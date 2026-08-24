@@ -34,7 +34,10 @@ async function bootstrap(): Promise<void> {
   });
 
   app.setGlobalPrefix('api/v1', { exclude: ['/health', '/metrics'] });
-  app.useGlobalPipes(new ZodValidationPipe(), new ValidationPipe({ transform: true }));
+  app.useGlobalPipes(
+    new ZodValidationPipe(),
+    new ValidationPipe({ transform: true }),
+  );
 
   const port = Number(process.env.PORT ?? 3100);
   await app.listen(port, '0.0.0.0');

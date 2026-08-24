@@ -3,19 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "description": "Drizzle ORM schema（PG）+ drizzle-kit 迁移（双 database：主库 + 竞品库）",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
   },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
-    "db:generate:competitor": "drizzle-kit generate --config drizzle.competitor.config.ts"
+    "db:generate:competitor": "drizzle-kit generate --config drizzle.competitor.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.2",

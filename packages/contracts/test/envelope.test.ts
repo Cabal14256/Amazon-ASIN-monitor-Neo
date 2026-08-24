@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { z } from 'zod';
 import {
   pageInfoSchema,
   pageQuerySchema,
@@ -8,7 +9,6 @@ import {
   wsMessageSchema,
   wsMessageTypeSchema,
 } from '../src/index';
-import { z } from 'zod';
 
 describe('信封契约（对齐 api-compat.d.ts）', () => {
   it('Result 接受完整信封', () => {
@@ -26,7 +26,9 @@ describe('信封契约（对齐 api-compat.d.ts）', () => {
   it('PageInfo 字段全可选且 list 元素受类型约束', () => {
     const schema = pageInfoSchema(z.string());
     expect(schema.parse({ total: 0 })).toEqual({ total: 0 });
-    expect(schema.parse({ list: ['a'], current: 1, pageSize: 20 }).list).toEqual(['a']);
+    expect(
+      schema.parse({ list: ['a'], current: 1, pageSize: 20 }).list,
+    ).toEqual(['a']);
     expect(() => schema.parse({ list: [1] })).toThrow();
   });
 

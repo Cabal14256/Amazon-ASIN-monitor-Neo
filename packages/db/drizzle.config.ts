@@ -9,7 +9,9 @@ export default defineConfig({
   schema: './src/schema',
   out: './drizzle',
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? 'postgres://localhost:5432/amazon_asin_monitor',
+    url:
+      process.env.DATABASE_URL ??
+      'postgres://localhost:5432/amazon_asin_monitor',
   },
   strict: true,
   verbose: true,

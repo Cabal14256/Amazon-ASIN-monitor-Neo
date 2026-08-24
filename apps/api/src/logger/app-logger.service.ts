@@ -44,7 +44,9 @@ function sanitize(data: unknown): unknown {
 /** UTC+8 时间戳（对齐旧系统 getUTC8ISOString 语义） */
 function utc8Iso(): string {
   const now = new Date();
-  const utc8 = new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60_000);
+  const utc8 = new Date(
+    now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60_000,
+  );
   return utc8.toISOString().replace('Z', '+08:00');
 }
 
@@ -62,20 +64,27 @@ export class AppLogger {
     return (LEVEL_WEIGHT[level] ?? 99) >= this.threshold;
   }
 
-  private write(level: LogLevel, message: unknown, context?: string, ...args: unknown[]): void {
+  private write(
+    level: LogLevel,
+    message: unknown,
+    context?: string,
+    ...args: unknown[]
+  ): void {
     if (!this.shouldLog(level)) {
       return;
     }
-    const prefix = `[${utc8Iso()}] [${level.toUpperCase()}]${context ? ` [${context}]` : ''}`;
+    const prefix = `[${utc8Iso()}] [${level.toUpperCase()}]${
+      context ? ` [${context}]` : ''
+    }`;
     const sanitized = args.map((a) => sanitize(a));
     const method: 'debug' | 'info' | 'warn' | 'error' =
       level === 'debug'
         ? 'debug'
         : level === 'warn'
-          ? 'warn'
-          : level === 'error' || level === 'fatal'
-            ? 'error'
-            : 'info';
+        ? 'warn'
+        : level === 'error' || level === 'fatal'
+        ? 'error'
+        : 'info';
     // eslint-disable-next-line no-console -- 日志模块是唯一允许的 console 出口
     console[method](prefix, message, ...sanitized);
   }

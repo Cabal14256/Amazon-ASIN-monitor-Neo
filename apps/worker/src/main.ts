@@ -43,7 +43,9 @@ async function bootstrap(): Promise<void> {
 
   // eslint-disable-next-line no-console -- 脚手架阶段启动横幅
   console.info(
-    `[worker] 已启动，启用队列: ${enabled.join(', ')}（共 ${queues.length} 个）`,
+    `[worker] 已启动，启用队列: ${enabled.join(', ')}（共 ${
+      queues.length
+    } 个）`,
   );
 
   const shutdown = async (): Promise<void> => {

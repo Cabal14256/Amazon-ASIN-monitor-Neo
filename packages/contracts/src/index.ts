@@ -1,3 +1,3 @@
 export * from './envelope';
-export * from './ws';
 export * from './permissions';
+export * from './ws';

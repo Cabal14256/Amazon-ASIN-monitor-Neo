@@ -39,13 +39,21 @@ describe('loadEnv', () => {
   });
 
   it('SCHEDULER_ENABLED 字符串转布尔', () => {
-    expect(loadEnv({ ...validEnv, SCHEDULER_ENABLED: 'true' }).SCHEDULER_ENABLED).toBe(true);
-    expect(loadEnv({ ...validEnv, SCHEDULER_ENABLED: 'false' }).SCHEDULER_ENABLED).toBe(false);
+    expect(
+      loadEnv({ ...validEnv, SCHEDULER_ENABLED: 'true' }).SCHEDULER_ENABLED,
+    ).toBe(true);
+    expect(
+      loadEnv({ ...validEnv, SCHEDULER_ENABLED: 'false' }).SCHEDULER_ENABLED,
+    ).toBe(false);
   });
 
   it('PROCESS_ROLE 只接受 api | worker | all', () => {
-    expect(loadEnv({ ...validEnv, PROCESS_ROLE: 'all' }).PROCESS_ROLE).toBe('all');
-    expect(() => loadEnv({ ...validEnv, PROCESS_ROLE: 'bogus' })).toThrow(EnvValidationError);
+    expect(loadEnv({ ...validEnv, PROCESS_ROLE: 'all' }).PROCESS_ROLE).toBe(
+      'all',
+    );
+    expect(() => loadEnv({ ...validEnv, PROCESS_ROLE: 'bogus' })).toThrow(
+      EnvValidationError,
+    );
   });
 
   it('PORT 支持字符串数字', () => {

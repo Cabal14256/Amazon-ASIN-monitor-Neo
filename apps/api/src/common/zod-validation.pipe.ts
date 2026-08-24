@@ -18,7 +18,8 @@ interface SchemaCarrier {
 @Injectable()
 export class ZodValidationPipe implements PipeTransform {
   transform(value: unknown, metadata: ArgumentMetadata): unknown {
-    const schema = (metadata.metatype as (SchemaCarrier & object) | undefined)?.schema;
+    const schema = (metadata.metatype as (SchemaCarrier & object) | undefined)
+      ?.schema;
     if (!schema) {
       return value;
     }

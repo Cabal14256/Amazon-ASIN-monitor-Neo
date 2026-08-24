@@ -23,7 +23,10 @@ describe('队列注册表', () => {
   });
 
   it('按逗号选择子集并容忍空白', () => {
-    expect(resolveEnabledQueues('monitor, export')).toEqual(['monitor', 'export']);
+    expect(resolveEnabledQueues('monitor, export')).toEqual([
+      'monitor',
+      'export',
+    ]);
   });
 
   it('未知队列名直接报错', () => {

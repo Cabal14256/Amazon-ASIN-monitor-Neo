@@ -33,8 +33,8 @@ const homeRoute = createRoute({
           </span>
         </h1>
         <p className="text-neutral-600">
-          阶段 0 空骨架（Vite 6 + React 19 + TanStack + Tailwind 4 + shadcn/ui）。
-          页面将按总体计划 §7 四批迁移。
+          阶段 0 空骨架（Vite 6 + React 19 + TanStack + Tailwind 4 +
+          shadcn/ui）。 页面将按总体计划 §7 四批迁移。
         </p>
       </main>
     );

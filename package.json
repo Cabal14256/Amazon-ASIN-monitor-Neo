@@ -1,15 +1,14 @@
 {
   "private": true,
   "author": "",
-  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "bench:analytics": "node scripts/benchmark-analytics.js",
     "build": "max build",
     "build:api": "pnpm --filter @asin-monitor/api build",
     "build:web": "pnpm --filter @asin-monitor/web build",
     "build:worker": "pnpm --filter @asin-monitor/worker build",
-    "check-redis": "node scripts/check-redis.js",
     "check:changed-format": "node scripts/check-changed-format.js",
+    "check-redis": "node scripts/check-redis.js",
     "dev": "max dev",
     "dev:api": "pnpm --filter @asin-monitor/api start:dev",
     "dev:web": "pnpm --filter @asin-monitor/web dev",
@@ -46,5 +45,6 @@
     "prettier-plugin-organize-imports": "^3.2.2",
     "prettier-plugin-packagejson": "^2.4.3",
     "typescript": "^5.0.3"
-  }
+  },
+  "packageManager": "pnpm@10.34.5"
 }

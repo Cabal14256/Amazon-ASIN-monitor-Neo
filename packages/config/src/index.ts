@@ -78,7 +78,9 @@ export class EnvValidationError extends Error {
  * @param source 默认取 process.env，测试可注入
  * @throws {EnvValidationError}
  */
-export function loadEnv(source: Record<string, string | undefined> = process.env): Env {
+export function loadEnv(
+  source: Record<string, string | undefined> = process.env,
+): Env {
   const result = envSchema.safeParse(source);
   if (!result.success) {
     throw new EnvValidationError(result.error.issues);
