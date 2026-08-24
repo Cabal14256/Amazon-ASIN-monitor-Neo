@@ -6,6 +6,7 @@ import {
   LEGACY_RECOMMENDED_ENV_VARS,
   LEGACY_REQUIRED_ENV_VARS,
   loadEnv,
+  loadEnvironmentFiles,
   resolveRedisUrl,
 } from '../src/index';
 
@@ -98,10 +99,23 @@ describe('loadEnv', () => {
     ).toBe('redis://user%40example:p%40ss%3Aword@[::1]:6380/3');
   });
 
-  it('默认环境文件指向 workspace 的 server/.env 与根 .env', () => {
+  it('默认环境文件指向 workspace 的 .env.neo 与根 .env', () => {
     const paths = getDefaultEnvironmentFiles();
-    expect(paths[0].replaceAll('\\', '/')).toMatch(/\/server\/\.env$/);
+    expect(paths[0].replaceAll('\\', '/')).toMatch(/\/\.env\.neo$/);
     expect(paths[1].replaceAll('\\', '/')).toMatch(/\/\.env$/);
+    expect(paths.every((path) => !path.includes('server'))).toBe(true);
+  });
+
+  it('Neo 环境模板包含双 PostgreSQL、Redis、JWT 与独立 3100 端口', () => {
+    const [neoEnvPath] = getDefaultEnvironmentFiles();
+    const target: Record<string, string> = {};
+    loadEnvironmentFiles([`${neoEnvPath}.example`], target);
+
+    const env = loadEnv(target);
+    expect(env.PORT).toBe(3100);
+    expect(env.DATABASE_URL).toContain('amazon_asin_monitor');
+    expect(env.COMPETITOR_DATABASE_URL).toContain('amazon_competitor_monitor');
+    expect(env.REDIS_URL).toBe('redis://127.0.0.1:6379');
   });
 
   it.each([

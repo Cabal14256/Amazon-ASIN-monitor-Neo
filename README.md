@@ -72,6 +72,7 @@ macOS / Linux：
 ```bash
 cp .env.example .env
 cp server/.env.example server/.env
+cp .env.neo.example .env.neo
 ```
 
 PowerShell：
@@ -79,6 +80,7 @@ PowerShell：
 ```powershell
 Copy-Item .env.example .env
 Copy-Item server/.env.example server/.env
+Copy-Item .env.neo.example .env.neo
 ```
 
 前端默认使用同源 `/api`，通常无需修改根目录 `.env`。后端启动前至少需要正确配置：
@@ -93,6 +95,8 @@ Copy-Item server/.env.example server/.env
 | `CORS_ORIGIN`             | 非同源部署时允许访问 API 的前端地址              |
 
 完整配置和默认值见 [`server/.env.example`](./server/.env.example)。SP-API 凭据既可以写入环境变量，也可以在管理员登录后通过“系统设置”维护；数据库中的配置优先。
+
+新 Nest API 与 BullMQ Worker 读取根目录 `.env.neo`，不会继承旧 Express 的 `PORT=3001`；模板固定 Neo API 默认端口 3100，并包含目标 PostgreSQL 主库、竞品库、Redis 与 JWT 必需变量。旧系统继续读取 `server/.env`，因此两套 API 可以并行启动。
 
 ### 4. 初始化数据库
 
@@ -348,6 +352,7 @@ Amazon-ASIN-monitor/
 │  └─ .env.example              # 后端完整环境模板
 ├─ scripts/                     # 前端检查与分析基准脚本
 ├─ .env.example                 # 前端 API 地址模板
+├─ .env.neo.example             # 新 Nest API / BullMQ Worker 环境模板
 ├─ .umirc.ts                    # Umi 路由与开发代理
 └─ nginx.conf.example           # 生产反向代理示例
 ```

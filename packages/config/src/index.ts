@@ -114,17 +114,18 @@ function findWorkspaceRoot(start: string): string | undefined {
 export function getDefaultEnvironmentFiles(cwd = process.cwd()): string[] {
   const workspaceRoot = findWorkspaceRoot(cwd);
   if (workspaceRoot) {
-    return [join(workspaceRoot, 'server', '.env'), join(workspaceRoot, '.env')];
+    return [join(workspaceRoot, '.env.neo'), join(workspaceRoot, '.env')];
   }
-  return [join(cwd, 'server', '.env'), join(cwd, '.env')];
+  return [join(cwd, '.env.neo'), join(cwd, '.env')];
 }
 
-/** server/.env 优先，根 .env 作为补充；已有进程环境变量始终优先。 */
+/** Neo 专用配置优先，根前端配置作为补充；已有进程环境变量始终优先。 */
 export function loadEnvironmentFiles(
   paths: string[] = getDefaultEnvironmentFiles(),
+  target: Record<string, string> = process.env as Record<string, string>,
 ): void {
   for (const path of [...new Set(paths)]) {
-    loadDotenv({ path, override: false, quiet: true });
+    loadDotenv({ path, override: false, quiet: true, processEnv: target });
   }
 }
 

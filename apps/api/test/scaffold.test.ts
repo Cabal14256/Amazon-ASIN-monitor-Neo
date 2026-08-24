@@ -11,6 +11,7 @@ import { ZodValidationPipe } from '../src/common/zod-validation.pipe';
 import { HealthController } from '../src/health/health.controller';
 import { configureHttpApp } from '../src/http-app';
 import { AppLogger, sanitize, utc8Iso } from '../src/logger/app-logger.service';
+import { createNestLoggerAdapter } from '../src/logger/nest-logger.adapter';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -116,6 +117,40 @@ describe('AppLogger.sanitize（对齐旧 logger.js 脱敏清单）', () => {
 
     expect(info).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledOnce();
+  });
+
+  it('Nest 异常日志保留 stack 与真实 context 并继续脱敏', () => {
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const adapter = createNestLoggerAdapter(new AppLogger());
+
+    adapter.error?.(
+      { authorization: 'Bearer raw', safe: 'boom' },
+      'Error: boom\n    at handler.ts:1:1',
+      'ExceptionsHandler',
+    );
+
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('[ERROR] [ExceptionsHandler]'),
+      { authorization: '***REDACTED***', safe: 'boom' },
+      'Error: boom\n    at handler.ts:1:1',
+    );
+  });
+
+  it('Nest 无 context 的单独 stack 不会被误放进日志前缀', () => {
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const adapter = createNestLoggerAdapter(new AppLogger());
+
+    adapter.error?.('boom', 'Error: boom\n    at handler.ts:1:1');
+
+    expect(error).toHaveBeenCalledWith(
+      expect.not.stringContaining('[Error: boom'),
+      'boom',
+      'Error: boom\n    at handler.ts:1:1',
+    );
   });
 });
 

@@ -11,6 +11,7 @@ import { AppModule } from './app.module';
 import { ENV } from './config/config.module';
 import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
+import { createNestLoggerAdapter } from './logger/nest-logger.adapter';
 import { runApi } from './runner';
 
 /**
@@ -26,14 +27,7 @@ async function bootstrap(): Promise<void> {
   );
 
   const logger = app.get(AppLogger);
-  app.useLogger({
-    log: (m, c) => logger.info(m, c),
-    error: (m, c) => logger.error(m, c),
-    warn: (m, c) => logger.warn(m, c),
-    debug: (m, c) => logger.debug(m, c),
-    verbose: (m, c) => logger.debug(m, c),
-    fatal: (m, c) => logger.error(m, c),
-  });
+  app.useLogger(createNestLoggerAdapter(logger));
 
   configureHttpApp(app);
 
