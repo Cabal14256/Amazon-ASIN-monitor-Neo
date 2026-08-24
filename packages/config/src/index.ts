@@ -25,6 +25,11 @@ export const envSchema = z.object({
 
   // Redis（队列 / 限流 / 缓存 / PubSub 四角色不变）
   REDIS_URL: z.string().min(1, '缺少 REDIS_URL'),
+  BULL_PREFIX: z
+    .string()
+    .trim()
+    .transform((value) => value || 'bull')
+    .default('bull'),
 
   JWT_SECRET: z.string().min(1, '缺少 JWT_SECRET'),
 

@@ -22,6 +22,7 @@ describe('loadEnv', () => {
     expect(env.PORT).toBe(3100);
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
+    expect(env.BULL_PREFIX).toBe('bull');
   });
 
   it('缺少必需变量时抛出 EnvValidationError 并列出全部缺失项', () => {
@@ -65,6 +66,15 @@ describe('loadEnv', () => {
 
   it('PORT 支持字符串数字', () => {
     expect(loadEnv({ ...validEnv, PORT: '3100' }).PORT).toBe(3100);
+  });
+
+  it('BULL_PREFIX 保留 legacy 命名空间并将空白回退 bull', () => {
+    expect(loadEnv({ ...validEnv, BULL_PREFIX: ' staging ' }).BULL_PREFIX).toBe(
+      'staging',
+    );
+    expect(loadEnv({ ...validEnv, BULL_PREFIX: '  ' }).BULL_PREFIX).toBe(
+      'bull',
+    );
   });
 
   it.each([

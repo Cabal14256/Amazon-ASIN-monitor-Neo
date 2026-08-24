@@ -8,7 +8,7 @@ import { logger } from './logger';
 import { attachQueueErrorLogger } from './queue-events';
 import {
   getPhysicalQueueName,
-  resolveEnabledQueues,
+  resolveQueueSelection,
   shouldInitializeQueueRuntime,
 } from './queues';
 import { getWatchdogRedisOptions, parseRedisUrl } from './redis-options';
@@ -24,7 +24,15 @@ import { RedisWatchdog } from './watchdog';
  */
 async function bootstrap(): Promise<void> {
   const env = loadEnv();
-  const enabled = resolveEnabledQueues(env.WORKER_ENABLED_QUEUES);
+  const { enabledQueues: enabled, unknownQueues } = resolveQueueSelection(
+    env.WORKER_ENABLED_QUEUES,
+  );
+
+  if (unknownQueues.length > 0) {
+    logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
+      unknownQueues,
+    });
+  }
 
   if (!shouldInitializeQueueRuntime(enabled)) {
     logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
@@ -35,7 +43,10 @@ async function bootstrap(): Promise<void> {
 
   const queues = enabled.map((name) => {
     const physicalName = getPhysicalQueueName(name);
-    const queue = new Queue(physicalName, { connection });
+    const queue = new Queue(physicalName, {
+      connection,
+      prefix: env.BULL_PREFIX,
+    });
     attachQueueErrorLogger(queue, physicalName);
     return queue;
   });

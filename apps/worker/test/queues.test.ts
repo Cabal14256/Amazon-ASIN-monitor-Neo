@@ -4,6 +4,7 @@ import {
   getPhysicalQueueName,
   QUEUE_NAMES,
   resolveEnabledQueues,
+  resolveQueueSelection,
   shouldInitializeQueueRuntime,
 } from '../src/queues';
 
@@ -59,7 +60,11 @@ describe('队列注册表', () => {
     expect(getPhysicalQueueName('export')).toBe('export-task-queue');
   });
 
-  it('未知队列名直接报错', () => {
-    expect(() => resolveEnabledQueues('monitor,nope')).toThrow(/未知队列/);
+  it('忽略未知队列并保留有效选择器供 Worker 继续启动', () => {
+    expect(resolveQueueSelection('monitor,old-export')).toEqual({
+      enabledQueues: ['monitor'],
+      unknownQueues: ['old-export'],
+    });
+    expect(resolveEnabledQueues('monitor,old-export')).toEqual(['monitor']);
   });
 });

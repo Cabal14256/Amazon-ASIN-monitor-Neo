@@ -50,6 +50,11 @@ export const QUEUE_NAMES = QUEUE_DEFINITIONS.map(({ name }) => name);
 
 export type QueueName = (typeof QUEUE_NAMES)[number];
 
+export interface QueueSelection {
+  enabledQueues: QueueName[];
+  unknownQueues: string[];
+}
+
 /** none/off 模式不应创建 Redis、BullMQ 或看门狗资源。 */
 export function shouldInitializeQueueRuntime(
   enabled: readonly QueueName[],
@@ -84,9 +89,9 @@ export function getPhysicalQueueName(name: QueueName): string {
  * 解析 WORKER_ENABLED_QUEUES（逗号分隔），未设置时启用全部队列。
  * 语义对齐旧系统：同名选择、空串视为全量。
  */
-export function resolveEnabledQueues(raw: string | undefined): QueueName[] {
+export function resolveQueueSelection(raw: string | undefined): QueueSelection {
   if (!raw || raw.trim() === '') {
-    return [...QUEUE_NAMES];
+    return { enabledQueues: [...QUEUE_NAMES], unknownQueues: [] };
   }
   const requested = raw
     .split(',')
@@ -96,17 +101,23 @@ export function resolveEnabledQueues(raw: string | undefined): QueueName[] {
   if (
     requested.some((token) => ['all', '*'].includes(normalizeQueueToken(token)))
   ) {
-    return [...QUEUE_NAMES];
+    return { enabledQueues: [...QUEUE_NAMES], unknownQueues: [] };
   }
 
   const resolved = requested
     .filter((token) => !['none', 'off'].includes(normalizeQueueToken(token)))
     .map((token) => ({ token, name: resolveQueueSelector(token) }));
-  const invalid = resolved
+  const unknownQueues = resolved
     .filter(({ name }) => !name)
     .map(({ token }) => token);
-  if (invalid.length > 0) {
-    throw new Error(`WORKER_ENABLED_QUEUES 含未知队列: ${invalid.join(', ')}`);
-  }
-  return [...new Set(resolved.map(({ name }) => name as QueueName))];
+  const enabledQueues = [
+    ...new Set(
+      resolved.filter(({ name }) => name).map(({ name }) => name as QueueName),
+    ),
+  ];
+  return { enabledQueues, unknownQueues };
+}
+
+export function resolveEnabledQueues(raw: string | undefined): QueueName[] {
+  return resolveQueueSelection(raw).enabledQueues;
 }
