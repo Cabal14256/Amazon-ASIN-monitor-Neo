@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 
-import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   FastifyAdapter,
@@ -9,20 +8,9 @@ import {
 
 import type { Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
-import { ZodValidationPipe } from './common/zod-validation.pipe';
 import { ENV } from './config/config.module';
+import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
-
-export function configureHttpApp(app: NestFastifyApplication): void {
-  app.setGlobalPrefix('api/v1', {
-    exclude: [
-      { path: 'health', method: RequestMethod.GET },
-      { path: 'api/v1/health', method: RequestMethod.GET },
-      { path: 'metrics', method: RequestMethod.GET },
-    ],
-  });
-  app.useGlobalPipes(new ZodValidationPipe());
-}
 
 /**
  * 新后端入口（PROCESS_ROLE=api 角色）。

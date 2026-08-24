@@ -9,8 +9,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../src/common/zod-validation.pipe';
 import { HealthController } from '../src/health/health.controller';
+import { configureHttpApp } from '../src/http-app';
 import { AppLogger, sanitize, utc8Iso } from '../src/logger/app-logger.service';
-import { configureHttpApp } from '../src/main';
 
 afterEach(() => {
   vi.restoreAllMocks();
