@@ -5,6 +5,7 @@ import { Queue, type ConnectionOptions } from 'bullmq';
 import { Redis, type RedisOptions } from 'ioredis';
 
 import { logger } from './logger';
+import { attachQueueErrorLogger } from './queue-events';
 import {
   getPhysicalQueueName,
   resolveEnabledQueues,
@@ -32,9 +33,12 @@ async function bootstrap(): Promise<void> {
 
   const connection: ConnectionOptions = parseRedisUrl(env.REDIS_URL);
 
-  const queues = enabled.map(
-    (name) => new Queue(getPhysicalQueueName(name), { connection }),
-  );
+  const queues = enabled.map((name) => {
+    const physicalName = getPhysicalQueueName(name);
+    const queue = new Queue(physicalName, { connection });
+    attachQueueErrorLogger(queue, physicalName);
+    return queue;
+  });
 
   const watchdogRedis = new Redis(
     getWatchdogRedisOptions(connection as RedisOptions),

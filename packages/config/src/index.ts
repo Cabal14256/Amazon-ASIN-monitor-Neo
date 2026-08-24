@@ -29,11 +29,19 @@ export const envSchema = z.object({
   JWT_SECRET: z.string().min(1, '缺少 JWT_SECRET'),
 
   // 进程拓扑：api | worker | all；单调度器语义
-  PROCESS_ROLE: z.enum(['api', 'worker', 'all']).default('api'),
+  PROCESS_ROLE: z
+    .string()
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .pipe(z.enum(['api', 'worker', 'all']))
+    .default('api'),
   SCHEDULER_ENABLED: z
-    .enum(['true', 'false'])
+    .string()
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
     .default('false')
-    .transform((v) => v === 'true'),
+    .transform((value) => !['false', '0', 'no', 'off'].includes(value)),
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),
