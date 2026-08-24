@@ -49,7 +49,7 @@ flowchart LR
 
 建议准备以下环境：
 
-- Node.js 20+ 与 Corepack/pnpm（优先使用 LTS 版本）
+- Node.js 20.19+ 与 Corepack/pnpm（TanStack Router 的最低引擎要求）
 - MySQL 8.0+（分析查询使用了 CTE 和窗口函数）
 - Redis 5.0+ 或兼容服务
 - 可用的 Amazon SP-API 凭据（实际执行监控时需要）
