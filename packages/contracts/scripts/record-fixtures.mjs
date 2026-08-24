@@ -16,7 +16,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const BASE_URL = (process.env.LEGACY_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+const BASE_URL = (
+  process.env.LEGACY_BASE_URL || 'http://localhost:3001'
+).replace(/\/+$/, '');
 const USERNAME = process.env.LEGACY_USERNAME;
 const PASSWORD = process.env.LEGACY_PASSWORD;
 
@@ -30,18 +32,42 @@ const OUT_DIR = join(
 
 /** 录制清单：关键只读端点（按计划 §4 P0-T1，可增量扩展） */
 const TARGETS = [
-  { name: 'auth-current-user', method: 'GET', path: '/api/v1/auth/current-user' },
+  {
+    name: 'auth-current-user',
+    method: 'GET',
+    path: '/api/v1/auth/current-user',
+  },
   { name: 'dashboard', method: 'GET', path: '/api/v1/dashboard' },
-  { name: 'monitor-history', method: 'GET', path: '/api/v1/monitor-history?current=1&pageSize=20' },
-  { name: 'monitor-history-statistics', method: 'GET', path: '/api/v1/monitor-history/statistics' },
-  { name: 'monitor-history-statistics-by-time', method: 'GET', path: '/api/v1/monitor-history/statistics/by-time' },
+  {
+    name: 'monitor-history',
+    method: 'GET',
+    path: '/api/v1/monitor-history?current=1&pageSize=20',
+  },
+  {
+    name: 'monitor-history-statistics',
+    method: 'GET',
+    path: '/api/v1/monitor-history/statistics',
+  },
+  {
+    name: 'monitor-history-statistics-by-time',
+    method: 'GET',
+    path: '/api/v1/monitor-history/statistics/by-time',
+  },
   { name: 'tasks', method: 'GET', path: '/api/v1/tasks?current=1&pageSize=20' },
   { name: 'ops-overview', method: 'GET', path: '/api/v1/ops/overview' },
   { name: 'variant-groups', method: 'GET', path: '/api/v1/variant-groups' },
-  { name: 'competitor-variant-groups', method: 'GET', path: '/api/v1/competitor/variant-groups' },
+  {
+    name: 'competitor-variant-groups',
+    method: 'GET',
+    path: '/api/v1/competitor/variant-groups',
+  },
   { name: 'users', method: 'GET', path: '/api/v1/users?current=1&pageSize=20' },
   { name: 'roles', method: 'GET', path: '/api/v1/roles' },
-  { name: 'audit-logs', method: 'GET', path: '/api/v1/audit-logs?current=1&pageSize=20' },
+  {
+    name: 'audit-logs',
+    method: 'GET',
+    path: '/api/v1/audit-logs?current=1&pageSize=20',
+  },
   { name: 'feishu-configs', method: 'GET', path: '/api/v1/feishu-configs' },
   { name: 'sp-api-configs', method: 'GET', path: '/api/v1/sp-api-configs' },
   { name: 'system-alert', method: 'GET', path: '/api/v1/system/alert' },
@@ -72,7 +98,10 @@ async function record(auth, target) {
   if (auth.cookie) headers.Cookie = auth.cookie;
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
   const startedAt = Date.now();
-  const res = await fetch(`${BASE_URL}${target.path}`, { method: target.method, headers });
+  const res = await fetch(`${BASE_URL}${target.path}`, {
+    method: target.method,
+    headers,
+  });
   const text = await res.text();
   let body;
   try {
@@ -108,7 +137,9 @@ async function main() {
         join(OUT_DIR, `${target.name}.json`),
         JSON.stringify(record$1, null, 2) + '\n',
       );
-      console.info(`  ✓ ${target.name} (${record$1.status}, ${record$1.durationMs}ms)`);
+      console.info(
+        `  ✓ ${target.name} (${record$1.status}, ${record$1.durationMs}ms)`,
+      );
       ok += 1;
     } catch (error) {
       console.error(`  ✗ ${target.name}: ${error.message}`);

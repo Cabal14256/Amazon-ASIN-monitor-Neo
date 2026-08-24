@@ -1,8 +1,6 @@
 # /api/v1 端点清单（契约冻结基线 v1）
 
-> 来源：`server/src/routes/*.js`（18 个路由文件）+ `server/src/index.js` 挂载表，2026-08-24 实读。
-> 共 **117 个端点**，与《重构总体计划》§1 口径一致。
-> 本清单是重构前后共同验收基线；任何字段/行为变化必须走 contracts 变更流程。
+> 来源：`server/src/routes/*.js`（18 个路由文件）+ `server/src/index.js` 挂载表，2026-08-24 实读。共 **117 个端点**，与《重构总体计划》§1 口径一致。本清单是重构前后共同验收基线；任何字段/行为变化必须走 contracts 变更流程。
 
 ## 0. 全局行为（index.js）
 
@@ -19,62 +17,62 @@
 | --- | --- | --- | --- | --- | --- |
 | POST | /auth/login | 否 | — | authController.login | 登录 |
 | GET | /auth/current-user | 是 | — | getCurrentUser | 前端 getInitialState 依赖 |
-| POST | /auth/logout | 是 | — | logout | |
-| GET | /auth/sessions | 是 | — | listSessions | |
-| POST | /auth/sessions/revoke | 是 | — | revokeSession | |
-| POST | /auth/change-password | 是 | — | changePassword | |
-| PUT | /auth/profile | 是 | — | updateProfile | |
+| POST | /auth/logout | 是 | — | logout |  |
+| GET | /auth/sessions | 是 | — | listSessions |  |
+| POST | /auth/sessions/revoke | 是 | — | revokeSession |  |
+| POST | /auth/change-password | 是 | — | changePassword |  |
+| PUT | /auth/profile | 是 | — | updateProfile |  |
 
 ## 2. users（8，router 级认证）
 
-| 方法 | 路径 | 权限 | 控制器 |
-| --- | --- | --- | --- |
-| GET | /users | user:read | getUserList |
-| GET | /users/roles/all | role:read | getAllRoles |
-| GET | /users/:userId | user:read | getUserDetail |
-| POST | /users | user:write | createUser |
-| POST | /users/batch-delete | user:delete | batchDeleteUsers |
-| PUT | /users/:userId | user:write | updateUser |
-| DELETE | /users/:userId | user:delete | deleteUser |
-| PUT | /users/:userId/password | user:write | updateUserPassword |
+| 方法   | 路径                    | 权限        | 控制器             |
+| ------ | ----------------------- | ----------- | ------------------ |
+| GET    | /users                  | user:read   | getUserList        |
+| GET    | /users/roles/all        | role:read   | getAllRoles        |
+| GET    | /users/:userId          | user:read   | getUserDetail      |
+| POST   | /users                  | user:write  | createUser         |
+| POST   | /users/batch-delete     | user:delete | batchDeleteUsers   |
+| PUT    | /users/:userId          | user:write  | updateUser         |
+| DELETE | /users/:userId          | user:delete | deleteUser         |
+| PUT    | /users/:userId/password | user:write  | updateUserPassword |
 
 ## 3. roles（4，router 级认证）
 
-| 方法 | 路径 | 权限 | 控制器 |
-| --- | --- | --- | --- |
-| GET | /roles | role:read | getRoleList |
-| GET | /roles/:roleId | role:read | getRoleDetail |
-| GET | /permissions | role:read | getPermissionList |
-| PUT | /roles/:roleId/permissions | role:write | updateRolePermissions |
+| 方法 | 路径                       | 权限       | 控制器                |
+| ---- | -------------------------- | ---------- | --------------------- |
+| GET  | /roles                     | role:read  | getRoleList           |
+| GET  | /roles/:roleId             | role:read  | getRoleDetail         |
+| GET  | /permissions               | role:read  | getPermissionList     |
+| PUT  | /roles/:roleId/permissions | role:write | updateRolePermissions |
 
 ## 4. asin（16）
 
 | 方法 | 路径 | 认证 | 权限 | 控制器 | 特殊 |
 | --- | --- | --- | --- | --- | --- |
-| GET | /variant-groups | **路由层未挂** | — | getVariantGroups | |
-| GET | /variant-groups/:groupId | **未挂** | — | getVariantGroupById | |
-| POST | /variant-groups | **未挂** | — | createVariantGroup | |
-| POST | /variant-groups/batch-delete | 是 | asin:delete | batchDeleteVariantGroups | |
-| PUT | /variant-groups/:groupId | **未挂** | — | updateVariantGroup | |
-| DELETE | /variant-groups/:groupId | **未挂** | — | deleteVariantGroup | |
-| PUT | /variant-groups/:groupId/feishu-notify | **未挂** | — | updateVariantGroupFeishuNotify | |
-| PUT | /variant-groups/:groupId/manual-broken | 是 | asin:write | updateVariantGroupManualBroken | |
-| POST | /asins | **未挂** | — | createASIN | |
-| POST | /asins/batch-create | 是 | asin:write | batchCreateASINs | |
-| PUT | /asins/:asinId | **未挂** | — | updateASIN | |
-| DELETE | /asins/:asinId | **未挂** | — | deleteASIN | |
-| POST | /asins/:asinId/move | **未挂** | — | moveASIN | |
-| PUT | /asins/:asinId/feishu-notify | **未挂** | — | updateASINFeishuNotify | |
-| PUT | /asins/:asinId/manual-broken | 是 | asin:write | updateASINManualBroken | |
+| GET | /variant-groups | **路由层未挂** | — | getVariantGroups |  |
+| GET | /variant-groups/:groupId | **未挂** | — | getVariantGroupById |  |
+| POST | /variant-groups | **未挂** | — | createVariantGroup |  |
+| POST | /variant-groups/batch-delete | 是 | asin:delete | batchDeleteVariantGroups |  |
+| PUT | /variant-groups/:groupId | **未挂** | — | updateVariantGroup |  |
+| DELETE | /variant-groups/:groupId | **未挂** | — | deleteVariantGroup |  |
+| PUT | /variant-groups/:groupId/feishu-notify | **未挂** | — | updateVariantGroupFeishuNotify |  |
+| PUT | /variant-groups/:groupId/manual-broken | 是 | asin:write | updateVariantGroupManualBroken |  |
+| POST | /asins | **未挂** | — | createASIN |  |
+| POST | /asins/batch-create | 是 | asin:write | batchCreateASINs |  |
+| PUT | /asins/:asinId | **未挂** | — | updateASIN |  |
+| DELETE | /asins/:asinId | **未挂** | — | deleteASIN |  |
+| POST | /asins/:asinId/move | **未挂** | — | moveASIN |  |
+| PUT | /asins/:asinId/feishu-notify | **未挂** | — | updateASINFeishuNotify |  |
+| PUT | /asins/:asinId/manual-broken | 是 | asin:write | updateASINManualBroken |  |
 | POST | /variant-groups/import-excel | 是 | asin:write | importFromExcel | **multer 上传（file 字段）** |
 
 ## 5. variant-check（4）
 
 | 方法 | 路径 | 认证 | 权限 | 控制器 | 特殊 |
 | --- | --- | --- | --- | --- | --- |
-| POST | /variant-groups/:groupId/check | **未挂** | — | checkVariantGroup | |
-| POST | /asins/:asinId/check | **未挂** | — | checkASIN | |
-| POST | /variant-groups/batch-check | 是 | asin:read | batchCheckVariantGroups | |
+| POST | /variant-groups/:groupId/check | **未挂** | — | checkVariantGroup |  |
+| POST | /asins/:asinId/check | **未挂** | — | checkASIN |  |
+| POST | /variant-groups/batch-check | 是 | asin:read | batchCheckVariantGroups |  |
 | POST | /variant-check/batch-query-parent-asin | 是 | asin:read | batchQueryParentAsin | 超时 300s |
 
 ## 6. monitor（17，**全部路由层未挂认证**）
@@ -94,10 +92,10 @@
 | GET | /monitor-history/statistics/asin-by-country | getASINStatisticsByCountry | 同上 |
 | GET | /monitor-history/statistics/asin-by-variant-group | getASINStatisticsByVariantGroup | 同上 |
 | GET | /monitor-history/statistics | getStatistics | 同上 |
-| GET | /monitor-history/abnormal-duration-statistics | getAbnormalDurationStatistics | |
-| GET | /monitor-history/:id | getMonitorHistoryById | |
-| GET | /monitor-history | getMonitorHistory | |
-| POST | /monitor/trigger | triggerManualCheck | |
+| GET | /monitor-history/abnormal-duration-statistics | getAbnormalDurationStatistics |  |
+| GET | /monitor-history/:id | getMonitorHistoryById |  |
+| GET | /monitor-history | getMonitorHistory |  |
+| POST | /monitor/trigger | triggerManualCheck |  |
 
 > 路由顺序约束：具体路径必须在 `:id` 之前（文件内注释明示），契约测试需覆盖。
 
@@ -105,19 +103,19 @@
 
 | 方法 | 路径 | 权限 | 控制器 | 特殊 |
 | --- | --- | --- | --- | --- |
-| GET | /competitor/variant-groups | asin:read | getCompetitorVariantGroups | |
-| GET | /competitor/variant-groups/:groupId | asin:read | getCompetitorVariantGroupById | |
-| POST | /competitor/variant-groups | asin:write | createCompetitorVariantGroup | |
-| POST | /competitor/variant-groups/batch-delete | asin:delete | batchDeleteCompetitorVariantGroups | |
-| PUT | /competitor/variant-groups/:groupId | asin:write | updateCompetitorVariantGroup | |
-| DELETE | /competitor/variant-groups/:groupId | asin:write | deleteCompetitorVariantGroup | |
-| PUT | /competitor/variant-groups/:groupId/feishu-notify | asin:write | updateCompetitorVariantGroupFeishuNotify | |
-| POST | /competitor/asins | asin:write | createCompetitorASIN | |
-| POST | /competitor/asins/batch-create | asin:write | batchCreateCompetitorASINs | |
-| PUT | /competitor/asins/:asinId | asin:write | updateCompetitorASIN | |
-| DELETE | /competitor/asins/:asinId | asin:write | deleteCompetitorASIN | |
-| POST | /competitor/asins/:asinId/move | asin:write | moveCompetitorASIN | |
-| PUT | /competitor/asins/:asinId/feishu-notify | asin:write | updateCompetitorASINFeishuNotify | |
+| GET | /competitor/variant-groups | asin:read | getCompetitorVariantGroups |  |
+| GET | /competitor/variant-groups/:groupId | asin:read | getCompetitorVariantGroupById |  |
+| POST | /competitor/variant-groups | asin:write | createCompetitorVariantGroup |  |
+| POST | /competitor/variant-groups/batch-delete | asin:delete | batchDeleteCompetitorVariantGroups |  |
+| PUT | /competitor/variant-groups/:groupId | asin:write | updateCompetitorVariantGroup |  |
+| DELETE | /competitor/variant-groups/:groupId | asin:write | deleteCompetitorVariantGroup |  |
+| PUT | /competitor/variant-groups/:groupId/feishu-notify | asin:write | updateCompetitorVariantGroupFeishuNotify |  |
+| POST | /competitor/asins | asin:write | createCompetitorASIN |  |
+| POST | /competitor/asins/batch-create | asin:write | batchCreateCompetitorASINs |  |
+| PUT | /competitor/asins/:asinId | asin:write | updateCompetitorASIN |  |
+| DELETE | /competitor/asins/:asinId | asin:write | deleteCompetitorASIN |  |
+| POST | /competitor/asins/:asinId/move | asin:write | moveCompetitorASIN |  |
+| PUT | /competitor/asins/:asinId/feishu-notify | asin:write | updateCompetitorASINFeishuNotify |  |
 | POST | /competitor/variant-groups/import-excel | asin:write | importCompetitorFromExcel | **multer 上传（10MB，xlsx/csv）** |
 
 ## 8. competitor-monitor（3，router 级认证）
@@ -138,9 +136,9 @@
 
 ## 10. dashboard（1，router 级认证）
 
-| 方法 | 路径 | 控制器 | 特殊 |
-| --- | --- | --- | --- |
-| GET | /dashboard | getDashboardData | 超时 120s |
+| 方法 | 路径       | 控制器           | 特殊      |
+| ---- | ---------- | ---------------- | --------- |
+| GET  | /dashboard | getDashboardData | 超时 120s |
 
 ## 11. export（9，router 级认证）
 
@@ -163,68 +161,68 @@
 | 方法 | 路径 | 权限 | 控制器 | 特殊 |
 | --- | --- | --- | --- | --- |
 | POST | /tasks/export | **控制器内按导出类型判定** | exportController.createExportTask | 创建异步导出任务 |
-| GET | /tasks | — | listTasks | |
-| GET | /tasks/:taskId | — | getTaskStatus | |
-| POST | /tasks/:taskId/cancel | — | cancelTask | |
+| GET | /tasks | — | listTasks |  |
+| GET | /tasks/:taskId | — | getTaskStatus |  |
+| POST | /tasks/:taskId/cancel | — | cancelTask |  |
 | GET | /tasks/:taskId/download | — | downloadTaskFile | **文件下载** |
 
 ## 13. backup（7，router 级认证 + settings:write）
 
-| 方法 | 路径 | 控制器 | 特殊 |
-| --- | --- | --- | --- |
-| POST | /backup | createBackup | |
-| POST | /backup/restore | restoreBackup | |
-| GET | /backup | listBackups | |
-| DELETE | /backup/:filename | deleteBackup | |
-| GET | /backup/:filename/download | downloadBackup | **文件下载** |
-| GET | /backup/config | getBackupConfig | |
-| POST | /backup/config | saveBackupConfig | |
+| 方法   | 路径                       | 控制器           | 特殊         |
+| ------ | -------------------------- | ---------------- | ------------ |
+| POST   | /backup                    | createBackup     |              |
+| POST   | /backup/restore            | restoreBackup    |              |
+| GET    | /backup                    | listBackups      |              |
+| DELETE | /backup/:filename          | deleteBackup     |              |
+| GET    | /backup/:filename/download | downloadBackup   | **文件下载** |
+| GET    | /backup/config             | getBackupConfig  |              |
+| POST   | /backup/config             | saveBackupConfig |              |
 
 > 契约变化点（已批准）：新系统备份产物切换为 pg_dump 自定义格式；旧 MySQL 备份仅历史保留。
 
 ## 14. feishu（6，**路由层未挂认证**）
 
-| 方法 | 路径 | 控制器 |
-| --- | --- | --- |
-| GET | /feishu-configs | getFeishuConfigs |
-| GET | /feishu-configs/:country | getFeishuConfigByCountry |
-| POST | /feishu-configs | upsertFeishuConfig |
-| PUT | /feishu-configs/:country | upsertFeishuConfig |
-| DELETE | /feishu-configs/:country | deleteFeishuConfig |
-| PATCH | /feishu-configs/:country/toggle | toggleFeishuConfig |
+| 方法   | 路径                            | 控制器                   |
+| ------ | ------------------------------- | ------------------------ |
+| GET    | /feishu-configs                 | getFeishuConfigs         |
+| GET    | /feishu-configs/:country        | getFeishuConfigByCountry |
+| POST   | /feishu-configs                 | upsertFeishuConfig       |
+| PUT    | /feishu-configs/:country        | upsertFeishuConfig       |
+| DELETE | /feishu-configs/:country        | deleteFeishuConfig       |
+| PATCH  | /feishu-configs/:country/toggle | toggleFeishuConfig       |
 
 ## 15. sp-api-config（5，**路由层未挂认证**）
 
-| 方法 | 路径 | 控制器 |
-| --- | --- | --- |
-| GET | /rate-limiter/status | getRateLimiterStatus |
-| GET | /error-stats | getErrorStats |
-| GET | /sp-api-configs | getSPAPIConfigForDisplay |
-| GET | /sp-api-configs/:configKey | getSPAPIConfigByKey |
-| PUT | /sp-api-configs | updateSPAPIConfig |
+| 方法 | 路径                       | 控制器                   |
+| ---- | -------------------------- | ------------------------ |
+| GET  | /rate-limiter/status       | getRateLimiterStatus     |
+| GET  | /error-stats               | getErrorStats            |
+| GET  | /sp-api-configs            | getSPAPIConfigForDisplay |
+| GET  | /sp-api-configs/:configKey | getSPAPIConfigByKey      |
+| PUT  | /sp-api-configs            | updateSPAPIConfig        |
 
 ## 16. audit（4，router 级认证 + audit:read）
 
-| 方法 | 路径 | 控制器 |
-| --- | --- | --- |
-| GET | /audit-logs | getAuditLogList |
-| GET | /audit-logs/:id | getAuditLogDetail |
-| GET | /audit-logs/statistics/actions | getActionStatistics |
-| GET | /audit-logs/statistics/resources | getResourceStatistics |
+| 方法 | 路径                             | 控制器                |
+| ---- | -------------------------------- | --------------------- |
+| GET  | /audit-logs                      | getAuditLogList       |
+| GET  | /audit-logs/:id                  | getAuditLogDetail     |
+| GET  | /audit-logs/statistics/actions   | getActionStatistics   |
+| GET  | /audit-logs/statistics/resources | getResourceStatistics |
 
 ## 17. ops（3，router 级认证）
 
-| 方法 | 路径 | 控制器 |
-| --- | --- | --- |
-| GET | /ops/overview | getOpsOverview |
+| 方法 | 路径                       | 控制器              |
+| ---- | -------------------------- | ------------------- |
+| GET  | /ops/overview              | getOpsOverview      |
 | POST | /ops/analytics/cache/clear | clearAnalyticsCache |
-| POST | /ops/analytics/refresh | refreshAnalyticsAgg |
+| POST | /ops/analytics/refresh     | refreshAnalyticsAgg |
 
 ## 18. system（1）与偏差登记
 
-| 方法 | 路径 | 控制器 |
-| --- | --- | --- |
-| GET | /system/alert | getAlert |
+| 方法 | 路径          | 控制器   |
+| ---- | ------------- | -------- |
+| GET  | /system/alert | getAlert |
 
 **偏差与安全发现（契约冻结如实记录，P2-T1 auth 模块平移时统一处置）：**
 

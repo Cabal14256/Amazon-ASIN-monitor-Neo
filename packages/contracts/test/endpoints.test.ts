@@ -97,10 +97,13 @@ describe('端点注册表（契约冻结基线）', () => {
   it('认证标记分布快照（契约冻结如实记录，含 43 个未挂认证端点）', () => {
     const unauthenticated = ENDPOINTS.filter((e) => !e.auth);
     expect(unauthenticated).toHaveLength(43);
-    const byDomain = unauthenticated.reduce<Record<string, number>>((acc, e) => {
-      acc[e.domain] = (acc[e.domain] ?? 0) + 1;
-      return acc;
-    }, {});
+    const byDomain = unauthenticated.reduce<Record<string, number>>(
+      (acc, e) => {
+        acc[e.domain] = (acc[e.domain] ?? 0) + 1;
+        return acc;
+      },
+      {},
+    );
     expect(byDomain).toEqual({
       auth: 1, // login
       asin: 11,
