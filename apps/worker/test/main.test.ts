@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { getWatchdogRedisOptions, parseRedisUrl } from '../src/main';
+import { getWatchdogRedisOptions, parseRedisUrl } from '../src/redis-options';
 
 describe('Redis 连接选项', () => {
   it('保留 rediss TLS 与 URL 编码凭据', () => {
