@@ -10,7 +10,12 @@ export const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
     .default('development'),
-  LOG_LEVEL: z.enum(['DEBUG', 'INFO', 'WARN', 'ERROR']).default('INFO'),
+  LOG_LEVEL: z
+    .string()
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .pipe(z.enum(['DEBUG', 'INFO', 'WARN', 'ERROR']))
+    .default('INFO'),
   PORT: z.coerce.number().int().positive().default(3100),
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）

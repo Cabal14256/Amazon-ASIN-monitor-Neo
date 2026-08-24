@@ -58,6 +58,8 @@ describe('AppLogger.sanitize（对齐旧 logger.js 脱敏清单）', () => {
       password: 'p',
       accessToken: 't',
       Authorization: 'a',
+      cookie: 'session=raw',
+      'set-cookie': 'refresh=raw',
       nested: { apiKey: 'k', safe: 's' },
       list: [{ secret: 'x' }],
     };
@@ -65,6 +67,8 @@ describe('AppLogger.sanitize（对齐旧 logger.js 脱敏清单）', () => {
     expect(out.password).toBe('***REDACTED***');
     expect(out.accessToken).toBe('***REDACTED***');
     expect(out.Authorization).toBe('***REDACTED***');
+    expect(out.cookie).toBe('***REDACTED***');
+    expect(out['set-cookie']).toBe('***REDACTED***');
     expect((out.nested as Record<string, unknown>).apiKey).toBe(
       '***REDACTED***',
     );

@@ -11,6 +11,7 @@ const SENSITIVE_FIELDS = [
   'apikey',
   'authorization',
   'auth',
+  'cookie',
 ];
 
 type AppLogLevel = 'debug' | 'info' | 'warn' | 'error';

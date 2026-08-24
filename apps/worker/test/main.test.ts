@@ -24,7 +24,12 @@ describe('Redis 连接选项', () => {
     const watchdogOptions = getWatchdogRedisOptions(queueOptions);
     expect(queueOptions.maxRetriesPerRequest).toBeNull();
     expect(watchdogOptions.maxRetriesPerRequest).toBe(1);
+    expect(watchdogOptions.commandTimeout).toBe(5_000);
     expect(watchdogOptions.enableOfflineQueue).toBe(false);
+  });
+
+  it('移除 IPv6 字面量主机的 URL 方括号', () => {
+    expect(parseRedisUrl('redis://[::1]:6379/0').host).toBe('::1');
   });
 
   it.each(['redis://host/jobs', 'redis://host/1/extra', 'redis://host/-1'])(

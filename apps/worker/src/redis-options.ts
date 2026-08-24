@@ -1,5 +1,11 @@
 import type { RedisOptions } from 'ioredis';
 
+function normalizeRedisHostname(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
 function parseRedisDatabase(pathname: string): number {
   if (pathname === '' || pathname === '/') return 0;
   const match = /^\/(\d+)$/.exec(pathname);
@@ -20,7 +26,7 @@ export function parseRedisUrl(raw: string): RedisOptions {
     throw new Error(`REDIS_URL 协议不受支持: ${url.protocol}`);
   }
   return {
-    host: url.hostname,
+    host: normalizeRedisHostname(url.hostname),
     port: url.port ? Number(url.port) : 6379,
     username: url.username ? decodeURIComponent(url.username) : undefined,
     password: url.password ? decodeURIComponent(url.password) : undefined,
@@ -36,6 +42,7 @@ export function getWatchdogRedisOptions(
 ): RedisOptions {
   return {
     ...connection,
+    commandTimeout: 5_000,
     enableOfflineQueue: false,
     maxRetriesPerRequest: 1,
   };

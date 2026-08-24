@@ -59,6 +59,20 @@ describe('loadEnv', () => {
   it('PORT 支持字符串数字', () => {
     expect(loadEnv({ ...validEnv, PORT: '3100' }).PORT).toBe(3100);
   });
+
+  it.each([
+    ['debug', 'DEBUG'],
+    ['Info', 'INFO'],
+    [' ERROR ', 'ERROR'],
+  ] as const)('LOG_LEVEL 接受大小写不敏感的 %s', (input, expected) => {
+    expect(loadEnv({ ...validEnv, LOG_LEVEL: input }).LOG_LEVEL).toBe(expected);
+  });
+
+  it('LOG_LEVEL 拒绝未知级别', () => {
+    expect(() => loadEnv({ ...validEnv, LOG_LEVEL: 'verbose' })).toThrow(
+      EnvValidationError,
+    );
+  });
 });
 
 describe('旧系统 envValidator 对照常量', () => {
