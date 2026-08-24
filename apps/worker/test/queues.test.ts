@@ -4,6 +4,7 @@ import {
   getPhysicalQueueName,
   QUEUE_NAMES,
   resolveEnabledQueues,
+  shouldInitializeQueueRuntime,
 } from '../src/queues';
 
 describe('队列注册表', () => {
@@ -37,6 +38,12 @@ describe('队列注册表', () => {
     expect(resolveEnabledQueues('all')).toEqual([...QUEUE_NAMES]);
     expect(resolveEnabledQueues('*')).toEqual([...QUEUE_NAMES]);
     expect(resolveEnabledQueues('none,off')).toEqual([]);
+    expect(shouldInitializeQueueRuntime(resolveEnabledQueues('none'))).toBe(
+      false,
+    );
+    expect(shouldInitializeQueueRuntime(resolveEnabledQueues('monitor'))).toBe(
+      true,
+    );
     expect(resolveEnabledQueues('competitor,batchCheck,variantCheck')).toEqual([
       'competitor-monitor',
       'batch-check',

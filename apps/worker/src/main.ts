@@ -5,8 +5,13 @@ import { Queue, type ConnectionOptions } from 'bullmq';
 import { Redis, type RedisOptions } from 'ioredis';
 
 import { logger } from './logger';
-import { getPhysicalQueueName, resolveEnabledQueues } from './queues';
+import {
+  getPhysicalQueueName,
+  resolveEnabledQueues,
+  shouldInitializeQueueRuntime,
+} from './queues';
 import { getWatchdogRedisOptions, parseRedisUrl } from './redis-options';
+import { runWorker } from './runner';
 import { shutdownWorker } from './shutdown';
 import { RedisWatchdog } from './watchdog';
 
@@ -19,6 +24,12 @@ import { RedisWatchdog } from './watchdog';
 async function bootstrap(): Promise<void> {
   const env = loadEnv();
   const enabled = resolveEnabledQueues(env.WORKER_ENABLED_QUEUES);
+
+  if (!shouldInitializeQueueRuntime(enabled)) {
+    logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
+    return;
+  }
+
   const connection: ConnectionOptions = parseRedisUrl(env.REDIS_URL);
 
   const queues = enabled.map(
@@ -50,5 +61,5 @@ async function bootstrap(): Promise<void> {
 }
 
 if (require.main === module) {
-  void bootstrap();
+  void runWorker(bootstrap);
 }

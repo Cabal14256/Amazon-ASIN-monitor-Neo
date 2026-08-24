@@ -14,6 +14,7 @@ import { AppLogger, sanitize, utc8Iso } from '../src/logger/app-logger.service';
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.useRealTimers();
 });
 
@@ -103,8 +104,18 @@ describe('AppLogger.sanitize（对齐旧 logger.js 脱敏清单）', () => {
   });
 
   it('Logger 级别遵循 LOG_LEVEL', () => {
-    void new AppLogger();
-    expect(true).toBe(true);
+    vi.stubEnv('LOG_LEVEL', ' ERROR ');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const logger = new AppLogger();
+
+    logger.info('below threshold');
+    logger.error('at threshold');
+
+    expect(info).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
   });
 });
 

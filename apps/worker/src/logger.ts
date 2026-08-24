@@ -38,7 +38,9 @@ function sanitize(value: unknown): unknown {
 }
 
 function shouldLog(level: WorkerLogLevel): boolean {
-  const configured = String(process.env.LOG_LEVEL || 'INFO').toLowerCase();
+  const configured = String(process.env.LOG_LEVEL || 'INFO')
+    .trim()
+    .toLowerCase();
   const threshold =
     LEVEL_WEIGHT[configured as WorkerLogLevel] ?? LEVEL_WEIGHT.info;
   return LEVEL_WEIGHT[level] >= threshold;

@@ -3,11 +3,11 @@ import { Redis } from 'ioredis';
 /**
  * 队列连接看门狗（对齐旧 queueConnectionWatchdog 语义）：
  * - 每 15s 对 Redis 发 ping
- * - 连续 4 次（约 60s）不健康则退出进程，交给进程管理器重启
+ * - 从首次失败起持续 60s 不健康才退出，交给进程管理器重启
  */
 export class RedisWatchdog {
   private timer: NodeJS.Timeout | null = null;
-  private failures = 0;
+  private failedAt: number | null = null;
   private checking = false;
   private running = false;
 
@@ -15,16 +15,19 @@ export class RedisWatchdog {
     private readonly redis: Redis,
     private readonly opts: {
       intervalMs?: number;
-      maxFailures?: number;
       pingTimeoutMs?: number;
+      unhealthyMs?: number;
+      now?: () => number;
     } = {},
   ) {}
 
   start(onUnhealthy: () => void): void {
     this.stop();
     const intervalMs = this.opts.intervalMs ?? 15_000;
-    const maxFailures = this.opts.maxFailures ?? 4;
     const pingTimeoutMs = this.opts.pingTimeoutMs ?? 5_000;
+    const unhealthyMs = this.opts.unhealthyMs ?? 60_000;
+    const now = this.opts.now ?? Date.now;
+    this.failedAt = null;
     this.running = true;
     this.timer = setInterval(() => {
       if (!this.running || this.checking) return;
@@ -43,11 +46,13 @@ export class RedisWatchdog {
             }),
           ]);
           if (!this.running) return;
-          this.failures = 0;
+          this.failedAt = null;
         } catch {
           if (!this.running) return;
-          this.failures += 1;
-          if (this.failures >= maxFailures) {
+          if (this.failedAt === null) {
+            this.failedAt = now();
+          }
+          if (Math.max(now() - this.failedAt, 0) >= unhealthyMs) {
             this.stop();
             onUnhealthy();
           }

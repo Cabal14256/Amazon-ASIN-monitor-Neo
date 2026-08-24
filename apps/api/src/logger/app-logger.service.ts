@@ -63,7 +63,7 @@ export class AppLogger {
   private readonly threshold: number;
 
   constructor() {
-    const level = (process.env.LOG_LEVEL || 'INFO').toLowerCase();
+    const level = (process.env.LOG_LEVEL || 'INFO').trim().toLowerCase();
     this.threshold = LEVEL_WEIGHT[level as AppLogLevel] ?? LEVEL_WEIGHT.info;
   }
 

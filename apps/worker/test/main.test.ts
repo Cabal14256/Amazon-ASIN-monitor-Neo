@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { sanitizeWorkerLog } from '../src/logger';
+import { logger, sanitizeWorkerLog } from '../src/logger';
 import { getWatchdogRedisOptions, parseRedisUrl } from '../src/redis-options';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe('Redis 连接选项', () => {
   it('保留 rediss TLS 与 URL 编码凭据', () => {
@@ -32,6 +37,19 @@ describe('Redis 连接选项', () => {
     expect(parseRedisUrl('redis://[::1]:6379/0').host).toBe('::1');
   });
 
+  it('无效 URL 异常不携带原始凭据', () => {
+    const password = 'super-secret-password';
+    let error: unknown;
+    try {
+      parseRedisUrl(`redis://user:${password}@`);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(JSON.stringify(error)).not.toContain(password);
+    expect((error as Error).message).toBe('REDIS_URL 格式无效');
+  });
+
   it.each(['redis://host/jobs', 'redis://host/1/extra', 'redis://host/-1'])(
     '拒绝无效 Redis 数据库路径 %s',
     (url) => {
@@ -60,5 +78,19 @@ describe('Worker 日志脱敏', () => {
         refreshToken: '***REDACTED***',
       },
     });
+  });
+
+  it('LOG_LEVEL 带空白时仍应用正确阈值', () => {
+    vi.stubEnv('LOG_LEVEL', ' ERROR ');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    logger.info('below threshold');
+    logger.error('at threshold');
+
+    expect(info).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
   });
 });

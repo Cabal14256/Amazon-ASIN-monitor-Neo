@@ -50,6 +50,13 @@ export const QUEUE_NAMES = QUEUE_DEFINITIONS.map(({ name }) => name);
 
 export type QueueName = (typeof QUEUE_NAMES)[number];
 
+/** none/off 模式不应创建 Redis、BullMQ 或看门狗资源。 */
+export function shouldInitializeQueueRuntime(
+  enabled: readonly QueueName[],
+): boolean {
+  return enabled.length > 0;
+}
+
 function normalizeQueueToken(token: string): string {
   return token
     .trim()

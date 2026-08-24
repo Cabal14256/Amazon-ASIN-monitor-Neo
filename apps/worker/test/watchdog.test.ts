@@ -14,14 +14,17 @@ describe('RedisWatchdog', () => {
     const onUnhealthy = vi.fn();
     const watchdog = new RedisWatchdog({ ping } as unknown as Redis, {
       intervalMs: 10,
-      maxFailures: 2,
       pingTimeoutMs: 5,
+      unhealthyMs: 20,
     });
 
     watchdog.start(onUnhealthy);
     await vi.advanceTimersByTimeAsync(30);
 
-    expect(ping).toHaveBeenCalledTimes(2);
+    expect(onUnhealthy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5);
+
+    expect(ping).toHaveBeenCalledTimes(3);
     expect(onUnhealthy).toHaveBeenCalledOnce();
   });
 
@@ -30,8 +33,8 @@ describe('RedisWatchdog', () => {
     const ping = vi.fn(() => new Promise<string>(() => undefined));
     const watchdog = new RedisWatchdog({ ping } as unknown as Redis, {
       intervalMs: 2,
-      maxFailures: 2,
       pingTimeoutMs: 10,
+      unhealthyMs: 20,
     });
 
     watchdog.start(vi.fn());

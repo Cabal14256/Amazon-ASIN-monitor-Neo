@@ -10,18 +10,23 @@ function parseRedisDatabase(pathname: string): number {
   if (pathname === '' || pathname === '/') return 0;
   const match = /^\/(\d+)$/.exec(pathname);
   if (!match) {
-    throw new Error(`REDIS_URL 数据库路径无效: ${pathname}`);
+    throw new Error('REDIS_URL 数据库路径无效');
   }
   const database = Number(match[1]);
   if (!Number.isSafeInteger(database)) {
-    throw new Error(`REDIS_URL 数据库编号超出安全整数范围: ${pathname}`);
+    throw new Error('REDIS_URL 数据库编号超出安全整数范围');
   }
   return database;
 }
 
 /** redis://[:password@]host[:port][/db] → RedisOptions */
 export function parseRedisUrl(raw: string): RedisOptions {
-  const url = new URL(raw);
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('REDIS_URL 格式无效');
+  }
   if (!['redis:', 'rediss:'].includes(url.protocol)) {
     throw new Error(`REDIS_URL 协议不受支持: ${url.protocol}`);
   }
