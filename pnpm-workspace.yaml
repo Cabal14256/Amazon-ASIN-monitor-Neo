@@ -1,0 +1,13 @@
+packages:
+  - .
+  - server
+  - apps/*
+  - packages/*
+
+# pnpm 默认阻止依赖的安装期脚本，以下为旧系统（Umi 构建链）必需的构建脚本白名单
+onlyBuiltDependencies:
+  - core-js
+  - core-js-pure
+  - es5-ext
+  - esbuild
+  - msgpackr-extract
