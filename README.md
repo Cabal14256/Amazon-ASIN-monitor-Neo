@@ -49,7 +49,7 @@ flowchart LR
 
 建议准备以下环境：
 
-- Node.js 20+ 与 npm（优先使用 LTS 版本）
+- Node.js 20+ 与 Corepack/pnpm（优先使用 LTS 版本）
 - MySQL 8.0+（分析查询使用了 CTE 和窗口函数）
 - Redis 5.0+ 或兼容服务
 - 可用的 Amazon SP-API 凭据（实际执行监控时需要）
@@ -59,11 +59,11 @@ flowchart LR
 在项目根目录执行：
 
 ```bash
-npm install
-npm --prefix server install
+corepack enable
+corepack pnpm install --frozen-lockfile
 ```
 
-自动化环境可将 `npm install` 替换为 `npm ci`，以严格按锁文件安装。
+根目录的单一 `pnpm-lock.yaml` 同时锁定旧前端、旧后端与新 Monorepo 包；本地和自动化环境都应从仓库根执行一次上述冻结安装，不再分别运行 `npm install` / `npm ci`。
 
 ### 3. 创建环境配置
 

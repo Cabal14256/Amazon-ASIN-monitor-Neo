@@ -19,15 +19,15 @@ export class MetricsService implements OnModuleDestroy {
   readonly httpRequestsTotal = new Counter({
     name: `${METRICS_PREFIX}http_requests_total`,
     help: 'HTTP 请求总数',
-    labelNames: ['method', 'route', 'status_code'] as const,
+    labelNames: ['method', 'route', 'status'] as const,
     registers: [this.registry],
   });
 
   readonly httpRequestDurationSeconds = new Histogram({
     name: `${METRICS_PREFIX}http_request_duration_seconds`,
     help: 'HTTP 请求耗时（秒）',
-    labelNames: ['method', 'route', 'status_code'] as const,
-    buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+    labelNames: ['method', 'route', 'status'] as const,
+    buckets: [0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 5],
     registers: [this.registry],
   });
 
@@ -38,25 +38,55 @@ export class MetricsService implements OnModuleDestroy {
     registers: [this.registry],
   });
 
+  readonly variantGroupCheckDurationSeconds = new Histogram({
+    name: `${METRICS_PREFIX}variant_group_check_duration_seconds`,
+    help: '每次变体组监控耗时',
+    labelNames: ['region'] as const,
+    buckets: [0.1, 0.5, 1, 2, 5, 10],
+    registers: [this.registry],
+  });
+
   readonly schedulerRunsTotal = new Counter({
     name: `${METRICS_PREFIX}scheduler_runs_total`,
     help: '调度任务执行总数（P2 阶段接入）',
-    labelNames: ['job', 'result'] as const,
+    labelNames: ['type'] as const,
+    registers: [this.registry],
+  });
+
+  readonly schedulerRunDurationSeconds = new Histogram({
+    name: `${METRICS_PREFIX}scheduler_run_duration_seconds`,
+    help: '调度任务执行耗时',
+    labelNames: ['type'] as const,
+    buckets: [1, 5, 10, 30, 60, 120],
     registers: [this.registry],
   });
 
   readonly dbQueryDurationSeconds = new Histogram({
     name: `${METRICS_PREFIX}db_query_duration_seconds`,
     help: '数据库查询耗时（秒，P2 阶段接入）',
-    labelNames: ['operation'] as const,
-    buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 5],
+    labelNames: ['table', 'operation'] as const,
+    buckets: [0.001, 0.01, 0.1, 0.5, 1, 2, 5],
+    registers: [this.registry],
+  });
+
+  readonly dbQueriesTotal = new Counter({
+    name: `${METRICS_PREFIX}db_queries_total`,
+    help: '数据库查询总数',
+    labelNames: ['table', 'operation', 'status'] as const,
     registers: [this.registry],
   });
 
   readonly cacheHitsTotal = new Counter({
     name: `${METRICS_PREFIX}cache_hits_total`,
     help: '缓存命中总数（P2 阶段接入）',
-    labelNames: ['cache', 'result'] as const,
+    labelNames: ['cache_key_prefix'] as const,
+    registers: [this.registry],
+  });
+
+  readonly cacheMissesTotal = new Counter({
+    name: `${METRICS_PREFIX}cache_misses_total`,
+    help: '缓存未命中次数（P2 阶段接入）',
+    labelNames: ['cache_key_prefix'] as const,
     registers: [this.registry],
   });
 

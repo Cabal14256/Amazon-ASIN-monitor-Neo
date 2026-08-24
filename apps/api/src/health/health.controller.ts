@@ -6,7 +6,7 @@ import { Controller, Get } from '@nestjs/common';
  */
 @Controller()
 export class HealthController {
-  @Get(['/health', '/api/v1/health'])
+  @Get(['health', 'api/v1/health'])
   getHealth() {
     return {
       status: 'ok',

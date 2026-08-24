@@ -1,4 +1,4 @@
-import { Injectable, type LogLevel } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
 /** 与旧系统 logger.js 相同的敏感字段清单（子串匹配、大小写不敏感） */
 const SENSITIVE_FIELDS = [
@@ -13,14 +13,24 @@ const SENSITIVE_FIELDS = [
   'auth',
 ];
 
-const LEVEL_WEIGHT: Record<string, number> = {
+type AppLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const LEVEL_WEIGHT: Record<AppLogLevel, number> = {
   debug: 0,
-  log: 1,
+  info: 1,
   warn: 2,
   error: 3,
 };
 
 function sanitize(data: unknown): unknown {
+  if (data instanceof Error) {
+    const errorWithCode = data as Error & { code?: unknown };
+    return {
+      name: data.name,
+      message: data.message,
+      ...(errorWithCode.code === undefined ? {} : { code: errorWithCode.code }),
+    };
+  }
   if (!data || typeof data !== 'object') {
     return data;
   }
@@ -42,11 +52,8 @@ function sanitize(data: unknown): unknown {
 }
 
 /** UTC+8 时间戳（对齐旧系统 getUTC8ISOString 语义） */
-function utc8Iso(): string {
-  const now = new Date();
-  const utc8 = new Date(
-    now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60_000,
-  );
+export function utc8Iso(): string {
+  const utc8 = new Date(Date.now() + 8 * 60 * 60_000);
   return utc8.toISOString().replace('Z', '+08:00');
 }
 
@@ -56,16 +63,15 @@ export class AppLogger {
 
   constructor() {
     const level = (process.env.LOG_LEVEL || 'INFO').toLowerCase();
-    const mapped = level === 'info' ? 'log' : level;
-    this.threshold = LEVEL_WEIGHT[mapped] ?? LEVEL_WEIGHT.log;
+    this.threshold = LEVEL_WEIGHT[level as AppLogLevel] ?? LEVEL_WEIGHT.info;
   }
 
-  private shouldLog(level: LogLevel): boolean {
+  private shouldLog(level: AppLogLevel): boolean {
     return (LEVEL_WEIGHT[level] ?? 99) >= this.threshold;
   }
 
   private write(
-    level: LogLevel,
+    level: AppLogLevel,
     message: unknown,
     context?: string,
     ...args: unknown[]
@@ -76,17 +82,11 @@ export class AppLogger {
     const prefix = `[${utc8Iso()}] [${level.toUpperCase()}]${
       context ? ` [${context}]` : ''
     }`;
+    const sanitizedMessage = sanitize(message);
     const sanitized = args.map((a) => sanitize(a));
-    const method: 'debug' | 'info' | 'warn' | 'error' =
-      level === 'debug'
-        ? 'debug'
-        : level === 'warn'
-        ? 'warn'
-        : level === 'error' || level === 'fatal'
-        ? 'error'
-        : 'info';
+    const method: AppLogLevel = level;
     // eslint-disable-next-line no-console -- 日志模块是唯一允许的 console 出口
-    console[method](prefix, message, ...sanitized);
+    console[method](prefix, sanitizedMessage, ...sanitized);
   }
 
   debug(message: unknown, context?: string, ...args: unknown[]): void {
@@ -94,7 +94,7 @@ export class AppLogger {
   }
 
   info(message: unknown, context?: string, ...args: unknown[]): void {
-    this.write('log', message, context, ...args);
+    this.write('info', message, context, ...args);
   }
 
   warn(message: unknown, context?: string, ...args: unknown[]): void {

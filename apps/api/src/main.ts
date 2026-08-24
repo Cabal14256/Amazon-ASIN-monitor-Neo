@@ -1,15 +1,28 @@
 import 'reflect-metadata';
 
-import { ValidationPipe } from '@nestjs/common';
+import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 
+import type { Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
 import { ZodValidationPipe } from './common/zod-validation.pipe';
+import { ENV } from './config/config.module';
 import { AppLogger } from './logger/app-logger.service';
+
+export function configureHttpApp(app: NestFastifyApplication): void {
+  app.setGlobalPrefix('api/v1', {
+    exclude: [
+      { path: 'health', method: RequestMethod.GET },
+      { path: 'api/v1/health', method: RequestMethod.GET },
+      { path: 'metrics', method: RequestMethod.GET },
+    ],
+  });
+  app.useGlobalPipes(new ZodValidationPipe());
+}
 
 /**
  * 新后端入口（PROCESS_ROLE=api 角色）。
@@ -33,15 +46,14 @@ async function bootstrap(): Promise<void> {
     fatal: (m, c) => logger.error(m, c),
   });
 
-  app.setGlobalPrefix('api/v1', { exclude: ['/health', '/metrics'] });
-  app.useGlobalPipes(
-    new ZodValidationPipe(),
-    new ValidationPipe({ transform: true }),
-  );
+  configureHttpApp(app);
 
-  const port = Number(process.env.PORT ?? 3100);
+  const env = app.get<Env>(ENV);
+  const port = env.PORT;
   await app.listen(port, '0.0.0.0');
   logger.info(`api 服务已启动: http://0.0.0.0:${port}`, 'Bootstrap');
 }
 
-void bootstrap();
+if (require.main === module) {
+  void bootstrap();
+}

@@ -19,7 +19,7 @@ describe('loadEnv', () => {
     const env = loadEnv({ ...validEnv });
     expect(env.NODE_ENV).toBe('development');
     expect(env.LOG_LEVEL).toBe('INFO');
-    expect(env.PORT).toBe(3001);
+    expect(env.PORT).toBe(3100);
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
   });

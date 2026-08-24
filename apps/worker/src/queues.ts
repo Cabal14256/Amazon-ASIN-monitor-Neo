@@ -1,19 +1,77 @@
 /**
- * 队列注册表（类型化，替代旧 workerProcessorRegistry 的字符串约定）。
- * 队列名与旧 Bull v4 的 8 个队列一一对应；P2-T2 平移各 Processor 实现。
+ * 选择器名称与 Redis 中的物理队列名称分开保存。
+ * 物理名称必须与旧 Bull v4 producer 一致，选择器则兼容旧
+ * WORKER_ENABLED_QUEUES 的别名。
  */
-export const QUEUE_NAMES = [
-  'monitor',
-  'competitor-monitor',
-  'export',
-  'import',
-  'batch-check',
-  'batch-delete',
-  'backup',
-  'variant-check',
+export const QUEUE_DEFINITIONS = [
+  {
+    name: 'monitor',
+    physicalName: 'monitor-task-queue',
+    aliases: ['monitor'],
+  },
+  {
+    name: 'competitor-monitor',
+    physicalName: 'competitor-monitor-task-queue',
+    aliases: ['competitor', 'competitor-monitor'],
+  },
+  {
+    name: 'export',
+    physicalName: 'export-task-queue',
+    aliases: ['export'],
+  },
+  {
+    name: 'import',
+    physicalName: 'import-task-queue',
+    aliases: ['import'],
+  },
+  {
+    name: 'batch-check',
+    physicalName: 'batch-check-task-queue',
+    aliases: ['batchcheck', 'batch-check'],
+  },
+  {
+    name: 'batch-delete',
+    physicalName: 'batch-delete-task-queue',
+    aliases: ['batchdelete', 'batch-delete'],
+  },
+  {
+    name: 'backup',
+    physicalName: 'backup-task-queue',
+    aliases: ['backup'],
+  },
+  {
+    name: 'variant-check',
+    physicalName: 'variant-check-task-queue',
+    aliases: ['variantcheck', 'variant-check'],
+  },
 ] as const;
 
+export const QUEUE_NAMES = QUEUE_DEFINITIONS.map(({ name }) => name);
+
 export type QueueName = (typeof QUEUE_NAMES)[number];
+
+function normalizeQueueToken(token: string): string {
+  return token
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-');
+}
+
+function resolveQueueSelector(token: string): QueueName | null {
+  const normalized = normalizeQueueToken(token);
+  const definition = QUEUE_DEFINITIONS.find(({ name, aliases }) =>
+    [name, ...aliases].map(normalizeQueueToken).includes(normalized),
+  );
+  return definition?.name ?? null;
+}
+
+export function getPhysicalQueueName(name: QueueName): string {
+  const definition = QUEUE_DEFINITIONS.find((item) => item.name === name);
+  if (!definition) {
+    throw new Error(`未知队列选择器: ${name}`);
+  }
+  return definition.physicalName;
+}
 
 /**
  * 解析 WORKER_ENABLED_QUEUES（逗号分隔），未设置时启用全部队列。
@@ -27,14 +85,21 @@ export function resolveEnabledQueues(raw: string | undefined): QueueName[] {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  const valid = requested.filter((q): q is QueueName =>
-    (QUEUE_NAMES as readonly string[]).includes(q),
-  );
-  const invalid = requested.filter(
-    (q) => !(QUEUE_NAMES as readonly string[]).includes(q),
-  );
+
+  if (
+    requested.some((token) => ['all', '*'].includes(normalizeQueueToken(token)))
+  ) {
+    return [...QUEUE_NAMES];
+  }
+
+  const resolved = requested
+    .filter((token) => !['none', 'off'].includes(normalizeQueueToken(token)))
+    .map((token) => ({ token, name: resolveQueueSelector(token) }));
+  const invalid = resolved
+    .filter(({ name }) => !name)
+    .map(({ token }) => token);
   if (invalid.length > 0) {
     throw new Error(`WORKER_ENABLED_QUEUES 含未知队列: ${invalid.join(', ')}`);
   }
-  return valid;
+  return [...new Set(resolved.map(({ name }) => name as QueueName))];
 }

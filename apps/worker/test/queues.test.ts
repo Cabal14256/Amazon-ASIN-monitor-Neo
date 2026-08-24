@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { QUEUE_NAMES, resolveEnabledQueues } from '../src/queues';
+import {
+  getPhysicalQueueName,
+  QUEUE_NAMES,
+  resolveEnabledQueues,
+} from '../src/queues';
 
 describe('队列注册表', () => {
   it('恰好包含旧系统 8 个队列', () => {
@@ -27,6 +31,25 @@ describe('队列注册表', () => {
       'monitor',
       'export',
     ]);
+  });
+
+  it('兼容 all/*、none/off 与旧选择器别名', () => {
+    expect(resolveEnabledQueues('all')).toEqual([...QUEUE_NAMES]);
+    expect(resolveEnabledQueues('*')).toEqual([...QUEUE_NAMES]);
+    expect(resolveEnabledQueues('none,off')).toEqual([]);
+    expect(resolveEnabledQueues('competitor,batchCheck,variantCheck')).toEqual([
+      'competitor-monitor',
+      'batch-check',
+      'variant-check',
+    ]);
+  });
+
+  it('选择器解析为旧系统物理队列名', () => {
+    expect(getPhysicalQueueName('monitor')).toBe('monitor-task-queue');
+    expect(getPhysicalQueueName('competitor-monitor')).toBe(
+      'competitor-monitor-task-queue',
+    );
+    expect(getPhysicalQueueName('export')).toBe('export-task-queue');
   });
 
   it('未知队列名直接报错', () => {

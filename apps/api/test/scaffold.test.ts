@@ -1,10 +1,21 @@
 import { BadRequestException } from '@nestjs/common';
-import { describe, expect, it } from 'vitest';
+import {
+  FastifyAdapter,
+  type NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { Test } from '@nestjs/testing';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { z } from 'zod';
 import { ZodValidationPipe } from '../src/common/zod-validation.pipe';
 import { HealthController } from '../src/health/health.controller';
-import { AppLogger, sanitize } from '../src/logger/app-logger.service';
+import { AppLogger, sanitize, utc8Iso } from '../src/logger/app-logger.service';
+import { configureHttpApp } from '../src/main';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe('HealthController', () => {
   it('返回 ok 状态与运行时间', () => {
@@ -12,6 +23,32 @@ describe('HealthController', () => {
     const health = controller.getHealth();
     expect(health.status).toBe('ok');
     expect(typeof health.uptime).toBe('number');
+  });
+
+  it('同时暴露 /health 与 /api/v1/health，且不产生双 /api 前缀', async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [HealthController],
+    }).compile();
+    const app = moduleRef.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter({ logger: false }),
+    );
+    configureHttpApp(app);
+    await app.init();
+    const fastify = app.getHttpAdapter().getInstance();
+    await fastify.ready();
+
+    expect(
+      (await fastify.inject({ method: 'GET', url: '/health' })).statusCode,
+    ).toBe(200);
+    expect(
+      (await fastify.inject({ method: 'GET', url: '/api/v1/health' }))
+        .statusCode,
+    ).toBe(200);
+    expect(
+      (await fastify.inject({ method: 'GET', url: '/api/v1/api/v1/health' }))
+        .statusCode,
+    ).toBe(404);
+    await app.close();
   });
 });
 
@@ -40,6 +77,25 @@ describe('AppLogger.sanitize（对齐旧 logger.js 脱敏清单）', () => {
   it('非对象原样返回', () => {
     expect(sanitize('str')).toBe('str');
     expect(sanitize(null)).toBe(null);
+  });
+
+  it('Error 只保留最小上下文，主消息对象同样脱敏', () => {
+    expect(
+      sanitize(Object.assign(new Error('boom'), { code: 'E_TEST' })),
+    ).toEqual({ name: 'Error', message: 'boom', code: 'E_TEST' });
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const logger = new AppLogger();
+    logger.info({ authorization: 'Bearer raw', safe: 'ok' }, 'Test');
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('[INFO] [Test]'),
+      { authorization: '***REDACTED***', safe: 'ok' },
+    );
+  });
+
+  it('UTC+8 时间戳不受宿主时区偏移影响', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T12:00:00.000Z'));
+    expect(utc8Iso()).toBe('2026-08-24T20:00:00.000+08:00');
   });
 
   it('Logger 级别遵循 LOG_LEVEL', () => {

@@ -4,15 +4,15 @@
   "scripts": {
     "bench:analytics": "node scripts/benchmark-analytics.js",
     "build": "max build",
-    "build:api": "pnpm --filter @asin-monitor/api build",
-    "build:web": "pnpm --filter @asin-monitor/web build",
-    "build:worker": "pnpm --filter @asin-monitor/worker build",
+    "build:api": "corepack pnpm --filter @asin-monitor/api... build",
+    "build:web": "corepack pnpm --filter @asin-monitor/web build",
+    "build:worker": "corepack pnpm --filter @asin-monitor/worker... build",
     "check:changed-format": "node scripts/check-changed-format.js",
     "check-redis": "node scripts/check-redis.js",
     "dev": "max dev",
-    "dev:api": "pnpm --filter @asin-monitor/api start:dev",
-    "dev:web": "pnpm --filter @asin-monitor/web dev",
-    "dev:worker": "pnpm --filter @asin-monitor/worker start:dev",
+    "dev:api": "corepack pnpm --filter @asin-monitor/api^... build && corepack pnpm --filter @asin-monitor/api start:dev",
+    "dev:web": "corepack pnpm --filter @asin-monitor/web dev",
+    "dev:worker": "corepack pnpm --filter @asin-monitor/worker^... build && corepack pnpm --filter @asin-monitor/worker start:dev",
     "format": "prettier --cache --write .",
     "postinstall": "max setup",
     "prepare": "husky",
@@ -33,7 +33,9 @@
     "dayjs": "^1.11.19",
     "dotenv": "^16.3.1",
     "echarts": "^5.4.2",
-    "echarts-for-react": "^3.0.5"
+    "echarts-for-react": "^3.0.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/react": "^18.0.33",
