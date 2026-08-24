@@ -57,6 +57,13 @@ function getMessage(raw: unknown, status: number): string {
 }
 
 function toEnvelope(raw: unknown, status: number): ErrorEnvelope {
+  if (status >= 500) {
+    return {
+      success: false,
+      errorMessage: '服务器内部错误',
+      errorCode: status,
+    };
+  }
   if (
     isRecord(raw) &&
     ('success' in raw || 'errorMessage' in raw || 'errorCode' in raw)

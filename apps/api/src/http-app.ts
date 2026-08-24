@@ -4,10 +4,13 @@ import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import { ApiExceptionFilter } from './common/api-exception.filter';
 import { ZodValidationPipe } from './common/zod-validation.pipe';
 import { AppLogger } from './logger/app-logger.service';
+import { registerHttpMetricsHook } from './metrics/http-metrics.hook';
+import type { MetricsService } from './metrics/metrics.service';
 
 interface HttpAppOptions {
   corsOrigin?: string;
   logger?: AppLogger;
+  metrics?: MetricsService;
 }
 
 /** 注册全局 API 前缀、兼容根路由与请求校验。 */
@@ -30,4 +33,7 @@ export function configureHttpApp(
   app.useGlobalFilters(
     new ApiExceptionFilter(options.logger ?? new AppLogger()),
   );
+  if (options.metrics) {
+    registerHttpMetricsHook(app, options.metrics);
+  }
 }

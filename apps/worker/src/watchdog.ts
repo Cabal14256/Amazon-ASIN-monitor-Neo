@@ -18,6 +18,7 @@ export class RedisWatchdog {
       pingTimeoutMs?: number;
       unhealthyMs?: number;
       now?: () => number;
+      checks?: ReadonlyArray<() => Promise<unknown>>;
     } = {},
   ) {}
 
@@ -36,7 +37,10 @@ export class RedisWatchdog {
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
-            this.redis.ping(),
+            Promise.all([
+              this.redis.ping(),
+              ...(this.opts.checks ?? []).map((check) => check()),
+            ]),
             new Promise<never>((_, reject) => {
               timeout = setTimeout(
                 () => reject(new Error('Redis ping timeout')),

@@ -56,7 +56,9 @@ async function bootstrap(): Promise<void> {
     getWatchdogRedisOptions(connection as RedisOptions),
   );
   attachRedisErrorLogger(watchdogRedis, 'watchdog');
-  const watchdog = new RedisWatchdog(watchdogRedis);
+  const watchdog = new RedisWatchdog(watchdogRedis, {
+    checks: queues.map((queue) => () => queue.getJobCounts()),
+  });
   watchdog.start(() => {
     logger.error('Redis 连续 60s 不健康，退出进程');
     process.exit(1);

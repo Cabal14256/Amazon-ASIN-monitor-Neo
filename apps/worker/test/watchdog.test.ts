@@ -42,4 +42,24 @@ describe('RedisWatchdog', () => {
     expect(ping).toHaveBeenCalledOnce();
     watchdog.stop();
   });
+
+  it('Redis PING 正常但 BullMQ 队列命令失败时仍触发恢复', async () => {
+    vi.useFakeTimers();
+    const ping = vi.fn(async () => 'PONG');
+    const queueCheck = vi.fn(async () => Promise.reject(new Error('NOPERM')));
+    const onUnhealthy = vi.fn();
+    const watchdog = new RedisWatchdog({ ping } as unknown as Redis, {
+      intervalMs: 10,
+      pingTimeoutMs: 5,
+      unhealthyMs: 20,
+      checks: [queueCheck],
+    });
+
+    watchdog.start(onUnhealthy);
+    await vi.advanceTimersByTimeAsync(31);
+
+    expect(ping).toHaveBeenCalledTimes(3);
+    expect(queueCheck).toHaveBeenCalledTimes(3);
+    expect(onUnhealthy).toHaveBeenCalledOnce();
+  });
 });

@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpException,
   Post,
 } from '@nestjs/common';
 import {
@@ -34,6 +35,19 @@ class TestErrorsController {
   @Get('boom')
   boom(): never {
     throw new Error('database unavailable');
+  }
+
+  @Get('wrapped-500')
+  wrapped500(): never {
+    throw new HttpException(
+      {
+        success: false,
+        errorMessage: 'internal database details',
+        errorCode: 503,
+        data: { diagnostics: 'private' },
+      },
+      503,
+    );
   }
 }
 
@@ -119,6 +133,19 @@ describe('HTTP 全局边界', () => {
       errorMessage: '请求参数校验失败',
       errorCode: 400,
       data: [{ path: 'name', message: 'Required' }],
+    });
+  });
+
+  it('5xx 自定义信封仅返回固定白名单字段', async () => {
+    const response = await app.getHttpAdapter().getInstance().inject({
+      method: 'GET',
+      url: '/api/v1/test-errors/wrapped-500',
+    });
+
+    expect(response.json()).toEqual({
+      success: false,
+      errorMessage: '服务器内部错误',
+      errorCode: 503,
     });
   });
 });

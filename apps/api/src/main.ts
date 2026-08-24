@@ -12,6 +12,7 @@ import { ENV } from './config/config.module';
 import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
 import { createNestLoggerAdapter } from './logger/nest-logger.adapter';
+import { MetricsService } from './metrics/metrics.service';
 import { runApi } from './runner';
 
 /**
@@ -30,7 +31,8 @@ async function bootstrap(): Promise<void> {
   app.useLogger(createNestLoggerAdapter(logger));
 
   const env = app.get<Env>(ENV);
-  configureHttpApp(app, { corsOrigin: env.CORS_ORIGIN, logger });
+  const metrics = app.get(MetricsService);
+  configureHttpApp(app, { corsOrigin: env.CORS_ORIGIN, logger, metrics });
 
   const port = env.PORT;
   await app.listen(port, '0.0.0.0');
