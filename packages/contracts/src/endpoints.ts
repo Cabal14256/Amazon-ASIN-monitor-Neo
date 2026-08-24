@@ -1,0 +1,215 @@
+/**
+ * /api/v1 端点注册表（契约冻结基线 v1）。
+ * 数据与 packages/contracts/docs/endpoint-inventory.md 一一对应；
+ * 任何端点增删改必须同步本表 + 清单文档 + 变更说明。
+ */
+
+export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+export type HttpMethod = (typeof HTTP_METHODS)[number];
+
+export const ENDPOINT_DOMAINS = [
+  'auth',
+  'users',
+  'roles',
+  'asin',
+  'variant-check',
+  'monitor',
+  'competitor-asin',
+  'competitor-monitor',
+  'competitor-variant-check',
+  'dashboard',
+  'export',
+  'tasks',
+  'backup',
+  'feishu',
+  'sp-api-config',
+  'audit',
+  'ops',
+  'system',
+] as const;
+export type EndpointDomain = (typeof ENDPOINT_DOMAINS)[number];
+
+export type EndpointSpecial =
+  | 'sse' // text/event-stream 进度推送（D5：新系统标记 deprecated）
+  | 'upload' // multer 文件上传
+  | 'download' // 文件下载
+  | 'timeout-120'
+  | 'timeout-300'
+  | 'timeout-600';
+
+export interface EndpointSpec {
+  method: HttpMethod;
+  /** Express 风格路径（:param），不含 /api/v1 前缀 */
+  path: string;
+  domain: EndpointDomain;
+  /** 路由层是否挂 authenticateToken（如实记录；见清单 §18 偏差 1） */
+  auth: boolean;
+  /** checkPermission('domain:action') 权限码 */
+  permission?: string;
+  /** 旧系统控制器方法（溯源用） */
+  controller: string;
+  special?: EndpointSpecial[];
+  /** 新系统标记废弃（双跑期由旧后端服务） */
+  deprecatedInNeo?: boolean;
+}
+
+/* eslint-disable sort-keys -- 保持与清单文档一致的分组顺序 */
+export const ENDPOINTS: EndpointSpec[] = [
+  // ── auth（7）──
+  { method: 'POST', path: '/auth/login', domain: 'auth', auth: false, controller: 'authController.login' },
+  { method: 'GET', path: '/auth/current-user', domain: 'auth', auth: true, controller: 'authController.getCurrentUser' },
+  { method: 'POST', path: '/auth/logout', domain: 'auth', auth: true, controller: 'authController.logout' },
+  { method: 'GET', path: '/auth/sessions', domain: 'auth', auth: true, controller: 'authController.listSessions' },
+  { method: 'POST', path: '/auth/sessions/revoke', domain: 'auth', auth: true, controller: 'authController.revokeSession' },
+  { method: 'POST', path: '/auth/change-password', domain: 'auth', auth: true, controller: 'authController.changePassword' },
+  { method: 'PUT', path: '/auth/profile', domain: 'auth', auth: true, controller: 'authController.updateProfile' },
+
+  // ── users（8）──
+  { method: 'GET', path: '/users', domain: 'users', auth: true, permission: 'user:read', controller: 'userController.getUserList' },
+  { method: 'GET', path: '/users/roles/all', domain: 'users', auth: true, permission: 'role:read', controller: 'userController.getAllRoles' },
+  { method: 'GET', path: '/users/:userId', domain: 'users', auth: true, permission: 'user:read', controller: 'userController.getUserDetail' },
+  { method: 'POST', path: '/users', domain: 'users', auth: true, permission: 'user:write', controller: 'userController.createUser' },
+  { method: 'POST', path: '/users/batch-delete', domain: 'users', auth: true, permission: 'user:delete', controller: 'userController.batchDeleteUsers' },
+  { method: 'PUT', path: '/users/:userId', domain: 'users', auth: true, permission: 'user:write', controller: 'userController.updateUser' },
+  { method: 'DELETE', path: '/users/:userId', domain: 'users', auth: true, permission: 'user:delete', controller: 'userController.deleteUser' },
+  { method: 'PUT', path: '/users/:userId/password', domain: 'users', auth: true, permission: 'user:write', controller: 'userController.updateUserPassword' },
+
+  // ── roles（4）──
+  { method: 'GET', path: '/roles', domain: 'roles', auth: true, permission: 'role:read', controller: 'roleController.getRoleList' },
+  { method: 'GET', path: '/roles/:roleId', domain: 'roles', auth: true, permission: 'role:read', controller: 'roleController.getRoleDetail' },
+  { method: 'GET', path: '/permissions', domain: 'roles', auth: true, permission: 'role:read', controller: 'roleController.getPermissionList' },
+  { method: 'PUT', path: '/roles/:roleId/permissions', domain: 'roles', auth: true, permission: 'role:write', controller: 'roleController.updateRolePermissions' },
+
+  // ── asin（16）──
+  { method: 'GET', path: '/variant-groups', domain: 'asin', auth: false, controller: 'asinController.getVariantGroups' },
+  { method: 'GET', path: '/variant-groups/:groupId', domain: 'asin', auth: false, controller: 'asinController.getVariantGroupById' },
+  { method: 'POST', path: '/variant-groups', domain: 'asin', auth: false, controller: 'asinController.createVariantGroup' },
+  { method: 'POST', path: '/variant-groups/batch-delete', domain: 'asin', auth: true, permission: 'asin:delete', controller: 'asinController.batchDeleteVariantGroups' },
+  { method: 'PUT', path: '/variant-groups/:groupId', domain: 'asin', auth: false, controller: 'asinController.updateVariantGroup' },
+  { method: 'DELETE', path: '/variant-groups/:groupId', domain: 'asin', auth: false, controller: 'asinController.deleteVariantGroup' },
+  { method: 'PUT', path: '/variant-groups/:groupId/feishu-notify', domain: 'asin', auth: false, controller: 'asinController.updateVariantGroupFeishuNotify' },
+  { method: 'PUT', path: '/variant-groups/:groupId/manual-broken', domain: 'asin', auth: true, permission: 'asin:write', controller: 'asinController.updateVariantGroupManualBroken' },
+  { method: 'POST', path: '/asins', domain: 'asin', auth: false, controller: 'asinController.createASIN' },
+  { method: 'POST', path: '/asins/batch-create', domain: 'asin', auth: true, permission: 'asin:write', controller: 'asinController.batchCreateASINs' },
+  { method: 'PUT', path: '/asins/:asinId', domain: 'asin', auth: false, controller: 'asinController.updateASIN' },
+  { method: 'DELETE', path: '/asins/:asinId', domain: 'asin', auth: false, controller: 'asinController.deleteASIN' },
+  { method: 'POST', path: '/asins/:asinId/move', domain: 'asin', auth: false, controller: 'asinController.moveASIN' },
+  { method: 'PUT', path: '/asins/:asinId/feishu-notify', domain: 'asin', auth: false, controller: 'asinController.updateASINFeishuNotify' },
+  { method: 'PUT', path: '/asins/:asinId/manual-broken', domain: 'asin', auth: true, permission: 'asin:write', controller: 'asinController.updateASINManualBroken' },
+  { method: 'POST', path: '/variant-groups/import-excel', domain: 'asin', auth: true, permission: 'asin:write', controller: 'asinController.importFromExcel', special: ['upload'] },
+
+  // ── variant-check（4）──
+  { method: 'POST', path: '/variant-groups/:groupId/check', domain: 'variant-check', auth: false, controller: 'variantCheckController.checkVariantGroup' },
+  { method: 'POST', path: '/asins/:asinId/check', domain: 'variant-check', auth: false, controller: 'variantCheckController.checkASIN' },
+  { method: 'POST', path: '/variant-groups/batch-check', domain: 'variant-check', auth: true, permission: 'asin:read', controller: 'variantCheckController.batchCheckVariantGroups' },
+  { method: 'POST', path: '/variant-check/batch-query-parent-asin', domain: 'variant-check', auth: true, permission: 'asin:read', controller: 'variantCheckController.batchQueryParentAsin', special: ['timeout-300'] },
+
+  // ── monitor（17，全部路由层未挂认证）──
+  { method: 'GET', path: '/monitor-history/statistics/by-time', domain: 'monitor', auth: false, controller: 'monitorController.getStatisticsByTime', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/by-country', domain: 'monitor', auth: false, controller: 'monitorController.getStatisticsByCountry', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/by-variant-group', domain: 'monitor', auth: false, controller: 'monitorController.getStatisticsByVariantGroup', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/peak-hours', domain: 'monitor', auth: false, controller: 'monitorController.getPeakHoursStatistics', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/analytics-monthly-breakdown', domain: 'monitor', auth: false, controller: 'monitorController.getAnalyticsMonthlyBreakdown', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/peak-mark-areas', domain: 'monitor', auth: false, controller: 'monitorController.getAnalyticsPeakMarkAreas', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/all-countries-summary', domain: 'monitor', auth: false, controller: 'monitorController.getAllCountriesSummary', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/region-summary', domain: 'monitor', auth: false, controller: 'monitorController.getRegionSummary', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/period-summary', domain: 'monitor', auth: false, controller: 'monitorController.getPeriodSummary', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/period-summary/details', domain: 'monitor', auth: false, controller: 'monitorController.getPeriodSummaryTimeSlotDetails', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/asin-by-country', domain: 'monitor', auth: false, controller: 'monitorController.getASINStatisticsByCountry', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics/asin-by-variant-group', domain: 'monitor', auth: false, controller: 'monitorController.getASINStatisticsByVariantGroup', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/statistics', domain: 'monitor', auth: false, controller: 'monitorController.getStatistics', special: ['timeout-600'] },
+  { method: 'GET', path: '/monitor-history/abnormal-duration-statistics', domain: 'monitor', auth: false, controller: 'monitorController.getAbnormalDurationStatistics' },
+  { method: 'GET', path: '/monitor-history/:id', domain: 'monitor', auth: false, controller: 'monitorController.getMonitorHistoryById' },
+  { method: 'GET', path: '/monitor-history', domain: 'monitor', auth: false, controller: 'monitorController.getMonitorHistory' },
+  { method: 'POST', path: '/monitor/trigger', domain: 'monitor', auth: false, controller: 'monitorController.triggerManualCheck' },
+
+  // ── competitor-asin（14）──
+  { method: 'GET', path: '/competitor/variant-groups', domain: 'competitor-asin', auth: true, permission: 'asin:read', controller: 'competitorAsinController.getCompetitorVariantGroups' },
+  { method: 'GET', path: '/competitor/variant-groups/:groupId', domain: 'competitor-asin', auth: true, permission: 'asin:read', controller: 'competitorAsinController.getCompetitorVariantGroupById' },
+  { method: 'POST', path: '/competitor/variant-groups', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.createCompetitorVariantGroup' },
+  { method: 'POST', path: '/competitor/variant-groups/batch-delete', domain: 'competitor-asin', auth: true, permission: 'asin:delete', controller: 'competitorAsinController.batchDeleteCompetitorVariantGroups' },
+  { method: 'PUT', path: '/competitor/variant-groups/:groupId', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.updateCompetitorVariantGroup' },
+  { method: 'DELETE', path: '/competitor/variant-groups/:groupId', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.deleteCompetitorVariantGroup' },
+  { method: 'PUT', path: '/competitor/variant-groups/:groupId/feishu-notify', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.updateCompetitorVariantGroupFeishuNotify' },
+  { method: 'POST', path: '/competitor/asins', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.createCompetitorASIN' },
+  { method: 'POST', path: '/competitor/asins/batch-create', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.batchCreateCompetitorASINs' },
+  { method: 'PUT', path: '/competitor/asins/:asinId', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.updateCompetitorASIN' },
+  { method: 'DELETE', path: '/competitor/asins/:asinId', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.deleteCompetitorASIN' },
+  { method: 'POST', path: '/competitor/asins/:asinId/move', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.moveCompetitorASIN' },
+  { method: 'PUT', path: '/competitor/asins/:asinId/feishu-notify', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.updateCompetitorASINFeishuNotify' },
+  { method: 'POST', path: '/competitor/variant-groups/import-excel', domain: 'competitor-asin', auth: true, permission: 'asin:write', controller: 'competitorAsinController.importCompetitorFromExcel', special: ['upload'] },
+
+  // ── competitor-monitor（3）──
+  { method: 'GET', path: '/competitor/monitor-history/:id', domain: 'competitor-monitor', auth: true, permission: 'monitor:read', controller: 'competitorMonitorController.getCompetitorMonitorHistoryById' },
+  { method: 'GET', path: '/competitor/monitor-history', domain: 'competitor-monitor', auth: true, permission: 'monitor:read', controller: 'competitorMonitorController.getCompetitorMonitorHistory' },
+  { method: 'POST', path: '/competitor/monitor/trigger', domain: 'competitor-monitor', auth: true, permission: 'monitor:write', controller: 'competitorMonitorTaskRunner.triggerCompetitorManualCheck' },
+
+  // ── competitor-variant-check（3）──
+  { method: 'POST', path: '/competitor/variant-groups/:groupId/check', domain: 'competitor-variant-check', auth: true, permission: 'asin:read', controller: 'competitorVariantCheckController.checkCompetitorVariantGroup' },
+  { method: 'POST', path: '/competitor/asins/:asinId/check', domain: 'competitor-variant-check', auth: true, permission: 'asin:read', controller: 'competitorVariantCheckController.checkCompetitorASIN' },
+  { method: 'POST', path: '/competitor/variant-groups/batch-check', domain: 'competitor-variant-check', auth: true, permission: 'asin:read', controller: 'competitorVariantCheckController.batchCheckCompetitorVariantGroups' },
+
+  // ── dashboard（1）──
+  { method: 'GET', path: '/dashboard', domain: 'dashboard', auth: true, controller: 'dashboardController.getDashboardData', special: ['timeout-120'] },
+
+  // ── export（9，D5：新系统统一异步任务 + WS，SSE 端点双跑期标记 deprecated）──
+  { method: 'GET', path: '/export/variant-group', domain: 'export', auth: true, permission: 'asin:read', controller: 'exportController.exportVariantGroupData', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/asin', domain: 'export', auth: true, permission: 'asin:read', controller: 'exportController.exportASINData', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/competitor-variant-group', domain: 'export', auth: true, permission: 'asin:read', controller: 'exportController.exportCompetitorVariantGroupData', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/competitor-asin', domain: 'export', auth: true, permission: 'asin:read', controller: 'exportController.exportCompetitorASINData', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/monitor-history', domain: 'export', auth: true, permission: 'monitor:read', controller: 'exportController.exportMonitorHistory', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/analytics-monthly-breakdown', domain: 'export', auth: true, permission: 'analytics:read', controller: 'exportController.exportAnalyticsMonthlyBreakdown', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'POST', path: '/export/analytics-monthly-breakdown', domain: 'export', auth: true, permission: 'analytics:read', controller: 'exportController.exportAnalyticsMonthlyBreakdown', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/competitor-monitor-history', domain: 'export', auth: true, permission: 'monitor:read', controller: 'exportController.exportCompetitorMonitorHistory', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+  { method: 'GET', path: '/export/parent-asin-query', domain: 'export', auth: true, permission: 'asin:read', controller: 'exportController.exportParentAsinQuery', special: ['sse', 'timeout-600'], deprecatedInNeo: true },
+
+  // ── tasks（5）──
+  { method: 'POST', path: '/tasks/export', domain: 'tasks', auth: true, controller: 'exportController.createExportTask' },
+  { method: 'GET', path: '/tasks', domain: 'tasks', auth: true, controller: 'taskController.listTasks' },
+  { method: 'GET', path: '/tasks/:taskId', domain: 'tasks', auth: true, controller: 'taskController.getTaskStatus' },
+  { method: 'POST', path: '/tasks/:taskId/cancel', domain: 'tasks', auth: true, controller: 'taskController.cancelTask' },
+  { method: 'GET', path: '/tasks/:taskId/download', domain: 'tasks', auth: true, controller: 'taskController.downloadTaskFile', special: ['download'] },
+
+  // ── backup（7，router 级 settings:write）──
+  { method: 'POST', path: '/backup', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.createBackup' },
+  { method: 'POST', path: '/backup/restore', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.restoreBackup' },
+  { method: 'GET', path: '/backup', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.listBackups' },
+  { method: 'DELETE', path: '/backup/:filename', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.deleteBackup' },
+  { method: 'GET', path: '/backup/:filename/download', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.downloadBackup', special: ['download'] },
+  { method: 'GET', path: '/backup/config', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.getBackupConfig' },
+  { method: 'POST', path: '/backup/config', domain: 'backup', auth: true, permission: 'settings:write', controller: 'backupController.saveBackupConfig' },
+
+  // ── feishu（6，路由层未挂认证）──
+  { method: 'GET', path: '/feishu-configs', domain: 'feishu', auth: false, controller: 'feishuController.getFeishuConfigs' },
+  { method: 'GET', path: '/feishu-configs/:country', domain: 'feishu', auth: false, controller: 'feishuController.getFeishuConfigByCountry' },
+  { method: 'POST', path: '/feishu-configs', domain: 'feishu', auth: false, controller: 'feishuController.upsertFeishuConfig' },
+  { method: 'PUT', path: '/feishu-configs/:country', domain: 'feishu', auth: false, controller: 'feishuController.upsertFeishuConfig' },
+  { method: 'DELETE', path: '/feishu-configs/:country', domain: 'feishu', auth: false, controller: 'feishuController.deleteFeishuConfig' },
+  { method: 'PATCH', path: '/feishu-configs/:country/toggle', domain: 'feishu', auth: false, controller: 'feishuController.toggleFeishuConfig' },
+
+  // ── sp-api-config（5，路由层未挂认证）──
+  { method: 'GET', path: '/rate-limiter/status', domain: 'sp-api-config', auth: false, controller: 'spApiConfigController.getRateLimiterStatus' },
+  { method: 'GET', path: '/error-stats', domain: 'sp-api-config', auth: false, controller: 'spApiConfigController.getErrorStats' },
+  { method: 'GET', path: '/sp-api-configs', domain: 'sp-api-config', auth: false, controller: 'spApiConfigController.getSPAPIConfigForDisplay' },
+  { method: 'GET', path: '/sp-api-configs/:configKey', domain: 'sp-api-config', auth: false, controller: 'spApiConfigController.getSPAPIConfigByKey' },
+  { method: 'PUT', path: '/sp-api-configs', domain: 'sp-api-config', auth: false, controller: 'spApiConfigController.updateSPAPIConfig' },
+
+  // ── audit（4）──
+  { method: 'GET', path: '/audit-logs', domain: 'audit', auth: true, permission: 'audit:read', controller: 'auditLogController.getAuditLogList' },
+  { method: 'GET', path: '/audit-logs/:id', domain: 'audit', auth: true, permission: 'audit:read', controller: 'auditLogController.getAuditLogDetail' },
+  { method: 'GET', path: '/audit-logs/statistics/actions', domain: 'audit', auth: true, permission: 'audit:read', controller: 'auditLogController.getActionStatistics' },
+  { method: 'GET', path: '/audit-logs/statistics/resources', domain: 'audit', auth: true, permission: 'audit:read', controller: 'auditLogController.getResourceStatistics' },
+
+  // ── ops（3）──
+  { method: 'GET', path: '/ops/overview', domain: 'ops', auth: true, controller: 'opsController.getOpsOverview' },
+  { method: 'POST', path: '/ops/analytics/cache/clear', domain: 'ops', auth: true, controller: 'opsController.clearAnalyticsCache' },
+  { method: 'POST', path: '/ops/analytics/refresh', domain: 'ops', auth: true, controller: 'opsController.refreshAnalyticsAgg' },
+
+  // ── system（1，路由层未挂认证）──
+  { method: 'GET', path: '/system/alert', domain: 'system', auth: false, controller: 'systemController.getAlert' },
+];
+
+/** 按域取端点 */
+export function endpointsOf(domain: EndpointDomain): EndpointSpec[] {
+  return ENDPOINTS.filter((e) => e.domain === domain);
+}
