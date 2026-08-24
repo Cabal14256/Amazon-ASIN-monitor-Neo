@@ -12,6 +12,7 @@ import { Test } from '@nestjs/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { configureHttpApp } from '../src/http-app';
+import { MetricsController } from '../src/metrics/metrics.controller';
 import { MetricsService } from '../src/metrics/metrics.service';
 
 @Controller('metric-probe')
@@ -33,13 +34,14 @@ describe('Fastify HTTP metrics hook', () => {
 
   beforeEach(async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    metrics = new MetricsService();
     const moduleRef = await Test.createTestingModule({
-      controllers: [MetricProbeController],
+      controllers: [MetricProbeController, MetricsController],
+      providers: [{ provide: MetricsService, useValue: metrics }],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(
       new FastifyAdapter({ logger: false }),
     );
-    metrics = new MetricsService();
     configureHttpApp(app, { metrics });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
@@ -89,5 +91,18 @@ describe('Fastify HTTP metrics hook', () => {
       'amazon_asin_monitor_http_requests_total{method="GET",route="unknown",status="404"} 2',
     );
     expect(rendered).not.toContain('/scan/unique-');
+  });
+
+  it('/metrics 返回 Registry 声明的 Prometheus exposition content type', async () => {
+    const response = await app.getHttpAdapter().getInstance().inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toBe(metrics.contentType);
+    expect(response.body).toContain(
+      '# HELP amazon_asin_monitor_http_requests_total HTTP 请求总数',
+    );
   });
 });

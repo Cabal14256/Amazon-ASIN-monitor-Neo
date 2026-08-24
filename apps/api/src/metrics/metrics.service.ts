@@ -94,6 +94,10 @@ export class MetricsService implements OnModuleDestroy {
     collectDefaultMetrics({ prefix: METRICS_PREFIX, register: this.registry });
   }
 
+  get contentType(): string {
+    return this.registry.contentType;
+  }
+
   async render(): Promise<string> {
     return this.registry.metrics();
   }
