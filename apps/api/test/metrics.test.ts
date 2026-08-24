@@ -41,7 +41,11 @@ describe('HTTP metrics interceptor', () => {
     const raw = Object.assign(new EventEmitter(), { statusCode: 200 });
     const context = {
       switchToHttp: () => ({
-        getRequest: () => ({ method: 'POST', url: '/api/v1/tasks' }),
+        getRequest: () => ({
+          method: 'POST',
+          url: '/api/v1/tasks',
+          routeOptions: { url: '/api/v1/tasks' },
+        }),
         getResponse: () => ({ statusCode: 200, raw }),
       }),
     } as unknown as ExecutionContext;
@@ -57,6 +61,32 @@ describe('HTTP metrics interceptor', () => {
       'amazon_asin_monitor_http_requests_total{method="POST",route="/api/v1/tasks",status="503"} 1',
     );
     expect(rendered).not.toContain('status="200"');
+    metrics.onModuleDestroy();
+  });
+
+  it('未匹配路径统一折叠为 unknown，避免指标标签基数失控', async () => {
+    const metrics = new MetricsService();
+    const interceptor = new HttpMetricsInterceptor(metrics);
+
+    for (const url of ['/scan/unique-1', '/scan/unique-2']) {
+      const raw = Object.assign(new EventEmitter(), { statusCode: 404 });
+      const context = {
+        switchToHttp: () => ({
+          getRequest: () => ({ method: 'GET', url }),
+          getResponse: () => ({ statusCode: 404, raw }),
+        }),
+      } as unknown as ExecutionContext;
+      await lastValueFrom(
+        interceptor.intercept(context, { handle: () => of(undefined) }),
+      );
+      raw.emit('finish');
+    }
+
+    const rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_requests_total{method="GET",route="unknown",status="404"} 2',
+    );
+    expect(rendered).not.toContain('/scan/unique-');
     metrics.onModuleDestroy();
   });
 });

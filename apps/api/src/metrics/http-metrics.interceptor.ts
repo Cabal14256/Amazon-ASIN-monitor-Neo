@@ -37,8 +37,7 @@ export class HttpMetricsInterceptor implements NestInterceptor {
         Number(process.hrtime.bigint() - startedAt) / 1_000_000_000;
       const labels = {
         method: request.method || 'UNKNOWN',
-        route:
-          request.routeOptions?.url || request.url?.split('?')[0] || 'unknown',
+        route: request.routeOptions?.url || 'unknown',
         status: String(response.raw?.statusCode ?? response.statusCode ?? 500),
       };
       this.metrics.httpRequestsTotal.inc(labels);
