@@ -1,3 +1,5 @@
+import type { PermissionCode } from './permissions';
+
 /**
  * /api/v1 端点注册表（契约冻结基线 v1）。
  * 数据与 packages/contracts/docs/endpoint-inventory.md 一一对应；
@@ -45,7 +47,7 @@ export interface EndpointSpec {
   /** 路由层是否挂 authenticateToken（如实记录；见清单 §18 偏差 1） */
   auth: boolean;
   /** checkPermission('domain:action') 权限码 */
-  permission?: string;
+  permission?: PermissionCode;
   /** 旧系统控制器方法（溯源用） */
   controller: string;
   special?: EndpointSpecial[];
