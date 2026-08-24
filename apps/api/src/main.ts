@@ -29,9 +29,9 @@ async function bootstrap(): Promise<void> {
   const logger = app.get(AppLogger);
   app.useLogger(createNestLoggerAdapter(logger));
 
-  configureHttpApp(app);
-
   const env = app.get<Env>(ENV);
+  configureHttpApp(app, { corsOrigin: env.CORS_ORIGIN, logger });
+
   const port = env.PORT;
   await app.listen(port, '0.0.0.0');
   logger.info(`api 服务已启动: http://0.0.0.0:${port}`, 'Bootstrap');

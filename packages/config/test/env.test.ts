@@ -23,6 +23,7 @@ describe('loadEnv', () => {
     expect(env.NODE_ENV).toBe('development');
     expect(env.LOG_LEVEL).toBe('INFO');
     expect(env.PORT).toBe(3100);
+    expect(env.CORS_ORIGIN).toBe('http://localhost:8000');
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
@@ -116,6 +117,7 @@ describe('loadEnv', () => {
     expect(env.DATABASE_URL).toContain('amazon_asin_monitor');
     expect(env.COMPETITOR_DATABASE_URL).toContain('amazon_competitor_monitor');
     expect(env.REDIS_URL).toBe('redis://127.0.0.1:6379');
+    expect(env.CORS_ORIGIN).toBe('http://localhost:8000');
   });
 
   it.each([

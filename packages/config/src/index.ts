@@ -21,6 +21,11 @@ export const envSchema = z.object({
     .pipe(z.enum(['DEBUG', 'INFO', 'WARN', 'ERROR']))
     .default('INFO'),
   PORT: z.coerce.number().int().positive().default(3100),
+  CORS_ORIGIN: z
+    .string()
+    .trim()
+    .min(1, 'CORS_ORIGIN 不能为空')
+    .default('http://localhost:8000'),
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),

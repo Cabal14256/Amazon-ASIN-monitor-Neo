@@ -50,6 +50,10 @@ describe('Redis 连接选项', () => {
     expect((error as Error).message).toBe('REDIS_URL 格式无效');
   });
 
+  it.each(['redis://', 'redis:///0'])('拒绝无主机名 Redis URL %s', (url) => {
+    expect(() => parseRedisUrl(url)).toThrow('REDIS_URL 缺少主机名');
+  });
+
   it.each(['redis://host/jobs', 'redis://host/1/extra', 'redis://host/-1'])(
     '拒绝无效 Redis 数据库路径 %s',
     (url) => {

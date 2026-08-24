@@ -30,6 +30,9 @@ export function parseRedisUrl(raw: string): RedisOptions {
   if (!['redis:', 'rediss:'].includes(url.protocol)) {
     throw new Error(`REDIS_URL 协议不受支持: ${url.protocol}`);
   }
+  if (!url.hostname) {
+    throw new Error('REDIS_URL 缺少主机名');
+  }
   return {
     host: normalizeRedisHostname(url.hostname),
     port: url.port ? Number(url.port) : 6379,
