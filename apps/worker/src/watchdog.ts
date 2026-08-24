@@ -1,5 +1,27 @@
 import { Redis } from 'ioredis';
 
+/** 同一探针未结束时复用原 Promise，避免外层超时后重复堆积 Redis 命令。 */
+export function createSingleFlightCheck(
+  check: () => Promise<unknown>,
+): () => Promise<unknown> {
+  let inFlight: Promise<unknown> | undefined;
+  return () => {
+    if (!inFlight) {
+      const current = Promise.resolve().then(() => check());
+      inFlight = current;
+      void current.then(
+        () => {
+          if (inFlight === current) inFlight = undefined;
+        },
+        () => {
+          if (inFlight === current) inFlight = undefined;
+        },
+      );
+    }
+    return inFlight;
+  };
+}
+
 /**
  * 队列连接看门狗（对齐旧 queueConnectionWatchdog 语义）：
  * - 每 15s 对 Redis 发 ping

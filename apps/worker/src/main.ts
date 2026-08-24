@@ -15,7 +15,7 @@ import {
 import { getWatchdogRedisOptions, parseRedisUrl } from './redis-options';
 import { runWorker } from './runner';
 import { shutdownWorker } from './shutdown';
-import { RedisWatchdog } from './watchdog';
+import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
 
 /**
  * Worker 进程入口（PROCESS_ROLE=worker 角色）。
@@ -60,7 +60,9 @@ async function bootstrap(): Promise<void> {
   );
   attachRedisErrorLogger(watchdogRedis, 'watchdog');
   const watchdog = new RedisWatchdog(watchdogRedis, {
-    checks: queues.map((queue) => () => queue.getJobCounts()),
+    checks: queues.map((queue) =>
+      createSingleFlightCheck(() => queue.getJobCounts()),
+    ),
   });
   watchdog.start(() => {
     logger.error('Redis 连续 60s 不健康，退出进程');

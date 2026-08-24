@@ -1,7 +1,7 @@
 import type { Redis } from 'ioredis';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { RedisWatchdog } from '../src/watchdog';
+import { createSingleFlightCheck, RedisWatchdog } from '../src/watchdog';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -61,5 +61,35 @@ describe('RedisWatchdog', () => {
     expect(ping).toHaveBeenCalledTimes(3);
     expect(queueCheck).toHaveBeenCalledTimes(3);
     expect(onUnhealthy).toHaveBeenCalledOnce();
+  });
+
+  it('队列命令黑洞时每个探针只保留一个未完成命令', async () => {
+    vi.useFakeTimers();
+    let resolveQueueCheck: (() => void) | undefined;
+    const rawQueueCheck = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveQueueCheck = resolve;
+        }),
+    );
+    const queueCheck = createSingleFlightCheck(rawQueueCheck);
+    const onUnhealthy = vi.fn();
+    const watchdog = new RedisWatchdog(
+      { ping: vi.fn(async () => 'PONG') } as unknown as Redis,
+      {
+        intervalMs: 10,
+        pingTimeoutMs: 5,
+        unhealthyMs: 20,
+        checks: [queueCheck],
+      },
+    );
+
+    watchdog.start(onUnhealthy);
+    await vi.advanceTimersByTimeAsync(35);
+
+    expect(rawQueueCheck).toHaveBeenCalledOnce();
+    expect(onUnhealthy).toHaveBeenCalledOnce();
+    resolveQueueCheck?.();
+    await vi.runAllTicks();
   });
 });
