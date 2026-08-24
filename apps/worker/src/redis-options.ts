@@ -1,5 +1,18 @@
 import type { RedisOptions } from 'ioredis';
 
+function parseRedisDatabase(pathname: string): number {
+  if (pathname === '' || pathname === '/') return 0;
+  const match = /^\/(\d+)$/.exec(pathname);
+  if (!match) {
+    throw new Error(`REDIS_URL 数据库路径无效: ${pathname}`);
+  }
+  const database = Number(match[1]);
+  if (!Number.isSafeInteger(database)) {
+    throw new Error(`REDIS_URL 数据库编号超出安全整数范围: ${pathname}`);
+  }
+  return database;
+}
+
 /** redis://[:password@]host[:port][/db] → RedisOptions */
 export function parseRedisUrl(raw: string): RedisOptions {
   const url = new URL(raw);
@@ -11,7 +24,7 @@ export function parseRedisUrl(raw: string): RedisOptions {
     port: url.port ? Number(url.port) : 6379,
     username: url.username ? decodeURIComponent(url.username) : undefined,
     password: url.password ? decodeURIComponent(url.password) : undefined,
-    db: url.pathname ? Number(url.pathname.slice(1)) || 0 : 0,
+    db: parseRedisDatabase(url.pathname),
     tls: url.protocol === 'rediss:' ? {} : undefined,
     maxRetriesPerRequest: null, // BullMQ 要求
   };

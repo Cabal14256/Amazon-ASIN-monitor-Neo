@@ -5,7 +5,6 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { finalize } from 'rxjs/operators';
 
 import { MetricsService } from './metrics.service';
 
@@ -17,6 +16,10 @@ interface RequestLike {
 
 interface ResponseLike {
   statusCode?: number;
+  raw?: {
+    statusCode?: number;
+    once(event: 'finish', listener: () => void): unknown;
+  };
 }
 
 @Injectable()
@@ -29,24 +32,19 @@ export class HttpMetricsInterceptor implements NestInterceptor {
     const response = http.getResponse<ResponseLike>();
     const startedAt = process.hrtime.bigint();
 
-    return next.handle().pipe(
-      finalize(() => {
-        const durationSeconds =
-          Number(process.hrtime.bigint() - startedAt) / 1_000_000_000;
-        const labels = {
-          method: request.method || 'UNKNOWN',
-          route:
-            request.routeOptions?.url ||
-            request.url?.split('?')[0] ||
-            'unknown',
-          status: String(response.statusCode ?? 500),
-        };
-        this.metrics.httpRequestsTotal.inc(labels);
-        this.metrics.httpRequestDurationSeconds.observe(
-          labels,
-          durationSeconds,
-        );
-      }),
-    );
+    response.raw?.once('finish', () => {
+      const durationSeconds =
+        Number(process.hrtime.bigint() - startedAt) / 1_000_000_000;
+      const labels = {
+        method: request.method || 'UNKNOWN',
+        route:
+          request.routeOptions?.url || request.url?.split('?')[0] || 'unknown',
+        status: String(response.raw?.statusCode ?? response.statusCode ?? 500),
+      };
+      this.metrics.httpRequestsTotal.inc(labels);
+      this.metrics.httpRequestDurationSeconds.observe(labels, durationSeconds);
+    });
+
+    return next.handle();
   }
 }

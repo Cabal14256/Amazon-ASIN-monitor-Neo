@@ -27,10 +27,12 @@ export const wsMessageTypeSchema = z.enum([
 ]);
 export type WsMessageType = z.infer<typeof wsMessageTypeSchema>;
 
-export const wsMessageSchema = z.object({
-  type: wsMessageTypeSchema,
-  data: z.unknown().optional(),
-});
+export const wsMessageSchema = z
+  .object({
+    type: wsMessageTypeSchema,
+    data: z.unknown().optional(),
+  })
+  .passthrough();
 export type WsMessage = z.infer<typeof wsMessageSchema>;
 
 /** 客户端上行消息（心跳） */

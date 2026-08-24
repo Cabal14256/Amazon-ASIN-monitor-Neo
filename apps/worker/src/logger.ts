@@ -7,6 +7,20 @@ const LEVEL_WEIGHT: Record<WorkerLogLevel, number> = {
   error: 3,
 };
 
+/** 与 API logger 相同：子串匹配、大小写不敏感。 */
+const SENSITIVE_FIELDS = [
+  'password',
+  'pwd',
+  'token',
+  'accesstoken',
+  'refreshtoken',
+  'secret',
+  'apikey',
+  'authorization',
+  'auth',
+  'cookie',
+];
+
 function sanitize(value: unknown): unknown {
   if (value instanceof Error) {
     return { name: value.name, message: value.message };
@@ -16,7 +30,7 @@ function sanitize(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [
       key,
-      /(password|token|secret|authorization|cookie)/i.test(key)
+      SENSITIVE_FIELDS.some((field) => key.toLowerCase().includes(field))
         ? '***REDACTED***'
         : sanitize(child),
     ]),

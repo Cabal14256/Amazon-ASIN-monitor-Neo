@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { sanitizeWorkerLog } from '../src/logger';
 import { getWatchdogRedisOptions, parseRedisUrl } from '../src/redis-options';
 
 describe('Redis 连接选项', () => {
@@ -24,5 +25,35 @@ describe('Redis 连接选项', () => {
     expect(queueOptions.maxRetriesPerRequest).toBeNull();
     expect(watchdogOptions.maxRetriesPerRequest).toBe(1);
     expect(watchdogOptions.enableOfflineQueue).toBe(false);
+  });
+
+  it.each(['redis://host/jobs', 'redis://host/1/extra', 'redis://host/-1'])(
+    '拒绝无效 Redis 数据库路径 %s',
+    (url) => {
+      expect(() => parseRedisUrl(url)).toThrow(/数据库路径无效/);
+    },
+  );
+});
+
+describe('Worker 日志脱敏', () => {
+  it('覆盖 API logger 的全部凭据别名', () => {
+    expect(
+      sanitizeWorkerLog({
+        apiKey: 'key',
+        pwd: 'password',
+        auth: 'basic',
+        cookie: 'session=secret',
+        nested: { accessToken: 'token', refreshToken: 'refresh' },
+      }),
+    ).toEqual({
+      apiKey: '***REDACTED***',
+      pwd: '***REDACTED***',
+      auth: '***REDACTED***',
+      cookie: '***REDACTED***',
+      nested: {
+        accessToken: '***REDACTED***',
+        refreshToken: '***REDACTED***',
+      },
+    });
   });
 });

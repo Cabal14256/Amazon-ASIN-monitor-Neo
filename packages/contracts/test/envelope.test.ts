@@ -59,6 +59,22 @@ describe('WS 协议契约（对齐 websocketService.js）', () => {
     expect(() => wsMessageSchema.parse({ type: 'unknown_type' })).toThrow();
   });
 
+  it('字段级 schema 完成前保留旧消息的顶层 payload', () => {
+    expect(
+      wsMessageSchema.parse({
+        type: 'task_progress',
+        taskId: 'task-1',
+        progress: 42,
+        message: 'running',
+      }),
+    ).toMatchObject({
+      type: 'task_progress',
+      taskId: 'task-1',
+      progress: 42,
+      message: 'running',
+    });
+  });
+
   it('关闭语义 4401/4403 固定', () => {
     expect(WS_CLOSE_CODES.UNAUTHORIZED).toBe(4401);
     expect(WS_CLOSE_CODES.FORBIDDEN).toBe(4403);

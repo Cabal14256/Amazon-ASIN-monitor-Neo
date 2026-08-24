@@ -7,6 +7,7 @@ import { Redis, type RedisOptions } from 'ioredis';
 import { logger } from './logger';
 import { getPhysicalQueueName, resolveEnabledQueues } from './queues';
 import { getWatchdogRedisOptions, parseRedisUrl } from './redis-options';
+import { shutdownWorker } from './shutdown';
 import { RedisWatchdog } from './watchdog';
 
 /**
@@ -39,11 +40,10 @@ async function bootstrap(): Promise<void> {
     queueCount: queues.length,
   });
 
-  const shutdown = async (): Promise<void> => {
-    watchdog.stop();
-    await Promise.all(queues.map((q) => q.close()));
-    await watchdogRedis.quit();
-    process.exit(0);
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= shutdownWorker({ watchdog, queues, watchdogRedis });
+    return shutdownPromise;
   };
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
