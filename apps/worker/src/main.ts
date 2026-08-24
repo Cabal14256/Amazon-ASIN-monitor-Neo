@@ -4,6 +4,7 @@ import { loadEnv, loadEnvironmentFiles } from '@asin-monitor/config';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { Redis, type RedisOptions } from 'ioredis';
 
+import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
 import { attachQueueErrorLogger, attachRedisErrorLogger } from './queue-events';
 import {
@@ -37,6 +38,8 @@ async function bootstrap(): Promise<void> {
 
   if (!shouldInitializeQueueRuntime(enabled)) {
     logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
+    const signal = await waitForShutdownSignal();
+    logger.info('空闲 Worker 收到停止信号', { signal });
     return;
   }
 
