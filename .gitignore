@@ -21,7 +21,8 @@ nginx.conf
 /.umi
 /.umi-production
 /.umi-test
-/dist
+dist/
+coverage/
 /.mfsu
 .swc
 

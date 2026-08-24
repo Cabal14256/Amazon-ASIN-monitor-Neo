@@ -19,7 +19,7 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -27,41 +27,65 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
+          cache: pnpm
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Install server dependencies
-        run: npm ci --prefix server
+      - name: Install dependencies (workspace)
+        run: pnpm install --frozen-lockfile
 
       - name: Run PR policy tests
-        run: npm run test:pr-policy
+        run: pnpm run test:pr-policy
 
       - name: Run changed-file format tests
-        run: npm run test:changed-format
+        run: pnpm run test:changed-format
 
       - name: Check changed-file formatting
         env:
           CHANGED_FILES_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           CHANGED_FILES_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: npm run check:changed-format
+        run: pnpm run check:changed-format
 
-      - name: Run contract tests
-        run: npm run test:contracts
+      - name: Run legacy contract tests
+        run: pnpm run test:contracts
 
-      - name: Run server unit tests
-        run: npm --prefix server run test:unit
+      - name: Run legacy server unit tests
+        run: pnpm --filter amazon-asin-monitor-server run test:unit
 
-      - name: Run strict TypeScript check
-        run: npx --no-install tsc --noEmit --pretty false
+      - name: Run strict TypeScript check (legacy frontend)
+        run: pnpm exec tsc --noEmit --pretty false
 
-      - name: Build production frontend
-        run: npm run build
+      - name: Build legacy frontend
+        run: pnpm run build
+
+      - name: Test contracts package
+        run: pnpm --filter @asin-monitor/contracts test
+
+      - name: Test config package
+        run: pnpm --filter @asin-monitor/config test
+
+      - name: Test new api
+        run: pnpm --filter @asin-monitor/api test
+
+      - name: Test new worker
+        run: pnpm --filter @asin-monitor/worker test
+
+      - name: Test new web
+        run: pnpm --filter @asin-monitor/web test
+
+      - name: Lint new web
+        run: pnpm --filter @asin-monitor/web lint
+
+      - name: Build new packages
+        run: pnpm --filter @asin-monitor/config --filter @asin-monitor/contracts --filter @asin-monitor/db build
+
+      - name: Build new api & worker
+        run: pnpm --filter @asin-monitor/api --filter @asin-monitor/worker build
+
+      - name: Build new web
+        run: pnpm --filter @asin-monitor/web build

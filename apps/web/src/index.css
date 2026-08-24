@@ -1,0 +1,31 @@
+@import 'tailwindcss';
+
+/*
+ * 方向七·明快作业台 设计 token（P3-T1 将按 §11.9 补全六层动效与完整组件主题）。
+ * 配色：暖奶油底 + 荧光青柠信号色；数字/ASIN/时间戳等宽 + tabular-nums。
+ */
+@theme {
+  --color-cream: #f5f5f0;
+  --color-cream-raised: #f8f8f8;
+  --color-surface: #ffffff;
+  --color-ink: #0a0a0a;
+  --color-signal: #c8ff00;
+  --color-signal-soft: #d4fd8e;
+  --color-module-monitor: #304ffe;
+  --color-progress: #adefed;
+
+  --radius-pill: 999px;
+  --radius-input: 20px;
+  --radius-card: 16px;
+  --radius-control: 12px;
+  --radius-chip: 8px;
+}
+
+:root {
+  font-variant-numeric: tabular-nums;
+}
+
+body {
+  background-color: var(--color-cream);
+  color: var(--color-ink);
+}

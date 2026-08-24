@@ -21,5 +21,6 @@
       "@umijs/max/typings": ["./src/.umi/typings"]
     }
   },
-  "include": [".umirc.ts", ".umirc.*.ts", "**/*.d.ts", "**/*.ts", "**/*.tsx"]
+  "include": [".umirc.ts", ".umirc.*.ts", "**/*.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "apps", "packages", "server"]
 }
