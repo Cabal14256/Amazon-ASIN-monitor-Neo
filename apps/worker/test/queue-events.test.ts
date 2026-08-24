@@ -2,7 +2,10 @@ import type { Queue } from 'bullmq';
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { attachQueueErrorLogger } from '../src/queue-events';
+import {
+  attachQueueErrorLogger,
+  attachRedisErrorLogger,
+} from '../src/queue-events';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -28,5 +31,25 @@ describe('BullMQ Queue error 事件', () => {
       },
     );
     expect(JSON.stringify(warn.mock.calls)).not.toContain('user:secret');
+  });
+
+  it('看门狗 ioredis error 同样经 warn logger 消费', () => {
+    const redis = new EventEmitter();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    attachRedisErrorLogger(
+      redis as unknown as Parameters<typeof attachRedisErrorLogger>[0],
+      'watchdog',
+    );
+    expect(() => redis.emit('error', new Error('socket closed'))).not.toThrow();
+
+    expect(warn).toHaveBeenCalledWith(
+      '[WARN] [worker]',
+      'Redis 连接异常，等待看门狗判定恢复',
+      {
+        connection: 'watchdog',
+        error: { name: 'Error', message: 'socket closed' },
+      },
+    );
   });
 });

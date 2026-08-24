@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+
+import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
 /**
@@ -60,6 +64,70 @@ export const envSchema = z.object({
 export type Env = z.infer<typeof envSchema>;
 export type EnvInput = z.input<typeof envSchema>;
 
+function nonEmpty(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+/** 对齐旧队列 buildRedisUrl：优先 URL/URI，否则由分项变量组装。 */
+export function resolveRedisUrl(
+  source: Record<string, string | undefined>,
+): string | undefined {
+  const explicit = nonEmpty(source.REDIS_URL) ?? nonEmpty(source.REDIS_URI);
+  if (explicit) return explicit;
+
+  const hostValue = nonEmpty(source.REDIS_HOST);
+  if (!hostValue) return undefined;
+  const host =
+    hostValue.includes(':') && !hostValue.startsWith('[')
+      ? `[${hostValue}]`
+      : hostValue;
+  const port = nonEmpty(source.REDIS_PORT) ?? '6379';
+  const username = nonEmpty(source.REDIS_USERNAME);
+  const password = nonEmpty(source.REDIS_PASSWORD);
+  const database = nonEmpty(source.REDIS_DB) ?? '0';
+
+  let authority = '';
+  if (username && password) {
+    authority = `${encodeURIComponent(username)}:${encodeURIComponent(
+      password,
+    )}@`;
+  } else if (password) {
+    authority = `:${encodeURIComponent(password)}@`;
+  }
+
+  return `redis://${authority}${host}:${port}${
+    database === '0' ? '' : `/${database}`
+  }`;
+}
+
+function findWorkspaceRoot(start: string): string | undefined {
+  let current = resolve(start);
+  while (true) {
+    if (existsSync(join(current, 'pnpm-workspace.yaml'))) return current;
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+export function getDefaultEnvironmentFiles(cwd = process.cwd()): string[] {
+  const workspaceRoot = findWorkspaceRoot(cwd);
+  if (workspaceRoot) {
+    return [join(workspaceRoot, 'server', '.env'), join(workspaceRoot, '.env')];
+  }
+  return [join(cwd, 'server', '.env'), join(cwd, '.env')];
+}
+
+/** server/.env 优先，根 .env 作为补充；已有进程环境变量始终优先。 */
+export function loadEnvironmentFiles(
+  paths: string[] = getDefaultEnvironmentFiles(),
+): void {
+  for (const path of [...new Set(paths)]) {
+    loadDotenv({ path, override: false, quiet: true });
+  }
+}
+
 /** 旧系统 envValidator 的必需变量组，供迁移期对照 */
 export const LEGACY_REQUIRED_ENV_VARS = [
   'DB_HOST',
@@ -99,7 +167,10 @@ export class EnvValidationError extends Error {
 export function loadEnv(
   source: Record<string, string | undefined> = process.env,
 ): Env {
-  const result = envSchema.safeParse(source);
+  const result = envSchema.safeParse({
+    ...source,
+    REDIS_URL: resolveRedisUrl(source),
+  });
   if (!result.success) {
     throw new EnvValidationError(result.error.issues);
   }

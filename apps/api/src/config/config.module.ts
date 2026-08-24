@@ -1,6 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 
-import { loadEnv, type Env } from '@asin-monitor/config';
+import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 
 export const ENV = Symbol('ENV');
 
@@ -12,7 +12,10 @@ export const ENV = Symbol('ENV');
   providers: [
     {
       provide: ENV,
-      useFactory: (): Env => loadEnv(),
+      useFactory: (): Env => {
+        loadEnvironmentFiles();
+        return loadEnv();
+      },
     },
   ],
   exports: [ENV],

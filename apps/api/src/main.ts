@@ -6,11 +6,12 @@ import {
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 
-import type { Env } from '@asin-monitor/config';
+import { loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
 import { ENV } from './config/config.module';
 import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
+import { runApi } from './runner';
 
 /**
  * 新后端入口（PROCESS_ROLE=api 角色）。
@@ -43,5 +44,6 @@ async function bootstrap(): Promise<void> {
 }
 
 if (require.main === module) {
-  void bootstrap();
+  loadEnvironmentFiles();
+  void runApi(bootstrap);
 }

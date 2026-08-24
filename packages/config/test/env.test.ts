@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   EnvValidationError,
+  getDefaultEnvironmentFiles,
   LEGACY_RECOMMENDED_ENV_VARS,
   LEGACY_REQUIRED_ENV_VARS,
   loadEnv,
+  resolveRedisUrl,
 } from '../src/index';
 
 const validEnv = {
@@ -75,6 +77,31 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...validEnv, BULL_PREFIX: '  ' }).BULL_PREFIX).toBe(
       'bull',
     );
+  });
+
+  it('REDIS_URI 与 legacy 分项配置归一为 REDIS_URL', () => {
+    expect(
+      loadEnv({
+        ...validEnv,
+        REDIS_URL: undefined,
+        REDIS_URI: 'redis://legacy.example:6380/2',
+      }).REDIS_URL,
+    ).toBe('redis://legacy.example:6380/2');
+    expect(
+      resolveRedisUrl({
+        REDIS_HOST: '::1',
+        REDIS_PORT: '6380',
+        REDIS_USERNAME: 'user@example',
+        REDIS_PASSWORD: 'p@ss:word',
+        REDIS_DB: '3',
+      }),
+    ).toBe('redis://user%40example:p%40ss%3Aword@[::1]:6380/3');
+  });
+
+  it('默认环境文件指向 workspace 的 server/.env 与根 .env', () => {
+    const paths = getDefaultEnvironmentFiles();
+    expect(paths[0].replaceAll('\\', '/')).toMatch(/\/server\/\.env$/);
+    expect(paths[1].replaceAll('\\', '/')).toMatch(/\/\.env$/);
   });
 
   it.each([

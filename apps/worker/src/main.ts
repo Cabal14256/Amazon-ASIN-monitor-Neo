@@ -1,11 +1,11 @@
 import 'reflect-metadata';
 
-import { loadEnv } from '@asin-monitor/config';
+import { loadEnv, loadEnvironmentFiles } from '@asin-monitor/config';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import { Redis, type RedisOptions } from 'ioredis';
 
 import { logger } from './logger';
-import { attachQueueErrorLogger } from './queue-events';
+import { attachQueueErrorLogger, attachRedisErrorLogger } from './queue-events';
 import {
   getPhysicalQueueName,
   resolveQueueSelection,
@@ -23,6 +23,7 @@ import { RedisWatchdog } from './watchdog';
  * BullMQ 自管连接（传 ConnectionOptions），看门狗使用独立 ioredis 实例。
  */
 async function bootstrap(): Promise<void> {
+  loadEnvironmentFiles();
   const env = loadEnv();
   const { enabledQueues: enabled, unknownQueues } = resolveQueueSelection(
     env.WORKER_ENABLED_QUEUES,
@@ -54,6 +55,7 @@ async function bootstrap(): Promise<void> {
   const watchdogRedis = new Redis(
     getWatchdogRedisOptions(connection as RedisOptions),
   );
+  attachRedisErrorLogger(watchdogRedis, 'watchdog');
   const watchdog = new RedisWatchdog(watchdogRedis);
   watchdog.start(() => {
     logger.error('Redis 连续 60s 不健康，退出进程');
