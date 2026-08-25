@@ -4,9 +4,15 @@
   "scripts": {
     "bench:analytics": "node scripts/benchmark-analytics.js",
     "build": "max build",
+    "build:api": "corepack pnpm --filter @asin-monitor/api... build",
+    "build:web": "corepack pnpm --filter @asin-monitor/web build",
+    "build:worker": "corepack pnpm --filter @asin-monitor/worker... build",
     "check-redis": "node scripts/check-redis.js",
     "check:changed-format": "node scripts/check-changed-format.js",
     "dev": "max dev",
+    "dev:api": "corepack pnpm --filter @asin-monitor/api^... build && corepack pnpm --filter @asin-monitor/api start:dev",
+    "dev:web": "corepack pnpm --filter @asin-monitor/web dev",
+    "dev:worker": "corepack pnpm --filter @asin-monitor/worker^... build && corepack pnpm --filter @asin-monitor/worker start:dev",
     "format": "prettier --cache --write .",
     "postinstall": "max setup",
     "prepare": "husky",
@@ -20,24 +26,27 @@
     "test:pr-policy": "node --test tests/pr-policy.test.js"
   },
   "dependencies": {
-    "@ant-design/icons": "^5.0.1",
-    "@ant-design/pro-components": "^2.4.4",
-    "@umijs/max": "^4.5.3",
-    "antd": "^5.4.0",
-    "dayjs": "^1.11.19",
-    "dotenv": "^16.3.1",
-    "echarts": "^5.4.2",
-    "echarts-for-react": "^3.0.5"
+    "@ant-design/icons": "5.6.1",
+    "@ant-design/pro-components": "2.8.10",
+    "@umijs/max": "4.5.3",
+    "antd": "5.29.1",
+    "dayjs": "1.11.19",
+    "dotenv": "16.6.1",
+    "echarts": "5.6.0",
+    "echarts-for-react": "3.0.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "@types/react": "^18.0.33",
-    "@types/react-dom": "^18.0.11",
-    "baseline-browser-mapping": "^2.10.0",
-    "husky": "^9",
-    "lint-staged": "^13.2.0",
-    "prettier": "^2.8.7",
-    "prettier-plugin-organize-imports": "^3.2.2",
-    "prettier-plugin-packagejson": "^2.4.3",
-    "typescript": "^5.0.3"
-  }
+    "@types/react": "18.3.27",
+    "@types/react-dom": "18.3.7",
+    "baseline-browser-mapping": "2.10.0",
+    "husky": "9.1.7",
+    "lint-staged": "13.3.0",
+    "prettier": "2.8.8",
+    "prettier-plugin-organize-imports": "3.2.4",
+    "prettier-plugin-packagejson": "2.5.19",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@10.34.5"
 }
