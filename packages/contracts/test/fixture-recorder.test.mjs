@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { mergeApiUrl, sanitizeFixture } from '../scripts/record-fixtures.mjs';
+import {
+  mergeApiUrl,
+  readPositiveInteger,
+  sanitizeFixture,
+} from '../scripts/record-fixtures.mjs';
 
 describe('golden fixture 录制工具', () => {
   it('合并 baseURL 时去尾斜杠并去重 /api 前缀', () => {
@@ -28,5 +32,12 @@ describe('golden fixture 录制工具', () => {
       configValue: '***MASKED***',
       displayValue: '***MASKED***',
     });
+  });
+
+  it('仅接受正整数请求超时', () => {
+    expect(readPositiveInteger(undefined, 610_000)).toBe(610_000);
+    expect(readPositiveInteger('30000', 610_000)).toBe(30_000);
+    expect(() => readPositiveInteger('0', 610_000)).toThrow();
+    expect(() => readPositiveInteger('1.5', 610_000)).toThrow();
   });
 });

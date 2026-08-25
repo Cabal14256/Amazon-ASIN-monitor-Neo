@@ -21,12 +21,25 @@ const BASE_URL = normalizeBaseUrl(
 );
 const USERNAME = process.env.LEGACY_USERNAME;
 const PASSWORD = process.env.LEGACY_PASSWORD;
+const REQUEST_TIMEOUT_MS = readPositiveInteger(
+  process.env.LEGACY_FIXTURE_TIMEOUT_MS,
+  610_000,
+);
 
 const SENSITIVE_KEY_PATTERN =
   /(password|token|secret|authorization|cookie|webhook|username|email|phone)/i;
 
 function normalizeBaseUrl(baseUrl) {
   return String(baseUrl).trim().replace(/\/+$/, '');
+}
+
+function readPositiveInteger(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error('LEGACY_FIXTURE_TIMEOUT_MS 必须为正整数');
+  }
+  return parsed;
 }
 
 /** 与前端请求/导出层一致：去尾斜杠，并去掉重复的 /api 前缀。 */
@@ -126,6 +139,7 @@ async function login() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`登录失败: HTTP ${res.status}`);
@@ -147,7 +161,11 @@ async function record(auth, target) {
   const res = await fetch(mergeApiUrl(BASE_URL, target.path), {
     method: target.method,
     headers,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
   const text = await res.text();
   let body;
   try {
@@ -171,30 +189,44 @@ async function main() {
     console.error('缺少 LEGACY_USERNAME / LEGACY_PASSWORD');
     process.exit(1);
   }
-  await mkdir(OUT_DIR, { recursive: true });
   const auth = await login();
   console.info(`登录成功，开始录制 ${TARGETS.length} 个端点 → ${OUT_DIR}`);
 
-  let ok = 0;
+  const records = [];
+  const failures = [];
   for (const target of TARGETS) {
     try {
       const record$1 = await record(auth, target);
-      await writeFile(
-        join(OUT_DIR, `${target.name}.json`),
-        JSON.stringify(record$1, null, 2) + '\n',
-      );
+      records.push({ target, record: record$1 });
       console.info(
         `  ✓ ${target.name} (${record$1.status}, ${record$1.durationMs}ms)`,
       );
-      ok += 1;
     } catch (error) {
+      failures.push(target.name);
       console.error(`  ✗ ${target.name}: ${error.message}`);
     }
   }
-  console.info(`完成：${ok}/${TARGETS.length}`);
-  if (ok === 0) {
-    process.exit(1);
+
+  if (failures.length > 0) {
+    console.error(
+      `录制失败：${records.length}/${
+        TARGETS.length
+      }；未更新 golden fixture（${failures.join(', ')}）`,
+    );
+    process.exitCode = 1;
+    return;
   }
+
+  await mkdir(OUT_DIR, { recursive: true });
+  await Promise.all(
+    records.map(({ target, record: record$1 }) =>
+      writeFile(
+        join(OUT_DIR, `${target.name}.json`),
+        JSON.stringify(record$1, null, 2) + '\n',
+      ),
+    ),
+  );
+  console.info(`完成：${records.length}/${TARGETS.length}`);
 }
 
 if (
@@ -204,4 +236,4 @@ if (
   await main();
 }
 
-export { mergeApiUrl, sanitizeFixture };
+export { mergeApiUrl, readPositiveInteger, sanitizeFixture };
