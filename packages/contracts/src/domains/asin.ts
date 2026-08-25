@@ -13,6 +13,8 @@ import { resultSchema } from '../envelope';
 const dateTimeString = z.string();
 /** MySQL TINYINT(1) 语义字段：0/1（历史数据也可能为 null） */
 const flag01 = z.union([z.literal(0), z.literal(1), z.boolean(), z.null()]);
+/** 运行期有效状态必为 0/1；兼容历史前端将其声明为 boolean。 */
+const effectiveFlag01 = z.union([z.literal(0), z.literal(1), z.boolean()]);
 /** 飞书通知开关仅接受控制器支持的布尔或数字 0/1。 */
 const feishuEnabledInput = z.union([z.boolean(), z.literal(0), z.literal(1)]);
 /** 人工异常兼容 parseMarkedBroken 的布尔、数字与字符串 0/1。 */
@@ -45,7 +47,7 @@ export const decoratedAsinSchema = z
     site: z.string().nullable().optional(),
     brand: z.string().nullable().optional(),
     parentId: z.string().nullable().optional(),
-    isBroken: z.boolean().optional(),
+    isBroken: effectiveFlag01.optional(),
     variantStatus: z.string().optional(),
     autoIsBroken: flag01.optional(),
     autoVariantStatus: z.string().nullable().optional(),
@@ -96,7 +98,7 @@ export const variantGroupSchema = z
     // ── 列表组装附加字段 ──
     asin_count: z.number().optional(),
     children: z.array(decoratedAsinSchema).optional(),
-    isBroken: z.boolean().optional(),
+    isBroken: effectiveFlag01.optional(),
     variantStatus: z.string().optional(),
     autoIsBroken: flag01.optional(),
     autoVariantStatus: z.string().nullable().optional(),
@@ -325,6 +327,9 @@ export const variantGroupListResultSchema = resultSchema(
 
 export const variantGroupResultSchema = resultSchema(variantGroupSchema);
 export const asinRecordResultSchema = resultSchema(asinRecordSchema);
+/** 单项删除的四个控制器均返回 data: '删除成功'。 */
+export const deleteVariantGroupResultSchema = resultSchema(z.string());
+export const deleteAsinResultSchema = resultSchema(z.string());
 
 /** 批量删除同步结果 */
 export const batchDeleteSyncDataSchema = z.object({

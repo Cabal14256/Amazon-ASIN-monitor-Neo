@@ -6,6 +6,8 @@ import {
   batchDeleteVariantGroupsRequestSchema,
   batchDeleteVariantGroupsResultSchema,
   createAsinRequestSchema,
+  deleteAsinResultSchema,
+  deleteVariantGroupResultSchema,
   feishuNotifyRequestSchema,
   groupManualBrokenRequestSchema,
   importExcelResultSchema,
@@ -37,7 +39,7 @@ describe('asin 域', () => {
             site: 'amazon.com',
             brand: 'B',
             asin_count: 1,
-            isBroken: true,
+            isBroken: 1,
             variantStatus: 'BROKEN',
             feishuNotifyEnabled: 1,
             children: [
@@ -47,6 +49,7 @@ describe('asin 域', () => {
                 asinType: '1',
                 country: 'US',
                 parentId: 'g1',
+                isBroken: 0,
                 manualBroken: 1,
                 statusSource: 'MANUAL',
               },
@@ -60,6 +63,8 @@ describe('asin 域', () => {
       },
     });
     expect(parsed.data?.list[0].children?.[0].asin).toBe('B0ABC12345');
+    expect(parsed.data?.list[0].isBroken).toBe(1);
+    expect(parsed.data?.list[0].children?.[0].isBroken).toBe(0);
   });
 
   it('创建 ASIN 拒绝非法 asinType', () => {
@@ -144,6 +149,18 @@ describe('asin 域', () => {
       },
     });
     expect(asyncRes.data?.mode).toBe('async');
+  });
+
+  it('变体组与 ASIN 单项删除返回字符串 data', () => {
+    expect(
+      deleteVariantGroupResultSchema.parse({
+        success: true,
+        data: '删除成功',
+      }).data,
+    ).toBe('删除成功');
+    expect(
+      deleteAsinResultSchema.parse({ success: true, data: '删除成功' }).data,
+    ).toBe('删除成功');
   });
 
   it('批量创建结果含 results/errors 明细', () => {

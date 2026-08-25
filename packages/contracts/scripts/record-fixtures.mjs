@@ -22,6 +22,8 @@ const ABSOLUTE_URL_PATTERN = /^(?:[a-z][a-z\d+.-]*:)?\/\//i;
 const VERSION_SEGMENT_PATTERN = /^v\d+$/i;
 const SENSITIVE_KEY_PATTERN =
   /(password|token|secret|authorization|cookie|webhook|username|email|phone|real[_-]?name|last[_-]?login[_-]?ip|ip[_-]?address|user[_-]?agent|session[_-]?id|operator[_-]?name|updated[_-]?by)/i;
+const USER_IDENTIFIER_KEY_PATTERN =
+  /^(?:user[_-]?id|operator[_-]?id|changed[_-]?by)$/i;
 const SERIALIZED_REQUEST_KEY_PATTERN = /^request_?data$/i;
 
 const BASE_URL = normalizeBaseUrl(
@@ -186,6 +188,12 @@ function sanitizeFixture(value) {
 
   const configKey = String(value.configKey || value.config_key || '');
   const sensitiveConfig = /(SECRET|TOKEN|KEY|ROLE_ARN)/i.test(configKey);
+  const isUserEntity = Object.prototype.hasOwnProperty.call(value, 'username');
+  const isSessionEntity =
+    (Object.prototype.hasOwnProperty.call(value, 'user_id') ||
+      Object.prototype.hasOwnProperty.call(value, 'userId')) &&
+    (Object.prototype.hasOwnProperty.call(value, 'expires_at') ||
+      Object.prototype.hasOwnProperty.call(value, 'expiresAt'));
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => {
       if (SERIALIZED_REQUEST_KEY_PATTERN.test(key)) {
@@ -193,6 +201,8 @@ function sanitizeFixture(value) {
       }
       if (
         SENSITIVE_KEY_PATTERN.test(key) ||
+        USER_IDENTIFIER_KEY_PATTERN.test(key) ||
+        (/^id$/i.test(key) && (isUserEntity || isSessionEntity)) ||
         (sensitiveConfig &&
           ['configValue', 'config_value', 'displayValue'].includes(key))
       ) {

@@ -124,9 +124,19 @@ describe('backup 域', () => {
           scheduleType: 'monthly',
           scheduleValue: 31,
           backupTime: '02:00',
+          createTime: '2026-08-24T10:00:00Z',
+          updateTime: '2026-08-25T10:00:00Z',
         },
-      }).data?.scheduleValue,
-    ).toBe(31);
+      }).data,
+    ).toMatchObject({
+      scheduleValue: 31,
+      createTime: '2026-08-24T10:00:00Z',
+      updateTime: '2026-08-25T10:00:00Z',
+    });
+    expect(saveBackupConfigRequestSchema.parse({ enabled: 0 }).enabled).toBe(0);
+    expect(() =>
+      saveBackupConfigRequestSchema.parse({ enabled: 'false' }),
+    ).toThrow();
   });
 });
 

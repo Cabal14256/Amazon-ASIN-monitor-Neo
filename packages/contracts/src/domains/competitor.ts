@@ -4,6 +4,8 @@ import { resultSchema } from '../envelope';
 import {
   batchCreateAsinsResultSchema,
   batchDeleteVariantGroupsResultSchema,
+  deleteAsinResultSchema,
+  deleteVariantGroupResultSchema,
   importExcelResultSchema,
 } from './asin';
 import { monitorHistoryRecordSchema } from './monitor';
@@ -189,6 +191,9 @@ export const competitorAsinRecordResultSchema = resultSchema(
   competitorAsinRecordSchema,
 );
 
+export const competitorDeleteGroupResultSchema = deleteVariantGroupResultSchema;
+export const competitorDeleteAsinResultSchema = deleteAsinResultSchema;
+
 // 批量删除 / 批量创建 / Excel 导入与主营同构，直接复用 asin 域 schema
 export {
   batchCreateAsinsResultSchema as competitorBatchCreateResultSchema,
@@ -196,9 +201,15 @@ export {
   importExcelResultSchema as competitorImportExcelResultSchema,
 };
 
+/** 竞对监控历史行额外包含从检查结果提取的父 ASIN。 */
+export const competitorMonitorHistoryRecordSchema =
+  monitorHistoryRecordSchema.extend({
+    parentAsin: z.string().nullable(),
+  });
+
 /** 竞对监控历史列表 data */
 export const competitorMonitorHistoryListDataSchema = z.object({
-  list: z.array(monitorHistoryRecordSchema),
+  list: z.array(competitorMonitorHistoryRecordSchema),
   total: z.number().nullable(),
   current: z.number(),
   pageSize: z.number(),
@@ -207,7 +218,7 @@ export const competitorMonitorHistoryListResultSchema = resultSchema(
   competitorMonitorHistoryListDataSchema,
 );
 export const competitorMonitorHistoryDetailResultSchema = resultSchema(
-  monitorHistoryRecordSchema,
+  competitorMonitorHistoryRecordSchema,
 );
 
 /** 竞对变体检查同步结果（服务返回 {isBroken, brokenASINs, details}） */

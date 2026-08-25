@@ -28,6 +28,19 @@ describe('golden fixture 录制工具', () => {
   it('落盘前遮盖认证信息、Webhook、PII 与 SP-API 配置值', () => {
     const sanitized = sanitizeFixture({
       username: 'admin',
+      user: { id: 'user-1', username: 'operator' },
+      roles: [{ id: 'role-1', code: 'ADMIN' }],
+      audit: {
+        user_id: 'user-1',
+        userId: 'user-1',
+        operator_id: 'user-2',
+        changed_by: null,
+      },
+      session: {
+        id: 'session-row-1',
+        user_id: 'user-1',
+        expires_at: '2026-08-25T00:00:00Z',
+      },
       real_name: '真实姓名',
       last_login_ip: '192.0.2.1',
       ipAddress: '192.0.2.2',
@@ -45,6 +58,19 @@ describe('golden fixture 录制工具', () => {
     });
     expect(sanitized).toMatchObject({
       username: '***MASKED***',
+      user: { id: '***MASKED***', username: '***MASKED***' },
+      roles: [{ id: 'role-1', code: 'ADMIN' }],
+      audit: {
+        user_id: '***MASKED***',
+        userId: '***MASKED***',
+        operator_id: '***MASKED***',
+        changed_by: null,
+      },
+      session: {
+        id: '***MASKED***',
+        user_id: '***MASKED***',
+        expires_at: '2026-08-25T00:00:00Z',
+      },
       real_name: '***MASKED***',
       last_login_ip: '***MASKED***',
       ipAddress: '***MASKED***',

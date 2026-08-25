@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   competitorBatchCheckResultSchema,
   competitorCheckResultSchema,
+  competitorDeleteAsinResultSchema,
+  competitorDeleteGroupResultSchema,
   competitorGroupListResultSchema,
   competitorGroupUpsertRequestSchema,
   competitorMonitorHistoryListResultSchema,
@@ -63,6 +65,7 @@ describe('competitor 域', () => {
           {
             id: 9,
             asin: 'B0COMP0001',
+            parentAsin: 'B0PARENT01',
             is_broken: 1,
             checkTime: '2026-08-24 11:00:00',
           },
@@ -73,6 +76,22 @@ describe('competitor 域', () => {
       },
     });
     expect(parsed.data?.list[0].asin).toBe('B0COMP0001');
+    expect(parsed.data?.list[0].parentAsin).toBe('B0PARENT01');
+  });
+
+  it('竞对组与 ASIN 单项删除返回字符串 data', () => {
+    expect(
+      competitorDeleteGroupResultSchema.parse({
+        success: true,
+        data: '删除成功',
+      }).data,
+    ).toBe('删除成功');
+    expect(
+      competitorDeleteAsinResultSchema.parse({
+        success: true,
+        data: '删除成功',
+      }).data,
+    ).toBe('删除成功');
   });
 
   it('竞对组检查同步结果含 isBroken/details', () => {
