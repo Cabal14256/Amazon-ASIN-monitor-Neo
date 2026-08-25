@@ -23,10 +23,14 @@ export const roleSchema = z.object({
 export type Role = z.infer<typeof roleSchema>;
 
 /** 用户列表项：公开字段 + 角色摘要数组 */
+export const userRoleSummarySchema = z.object({
+  id: z.string(),
+  code: z.string(),
+  name: z.string(),
+});
+
 export const userListItemSchema = userPublicSchema.extend({
-  roles: z
-    .array(z.object({ id: z.string(), code: z.string(), name: z.string() }))
-    .optional(),
+  roles: z.array(userRoleSummarySchema).optional(),
 });
 export type UserListItem = z.infer<typeof userListItemSchema>;
 
@@ -53,7 +57,7 @@ export type CreateUserRequest = z.infer<typeof createUserRequestSchema>;
 
 /** POST /users/batch-delete */
 export const batchDeleteUsersRequestSchema = z.object({
-  userIds: z.array(z.number()).nonempty('userIds 不能为空'),
+  userIds: z.array(z.string().min(1)).nonempty('userIds 不能为空'),
 });
 export type BatchDeleteUsersRequest = z.infer<
   typeof batchDeleteUsersRequestSchema
@@ -101,12 +105,14 @@ export const userDetailDataSchema = userPublicSchema.extend({
     .array(
       z.object({
         id: z.number().optional(),
-        user_id: z.number().optional(),
+        user_id: z.string().optional(),
         old_status: z.string().nullable().optional(),
         new_status: z.string().optional(),
         reason: z.string().nullable().optional(),
-        operator_id: z.number().nullable().optional(),
+        changed_by: z.string().nullable().optional(),
+        operator_id: z.string().nullable().optional(),
         operator_name: z.string().nullable().optional(),
+        created_at: dateTimeString.optional(),
         create_time: dateTimeString.optional(),
       }),
     )
@@ -119,14 +125,22 @@ export const userDetailResultSchema = resultSchema(userDetailDataSchema);
 export const batchDeleteDataSchema = z.object({
   totalRequested: z.number(),
   deletedCount: z.number(),
-  skipped: z.array(z.object({ userId: z.number(), reason: z.string() })),
-  failed: z.array(z.object({ userId: z.number(), message: z.string() })),
+  skipped: z.array(z.object({ userId: z.string(), reason: z.string() })),
+  failed: z.array(z.object({ userId: z.string(), message: z.string() })),
 });
 export type BatchDeleteData = z.infer<typeof batchDeleteDataSchema>;
 export const batchDeleteResultSchema = resultSchema(batchDeleteDataSchema);
 
+/** POST /users 与 PUT /users/:userId 返回用户公开字段与角色摘要。 */
+export const userMutationDataSchema = userPublicSchema.extend({
+  roles: z.array(userRoleSummarySchema),
+});
+export type UserMutationData = z.infer<typeof userMutationDataSchema>;
+export const createUserResultSchema = resultSchema(userMutationDataSchema);
+export const updateUserResultSchema = resultSchema(userMutationDataSchema);
+
 /**
- * POST /users、PUT /users/:userId、DELETE /users/:userId、
- * PUT /users/:userId/password：message 变体（无 data 或仅提示）。
+ * DELETE /users/:userId 与 PUT /users/:userId/password：
+ * message 变体（无 data 或仅提示）。
  * 复用 auth.ts 的 messageResultSchema。
  */

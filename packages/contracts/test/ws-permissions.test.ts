@@ -55,6 +55,16 @@ describe('WebSocket 协议', () => {
         timestamp: '2026-08-24T18:00:00+08:00',
       }),
     ).toThrow();
+
+    expect(
+      wsMessageSchema.parse({
+        type: 'task_complete',
+        taskId: 'task-2',
+        downloadUrl: null,
+        filename: null,
+        timestamp: '2026-08-24T18:00:00+08:00',
+      }).type,
+    ).toBe('task_complete');
   });
 
   it('客户端只接受 ping 心跳', () => {

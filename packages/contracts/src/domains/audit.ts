@@ -16,7 +16,7 @@ const dateTimeString = z.string();
 export const auditLogSchema = z
   .object({
     id: z.number(),
-    user_id: z.number().nullable().optional(),
+    user_id: z.string().nullable().optional(),
     username: z.string().nullable().optional(),
     action: z.string(),
     resource: z.string().nullable().optional(),
@@ -32,7 +32,7 @@ export const auditLogSchema = z
     error_message: z.string().nullable().optional(),
     create_time: dateTimeString.optional(),
     // ── 驼峰别名（模型层补充） ──
-    userId: z.number().nullable().optional(),
+    userId: z.string().nullable().optional(),
     resourceId: z.string().nullable().optional(),
     resourceName: z.string().nullable().optional(),
     ipAddress: z.string().nullable().optional(),
@@ -50,7 +50,7 @@ export type AuditLog = z.infer<typeof auditLogSchema>;
 
 /** GET /audit-logs query */
 export const auditLogListQuerySchema = z.object({
-  userId: z.coerce.number().optional(),
+  userId: z.string().optional(),
   username: z.string().optional(),
   action: z.string().optional(),
   resource: z.string().optional(),

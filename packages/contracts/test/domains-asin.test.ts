@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   asinManualBrokenRequestSchema,
   batchCreateAsinsResultSchema,
+  batchDeleteVariantGroupsRequestSchema,
   batchDeleteVariantGroupsResultSchema,
   createAsinRequestSchema,
+  feishuNotifyRequestSchema,
+  groupManualBrokenRequestSchema,
   importExcelResultSchema,
   variantGroupListResultSchema,
 } from '../src/domains/asin';
@@ -74,13 +77,45 @@ describe('asin 域', () => {
   it('人工异常请求同时支持 action 与 markedBroken 兼容形态', () => {
     expect(
       asinManualBrokenRequestSchema.parse({
-        action: 'MARK_BROKEN',
+        action: ' mark_broken ',
         reason: '断货',
       }).action,
     ).toBe('MARK_BROKEN');
     expect(
-      asinManualBrokenRequestSchema.parse({ markedBroken: 1 }).markedBroken,
-    ).toBe(1);
+      asinManualBrokenRequestSchema.parse({ markedBroken: '0' }).markedBroken,
+    ).toBe('0');
+    expect(() => asinManualBrokenRequestSchema.parse({})).toThrow();
+    expect(() =>
+      asinManualBrokenRequestSchema.parse({ markedBroken: 1 }),
+    ).toThrow();
+    expect(() =>
+      asinManualBrokenRequestSchema.parse({ action: 'EXCLUDE_GROUP_MANUAL' }),
+    ).toThrow();
+  });
+
+  it('通知开关与组人工异常匹配控制器 0/1 语义', () => {
+    expect(feishuNotifyRequestSchema.parse({ enabled: 0 }).enabled).toBe(0);
+    expect(() => feishuNotifyRequestSchema.parse({ enabled: '0' })).toThrow();
+    expect(
+      groupManualBrokenRequestSchema.parse({ markedBroken: '0' }).markedBroken,
+    ).toBe('0');
+    expect(() =>
+      groupManualBrokenRequestSchema.parse({ markedBroken: true }),
+    ).toThrow();
+  });
+
+  it('批量删除至少需要一个非空目标', () => {
+    expect(() => batchDeleteVariantGroupsRequestSchema.parse({})).toThrow();
+    expect(() =>
+      batchDeleteVariantGroupsRequestSchema.parse({
+        groupIds: [],
+        asinIds: [' '],
+      }),
+    ).toThrow();
+    expect(
+      batchDeleteVariantGroupsRequestSchema.parse({ groupIds: ['g1'] })
+        .groupIds,
+    ).toEqual(['g1']);
   });
 
   it('批量删除同步/异步两种 data 均可解析', () => {

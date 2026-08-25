@@ -16,6 +16,14 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const DEFAULT_API_BASE_URL = '/api';
+const API_SUFFIX_PATTERN = /\/api(?:\/(?:api|v\d+))*$/i;
+const ABSOLUTE_URL_PATTERN = /^(?:[a-z][a-z\d+.-]*:)?\/\//i;
+const VERSION_SEGMENT_PATTERN = /^v\d+$/i;
+const SENSITIVE_KEY_PATTERN =
+  /(password|token|secret|authorization|cookie|webhook|username|email|phone|real[_-]?name|last[_-]?login[_-]?ip|ip[_-]?address|user[_-]?agent|session[_-]?id|operator[_-]?name|updated[_-]?by)/i;
+const SERIALIZED_REQUEST_KEY_PATTERN = /^request_?data$/i;
+
 const BASE_URL = normalizeBaseUrl(
   process.env.LEGACY_BASE_URL || 'http://localhost:3001',
 );
@@ -26,11 +34,10 @@ const REQUEST_TIMEOUT_MS = readPositiveInteger(
   610_000,
 );
 
-const SENSITIVE_KEY_PATTERN =
-  /(password|token|secret|authorization|cookie|webhook|username|email|phone)/i;
-
 function normalizeBaseUrl(baseUrl) {
-  return String(baseUrl).trim().replace(/\/+$/, '');
+  const normalized = String(baseUrl || DEFAULT_API_BASE_URL).trim();
+  if (normalized === '/') return '';
+  return normalized.replace(/\/+$/, '');
 }
 
 function readPositiveInteger(value, fallback) {
@@ -42,14 +49,64 @@ function readPositiveInteger(value, fallback) {
   return parsed;
 }
 
-/** 与前端请求/导出层一致：去尾斜杠，并去掉重复的 /api 前缀。 */
-function mergeApiUrl(baseUrl, path) {
-  const normalizedBase = normalizeBaseUrl(baseUrl);
-  let normalizedPath = path.startsWith('/') ? path : `/${path}`;
-  if (normalizedBase.endsWith('/api') && normalizedPath.startsWith('/api/')) {
-    normalizedPath = normalizedPath.slice(4);
+function resolveApiBaseUrl(baseUrl) {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  const absoluteBaseMatch = normalizedBaseUrl.match(
+    /^((?:[a-z][a-z\d+.-]*:)?\/\/[^/]+)(\/.*)?$/i,
+  );
+  if (absoluteBaseMatch) {
+    const [, origin, pathname = ''] = absoluteBaseMatch;
+    return `${origin}${pathname.replace(API_SUFFIX_PATTERN, '')}`;
   }
-  return `${normalizedBase}${normalizedPath}`;
+  return normalizedBaseUrl.replace(API_SUFFIX_PATTERN, '');
+}
+
+function normalizeApiPath(path) {
+  const trimmedPath = String(path || '').trim();
+  if (ABSOLUTE_URL_PATTERN.test(trimmedPath)) {
+    throw new Error('API 请求路径必须使用相对地址');
+  }
+
+  const suffixIndex = trimmedPath.search(/[?#]/);
+  const pathname =
+    suffixIndex >= 0 ? trimmedPath.slice(0, suffixIndex) : trimmedPath;
+  const suffix = suffixIndex >= 0 ? trimmedPath.slice(suffixIndex) : '';
+  const hasTrailingSlash = pathname.length > 1 && pathname.endsWith('/');
+  const segments = pathname.split('/').filter(Boolean);
+
+  let cursor = 0;
+  let versionSegment;
+  while (cursor < segments.length) {
+    const segment = segments[cursor];
+    if (segment.toLowerCase() === 'api') {
+      cursor += 1;
+      continue;
+    }
+    if (
+      VERSION_SEGMENT_PATTERN.test(segment) &&
+      (!versionSegment ||
+        segment.toLowerCase() === versionSegment.toLowerCase())
+    ) {
+      versionSegment = segment.toLowerCase();
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+
+  const normalizedSegments = [
+    'api',
+    ...(versionSegment ? [versionSegment] : []),
+    ...segments.slice(cursor),
+  ];
+  let normalizedPath = `/${normalizedSegments.join('/')}`;
+  if (hasTrailingSlash) normalizedPath += '/';
+  return `${normalizedPath}${suffix}`;
+}
+
+/** 与前端请求/导出层共用相同的 baseURL 与 API path 归一化语义。 */
+function mergeApiUrl(baseUrl, path) {
+  return `${resolveApiBaseUrl(baseUrl)}${normalizeApiPath(path)}`;
 }
 
 const OUT_DIR = join(
@@ -110,6 +167,15 @@ function maskValue(value) {
   return '***MASKED***';
 }
 
+function sanitizeSerializedFixture(value) {
+  if (typeof value !== 'string') return sanitizeFixture(value);
+  try {
+    return JSON.stringify(sanitizeFixture(JSON.parse(value)));
+  } catch {
+    return maskValue(value);
+  }
+}
+
 /**
  * 保留 fixture 的字段与类型骨架，同时阻止凭据、Webhook 与用户 PII 落盘。
  * SP-API 显示接口的敏感性由 configKey 决定，需要额外处理 configValue。
@@ -122,6 +188,9 @@ function sanitizeFixture(value) {
   const sensitiveConfig = /(SECRET|TOKEN|KEY|ROLE_ARN)/i.test(configKey);
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => {
+      if (SERIALIZED_REQUEST_KEY_PATTERN.test(key)) {
+        return [key, sanitizeSerializedFixture(child)];
+      }
       if (
         SENSITIVE_KEY_PATTERN.test(key) ||
         (sensitiveConfig &&

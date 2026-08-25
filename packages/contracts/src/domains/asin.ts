@@ -13,13 +13,20 @@ import { resultSchema } from '../envelope';
 const dateTimeString = z.string();
 /** MySQL TINYINT(1) 语义字段：0/1（历史数据也可能为 null） */
 const flag01 = z.union([z.literal(0), z.literal(1), z.boolean(), z.null()]);
-/** enabled 入参：布尔或 0/1 */
-const enabledInput = z.union([
+/** 飞书通知开关仅接受控制器支持的布尔或数字 0/1。 */
+const feishuEnabledInput = z.union([z.boolean(), z.literal(0), z.literal(1)]);
+/** 人工异常兼容 parseMarkedBroken 的布尔、数字与字符串 0/1。 */
+const manualBrokenInput = z.union([
   z.boolean(),
   z.literal(0),
   z.literal(1),
-  z.string(),
+  z.literal('0'),
+  z.literal('1'),
 ]);
+
+function isMarkedBroken(value: z.infer<typeof manualBrokenInput>): boolean {
+  return value === true || value === 1 || value === '1';
+}
 
 /** ASIN 类型：'1' 主链 / '2' 副评 */
 export const asinTypeSchema = z
@@ -142,27 +149,50 @@ export type VariantGroupUpsertRequest = z.infer<
   typeof variantGroupUpsertRequestSchema
 >;
 
-export const batchDeleteVariantGroupsRequestSchema = z.object({
-  groupIds: z.array(z.string()).optional(),
-  asinIds: z.array(z.string()).optional(),
-  useAsync: z.boolean().optional(),
-});
+export const batchDeleteVariantGroupsRequestSchema = z
+  .object({
+    groupIds: z.array(z.string()).optional(),
+    asinIds: z.array(z.string()).optional(),
+    useAsync: z.boolean().optional(),
+  })
+  .superRefine((value, ctx) => {
+    const hasTarget = [
+      ...(value.groupIds ?? []),
+      ...(value.asinIds ?? []),
+    ].some((id) => id.trim().length > 0);
+    if (!hasTarget) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '请提供变体组ID或ASIN ID列表',
+        path: ['groupIds'],
+      });
+    }
+  });
 export type BatchDeleteVariantGroupsRequest = z.infer<
   typeof batchDeleteVariantGroupsRequestSchema
 >;
 
 export const feishuNotifyRequestSchema = z.object({
-  enabled: enabledInput,
+  enabled: feishuEnabledInput,
 });
 export type FeishuNotifyRequest = z.infer<typeof feishuNotifyRequestSchema>;
 
 /** 变体组人工异常：仅 markedBroken + reason */
 export const groupManualBrokenRequestSchema = z
   .object({
-    markedBroken: enabledInput,
+    markedBroken: manualBrokenInput,
     reason: z.string().max(500, '原因长度不能超过500个字符').optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, ctx) => {
+    if (isMarkedBroken(value.markedBroken) && !value.reason?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '人工标记异常时必须填写原因',
+        path: ['reason'],
+      });
+    }
+  });
 export type GroupManualBrokenRequest = z.infer<
   typeof groupManualBrokenRequestSchema
 >;
@@ -174,13 +204,60 @@ export const ASIN_MANUAL_BROKEN_ACTIONS = [
   'EXCLUDE_GROUP_MANUAL',
   'CLEAR_GROUP_EXCLUSION',
 ] as const;
+type AsinManualBrokenAction = (typeof ASIN_MANUAL_BROKEN_ACTIONS)[number];
+
+function normalizeManualBrokenAction(
+  value: unknown,
+): AsinManualBrokenAction | undefined {
+  const normalized =
+    typeof value === 'string' ? value.trim().toUpperCase() : '';
+  return ASIN_MANUAL_BROKEN_ACTIONS.find((action) => action === normalized);
+}
+
+const optionalManualBrokenInput = z.preprocess(
+  (value) => (manualBrokenInput.safeParse(value).success ? value : undefined),
+  manualBrokenInput.optional(),
+);
+
 export const asinManualBrokenRequestSchema = z
   .object({
-    action: z.enum(ASIN_MANUAL_BROKEN_ACTIONS).optional(),
-    markedBroken: enabledInput.optional(),
+    action: z.preprocess(
+      (value) => normalizeManualBrokenAction(value),
+      z.enum(ASIN_MANUAL_BROKEN_ACTIONS).optional(),
+    ),
+    markedBroken: optionalManualBrokenInput,
     reason: z.string().max(500, '原因长度不能超过500个字符').optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, ctx) => {
+    const action =
+      value.action ??
+      (value.markedBroken === undefined
+        ? undefined
+        : isMarkedBroken(value.markedBroken)
+        ? 'MARK_BROKEN'
+        : 'CLEAR_SELF_MANUAL');
+
+    if (!action) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'action参数无效，或 markedBroken 参数必须是布尔值或0/1',
+        path: ['action'],
+      });
+      return;
+    }
+
+    if (
+      (action === 'MARK_BROKEN' || action === 'EXCLUDE_GROUP_MANUAL') &&
+      !value.reason?.trim()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '当前操作必须填写原因',
+        path: ['reason'],
+      });
+    }
+  });
 export type AsinManualBrokenRequest = z.infer<
   typeof asinManualBrokenRequestSchema
 >;

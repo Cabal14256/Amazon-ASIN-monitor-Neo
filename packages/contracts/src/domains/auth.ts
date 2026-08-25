@@ -25,7 +25,7 @@ const dateTimeString = z.string();
 
 /** User.USER_PUBLIC_COLUMNS（不含 password），formatUser 归一化后形态 */
 export const userPublicSchema = z.object({
-  id: z.number(),
+  id: z.string(),
   username: z.string(),
   real_name: z.string().nullable().optional(),
   status: userStatusSchema,
@@ -44,7 +44,7 @@ export type UserPublic = z.infer<typeof userPublicSchema>;
 /** sessions 表行（remember_me 为 MySQL TINYINT 0/1） */
 export const sessionSchema = z.object({
   id: z.string(),
-  user_id: z.number(),
+  user_id: z.string(),
   user_agent: z.string().nullable().optional(),
   ip_address: z.string().nullable().optional(),
   expires_at: dateTimeString.nullable().optional(),

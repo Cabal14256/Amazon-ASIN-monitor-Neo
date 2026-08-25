@@ -83,8 +83,8 @@ export const wsTaskProgressMessageSchema = z.object({
 export const wsTaskCompleteMessageSchema = z.object({
   type: z.literal('task_complete'),
   taskId: z.string(),
-  downloadUrl: z.string(),
-  filename: z.string(),
+  downloadUrl: z.string().nullable(),
+  filename: z.string().nullable(),
   timestamp: timestampSchema,
 });
 

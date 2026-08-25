@@ -129,12 +129,13 @@ describe('dashboard / ops / system / health 域', () => {
         overview: { ...counters, overviewByCountry: { US: counters } },
         realtimeAlerts: { brokenGroups: [], brokenASINs: [] },
         distribution: {
-          byCountry: [{ country: 'US', total: 1, broken: 0, normal: 1 }],
+          byCountry: [{ country: 'US', total: 1, broken: '0', normal: 1 }],
         },
         recentActivities: [],
       },
     });
     expect(parsed.data?.overview.totalASINs).toBe(2);
+    expect(parsed.data?.distribution.byCountry[0].broken).toBe('0');
   });
 
   it('解析运维概览与聚合刷新参数', () => {

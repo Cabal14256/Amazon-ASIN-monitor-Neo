@@ -3,6 +3,11 @@ import { z } from 'zod';
 import { resultSchema } from '../envelope';
 import { monitorHistoryRecordSchema } from './monitor';
 
+const sqlNumericAggregateSchema = z.union([
+  z.number(),
+  z.string().regex(/^\d+(?:\.\d+)?$/),
+]);
+
 const dashboardCountersSchema = z.object({
   totalGroups: z.number(),
   totalASINs: z.number(),
@@ -27,7 +32,7 @@ export const dashboardDataSchema = z.object({
       z.object({
         country: z.string(),
         total: z.number(),
-        broken: z.number(),
+        broken: sqlNumericAggregateSchema,
         normal: z.number(),
       }),
     ),

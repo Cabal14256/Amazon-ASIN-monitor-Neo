@@ -13,6 +13,8 @@ import {
 import {
   batchDeleteResultSchema,
   createUserRequestSchema,
+  createUserResultSchema,
+  updateUserResultSchema,
   userDetailResultSchema,
   userListResultSchema,
 } from '../src/domains/users';
@@ -30,7 +32,7 @@ describe('users 域', () => {
       data: {
         list: [
           {
-            id: 1,
+            id: 'user-1',
             username: 'admin',
             status: 'ACTIVE',
             force_password_change: false,
@@ -57,7 +59,7 @@ describe('users 域', () => {
     const parsed = userDetailResultSchema.parse({
       success: true,
       data: {
-        id: 2,
+        id: 'user-2',
         username: 'u2',
         status: 'LOCKED',
         force_password_change: true,
@@ -74,11 +76,27 @@ describe('users 域', () => {
       data: {
         totalRequested: 3,
         deletedCount: 2,
-        skipped: [{ userId: 1, reason: '不能删除自己' }],
+        skipped: [{ userId: 'user-1', reason: '不能删除自己' }],
         failed: [],
       },
     });
-    expect(parsed.data?.skipped[0].userId).toBe(1);
+    expect(parsed.data?.skipped[0].userId).toBe('user-1');
+  });
+
+  it('创建与更新用户响应包含用户和角色摘要', () => {
+    const data = {
+      id: 'user-3',
+      username: 'u3',
+      status: 'ACTIVE',
+      force_password_change: true,
+      roles: [{ id: 'role-001', code: 'ADMIN', name: '管理员' }],
+    };
+    expect(
+      createUserResultSchema.parse({ success: true, data }).data?.roles[0].code,
+    ).toBe('ADMIN');
+    expect(updateUserResultSchema.parse({ success: true, data }).data?.id).toBe(
+      'user-3',
+    );
   });
 });
 
@@ -146,8 +164,8 @@ describe('audit 域', () => {
           {
             id: 1,
             action: 'LOGIN',
-            user_id: 5,
-            userId: 5,
+            user_id: 'user-5',
+            userId: 'user-5',
             ipAddress: '127.0.0.1',
             requestData: { a: 1 },
             createTime: '2026-08-24 10:00:00',
@@ -158,7 +176,7 @@ describe('audit 域', () => {
         pageSize: 10,
       },
     });
-    expect(parsed.data?.list[0].userId).toBe(5);
+    expect(parsed.data?.list[0].userId).toBe('user-5');
   });
 
   it('requestData 解析失败时允许字符串', () => {
