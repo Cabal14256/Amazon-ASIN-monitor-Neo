@@ -188,6 +188,9 @@ function sanitizeFixture(value) {
 
   const configKey = String(value.configKey || value.config_key || '');
   const sensitiveConfig = /(SECRET|TOKEN|KEY|ROLE_ARN)/i.test(configKey);
+  const isUserResource =
+    typeof value.resource === 'string' &&
+    value.resource.trim().toLowerCase() === 'user';
   const isUserEntity = Object.prototype.hasOwnProperty.call(value, 'username');
   const isSessionEntity =
     (Object.prototype.hasOwnProperty.call(value, 'user_id') ||
@@ -202,6 +205,8 @@ function sanitizeFixture(value) {
       if (
         SENSITIVE_KEY_PATTERN.test(key) ||
         USER_IDENTIFIER_KEY_PATTERN.test(key) ||
+        (isUserResource &&
+          /^(?:resource[_-]?id|resource[_-]?name)$/i.test(key)) ||
         (/^id$/i.test(key) && (isUserEntity || isSessionEntity)) ||
         (sensitiveConfig &&
           ['configValue', 'config_value', 'displayValue'].includes(key))

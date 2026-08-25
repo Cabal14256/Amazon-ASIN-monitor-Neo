@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { resultSchema } from '../envelope';
+import { parentAsinCodeSchema } from './variantCheck';
 
 /**
  * export 域契约（9 端点）。
@@ -27,13 +28,17 @@ export type ListExportQuery = z.infer<typeof listExportQuerySchema>;
 /** GET /export/monitor-history、/export/competitor-monitor-history query */
 export const historyExportQuerySchema = z.object({
   variantGroupId: z.string().optional(),
+  variantGroupName: z.string().optional(),
   asinId: z.string().optional(),
   asin: z.string().optional(),
+  asinName: z.string().optional(),
+  asinType: z.string().optional(),
   country: z.string().optional(),
   checkType: z.string().optional(),
   isBroken: z.union([z.string(), z.number()]).optional(),
   startTime: z.string().optional(),
   endTime: z.string().optional(),
+  exportType: z.enum(['records', 'statusChanges']).optional(),
   useProgress: z.union([z.literal('true'), z.literal('false')]).optional(),
 });
 export type HistoryExportQuery = z.infer<typeof historyExportQuerySchema>;
@@ -50,9 +55,20 @@ export type MonthlyBreakdownExportParams = z.infer<
   typeof monthlyBreakdownExportParamsSchema
 >;
 
-/** GET /export/parent-asin-query query（asins 为逗号分隔字符串） */
+const parentAsinExportListSchema = z
+  .string()
+  .transform((value) =>
+    value
+      .split(/[,\n]/)
+      .map((asin) => asin.trim())
+      .filter(Boolean),
+  )
+  .pipe(z.array(parentAsinCodeSchema).nonempty('请提供ASIN列表'))
+  .transform((asins) => asins.join(','));
+
+/** GET /export/parent-asin-query query（asins 为逗号/换行分隔字符串） */
 export const parentAsinQueryExportQuerySchema = z.object({
-  asins: z.string().min(1, '请提供ASIN列表'),
+  asins: parentAsinExportListSchema,
   country: z.string().min(1, '请提供国家代码'),
   useProgress: z.union([z.literal('true'), z.literal('false')]).optional(),
 });

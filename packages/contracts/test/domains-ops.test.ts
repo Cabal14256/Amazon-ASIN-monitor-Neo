@@ -6,7 +6,10 @@ import {
   createBackupResultSchema,
   saveBackupConfigRequestSchema,
 } from '../src/domains/backup';
-import { parentAsinQueryExportQuerySchema } from '../src/domains/export';
+import {
+  historyExportQuerySchema,
+  parentAsinQueryExportQuerySchema,
+} from '../src/domains/export';
 import {
   createExportTaskRequestSchema,
   taskInfoResultSchema,
@@ -138,6 +141,54 @@ describe('backup 域', () => {
       saveBackupConfigRequestSchema.parse({ enabled: 'false' }),
     ).toThrow();
   });
+
+  it('拒绝无法生成有效 cron 的备份计划组合', () => {
+    expect(() =>
+      saveBackupConfigRequestSchema.parse({
+        enabled: true,
+        scheduleType: 'hourly',
+        backupTime: '02:00',
+      }),
+    ).toThrow();
+    expect(() =>
+      saveBackupConfigRequestSchema.parse({
+        enabled: true,
+        scheduleType: 'weekly',
+        backupTime: '02:00',
+      }),
+    ).toThrow();
+    expect(() =>
+      saveBackupConfigRequestSchema.parse({
+        enabled: true,
+        scheduleType: 'weekly',
+        scheduleValue: 8,
+        backupTime: '02:00',
+      }),
+    ).toThrow();
+    expect(() =>
+      saveBackupConfigRequestSchema.parse({
+        enabled: true,
+        scheduleType: 'monthly',
+        scheduleValue: 0,
+        backupTime: '02:00',
+      }),
+    ).toThrow();
+    expect(() =>
+      saveBackupConfigRequestSchema.parse({
+        enabled: true,
+        scheduleType: 'daily',
+        backupTime: '24:00',
+      }),
+    ).toThrow();
+    expect(
+      saveBackupConfigRequestSchema.parse({
+        enabled: true,
+        scheduleType: 'monthly',
+        scheduleValue: 31,
+        backupTime: '23:59',
+      }),
+    ).toMatchObject({ scheduleValue: 31, backupTime: '23:59' });
+  });
 });
 
 describe('export 域（流端点）', () => {
@@ -147,10 +198,38 @@ describe('export 域（流端点）', () => {
     ).toThrow();
     expect(
       parentAsinQueryExportQuerySchema.parse({
-        asins: 'B0ABC12345,B0DEF67890',
+        asins: ' b0abc12345,\nB0DEF67890 ',
         country: 'US',
         useProgress: 'false',
-      }).country,
-    ).toBe('US');
+      }),
+    ).toMatchObject({
+      asins: 'B0ABC12345,B0DEF67890',
+      country: 'US',
+    });
+    expect(() =>
+      parentAsinQueryExportQuerySchema.parse({
+        asins: 'B0ABC12345,bad',
+        country: 'US',
+      }),
+    ).toThrow();
+  });
+
+  it('监控历史导出保留模式与页面筛选字段', () => {
+    expect(
+      historyExportQuerySchema.parse({
+        exportType: 'statusChanges',
+        variantGroupName: '组 A',
+        asinName: '商品 A',
+        asinType: 'MAIN_LINK',
+      }),
+    ).toMatchObject({
+      exportType: 'statusChanges',
+      variantGroupName: '组 A',
+      asinName: '商品 A',
+      asinType: 'MAIN_LINK',
+    });
+    expect(() =>
+      historyExportQuerySchema.parse({ exportType: 'summary' }),
+    ).toThrow();
   });
 });

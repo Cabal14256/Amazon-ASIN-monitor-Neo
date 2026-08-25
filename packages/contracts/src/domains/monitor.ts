@@ -246,8 +246,17 @@ export type AsinStatisticsByVariantGroupQuery = z.infer<
 >;
 
 /** POST /monitor/trigger */
+const monitorCountryCodeSchema = z
+  .string()
+  .transform((country) => country.trim().toUpperCase())
+  .pipe(z.enum(['US', 'UK', 'DE', 'FR', 'IT', 'ES']));
+
 export const triggerMonitorRequestSchema = z.object({
-  countries: z.array(z.string()).optional(),
+  countries: z
+    .array(monitorCountryCodeSchema)
+    .nonempty('countries 不能为空')
+    .transform((countries) => [...new Set(countries)])
+    .optional(),
 });
 export type TriggerMonitorRequest = z.infer<typeof triggerMonitorRequestSchema>;
 

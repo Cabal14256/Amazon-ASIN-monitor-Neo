@@ -221,6 +221,92 @@ export const competitorMonitorHistoryDetailResultSchema = resultSchema(
   competitorMonitorHistoryRecordSchema,
 );
 
+/** POST /competitor/monitor/trigger 中每个国家的执行汇总。 */
+export const competitorMonitorCountryResultSchema = z
+  .object({
+    country: z.string(),
+    totalGroups: z.number(),
+    brokenGroups: z.number(),
+    brokenGroupNames: z.array(z.string()),
+    brokenGroupDetails: z.array(
+      z
+        .object({
+          variantGroupId: z.string(),
+          groupName: z.string(),
+        })
+        .passthrough(),
+    ),
+    brokenASINs: z.array(z.record(z.string(), z.unknown())),
+    brokenByType: z.object({
+      SP_API_ERROR: z.number(),
+      NOT_FOUND: z.number(),
+      NO_VARIANTS: z.number(),
+    }),
+    asinClassifications: z.record(z.string(), z.string()),
+    checkedGroupKeys: z.array(z.string()),
+    checkTime: z.string(),
+  })
+  .passthrough();
+
+export const competitorMonitorNotifyResultSchema = z
+  .object({
+    total: z.number(),
+    success: z.number(),
+    failed: z.number(),
+    skipped: z.number(),
+    countryResults: z.record(
+      z.string(),
+      z
+        .object({
+          success: z.boolean(),
+          skipped: z.boolean(),
+          errorCode: z.union([z.string(), z.number()]).optional(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+
+const competitorMonitorCountryResultsSchema = z.record(
+  z.string(),
+  competitorMonitorCountryResultSchema,
+);
+
+/** POST /competitor/monitor/trigger 成功 data。 */
+export const competitorMonitorTriggerSuccessDataSchema = z
+  .object({
+    success: z.literal(true),
+    totalChecked: z.number(),
+    totalBroken: z.number(),
+    totalNormal: z.number(),
+    countryResults: competitorMonitorCountryResultsSchema,
+    notifyResults: competitorMonitorNotifyResultSchema,
+    duration: z.number(),
+    checkTime: z.string(),
+  })
+  .passthrough();
+
+/** 失败可能在 runner 初始化前早退，因此 totalNormal/duration 并非总会出现。 */
+export const competitorMonitorTriggerFailureDataSchema = z
+  .object({
+    success: z.literal(false),
+    error: z.string(),
+    totalChecked: z.number(),
+    totalBroken: z.number(),
+    totalNormal: z.number().optional(),
+    countryResults: competitorMonitorCountryResultsSchema,
+    duration: z.number().optional(),
+  })
+  .passthrough();
+
+export const competitorMonitorTriggerDataSchema = z.union([
+  competitorMonitorTriggerSuccessDataSchema,
+  competitorMonitorTriggerFailureDataSchema,
+]);
+export const competitorMonitorTriggerResultSchema = resultSchema(
+  competitorMonitorTriggerDataSchema,
+);
+
 /** 竞对变体检查同步结果（服务返回 {isBroken, brokenASINs, details}） */
 export const competitorCheckDataSchema = z
   .object({

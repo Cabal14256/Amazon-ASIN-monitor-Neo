@@ -11,6 +11,12 @@ import { resultSchema } from '../envelope';
 
 // ── 实体 ──
 
+export const backupScheduleTypeSchema = z.enum(['daily', 'weekly', 'monthly']);
+const backupTimeSchema = z
+  .string()
+  .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'backupTime 必须为 HH:mm');
+const backupScheduleValueSchema = z.number().int().min(1).max(31);
+
 /** 备份列表项（backupService.listBackups 元素） */
 export const backupFileSchema = z
   .object({
@@ -25,9 +31,9 @@ export type BackupFile = z.infer<typeof backupFileSchema>;
 export const backupConfigSchema = z.object({
   id: z.number().nullable(),
   enabled: z.boolean(),
-  scheduleType: z.string(),
-  scheduleValue: z.number().int().nullable().optional(),
-  backupTime: z.string().nullable().optional(),
+  scheduleType: backupScheduleTypeSchema,
+  scheduleValue: backupScheduleValueSchema.nullable().optional(),
+  backupTime: backupTimeSchema.nullable().optional(),
   createTime: z.string().nullable().optional(),
   updateTime: z.string().nullable().optional(),
 });
@@ -48,12 +54,53 @@ export const restoreBackupRequestSchema = z.object({
 });
 export type RestoreBackupRequest = z.infer<typeof restoreBackupRequestSchema>;
 
-export const saveBackupConfigRequestSchema = z.object({
-  enabled: z.union([z.boolean(), z.literal(0), z.literal(1)]).optional(),
-  scheduleType: z.string().optional(),
-  scheduleValue: z.number().int().nullable().optional(),
-  backupTime: z.string().nullable().optional(),
-});
+export const saveBackupConfigRequestSchema = z
+  .object({
+    enabled: z.union([z.boolean(), z.literal(0), z.literal(1)]).optional(),
+    scheduleType: backupScheduleTypeSchema.optional(),
+    scheduleValue: backupScheduleValueSchema.nullable().optional(),
+    backupTime: backupTimeSchema.nullable().optional(),
+  })
+  .superRefine((value, ctx) => {
+    const scheduleType = value.scheduleType ?? 'daily';
+    const isEnabled = value.enabled === true || value.enabled === 1;
+
+    if (isEnabled && value.backupTime === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '启用自动备份时 backupTime 不能为空',
+        path: ['backupTime'],
+      });
+    }
+
+    if (scheduleType === 'daily') {
+      if (value.scheduleValue !== undefined && value.scheduleValue !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'daily 计划不应设置 scheduleValue',
+          path: ['scheduleValue'],
+        });
+      }
+      return;
+    }
+
+    if (value.scheduleValue === undefined || value.scheduleValue === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${scheduleType} 计划必须设置 scheduleValue`,
+        path: ['scheduleValue'],
+      });
+      return;
+    }
+
+    if (scheduleType === 'weekly' && value.scheduleValue > 7) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'weekly 的 scheduleValue 必须为 1-7',
+        path: ['scheduleValue'],
+      });
+    }
+  });
 export type SaveBackupConfigRequest = z.infer<
   typeof saveBackupConfigRequestSchema
 >;

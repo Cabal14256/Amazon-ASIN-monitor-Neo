@@ -50,7 +50,7 @@ export const batchCheckRequestSchema = z.object({
 });
 export type BatchCheckRequest = z.infer<typeof batchCheckRequestSchema>;
 
-const parentAsinCodeSchema = z
+export const parentAsinCodeSchema = z
   .string()
   .transform((value) => value.trim().toUpperCase())
   .pipe(z.string().regex(/^[A-Z][A-Z0-9]{9}$/, 'ASIN格式不正确'));

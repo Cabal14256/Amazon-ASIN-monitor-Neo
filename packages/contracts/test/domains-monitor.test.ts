@@ -19,6 +19,7 @@ import {
   statisticsByTimeQuerySchema,
   statisticsByTimeResultSchema,
   statisticsByVariantGroupQuerySchema,
+  triggerMonitorRequestSchema,
   triggerMonitorResultSchema,
 } from '../src/domains/monitor';
 
@@ -313,5 +314,20 @@ describe('monitor 域', () => {
       },
     });
     expect(parsed.data?.countries).toContain('US');
+  });
+
+  it('手动触发国家列表归一化、去重并拒绝空值或未知代码', () => {
+    expect(
+      triggerMonitorRequestSchema.parse({
+        countries: [' us ', 'DE', 'US'],
+      }).countries,
+    ).toEqual(['US', 'DE']);
+    expect(() =>
+      triggerMonitorRequestSchema.parse({ countries: [] }),
+    ).toThrow();
+    expect(() =>
+      triggerMonitorRequestSchema.parse({ countries: ['US', 'ZZ'] }),
+    ).toThrow();
+    expect(triggerMonitorRequestSchema.parse({})).toEqual({});
   });
 });

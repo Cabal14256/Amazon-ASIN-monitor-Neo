@@ -36,6 +36,18 @@ describe('golden fixture 录制工具', () => {
         operator_id: 'user-2',
         changed_by: null,
       },
+      userAudit: {
+        resource: 'user',
+        resource_id: 'user-3',
+        resourceId: 'user-3',
+        resource_name: 'target-user',
+        resourceName: 'target-user',
+      },
+      asinAudit: {
+        resource: 'asin',
+        resource_id: 'asin-row-1',
+        resourceName: 'B0ABC12345',
+      },
       session: {
         id: 'session-row-1',
         user_id: 'user-1',
@@ -65,6 +77,18 @@ describe('golden fixture 录制工具', () => {
         userId: '***MASKED***',
         operator_id: '***MASKED***',
         changed_by: null,
+      },
+      userAudit: {
+        resource: 'user',
+        resource_id: '***MASKED***',
+        resourceId: '***MASKED***',
+        resource_name: '***MASKED***',
+        resourceName: '***MASKED***',
+      },
+      asinAudit: {
+        resource: 'asin',
+        resource_id: 'asin-row-1',
+        resourceName: 'B0ABC12345',
       },
       session: {
         id: '***MASKED***',
