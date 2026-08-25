@@ -150,6 +150,69 @@ export const statisticsByTimeQuerySchema = timeRangeQuerySchema.extend({
 });
 export type StatisticsByTimeQuery = z.infer<typeof statisticsByTimeQuerySchema>;
 
+/** GET /monitor-history/statistics query */
+export const monitorStatisticsQuerySchema = timeRangeQuerySchema.extend({
+  variantGroupId: z.string().optional(),
+  asinId: z.string().optional(),
+  checkType: z.string().optional(),
+});
+export type MonitorStatisticsQuery = z.infer<
+  typeof monitorStatisticsQuerySchema
+>;
+
+/** GET /monitor-history/statistics/by-country query */
+export const statisticsByCountryQuerySchema = z.object({
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
+});
+export type StatisticsByCountryQuery = z.infer<
+  typeof statisticsByCountryQuerySchema
+>;
+
+/** GET /monitor-history/statistics/by-variant-group query */
+export const statisticsByVariantGroupQuerySchema = timeRangeQuerySchema.extend({
+  limit: z.coerce.number().int().positive().optional(),
+});
+export type StatisticsByVariantGroupQuery = z.infer<
+  typeof statisticsByVariantGroupQuerySchema
+>;
+
+/** GET /monitor-history/statistics/peak-hours query */
+export const peakHoursStatisticsQuerySchema = z.object({
+  country: z.string().min(1, '高峰期统计需要指定国家'),
+  checkType: z.string().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
+});
+export type PeakHoursStatisticsQuery = z.infer<
+  typeof peakHoursStatisticsQuerySchema
+>;
+
+/** GET /monitor-history/statistics/analytics-monthly-breakdown query */
+export const monthlyBreakdownQuerySchema = timeRangeQuerySchema.extend({
+  month: z.string().optional(),
+});
+export type MonthlyBreakdownQuery = z.infer<typeof monthlyBreakdownQuerySchema>;
+
+/** GET /monitor-history/statistics/peak-mark-areas query */
+export const peakMarkAreasQuerySchema = z.object({
+  groupBy: z.string().optional(),
+  country: z.string().optional(),
+  startTime: z.string().min(1, '请提供开始时间'),
+  endTime: z.string().min(1, '请提供结束时间'),
+});
+export type PeakMarkAreasQuery = z.infer<typeof peakMarkAreasQuerySchema>;
+
+/** all-countries-summary / region-summary 公共 query */
+export const aggregateSummaryQuerySchema = z.object({
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
+  timeSlotGranularity: z.string().min(1).optional(),
+});
+export type AggregateSummaryQuery = z.infer<typeof aggregateSummaryQuerySchema>;
+export const allCountriesSummaryQuerySchema = aggregateSummaryQuerySchema;
+export const regionSummaryQuerySchema = aggregateSummaryQuerySchema;
+
 /** GET /monitor-history/statistics/period-summary query */
 export const periodSummaryDetailsQuerySchema = z.object({
   country: z.string().optional(),
@@ -168,6 +231,19 @@ export const periodSummaryQuerySchema = periodSummaryDetailsQuerySchema.extend({
   pageSize: z.coerce.number().int().positive().optional(),
 });
 export type PeriodSummaryQuery = z.infer<typeof periodSummaryQuerySchema>;
+
+/** asin-by-country / asin-by-variant-group query */
+export const asinStatisticsByCountryQuerySchema = timeRangeQuerySchema;
+export type AsinStatisticsByCountryQuery = z.infer<
+  typeof asinStatisticsByCountryQuerySchema
+>;
+export const asinStatisticsByVariantGroupQuerySchema =
+  timeRangeQuerySchema.extend({
+    limit: z.coerce.number().int().positive().optional(),
+  });
+export type AsinStatisticsByVariantGroupQuery = z.infer<
+  typeof asinStatisticsByVariantGroupQuerySchema
+>;
 
 /** POST /monitor/trigger */
 export const triggerMonitorRequestSchema = z.object({

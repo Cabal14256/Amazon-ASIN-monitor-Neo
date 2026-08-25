@@ -1,17 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  allCountriesSummaryQuerySchema,
   allCountriesSummaryResultSchema,
+  asinStatisticsByVariantGroupQuerySchema,
   monitorHistoryListResultSchema,
+  monitorStatisticsQuerySchema,
   monitorStatisticsResultSchema,
+  monthlyBreakdownQuerySchema,
   monthlyBreakdownResultSchema,
+  peakHoursStatisticsQuerySchema,
   peakHoursStatisticsResultSchema,
+  peakMarkAreasQuerySchema,
   periodSummaryDetailsQuerySchema,
   periodSummaryQuerySchema,
   periodSummaryResultSchema,
   statisticsByCountryResultSchema,
   statisticsByTimeQuerySchema,
   statisticsByTimeResultSchema,
+  statisticsByVariantGroupQuerySchema,
   triggerMonitorResultSchema,
 } from '../src/domains/monitor';
 
@@ -161,6 +168,41 @@ describe('monitor 域', () => {
         timeSlotGranularity: 'hour',
       }),
     ).toMatchObject({ site: 'amazon.com', timeSlotGranularity: 'hour' });
+  });
+
+  it('其余统计 query 不会剥离控制器读取的端点字段', () => {
+    expect(
+      monitorStatisticsQuerySchema.parse({
+        variantGroupId: 'group-1',
+        asinId: 'asin-1',
+        checkType: 'ASIN',
+        country: 'US',
+      }),
+    ).toMatchObject({ variantGroupId: 'group-1', checkType: 'ASIN' });
+    expect(
+      statisticsByVariantGroupQuerySchema.parse({ limit: '20' }).limit,
+    ).toBe(20);
+    expect(
+      peakHoursStatisticsQuerySchema.parse({ country: 'US' }).country,
+    ).toBe('US');
+    expect(() => peakHoursStatisticsQuerySchema.parse({})).toThrow();
+    expect(monthlyBreakdownQuerySchema.parse({ month: '2026-08' }).month).toBe(
+      '2026-08',
+    );
+    expect(
+      peakMarkAreasQuerySchema.parse({
+        groupBy: 'hour',
+        startTime: '2026-08-01',
+        endTime: '2026-08-24',
+      }).groupBy,
+    ).toBe('hour');
+    expect(
+      allCountriesSummaryQuerySchema.parse({ timeSlotGranularity: 'day' })
+        .timeSlotGranularity,
+    ).toBe('day');
+    expect(
+      asinStatisticsByVariantGroupQuerySchema.parse({ limit: '10' }).limit,
+    ).toBe(10);
   });
 
   it('周期汇总为分页形态且含 meta', () => {
