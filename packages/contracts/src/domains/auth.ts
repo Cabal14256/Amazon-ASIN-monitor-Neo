@@ -23,6 +23,45 @@ export type UserStatus = z.infer<typeof userStatusSchema>;
 /** MySQL DATETIME 经 mysql2 → JSON 序列化为字符串 */
 const dateTimeString = z.string();
 
+/** 对齐 server/src/utils/passwordValidator.js 的确定性密码策略。 */
+export const COMMON_WEAK_PASSWORDS = [
+  'password',
+  '123456',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'qwerty',
+  'abc123',
+  'password123',
+  'admin',
+  'admin123',
+  'letmein',
+  'welcome',
+  'monkey',
+  '1234567',
+  'sunshine',
+  'princess',
+  'dragon',
+  'passw0rd',
+  'master',
+  'hello',
+] as const;
+
+const commonWeakPasswordSet = new Set<string>(COMMON_WEAK_PASSWORDS);
+
+export const passwordPolicySchema = z
+  .string()
+  .min(8, '密码长度至少为8位')
+  .regex(/[a-zA-Z]/, '密码必须包含至少一个字母')
+  .regex(/[0-9]/, '密码必须包含至少一个数字')
+  .refine((password) => !commonWeakPasswordSet.has(password.toLowerCase()), {
+    message: '密码过于简单，请使用更复杂的密码',
+  })
+  .refine((password) => !/\s/.test(password), {
+    message: '密码不能包含空格',
+  });
+export type PasswordPolicyValue = z.infer<typeof passwordPolicySchema>;
+
 /** User.USER_PUBLIC_COLUMNS（不含 password），formatUser 归一化后形态 */
 export const userPublicSchema = z.object({
   id: z.string(),
@@ -71,7 +110,7 @@ export type RevokeSessionRequest = z.infer<typeof revokeSessionRequestSchema>;
 
 export const changePasswordRequestSchema = z.object({
   oldPassword: z.string().min(1, '原密码不能为空'),
-  newPassword: z.string().min(1, '新密码不能为空'),
+  newPassword: passwordPolicySchema,
   revokeOtherSessions: z.boolean().optional().default(true),
 });
 export type ChangePasswordRequest = z.infer<typeof changePasswordRequestSchema>;

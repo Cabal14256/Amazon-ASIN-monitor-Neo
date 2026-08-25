@@ -26,7 +26,7 @@ export const backupConfigSchema = z.object({
   id: z.number().nullable(),
   enabled: z.boolean(),
   scheduleType: z.string(),
-  scheduleValue: z.string().nullable().optional(),
+  scheduleValue: z.number().int().nullable().optional(),
   backupTime: z.string().nullable().optional(),
 });
 export type BackupConfig = z.infer<typeof backupConfigSchema>;
@@ -49,7 +49,7 @@ export type RestoreBackupRequest = z.infer<typeof restoreBackupRequestSchema>;
 export const saveBackupConfigRequestSchema = z.object({
   enabled: z.union([z.boolean(), z.number(), z.string()]).optional(),
   scheduleType: z.string().optional(),
-  scheduleValue: z.string().nullable().optional(),
+  scheduleValue: z.number().int().nullable().optional(),
   backupTime: z.string().nullable().optional(),
 });
 export type SaveBackupConfigRequest = z.infer<

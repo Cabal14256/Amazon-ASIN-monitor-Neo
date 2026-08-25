@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  allCountriesSummaryResultSchema,
   monitorHistoryListResultSchema,
   monitorStatisticsResultSchema,
+  peakHoursStatisticsResultSchema,
   periodSummaryResultSchema,
+  statisticsByTimeQuerySchema,
   statisticsByTimeResultSchema,
   triggerMonitorResultSchema,
 } from '../src/domains/monitor';
@@ -62,6 +65,30 @@ describe('monitor 域', () => {
     expect(parsed.data?.brokenCount).toBe(5);
   });
 
+  it('总体统计兼容 mysql2 的 SUM 数字字符串', () => {
+    const parsed = monitorStatisticsResultSchema.parse({
+      success: true,
+      data: {
+        totalChecks: 100,
+        brokenCount: '5',
+        normalCount: '95',
+        groupCount: 3,
+        asinCount: 20,
+      },
+    });
+    expect(parsed.data?.brokenCount).toBe('5');
+    expect(parsed.data?.normalCount).toBe('95');
+  });
+
+  it('时间分组 query 保留控制器支持的 groupBy', () => {
+    expect(statisticsByTimeQuerySchema.parse({ groupBy: 'hour' }).groupBy).toBe(
+      'hour',
+    );
+    expect(() =>
+      statisticsByTimeQuerySchema.parse({ groupBy: 'quarter' }),
+    ).toThrow();
+  });
+
   it('时间分组统计带顶层 meta', () => {
     const parsed = statisticsByTimeResultSchema.parse({
       success: true,
@@ -92,6 +119,61 @@ describe('monitor 域', () => {
       meta: { source: 'raw' },
     });
     expect(parsed.data?.list).toHaveLength(1);
+  });
+
+  it('高峰期统计 data 为汇总对象而非小时数组', () => {
+    const data = {
+      peakBroken: 1,
+      peakTotal: 10,
+      peakRate: 10,
+      offPeakBroken: 2,
+      offPeakTotal: 20,
+      offPeakRate: 10,
+      peakDurationHours: 6,
+      peakAbnormalDurationHours: 1,
+      peakDurationRate: 16.67,
+      offPeakDurationHours: 18,
+      offPeakAbnormalDurationHours: 2,
+      offPeakDurationRate: 11.11,
+    };
+    expect(
+      peakHoursStatisticsResultSchema.parse({ success: true, data }).data,
+    ).toMatchObject({ peakBroken: 1, offPeakTotal: 20 });
+    expect(() =>
+      peakHoursStatisticsResultSchema.parse({ success: true, data: [] }),
+    ).toThrow();
+  });
+
+  it('全部国家汇总 data 为单个汇总对象', () => {
+    const data = {
+      timeRange: '2026-08-01 ~ 2026-08-24',
+      totalDurationHours: 24,
+      abnormalDurationHours: 2,
+      normalDurationHours: 22,
+      peakDurationHours: 8,
+      peakAbnormalDurationHours: 1,
+      lowDurationHours: 16,
+      lowAbnormalDurationHours: 1,
+      ratioAllAsin: 8.33,
+      ratioAllTime: 8.33,
+      globalPeakRate: 12.5,
+      globalLowRate: 6.25,
+      ratioHigh: 12.5,
+      ratioLow: 6.25,
+      totalChecks: 100,
+      brokenCount: 8,
+      totalAsinsDedup: 20,
+      brokenAsinsDedup: 2,
+    };
+    const parsed = allCountriesSummaryResultSchema.parse({
+      success: true,
+      data,
+      meta: { source: 'agg' },
+    });
+    expect(parsed.data?.totalChecks).toBe(100);
+    expect(() =>
+      allCountriesSummaryResultSchema.parse({ success: true, data: [data] }),
+    ).toThrow();
   });
 
   it('手动触发 data 含 queued/jobId/countries', () => {

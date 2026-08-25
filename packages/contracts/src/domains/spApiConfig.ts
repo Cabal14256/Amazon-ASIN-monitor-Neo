@@ -46,7 +46,7 @@ export const rateLimiterStatusQuerySchema = z.object({
     .transform((value) => value.trim().toUpperCase())
     .pipe(z.enum(['US', 'EU']))
     .optional(),
-  operation: z.string().min(1).optional(),
+  operation: z.enum(['getCatalogItem', 'searchCatalogItems']).optional(),
 });
 
 export const rateLimitWindowSchema = z.object({

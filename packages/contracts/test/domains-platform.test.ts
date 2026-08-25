@@ -109,6 +109,19 @@ describe('sp-api-config 域', () => {
     });
     expect(parsed.data?.US.redisAvailable).toBe(true);
   });
+
+  it('限流 operation 只接受控制器支持的两个名称', () => {
+    expect(
+      rateLimiterStatusQuerySchema.parse({ operation: 'getCatalogItem' })
+        .operation,
+    ).toBe('getCatalogItem');
+    expect(() =>
+      rateLimiterStatusQuerySchema.parse({ operation: 'default' }),
+    ).toThrow();
+    expect(() =>
+      rateLimiterStatusQuerySchema.parse({ operation: 'unknown' }),
+    ).toThrow();
+  });
 });
 
 describe('dashboard / ops / system / health 域', () => {

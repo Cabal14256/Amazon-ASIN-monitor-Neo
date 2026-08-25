@@ -50,8 +50,13 @@ export const batchCheckRequestSchema = z.object({
 });
 export type BatchCheckRequest = z.infer<typeof batchCheckRequestSchema>;
 
+const parentAsinCodeSchema = z
+  .string()
+  .transform((value) => value.trim().toUpperCase())
+  .pipe(z.string().regex(/^[A-Z][A-Z0-9]{9}$/, 'ASIN格式不正确'));
+
 export const batchQueryParentAsinRequestSchema = z.object({
-  asins: z.array(z.string()).nonempty('请提供ASIN列表'),
+  asins: z.array(parentAsinCodeSchema).nonempty('请提供ASIN列表'),
   country: z.string().min(1, '请提供国家代码'),
   useAsync: z.boolean().optional(),
 });

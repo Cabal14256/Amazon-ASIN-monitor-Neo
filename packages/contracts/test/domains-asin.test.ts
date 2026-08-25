@@ -14,6 +14,7 @@ import {
 import {
   asinCheckResultSchema,
   batchCheckResultSchema,
+  batchQueryParentAsinRequestSchema,
   batchQueryParentAsinResultSchema,
   variantGroupCheckResultSchema,
 } from '../src/domains/variantCheck';
@@ -187,6 +188,23 @@ describe('asin 域', () => {
 });
 
 describe('variant-check 域', () => {
+  it('父变体查询 ASIN 会归一化并拒绝非法成员', () => {
+    expect(
+      batchQueryParentAsinRequestSchema.parse({
+        asins: [' b0abc12345 '],
+        country: 'US',
+        useAsync: false,
+      }).asins,
+    ).toEqual(['B0ABC12345']);
+    expect(() =>
+      batchQueryParentAsinRequestSchema.parse({
+        asins: ['bad'],
+        country: 'US',
+        useAsync: false,
+      }),
+    ).toThrow();
+  });
+
   it('组检查同步结果 details.results 项带 variantView', () => {
     const parsed = variantGroupCheckResultSchema.parse({
       success: true,

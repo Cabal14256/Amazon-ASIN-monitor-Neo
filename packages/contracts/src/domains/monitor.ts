@@ -14,6 +14,12 @@ import { resultSchema } from '../envelope';
 
 const dateTimeString = z.string();
 
+/** mysql2 对 SUM/DECIMAL 聚合可能返回数字字符串。 */
+const sqlNumericAggregateSchema = z.union([
+  z.number(),
+  z.string().regex(/^\d+(?:\.\d+)?$/),
+]);
+
 /** 监控历史记录（findAll / findById 归一化后，含驼峰别名） */
 export const monitorHistoryRecordSchema = z
   .object({
@@ -136,6 +142,12 @@ export const timeRangeQuerySchema = z.object({
 });
 export type TimeRangeQuery = z.infer<typeof timeRangeQuerySchema>;
 
+/** GET /monitor-history/statistics/by-time query */
+export const statisticsByTimeQuerySchema = timeRangeQuerySchema.extend({
+  groupBy: z.enum(['hour', 'day', 'week', 'month']).optional(),
+});
+export type StatisticsByTimeQuery = z.infer<typeof statisticsByTimeQuerySchema>;
+
 /** POST /monitor/trigger */
 export const triggerMonitorRequestSchema = z.object({
   countries: z.array(z.string()).optional(),
@@ -182,8 +194,8 @@ export const monitorHistoryDetailResultSchema = resultSchema(
 export const monitorStatisticsDataSchema = z
   .object({
     totalChecks: z.number(),
-    brokenCount: z.number(),
-    normalCount: z.number(),
+    brokenCount: sqlNumericAggregateSchema,
+    normalCount: sqlNumericAggregateSchema,
     groupCount: z.number(),
     asinCount: z.number(),
     totalDurationHours: z.number().optional(),
@@ -231,8 +243,25 @@ export const statisticsByVariantGroupResultSchema = resultSchema(
 );
 
 /** 高峰期统计（country 必填，400 校验） */
+export const peakHoursStatisticsSchema = z
+  .object({
+    peakBroken: z.number(),
+    peakTotal: z.number(),
+    peakRate: z.number(),
+    offPeakBroken: z.number(),
+    offPeakTotal: z.number(),
+    offPeakRate: z.number(),
+    peakDurationHours: z.number(),
+    peakAbnormalDurationHours: z.number(),
+    peakDurationRate: z.number(),
+    offPeakDurationHours: z.number(),
+    offPeakAbnormalDurationHours: z.number(),
+    offPeakDurationRate: z.number(),
+  })
+  .passthrough();
+export type PeakHoursStatistics = z.infer<typeof peakHoursStatisticsSchema>;
 export const peakHoursStatisticsResultSchema = resultSchema(
-  z.array(z.object({ hour: z.number().optional() }).passthrough()),
+  peakHoursStatisticsSchema,
 );
 
 /** 月度异常时长明细（服务端衍生行） */
@@ -245,10 +274,35 @@ export const peakMarkAreasResultSchema = resultSchema(
   z.array(z.record(z.string(), z.unknown())),
 );
 
-/** 全部国家汇总 / 区域汇总（含 meta） */
+/** 全部国家汇总对象（含 meta） */
+export const allCountriesSummarySchema = z
+  .object({
+    timeRange: z.string(),
+    totalDurationHours: z.number(),
+    abnormalDurationHours: z.number(),
+    normalDurationHours: z.number(),
+    peakDurationHours: z.number(),
+    peakAbnormalDurationHours: z.number(),
+    lowDurationHours: z.number(),
+    lowAbnormalDurationHours: z.number(),
+    ratioAllAsin: z.number(),
+    ratioAllTime: z.number(),
+    globalPeakRate: z.number(),
+    globalLowRate: z.number(),
+    ratioHigh: z.number(),
+    ratioLow: z.number(),
+    totalChecks: z.number(),
+    brokenCount: z.number(),
+    totalAsinsDedup: z.number(),
+    brokenAsinsDedup: z.number(),
+  })
+  .passthrough();
+export type AllCountriesSummary = z.infer<typeof allCountriesSummarySchema>;
 export const allCountriesSummaryResultSchema = analyticsResultSchema(
-  z.array(z.record(z.string(), z.unknown())),
+  allCountriesSummarySchema,
 );
+
+/** 区域汇总仍为区域行数组（含 meta）。 */
 export const regionSummaryResultSchema = analyticsResultSchema(
   z.array(z.record(z.string(), z.unknown())),
 );

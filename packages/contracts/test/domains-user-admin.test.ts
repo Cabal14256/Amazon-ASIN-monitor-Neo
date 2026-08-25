@@ -5,15 +5,20 @@ import {
   auditLogListResultSchema,
   auditLogSchema,
 } from '../src/domains/audit';
-import { messageResultSchema } from '../src/domains/auth';
+import {
+  changePasswordRequestSchema,
+  messageResultSchema,
+} from '../src/domains/auth';
 import {
   permissionListResultSchema,
   roleListResultSchema,
 } from '../src/domains/roles';
 import {
+  adminResetPasswordRequestSchema,
   batchDeleteResultSchema,
   createUserRequestSchema,
   createUserResultSchema,
+  updateUserRequestSchema,
   updateUserResultSchema,
   userDetailResultSchema,
   userListResultSchema,
@@ -49,10 +54,43 @@ describe('users 域', () => {
     expect(() =>
       createUserRequestSchema.parse({
         username: 'a',
-        password: 'b',
+        password: 'ValidPass1',
         roleIds: [],
       }),
     ).toThrow();
+  });
+
+  it('创建与修改密码执行旧服务密码策略', () => {
+    expect(
+      createUserRequestSchema.parse({
+        username: 'operator',
+        password: 'ValidPass1',
+        roleIds: ['role-1'],
+      }).password,
+    ).toBe('ValidPass1');
+    expect(() =>
+      createUserRequestSchema.parse({
+        username: 'User1234',
+        password: 'user1234',
+        roleIds: ['role-1'],
+      }),
+    ).toThrow();
+    expect(() =>
+      changePasswordRequestSchema.parse({
+        oldPassword: 'OldPass1',
+        newPassword: 'admin123',
+      }),
+    ).toThrow();
+    expect(() =>
+      adminResetPasswordRequestSchema.parse({ newPassword: 'Safe Pass1' }),
+    ).toThrow();
+  });
+
+  it('更新角色时非空，未更新角色时可省略 roleIds', () => {
+    expect(() => updateUserRequestSchema.parse({ roleIds: [] })).toThrow();
+    expect(updateUserRequestSchema.parse({ real_name: '新名称' })).toEqual({
+      real_name: '新名称',
+    });
   });
 
   it('用户详情 data 带 permissions 字符串数组与 statusHistory', () => {

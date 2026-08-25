@@ -4,6 +4,7 @@ import {
   backupConfigResultSchema,
   backupListResultSchema,
   createBackupResultSchema,
+  saveBackupConfigRequestSchema,
 } from '../src/domains/backup';
 import { parentAsinQueryExportQuerySchema } from '../src/domains/export';
 import {
@@ -105,6 +106,27 @@ describe('backup 域', () => {
       },
     });
     expect(parsed.data?.enabled).toBe(false);
+  });
+
+  it('每周与每月备份的 scheduleValue 使用 INT 数字', () => {
+    expect(
+      saveBackupConfigRequestSchema.parse({
+        scheduleType: 'weekly',
+        scheduleValue: 7,
+      }).scheduleValue,
+    ).toBe(7);
+    expect(
+      backupConfigResultSchema.parse({
+        success: true,
+        data: {
+          id: 1,
+          enabled: true,
+          scheduleType: 'monthly',
+          scheduleValue: 31,
+          backupTime: '02:00',
+        },
+      }).data?.scheduleValue,
+    ).toBe(31);
   });
 });
 

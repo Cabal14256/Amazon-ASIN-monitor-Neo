@@ -1,7 +1,11 @@
 import { z } from 'zod';
 
 import { resultSchema } from '../envelope';
-import { userPublicSchema, userStatusSchema } from './auth';
+import {
+  passwordPolicySchema,
+  userPublicSchema,
+  userStatusSchema,
+} from './auth';
 
 /**
  * users 域契约（8 端点）。
@@ -46,13 +50,23 @@ export const userListQuerySchema = z.object({
 export type UserListQuery = z.infer<typeof userListQuerySchema>;
 
 /** POST /users */
-export const createUserRequestSchema = z.object({
-  username: z.string().min(1, '用户名不能为空'),
-  password: z.string().min(1, '密码不能为空'),
-  real_name: z.string().optional(),
-  roleIds: z.array(z.string()).nonempty('至少分配一个角色'),
-  forcePasswordChange: z.boolean().optional().default(true),
-});
+export const createUserRequestSchema = z
+  .object({
+    username: z.string().min(1, '用户名不能为空'),
+    password: passwordPolicySchema,
+    real_name: z.string().optional(),
+    roleIds: z.array(z.string()).nonempty('至少分配一个角色'),
+    forcePasswordChange: z.boolean().optional().default(true),
+  })
+  .superRefine(({ username, password }, context) => {
+    if (password.toLowerCase() === username.toLowerCase()) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['password'],
+        message: '密码不能与用户名相同',
+      });
+    }
+  });
 export type CreateUserRequest = z.infer<typeof createUserRequestSchema>;
 
 /** POST /users/batch-delete */
@@ -67,14 +81,14 @@ export type BatchDeleteUsersRequest = z.infer<
 export const updateUserRequestSchema = z.object({
   real_name: z.string().optional(),
   status: userStatusSchema.optional(),
-  roleIds: z.array(z.string()).optional(),
+  roleIds: z.array(z.string()).nonempty('至少保留一个角色').optional(),
   statusReason: z.string().optional(),
 });
 export type UpdateUserRequest = z.infer<typeof updateUserRequestSchema>;
 
 /** PUT /users/:userId/password（管理员重置） */
 export const adminResetPasswordRequestSchema = z.object({
-  newPassword: z.string().min(1, '新密码不能为空'),
+  newPassword: passwordPolicySchema,
   forceChangeOnNextLogin: z.boolean().optional().default(true),
   revokeAllSessions: z.boolean().optional().default(true),
 });
