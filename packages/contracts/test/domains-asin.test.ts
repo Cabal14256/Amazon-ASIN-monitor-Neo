@@ -184,6 +184,18 @@ describe('asin 域', () => {
         data: { taskId: 't2', status: 'pending' },
       }).data,
     ).toMatchObject({ taskId: 't2' });
+    expect(
+      importExcelResultSchema.parse({
+        success: false,
+        errorCode: 500,
+        errorMessage: '解析失败',
+        data: {
+          successCount: 0,
+          failedCount: 0,
+          errors: [{ message: '解析失败' }],
+        },
+      }).data,
+    ).toMatchObject({ successCount: 0, failedCount: 0 });
   });
 });
 
@@ -281,6 +293,7 @@ describe('variant-check 域', () => {
           asin: 'B0ABC12345',
           hasParentAsin: true,
           parentAsin: 'B0PARENT01',
+          parentTitle: '父体标题',
           title: 'T',
           brand: 'B',
           hasVariants: true,

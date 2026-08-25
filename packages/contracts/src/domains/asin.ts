@@ -398,6 +398,16 @@ export const importTaskDataSchema = z.object({
   taskId: z.string(),
   status: z.string(),
 });
+/** Excel 解析/导入异常时控制器仍返回的结构化 data。 */
+export const importFailureDataSchema = z.object({
+  successCount: z.number(),
+  failedCount: z.number(),
+  errors: z.array(z.object({ message: z.string() }).passthrough()),
+});
 export const importExcelResultSchema = resultSchema(
-  z.union([importResultDataSchema, importTaskDataSchema]),
+  z.union([
+    importResultDataSchema,
+    importTaskDataSchema,
+    importFailureDataSchema,
+  ]),
 );

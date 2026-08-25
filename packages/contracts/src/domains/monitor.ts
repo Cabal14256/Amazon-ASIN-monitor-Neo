@@ -90,10 +90,12 @@ export const analyticsMetaSchema = z
   .object({
     source: z.string().optional(),
     cacheHit: z.boolean().optional(),
-    generatedAt: z.string().optional(),
-    lastUpdatedAt: z.string().optional(),
+    cacheTime: z.string().nullable().optional(),
+    dataFreshness: z.enum(['cached', 'fresh']).optional(),
+    generatedAt: z.string().nullable().optional(),
+    lastUpdatedAt: z.string().nullable().optional(),
     busyFallback: z.boolean().optional(),
-    busyReason: z.string().optional(),
+    busyReason: z.string().nullable().optional(),
   })
   .passthrough();
 export type AnalyticsMeta = z.infer<typeof analyticsMetaSchema>;
@@ -147,6 +149,25 @@ export const statisticsByTimeQuerySchema = timeRangeQuerySchema.extend({
   groupBy: z.enum(['hour', 'day', 'week', 'month']).optional(),
 });
 export type StatisticsByTimeQuery = z.infer<typeof statisticsByTimeQuerySchema>;
+
+/** GET /monitor-history/statistics/period-summary query */
+export const periodSummaryDetailsQuerySchema = z.object({
+  country: z.string().optional(),
+  site: z.string().optional(),
+  brand: z.string().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
+  timeSlotGranularity: z.string().min(1).optional(),
+});
+export type PeriodSummaryDetailsQuery = z.infer<
+  typeof periodSummaryDetailsQuerySchema
+>;
+
+export const periodSummaryQuerySchema = periodSummaryDetailsQuerySchema.extend({
+  current: z.coerce.number().int().positive().optional(),
+  pageSize: z.coerce.number().int().positive().optional(),
+});
+export type PeriodSummaryQuery = z.infer<typeof periodSummaryQuerySchema>;
 
 /** POST /monitor/trigger */
 export const triggerMonitorRequestSchema = z.object({
@@ -222,7 +243,8 @@ export const statisticsByCountryResultSchema = resultSchema(
       .object({
         country: z.string().optional(),
         total_checks: z.number().optional(),
-        broken_count: z.number().optional(),
+        broken_count: sqlNumericAggregateSchema.optional(),
+        normal_count: sqlNumericAggregateSchema.optional(),
         totalChecks: z.number().optional(),
         brokenCount: z.number().optional(),
       })
@@ -264,9 +286,26 @@ export const peakHoursStatisticsResultSchema = resultSchema(
   peakHoursStatisticsSchema,
 );
 
-/** 月度异常时长明细（服务端衍生行） */
+/** 月度异常时长明细（服务端衍生汇总对象） */
+export const monthlyBreakdownRowSchema = z.object({
+  date: z.string(),
+  day: z.number().int().positive(),
+  abnormalDurationHours: z.number(),
+  totalDurationHours: z.number(),
+  abnormalDurationRate: z.number(),
+});
+export const monthlyBreakdownDataSchema = z.object({
+  month: z.string(),
+  rows: z.array(monthlyBreakdownRowSchema),
+  summary: z.object({
+    abnormalDurationTotal: z.number(),
+    totalDurationTotal: z.number(),
+    averageRatio: z.number(),
+  }),
+});
+export type MonthlyBreakdownData = z.infer<typeof monthlyBreakdownDataSchema>;
 export const monthlyBreakdownResultSchema = resultSchema(
-  z.array(durationMetricsRowSchema),
+  monthlyBreakdownDataSchema,
 );
 
 /** 高峰期标记区域 */

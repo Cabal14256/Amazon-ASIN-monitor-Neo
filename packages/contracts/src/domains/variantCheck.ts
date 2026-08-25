@@ -116,6 +116,7 @@ export const parentAsinQueryItemSchema = z.object({
   asin: z.string(),
   hasParentAsin: z.boolean(),
   parentAsin: z.string().nullable(),
+  parentTitle: z.string(),
   title: z.string(),
   brand: z.string().nullable(),
   hasVariants: z.boolean(),

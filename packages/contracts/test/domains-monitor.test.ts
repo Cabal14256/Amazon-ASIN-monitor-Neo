@@ -4,8 +4,12 @@ import {
   allCountriesSummaryResultSchema,
   monitorHistoryListResultSchema,
   monitorStatisticsResultSchema,
+  monthlyBreakdownResultSchema,
   peakHoursStatisticsResultSchema,
+  periodSummaryDetailsQuerySchema,
+  periodSummaryQuerySchema,
   periodSummaryResultSchema,
+  statisticsByCountryResultSchema,
   statisticsByTimeQuerySchema,
   statisticsByTimeResultSchema,
   triggerMonitorResultSchema,
@@ -101,10 +105,62 @@ describe('monitor 域', () => {
           abnormalDurationHours: 0.5,
         },
       ],
-      meta: { source: 'agg', cacheHit: false, generatedAt: '2026-08-24' },
+      meta: {
+        source: 'agg',
+        cacheHit: false,
+        cacheTime: null,
+        dataFreshness: 'fresh',
+        lastUpdatedAt: '2026-08-24',
+        busyFallback: false,
+        busyReason: null,
+      },
     });
     expect(parsed.meta?.source).toBe('agg');
     expect(parsed.data?.[0].time_period).toBe('2026-08-24');
+  });
+
+  it('按国家统计兼容 mysql2 的 SUM 数字字符串', () => {
+    const parsed = statisticsByCountryResultSchema.parse({
+      success: true,
+      data: [
+        {
+          country: 'US',
+          total_checks: 10,
+          broken_count: '2',
+          normal_count: '8',
+        },
+      ],
+    });
+    expect(parsed.data?.[0].broken_count).toBe('2');
+    expect(parsed.data?.[0].normal_count).toBe('8');
+  });
+
+  it('周期汇总 query 保留维度、粒度和分页筛选', () => {
+    expect(
+      periodSummaryQuerySchema.parse({
+        country: 'US',
+        site: 'amazon.com',
+        brand: 'Brand A',
+        startTime: '2026-08-01',
+        endTime: '2026-08-24',
+        timeSlotGranularity: 'day',
+        current: '2',
+        pageSize: '20',
+      }),
+    ).toMatchObject({
+      site: 'amazon.com',
+      brand: 'Brand A',
+      timeSlotGranularity: 'day',
+      current: 2,
+      pageSize: 20,
+    });
+    expect(
+      periodSummaryDetailsQuerySchema.parse({
+        site: 'amazon.com',
+        brand: 'Brand A',
+        timeSlotGranularity: 'hour',
+      }),
+    ).toMatchObject({ site: 'amazon.com', timeSlotGranularity: 'hour' });
   });
 
   it('周期汇总为分页形态且含 meta', () => {
@@ -119,6 +175,33 @@ describe('monitor 域', () => {
       meta: { source: 'raw' },
     });
     expect(parsed.data?.list).toHaveLength(1);
+  });
+
+  it('月度异常时长 data 包含 month、rows 与 summary', () => {
+    const parsed = monthlyBreakdownResultSchema.parse({
+      success: true,
+      data: {
+        month: '2026-08',
+        rows: [
+          {
+            date: '2026-08-01',
+            day: 1,
+            abnormalDurationHours: 2,
+            totalDurationHours: 24,
+            abnormalDurationRate: 8.33,
+          },
+        ],
+        summary: {
+          abnormalDurationTotal: 2,
+          totalDurationTotal: 24,
+          averageRatio: 8.33,
+        },
+      },
+    });
+    expect(parsed.data?.rows[0].day).toBe(1);
+    expect(() =>
+      monthlyBreakdownResultSchema.parse({ success: true, data: [] }),
+    ).toThrow();
   });
 
   it('高峰期统计 data 为汇总对象而非小时数组', () => {
