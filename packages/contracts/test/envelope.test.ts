@@ -59,19 +59,21 @@ describe('WS 协议契约（对齐 websocketService.js）', () => {
     expect(() => wsMessageSchema.parse({ type: 'unknown_type' })).toThrow();
   });
 
-  it('字段级 schema 完成前保留旧消息的顶层 payload', () => {
+  it('按旧系统实际字段校验任务进度消息', () => {
     expect(
       wsMessageSchema.parse({
         type: 'task_progress',
         taskId: 'task-1',
         progress: 42,
         message: 'running',
+        timestamp: '2026-08-25T17:30:00+08:00',
       }),
     ).toMatchObject({
       type: 'task_progress',
       taskId: 'task-1',
       progress: 42,
       message: 'running',
+      timestamp: '2026-08-25T17:30:00+08:00',
     });
   });
 
