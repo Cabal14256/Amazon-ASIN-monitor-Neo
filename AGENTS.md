@@ -23,6 +23,22 @@
 - Keep request-layer and export-layer URL merge logic consistent to avoid environment-specific regressions.
 - Any API-related change should include a quick verification that request and export endpoints do not produce duplicated `/api` prefixes.
 
+## Refactor Monorepo Structure
+
+- The repository is in a dual-system migration period. Both systems live on `main`; do not use a long-lived rewrite branch.
+- Legacy production paths remain active until their phase gate is passed:
+  - `src/` + `.umirc.ts`: React 18 / Umi frontend.
+  - `server/`: Express 4 / MySQL / Bull backend and worker roles.
+- Neo target paths are:
+  - `apps/web`: React 19 / Vite / TanStack / Tailwind frontend.
+  - `apps/api`: NestJS 11 / Fastify HTTP API, default port 3100.
+  - `apps/worker`: BullMQ worker process.
+  - `packages/contracts`: shared REST/WS Zod contracts and permissions.
+  - `packages/db`: PostgreSQL / TimescaleDB Drizzle schema and migrations.
+  - `packages/config`: shared environment validation.
+- During migration, preserve legacy behavior and checks while adding Neo coverage. Remove a legacy path only in the explicit retirement PR for its phase.
+- Run workspace commands from the repository root with the root `pnpm-lock.yaml`; do not create package-local lockfiles.
+
 ## Git and Branch Workflow
 
 - Treat `main` as protected. Never develop or commit directly on it.
@@ -31,11 +47,23 @@
 - Features, fixes, refactors, tests, CI changes, and other runtime-affecting work must use a numeric GitHub Issue. `no-issue` is allowed only for small `docs/*` or `chore/*` changes that do not alter runtime behavior.
 - Every pull request must target `main`. Do not use feature branches as long-lived or stacked PR targets.
 - Before opening or merging a pull request, run the relevant checks. The default baseline is:
-  - `npm run test:contracts`
+  - `corepack pnpm test:contracts`
   - `npm --prefix server run test:unit`
-  - `npx --no-install tsc --noEmit --pretty false`
   - `npm run build`
+  - `corepack pnpm --filter contracts test`
+  - `corepack pnpm --filter config test`
+  - `corepack pnpm --filter api test`
+  - `corepack pnpm --filter worker test`
+  - `corepack pnpm --filter web test`
+  - `corepack pnpm --filter web lint`
+  - `corepack pnpm --filter web build`
+  - `corepack pnpm build:api`
+  - `corepack pnpm build:worker`
+  - `corepack pnpm build:db`
+  - `corepack pnpm exec tsc --noEmit --pretty false`
+  - `npm run test:changed-format`
   - `git diff --check`
+- Also run package-specific checks for every touched module (for example `web test/lint`, `config test/build`, `db build`, or the legacy server unit suite). Record any intentionally skipped command and reason in the PR `验证` section.
 - If a check cannot be run, record the command and reason in the PR's `验证` section.
 - Open pull requests as Draft by default. After CI passes, trigger Codex Review and keep the PR unmerged until the latest head commit has been reviewed.
 - P0/P1/P2 findings block merge. P3 findings may be deferred only with an explicitly linked follow-up Issue.
@@ -107,11 +135,15 @@ Closes #<issue>
 
 ## 检查清单
 
-- [ ] 已关联 Issue 或符合 no-issue 例外
+- [ ] 已关联 Issue，或属于允许的 no-issue 小型文档/维护修正
+- [ ] 本 PR 只处理一个明确任务
 - [ ] 已补充或更新测试
+- [ ] 已更新相关文档，或说明不需要更新
+- [ ] 未提交密码、Token、Cookie、真实账号或其他敏感数据
+- [ ] 数据库变化包含升级和回滚说明，或不涉及数据库
 - [ ] CI 已通过
 - [ ] Codex Review 已覆盖最新提交
-- [ ] 所有 P0/P1/P2 与 Review Thread 已处理
+- [ ] 所有 P0/P1/P2 意见和 Review Thread 已处理
 ```
 
 - Keep section headings in Chinese exactly as above.

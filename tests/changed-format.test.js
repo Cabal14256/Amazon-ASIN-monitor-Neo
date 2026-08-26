@@ -14,6 +14,9 @@ test('仅选择新增或修改且受 Prettier 支持的源文件', () => {
     [
       'src/index.ts',
       'docs/guide.md',
+      'docs/refactor/Amazon-ASIN-monitor-重构方案.md',
+      'docs/refactor/Amazon-ASIN-monitor-重构总体计划.md',
+      'docs/refactor/README.md',
       'server/dist/generated.js',
       'backups/config.json',
       'assets/logo.png',
@@ -21,9 +24,17 @@ test('仅选择新增或修改且受 Prettier 支持的源文件', () => {
     ].join('\0'),
   );
 
-  assert.deepEqual(files, ['src/index.ts', 'docs/guide.md']);
+  assert.deepEqual(files, [
+    'src/index.ts',
+    'docs/guide.md',
+    'docs/refactor/README.md',
+  ]);
   assert.equal(isSupportedFile('server\\src\\index.js'), true);
   assert.equal(isSupportedFile('server/node_modules/pkg/index.js'), false);
+  assert.equal(
+    isSupportedFile('docs\\refactor\\Amazon-ASIN-monitor-重构总体计划.md'),
+    false,
+  );
 });
 
 test('git diff 使用三点范围、关闭重命名检测、空字符分隔和 AM 过滤', () => {

@@ -5,6 +5,7 @@
     "bench:analytics": "node scripts/benchmark-analytics.js",
     "build": "max build",
     "build:api": "corepack pnpm --filter @asin-monitor/api... build",
+    "build:db": "corepack pnpm --filter @asin-monitor/db build",
     "build:web": "corepack pnpm --filter @asin-monitor/web build",
     "build:worker": "corepack pnpm --filter @asin-monitor/worker... build",
     "check-redis": "node scripts/check-redis.js",
@@ -20,10 +21,11 @@
     "start": "npm run dev",
     "test:api-url": "node --test tests/api-url.test.js",
     "test:changed-format": "node --test tests/changed-format.test.js",
-    "test:contracts": "npm run test:api-url && npm run test:init-schema && npm run test:database-docs",
+    "test:contracts": "npm run test:api-url && npm run test:init-schema && npm run test:database-docs && npm run test:refactor-docs",
     "test:database-docs": "node --test tests/database-docs.test.js",
     "test:init-schema": "node --test tests/init-schema.test.js",
-    "test:pr-policy": "node --test tests/pr-policy.test.js"
+    "test:pr-policy": "node --test tests/pr-policy.test.js",
+    "test:refactor-docs": "node --test tests/refactor-docs.test.js"
   },
   "dependencies": {
     "@ant-design/icons": "5.6.1",
