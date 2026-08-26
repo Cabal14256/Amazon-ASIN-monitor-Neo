@@ -13,6 +13,15 @@ const normalizedHash = (relativePath) => {
     .replace(/\n$/, '');
   return crypto.createHash('sha256').update(normalized).digest('hex');
 };
+const checklistItems = (contents) => {
+  const heading = '## 检查清单';
+  const start = contents.indexOf(heading);
+  assert.notEqual(start, -1, `缺少 ${heading}`);
+  const section = contents.slice(start + heading.length);
+  return [...section.matchAll(/^\s*-\s+\[[ xX]\]\s+(.+)$/gm)].map((match) =>
+    match[1].trim(),
+  );
+};
 
 const archivedDocuments = {
   'docs/refactor/Amazon-ASIN-monitor-重构方案.md':
@@ -94,6 +103,15 @@ test('协作指南保留短分支、Draft、中文模板与双系统开发约定
   assert.match(contributing, /corepack pnpm --filter web test/);
   assert.match(contributing, /corepack pnpm --filter web lint/);
   assert.match(contributing, /npm run test:changed-format/);
+});
+
+test('AGENTS 与 GitHub PR 模板保持同一套九项 Ready 清单', () => {
+  const agentsItems = checklistItems(read('AGENTS.md'));
+  const templateItems = checklistItems(
+    read('.github/pull_request_template.md'),
+  );
+  assert.equal(agentsItems.length, 9);
+  assert.deepEqual(agentsItems, templateItems);
 });
 
 test('README 明确当前能力、双跑端口、开发命令与归档入口', () => {

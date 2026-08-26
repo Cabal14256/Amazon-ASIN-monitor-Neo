@@ -135,11 +135,15 @@ Closes #<issue>
 
 ## 检查清单
 
-- [ ] 已关联 Issue 或符合 no-issue 例外
+- [ ] 已关联 Issue，或属于允许的 no-issue 小型文档/维护修正
+- [ ] 本 PR 只处理一个明确任务
 - [ ] 已补充或更新测试
+- [ ] 已更新相关文档，或说明不需要更新
+- [ ] 未提交密码、Token、Cookie、真实账号或其他敏感数据
+- [ ] 数据库变化包含升级和回滚说明，或不涉及数据库
 - [ ] CI 已通过
 - [ ] Codex Review 已覆盖最新提交
-- [ ] 所有 P0/P1/P2 与 Review Thread 已处理
+- [ ] 所有 P0/P1/P2 意见和 Review Thread 已处理
 ```
 
 - Keep section headings in Chinese exactly as above.
