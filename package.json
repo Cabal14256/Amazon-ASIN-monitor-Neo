@@ -5,6 +5,7 @@
     "bench:analytics": "node scripts/benchmark-analytics.js",
     "build": "max build",
     "build:api": "corepack pnpm --filter @asin-monitor/api... build",
+    "build:db": "corepack pnpm --filter @asin-monitor/db build",
     "build:web": "corepack pnpm --filter @asin-monitor/web build",
     "build:worker": "corepack pnpm --filter @asin-monitor/worker... build",
     "check-redis": "node scripts/check-redis.js",

@@ -63,6 +63,7 @@ test('AGENTS 固定双系统结构与 Monorepo 检查基线', () => {
     'corepack pnpm --filter web build',
     'corepack pnpm build:api',
     'corepack pnpm build:worker',
+    'corepack pnpm build:db',
     'corepack pnpm exec tsc --noEmit --pretty false',
     'git diff --check',
   ]) {
@@ -84,6 +85,7 @@ test('协作指南保留短分支、Draft、中文模板与双系统开发约定
   assert.match(contributing, /npm run build/);
   assert.match(contributing, /corepack pnpm build:api/);
   assert.match(contributing, /corepack pnpm build:worker/);
+  assert.match(contributing, /corepack pnpm build:db/);
 });
 
 test('README 明确当前能力、双跑端口、开发命令与归档入口', () => {
@@ -132,11 +134,15 @@ test('仅放行受版本控制的重构归档并固定双跑代理路径', () =>
   );
 });
 
-test('旧契约入口包含治理文档回归套件', () => {
+test('根脚本包含治理文档回归与数据库构建入口', () => {
   const rootPackage = JSON.parse(read('package.json'));
   assert.match(rootPackage.scripts['test:contracts'], /test:refactor-docs/);
   assert.equal(
     rootPackage.scripts['test:refactor-docs'],
     'node --test tests/refactor-docs.test.js',
+  );
+  assert.equal(
+    rootPackage.scripts['build:db'],
+    'corepack pnpm --filter @asin-monitor/db build',
   );
 });

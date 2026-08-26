@@ -48,6 +48,7 @@ corepack pnpm --filter worker test
 corepack pnpm --filter web build
 corepack pnpm build:api
 corepack pnpm build:worker
+corepack pnpm build:db
 corepack pnpm exec tsc --noEmit --pretty false
 git diff --check
 ```
