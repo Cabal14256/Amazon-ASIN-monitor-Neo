@@ -48,11 +48,13 @@
 - Every pull request must target `main`. Do not use feature branches as long-lived or stacked PR targets.
 - Before opening or merging a pull request, run the relevant checks. The default baseline is:
   - `corepack pnpm test:contracts`
+  - `npm --prefix server run test:unit`
+  - `npm run build`
   - `corepack pnpm --filter contracts test`
   - `corepack pnpm --filter api test`
   - `corepack pnpm --filter worker test`
   - `corepack pnpm --filter web build`
-  - `corepack pnpm --filter api build`
+  - `corepack pnpm build:api`
   - `corepack pnpm exec tsc --noEmit --pretty false`
   - `git diff --check`
 - Also run package-specific checks for every touched module (for example `web test/lint`, `config test/build`, `db build`, or the legacy server unit suite). Record any intentionally skipped command and reason in the PR `验证` section.

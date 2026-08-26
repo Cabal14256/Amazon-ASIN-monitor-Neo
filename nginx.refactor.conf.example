@@ -9,6 +9,11 @@ location /api/ {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+
+    # 保持 Legacy 长分析请求的现有行为，不回退到 Nginx 默认 60 秒。
+    proxy_connect_timeout 1200s;
+    proxy_send_timeout 1200s;
+    proxy_read_timeout 1200s;
 }
 
 location /ws {

@@ -55,11 +55,13 @@ test('AGENTS 固定双系统结构与 Monorepo 检查基线', () => {
 
   for (const command of [
     'corepack pnpm test:contracts',
+    'npm --prefix server run test:unit',
+    'npm run build',
     'corepack pnpm --filter contracts test',
     'corepack pnpm --filter api test',
     'corepack pnpm --filter worker test',
     'corepack pnpm --filter web build',
-    'corepack pnpm --filter api build',
+    'corepack pnpm build:api',
     'corepack pnpm exec tsc --noEmit --pretty false',
     'git diff --check',
   ]) {
@@ -77,6 +79,9 @@ test('协作指南保留短分支、Draft、中文模板与双系统开发约定
   assert.match(contributing, /Neo Web.*3001/);
   assert.match(contributing, /dev:api.*3100/);
   assert.match(contributing, /dev:web.*5173/);
+  assert.match(contributing, /npm --prefix server run test:unit/);
+  assert.match(contributing, /npm run build/);
+  assert.match(contributing, /corepack pnpm build:api/);
 });
 
 test('README 明确当前能力、双跑端口、开发命令与归档入口', () => {
@@ -103,6 +108,9 @@ test('仅放行受版本控制的重构归档并固定双跑代理路径', () =>
   const nginx = read('nginx.refactor.conf.example');
   assert.match(nginx, /location \/api\//);
   assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:3001;/);
+  assert.match(nginx, /proxy_connect_timeout 1200s;/);
+  assert.match(nginx, /proxy_send_timeout 1200s;/);
+  assert.match(nginx, /proxy_read_timeout 1200s;/);
   assert.match(nginx, /location \/neo-api\//);
   assert.match(nginx, /rewrite \^\/neo-api\/\(\.\*\)\$ \/\$1 break;/);
   assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:3100;/);

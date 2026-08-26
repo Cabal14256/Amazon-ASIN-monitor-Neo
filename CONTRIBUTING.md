@@ -40,11 +40,13 @@ CI 使用 Node.js 20 与根目录单一 `pnpm-lock.yaml`。本地从仓库根执
 ```bash
 corepack pnpm install --frozen-lockfile
 corepack pnpm test:contracts
+npm --prefix server run test:unit
+npm run build
 corepack pnpm --filter contracts test
 corepack pnpm --filter api test
 corepack pnpm --filter worker test
 corepack pnpm --filter web build
-corepack pnpm --filter api build
+corepack pnpm build:api
 corepack pnpm exec tsc --noEmit --pretty false
 git diff --check
 ```
