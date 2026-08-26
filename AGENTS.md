@@ -55,6 +55,7 @@
   - `corepack pnpm --filter worker test`
   - `corepack pnpm --filter web build`
   - `corepack pnpm build:api`
+  - `corepack pnpm build:worker`
   - `corepack pnpm exec tsc --noEmit --pretty false`
   - `git diff --check`
 - Also run package-specific checks for every touched module (for example `web test/lint`, `config test/build`, `db build`, or the legacy server unit suite). Record any intentionally skipped command and reason in the PR `验证` section.

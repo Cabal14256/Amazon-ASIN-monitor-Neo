@@ -365,6 +365,7 @@ npm --prefix server run rebuild:agg
 | `corepack pnpm --filter web lint`       | 检查 Neo Web ESLint             |
 | `corepack pnpm --filter web build`      | 构建 Neo Web                    |
 | `corepack pnpm build:api`               | 先构建依赖包，再构建 Neo API    |
+| `corepack pnpm build:worker`            | 先构建依赖包，再构建 Neo Worker |
 | `corepack pnpm test:contracts`          | 运行过渡期 Legacy/docs 契约基线 |
 
 ### `server/` 目录
