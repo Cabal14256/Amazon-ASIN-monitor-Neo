@@ -42,8 +42,22 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 --silent" --health-interval 10s --health-timeout 5s --health-retries 12
 
 
+      timescaledb:
+        image: timescale/timescaledb:2.29.2-pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: amazon_asin_monitor_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d amazon_asin_monitor_ci" --health-interval 5s --health-timeout 3s --health-retries 20
+
+
     env:
       RUN_INTEGRATION_TESTS: 'true'
+      DATABASE_URL: postgresql://postgres@127.0.0.1:5432/amazon_asin_monitor_ci
+      COMPETITOR_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/amazon_competitor_monitor_ci
       LOG_LEVEL: ERROR
       REDIS_URL: redis://127.0.0.1:6379/15
       RATE_LIMITER_KEY_PREFIX: spapi:integration:${{ github.run_id }}
@@ -61,6 +75,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Validate Neo Compose configuration
+        run: docker compose --env-file .env.neo.example -f compose.neo.yml config > /dev/null
+
       - name: Enable corepack (pnpm)
         run: corepack enable
 
@@ -73,14 +90,25 @@ jobs:
       - name: Install dependencies (workspace)
         run: pnpm install --frozen-lockfile
 
-      - name: Resolve Redis service container
+      - name: Resolve Redis and TimescaleDB service containers
         run: |
           redis_container_id="$(docker ps --filter ancestor=redis:7 --format '{{.ID}}' | head -n 1)"
           test -n "$redis_container_id"
           echo "INTEGRATION_REDIS_CONTAINER_ID=$redis_container_id" >> "$GITHUB_ENV"
+          timescale_container_id="$(docker ps --filter ancestor=timescale/timescaledb:2.29.2-pg16 --format '{{.ID}}' | head -n 1)"
+          test -n "$timescale_container_id"
+          echo "INTEGRATION_TIMESCALE_CONTAINER_ID=$timescale_container_id" >> "$GITHUB_ENV"
+
+      - name: Bootstrap TimescaleDB databases
+        run: |
+          docker cp packages/db/docker/init/010-bootstrap-databases.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/010-bootstrap-databases.sh"
+          docker exec --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/010-bootstrap-databases.sh
 
       - name: Run Redis and MySQL integration tests
         run: pnpm --filter amazon-asin-monitor-server run test:integration
+
+      - name: Run PostgreSQL and TimescaleDB integration smoke tests
+        run: pnpm --filter @asin-monitor/db test:integration
 
       - name: Report integration duration
         if: always()
