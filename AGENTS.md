@@ -52,6 +52,7 @@
   - `npm run build`
   - `corepack pnpm --filter contracts test`
   - `corepack pnpm --filter config test`
+  - `corepack pnpm --filter db test`
   - `corepack pnpm --filter api test`
   - `corepack pnpm --filter worker test`
   - `corepack pnpm --filter web test`

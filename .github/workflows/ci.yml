@@ -69,6 +69,9 @@ jobs:
       - name: Test config package
         run: pnpm --filter @asin-monitor/config test
 
+      - name: Test database package
+        run: pnpm --filter @asin-monitor/db test
+
       - name: Test new api
         run: pnpm --filter @asin-monitor/api test
 

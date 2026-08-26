@@ -15,6 +15,8 @@
     "build": "tsc -p tsconfig.json",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:generate:competitor": "drizzle-kit generate --config drizzle.competitor.config.ts",
+    "test": "vitest run --exclude test/environment.integration.test.ts",
+    "test:integration": "vitest run test/environment.integration.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -25,7 +27,8 @@
     "@types/node": "^22.15.0",
     "@types/pg": "^8.15.4",
     "drizzle-kit": "^0.31.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=20"
