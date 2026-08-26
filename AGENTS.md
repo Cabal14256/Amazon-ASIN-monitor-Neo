@@ -51,13 +51,17 @@
   - `npm --prefix server run test:unit`
   - `npm run build`
   - `corepack pnpm --filter contracts test`
+  - `corepack pnpm --filter config test`
   - `corepack pnpm --filter api test`
   - `corepack pnpm --filter worker test`
+  - `corepack pnpm --filter web test`
+  - `corepack pnpm --filter web lint`
   - `corepack pnpm --filter web build`
   - `corepack pnpm build:api`
   - `corepack pnpm build:worker`
   - `corepack pnpm build:db`
   - `corepack pnpm exec tsc --noEmit --pretty false`
+  - `npm run test:changed-format`
   - `git diff --check`
 - Also run package-specific checks for every touched module (for example `web test/lint`, `config test/build`, `db build`, or the legacy server unit suite). Record any intentionally skipped command and reason in the PR `验证` section.
 - If a check cannot be run, record the command and reason in the PR's `验证` section.

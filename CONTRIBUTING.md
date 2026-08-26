@@ -43,13 +43,17 @@ corepack pnpm test:contracts
 npm --prefix server run test:unit
 npm run build
 corepack pnpm --filter contracts test
+corepack pnpm --filter config test
 corepack pnpm --filter api test
 corepack pnpm --filter worker test
+corepack pnpm --filter web test
+corepack pnpm --filter web lint
 corepack pnpm --filter web build
 corepack pnpm build:api
 corepack pnpm build:worker
 corepack pnpm build:db
 corepack pnpm exec tsc --noEmit --pretty false
+npm run test:changed-format
 git diff --check
 ```
 

@@ -58,13 +58,17 @@ test('AGENTS 固定双系统结构与 Monorepo 检查基线', () => {
     'npm --prefix server run test:unit',
     'npm run build',
     'corepack pnpm --filter contracts test',
+    'corepack pnpm --filter config test',
     'corepack pnpm --filter api test',
     'corepack pnpm --filter worker test',
+    'corepack pnpm --filter web test',
+    'corepack pnpm --filter web lint',
     'corepack pnpm --filter web build',
     'corepack pnpm build:api',
     'corepack pnpm build:worker',
     'corepack pnpm build:db',
     'corepack pnpm exec tsc --noEmit --pretty false',
+    'npm run test:changed-format',
     'git diff --check',
   ]) {
     assert.ok(agents.includes(command), command);
@@ -86,6 +90,10 @@ test('协作指南保留短分支、Draft、中文模板与双系统开发约定
   assert.match(contributing, /corepack pnpm build:api/);
   assert.match(contributing, /corepack pnpm build:worker/);
   assert.match(contributing, /corepack pnpm build:db/);
+  assert.match(contributing, /corepack pnpm --filter config test/);
+  assert.match(contributing, /corepack pnpm --filter web test/);
+  assert.match(contributing, /corepack pnpm --filter web lint/);
+  assert.match(contributing, /npm run test:changed-format/);
 });
 
 test('README 明确当前能力、双跑端口、开发命令与归档入口', () => {
@@ -110,15 +118,20 @@ test('仅放行受版本控制的重构归档并固定双跑代理路径', () =>
   assert.match(gitignore, /^!\/docs\/refactor\/\*\*$/m);
 
   const nginx = read('nginx.refactor.conf.example');
-  const apiLocation = nginx.match(/location \/api\/ \{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(apiLocation, '缺少 Legacy /api/ location');
+  const apiLocation = nginx.match(/location \/api \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(apiLocation, '缺少 Legacy /api location');
   assert.match(apiLocation, /proxy_pass http:\/\/127\.0\.0\.1:3001;/);
+  assert.match(apiLocation, /proxy_set_header Upgrade \$http_upgrade;/);
+  assert.match(apiLocation, /proxy_cache_bypass \$http_upgrade;/);
   assert.match(apiLocation, /proxy_connect_timeout 1200s;/);
   assert.match(apiLocation, /proxy_send_timeout 1200s;/);
   assert.match(apiLocation, /proxy_read_timeout 1200s;/);
 
   const wsLocation = nginx.match(/location \/ws \{([\s\S]*?)\n\}/)?.[1];
   assert.ok(wsLocation, '缺少 Legacy /ws location');
+  assert.match(wsLocation, /proxy_set_header X-Real-IP \$remote_addr;/);
+  assert.match(wsLocation, /proxy_set_header X-Forwarded-Proto \$scheme;/);
+  assert.match(wsLocation, /proxy_cache_bypass \$http_upgrade;/);
   assert.match(wsLocation, /proxy_connect_timeout 7d;/);
   assert.match(wsLocation, /proxy_send_timeout 7d;/);
   assert.match(wsLocation, /proxy_read_timeout 7d;/);

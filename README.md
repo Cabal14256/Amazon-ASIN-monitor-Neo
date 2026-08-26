@@ -359,6 +359,7 @@ npm --prefix server run rebuild:agg
 | `corepack pnpm dev:worker`              | 启动 BullMQ Worker              |
 | `corepack pnpm dev:web`                 | 启动 Vite Web（5173）           |
 | `corepack pnpm --filter contracts test` | 运行共享 REST/WS 契约测试       |
+| `corepack pnpm --filter config test`    | 验证 Neo 环境模板与配置解析     |
 | `corepack pnpm --filter api test`       | 运行 Neo API 测试               |
 | `corepack pnpm --filter worker test`    | 运行 Neo Worker 测试            |
 | `corepack pnpm --filter web test`       | 运行 Neo Web 测试               |
@@ -368,6 +369,7 @@ npm --prefix server run rebuild:agg
 | `corepack pnpm build:worker`            | 先构建依赖包，再构建 Neo Worker |
 | `corepack pnpm build:db`                | 构建 Drizzle 数据库包           |
 | `corepack pnpm test:contracts`          | 运行过渡期 Legacy/docs 契约基线 |
+| `npm run test:changed-format`           | 验证差异格式检查器              |
 
 ### `server/` 目录
 
