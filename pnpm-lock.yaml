@@ -263,6 +263,9 @@ importers:
         specifier: ^8.16.3
         version: 8.23.0
     devDependencies:
+      '@asin-monitor/config':
+        specifier: workspace:*
+        version: link:../config
       '@types/node':
         specifier: ^22.15.0
         version: 22.20.1

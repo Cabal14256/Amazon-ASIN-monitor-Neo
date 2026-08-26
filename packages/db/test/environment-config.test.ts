@@ -21,6 +21,18 @@ describe('TimescaleDB 环境配置', () => {
     expect(workflow).not.toContain('latest-pg16');
   });
 
+  it('Compose 只向回环地址发布端口且不遮蔽镜像初始化目录', () => {
+    const compose = read('compose.neo.yml');
+
+    expect(compose).toContain("- '127.0.0.1:${NEO_POSTGRES_PORT:-5432}:5432'");
+    expect(compose).toContain(
+      '- ./packages/db/docker/init/010-bootstrap-databases.sh:/docker-entrypoint-initdb.d/010-bootstrap-databases.sh:ro',
+    );
+    expect(compose).not.toContain(
+      '- ./packages/db/docker/init:/docker-entrypoint-initdb.d:ro',
+    );
+  });
+
   it('bootstrap 幂等创建竞品库并在双库安装 TimescaleDB', () => {
     const script = read('packages/db/docker/init/010-bootstrap-databases.sh');
 
@@ -38,6 +50,12 @@ describe('TimescaleDB 环境配置', () => {
     const rootPackage = JSON.parse(read('package.json')) as {
       scripts: Record<string, string>;
     };
+    const dbPackage = JSON.parse(read('packages/db/package.json')) as {
+      scripts: Record<string, string>;
+    };
+    const integrationTest = read(
+      'packages/db/test/environment.integration.test.ts',
+    );
     const workflow = read('.github/workflows/integration.yml');
 
     expect(env).toContain('NEO_POSTGRES_DATABASE=amazon_asin_monitor');
@@ -50,6 +68,10 @@ describe('TimescaleDB 环境配置', () => {
     );
     expect(rootPackage.scripts['db:up']).toContain('compose.neo.yml');
     expect(rootPackage.scripts['db:down']).toContain('compose.neo.yml');
+    expect(dbPackage.scripts['test:integration']).toContain(
+      '@asin-monitor/config build',
+    );
+    expect(integrationTest).toContain('loadEnvironmentFiles();');
     expect(workflow).toContain(
       'pnpm --filter @asin-monitor/db test:integration',
     );

@@ -1,6 +1,10 @@
 import { afterAll, describe, expect, it } from 'vitest';
 
+import { loadEnvironmentFiles } from '@asin-monitor/config';
+
 import { createPgPool } from '../src/client';
+
+loadEnvironmentFiles();
 
 const targets = [
   {

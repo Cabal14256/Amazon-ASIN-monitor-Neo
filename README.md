@@ -168,7 +168,7 @@ Umi 开发服务器会把 `/api` 代理到 `http://localhost:3001`，WebSocket �
 
 #### Neo 并行骨架
 
-先按 `.env.neo.example` 创建 `.env.neo`。仓库用固定的 `timescale/timescaledb:2.29.2-pg16` 镜像初始化主营/竞品两个 database，并在两库启用 TimescaleDB；Redis 仍需单独准备。
+先按 `.env.neo.example` 创建 `.env.neo`。仓库用固定的 `timescale/timescaledb:2.29.2-pg16` 镜像初始化主营/竞品两个 database，并在两库启用 TimescaleDB；数据库端口默认只绑定 `127.0.0.1`，Redis 仍需单独准备。
 
 ```bash
 corepack pnpm db:up
