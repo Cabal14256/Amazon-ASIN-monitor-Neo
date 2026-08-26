@@ -28,6 +28,11 @@ const IGNORED_DIRECTORIES = new Set([
   'node_modules',
 ]);
 
+const IMMUTABLE_ARCHIVES = new Set([
+  'docs/refactor/Amazon-ASIN-monitor-重构方案.md',
+  'docs/refactor/Amazon-ASIN-monitor-重构总体计划.md',
+]);
+
 function normalizeRepositoryPath(filePath) {
   return String(filePath || '')
     .replace(/\\/g, '/')
@@ -37,6 +42,7 @@ function normalizeRepositoryPath(filePath) {
 function isSupportedFile(filePath) {
   const normalizedPath = normalizeRepositoryPath(filePath);
   if (!normalizedPath) return false;
+  if (IMMUTABLE_ARCHIVES.has(normalizedPath)) return false;
 
   const segments = normalizedPath.split('/');
   if (
