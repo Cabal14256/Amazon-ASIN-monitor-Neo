@@ -4,6 +4,16 @@
 
 > 2026-07-15 之前的 README 已原样存档为 [`README.archive-2026-07-15.md`](./README.archive-2026-07-15.md)。存档仅用于追溯，当前安装与部署请以本文和代码中的示例配置为准。
 
+## 重构状态：双系统并行
+
+项目正按“方案 B + PostgreSQL 16/TimescaleDB”的定稿路线原地重构，避免一次性切换造成业务中断：
+
+- **Legacy（当前业务系统）**：根 `src/` 的 Umi 前端与 `server/` 的 Express/MySQL/Bull 后端，继续承担完整业务流量；重构期冻结新增功能，只接受必要 bugfix。
+- **Neo（目标系统）**：`apps/web`、`apps/api`、`apps/worker` 与 `packages/*`。目前已建立可构建骨架和共享契约，但业务域尚未完成迁移，不能替代 Legacy 生产流量。
+- 两套系统持续通过短生命周期 PR 合入 `main`。每个阶段完成契约/数据/任务/页面对拍并达到出口 gate 后，才切换对应流量和删除旧路径。
+
+定稿方案与逐阶段任务已归档在 [`docs/refactor/`](./docs/refactor/README.md)。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。
@@ -16,7 +26,7 @@
 - **账号与安全**：JWT 认证、角色权限、会话管理、密码策略和操作审计。
 - **运维能力**：健康检查、Prometheus 指标、WebSocket 实时进度、日志脱敏和备份恢复。
 
-## 技术栈
+## 当前生产技术栈（Legacy）
 
 | 层级     | 主要技术                                               |
 | -------- | ------------------------------------------------------ |
@@ -26,22 +36,25 @@
 | 外部服务 | Amazon Selling Partner API、飞书 Webhook               |
 | 运维     | Nginx、Prometheus 指标、API/Worker 分角色部署          |
 
+目标 Neo 技术栈为 React 19 + Vite 6 + TanStack + Tailwind/shadcn、NestJS 11 + Fastify、BullMQ、Drizzle、PostgreSQL 16 + TimescaleDB；Redis 继续承担队列、限流、缓存与实时协调。
+
 ## 运行结构
 
 ```mermaid
 flowchart LR
-  Browser[浏览器] --> Nginx[Nginx / 静态站点]
-  Nginx -->|/api 与 /ws| API[Express API]
-  API --> MySQL[(MySQL)]
-  API --> Redis[(Redis / Bull)]
-  Scheduler[Scheduler] --> Redis
-  Redis --> Worker[Worker]
-  Worker --> MySQL
-  Worker --> SPAPI[Amazon SP-API]
-  Worker --> Feishu[飞书 Webhook]
+  LegacyWeb[Legacy Umi :8000] --> LegacyAPI[Express :3001]
+  NeoWeb[Neo Vite :5173] -->|双跑期 /api 与 /ws| LegacyAPI
+  Nginx[Nginx] -->|/api 与 /ws| LegacyAPI
+  Nginx -->|/neo-api 验证入口| NeoAPI[Nest :3100]
+  LegacyAPI --> MySQL[(MySQL)]
+  LegacyAPI --> Redis[(Redis / Bull)]
+  NeoAPI --> PG[(PostgreSQL / TimescaleDB)]
+  NeoAPI --> RedisNeo[(Redis / BullMQ)]
+  NeoWorker[Neo Worker] --> RedisNeo
+  NeoWorker --> PG
 ```
 
-开发环境可以用一个 `all` 进程同时承载 API、调度器和队列消费者；生产环境建议拆分 API 与 Worker，并保证同一套环境只有一个调度器实例。
+Legacy 开发环境可以用一个 `all` 进程同时承载 API、调度器和队列消费者；生产环境建议拆分 API 与 Worker，并保证同一套环境只有一个调度器实例。Neo API 和 Worker 从设计起就是独立进程。
 
 ## 快速开始
 
@@ -137,6 +150,8 @@ Set-Location ..
 
 ### 6. 启动开发环境
 
+#### Legacy 完整业务系统
+
 打开两个终端，在项目根目录分别运行：
 
 ```bash
@@ -150,6 +165,24 @@ npm run dev
 ```
 
 Umi 开发服务器会把 `/api` 代理到 `http://localhost:3001`，WebSocket 在开发环境也会直连该端口。
+
+#### Neo 并行骨架
+
+先按 `.env.neo.example` 创建 `.env.neo`，并准备其中声明的 PostgreSQL 双库与 Redis。再打开三个终端，从仓库根分别运行：
+
+```bash
+corepack pnpm dev:api
+```
+
+```bash
+corepack pnpm dev:worker
+```
+
+```bash
+corepack pnpm dev:web
+```
+
+Neo API 默认监听 `http://localhost:3100`，Neo Web 默认监听 `http://localhost:5173`。双跑期 Neo Web 仍将 `/api` 与 `/ws` 代理到 Legacy 3001；可直接访问 `http://localhost:3100/health` 验证 Neo API 骨架。生产式并行验证可参考 [`nginx.refactor.conf.example`](./nginx.refactor.conf.example)，其中 `/neo-api/` 独立指向 3100，不会提前接管旧 `/api/v1`。
 
 ### 7. 基础检查
 
@@ -318,6 +351,22 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo Monorepo（从项目根执行）
+
+| 命令                                    | 说明                            |
+| --------------------------------------- | ------------------------------- |
+| `corepack pnpm dev:api`                 | 启动 Nest/Fastify API（3100）   |
+| `corepack pnpm dev:worker`              | 启动 BullMQ Worker              |
+| `corepack pnpm dev:web`                 | 启动 Vite Web（5173）           |
+| `corepack pnpm --filter contracts test` | 运行共享 REST/WS 契约测试       |
+| `corepack pnpm --filter api test`       | 运行 Neo API 测试               |
+| `corepack pnpm --filter worker test`    | 运行 Neo Worker 测试            |
+| `corepack pnpm --filter web test`       | 运行 Neo Web 测试               |
+| `corepack pnpm --filter web lint`       | 检查 Neo Web ESLint             |
+| `corepack pnpm --filter web build`      | 构建 Neo Web                    |
+| `corepack pnpm --filter api build`      | 构建 Neo API                    |
+| `corepack pnpm test:contracts`          | 运行过渡期 Legacy/docs 契约基线 |
+
 ### `server/` 目录
 
 | 命令                           | 说明                                   |
@@ -333,13 +382,22 @@ npm --prefix server run rebuild:agg
 ## 项目结构
 
 ```text
-Amazon-ASIN-monitor/
-├─ src/                         # React/Umi 前端
+Amazon-ASIN-monitor-Neo/
+├─ apps/
+│  ├─ api/                      # Neo NestJS/Fastify API（3100）
+│  ├─ worker/                   # Neo BullMQ Worker
+│  └─ web/                      # Neo React/Vite 前端（5173）
+├─ packages/
+│  ├─ config/                   # 共享环境变量校验
+│  ├─ contracts/                # REST/WS Zod 契约与权限常量
+│  └─ db/                       # Drizzle + PostgreSQL/TimescaleDB
+├─ docs/refactor/               # 重构方案与总体计划归档
+├─ src/                         # Legacy React/Umi 前端
 │  ├─ pages/                    # 页面
 │  ├─ components/               # 公共组件
 │  ├─ services/                 # API 与 WebSocket 客户端
 │  └─ utils/                    # 导出、任务、鉴权等工具
-├─ server/
+├─ server/                      # Legacy Express/MySQL/Bull 后端
 │  ├─ src/
 │  │  ├─ controllers/           # HTTP 控制器
 │  │  ├─ routes/                # /api/v1 路由
@@ -353,8 +411,10 @@ Amazon-ASIN-monitor/
 ├─ scripts/                     # 前端检查与分析基准脚本
 ├─ .env.example                 # 前端 API 地址模板
 ├─ .env.neo.example             # 新 Nest API / BullMQ Worker 环境模板
+├─ pnpm-workspace.yaml          # Legacy + Neo 单一 workspace
 ├─ .umirc.ts                    # Umi 路由与开发代理
-└─ nginx.conf.example           # 生产反向代理示例
+├─ nginx.conf.example           # Legacy 生产反向代理示例
+└─ nginx.refactor.conf.example  # Phase 0 双系统验证片段
 ```
 
 ## 常见问题
@@ -389,6 +449,8 @@ Amazon-ASIN-monitor/
 - [`server/database/MIGRATION.md`](./server/database/MIGRATION.md)：已有数据库升级指南
 - [`server/scripts/QUOTA-GUIDE.md`](./server/scripts/QUOTA-GUIDE.md)：SP-API 配额分析说明
 - [`nginx.conf.example`](./nginx.conf.example)：Nginx/1Panel 配置起点
+- [`nginx.refactor.conf.example`](./nginx.refactor.conf.example)：重构期 3001/3100 双跑验证片段
+- [`docs/refactor/README.md`](./docs/refactor/README.md)：定稿重构方案、总体计划与归档校验值
 - [`AGENTS.md`](./AGENTS.md)：仓库开发约定与 PR 描述格式
 - [`README.archive-2026-07-15.md`](./README.archive-2026-07-15.md)：旧版 README 存档
 

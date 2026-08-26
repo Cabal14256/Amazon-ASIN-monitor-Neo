@@ -2,6 +2,8 @@
 
 本仓库采用受保护的 `main` + 短生命周期分支模式。除 `main` 外，不保留长期开发、发布或个人分支。
 
+当前处于新旧系统并行重构期。旧系统位于根 `src/` 与 `server/`，Neo 系统位于 `apps/*` 与 `packages/*`。两套代码持续小步合入 `main`；旧系统冻结新增功能但仍接受必要 bugfix，任何旧路径删除都必须等到对应阶段出口 gate，并使用独立退役 PR。
+
 ## 分支生命周期
 
 - 从最新 `main` 创建分支，一个分支只处理一个明确任务。
@@ -33,4 +35,25 @@
 
 ## 必需检查
 
-CI 使用 Node.js 20，并依次执行依赖锁定安装、PR 策略测试、变更文件格式检查、契约测试、后端纯逻辑单测、严格 TypeScript 检查和生产构建。`pr-policy` 另外校验分支、Issue、PR 章节和粒度说明。任何必需检查失败都不得合入 `main`。
+CI 使用 Node.js 20 与根目录单一 `pnpm-lock.yaml`。本地从仓库根执行：
+
+```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm test:contracts
+corepack pnpm --filter contracts test
+corepack pnpm --filter api test
+corepack pnpm --filter worker test
+corepack pnpm --filter web build
+corepack pnpm --filter api build
+corepack pnpm exec tsc --noEmit --pretty false
+git diff --check
+```
+
+同时运行所有受影响包的补充检查，例如 `web test/lint`、`config test/build`、`db build` 或旧 `server` 单测。CI 还执行 PR 策略、变更文件格式、旧前端构建与 Monorepo 全包验证；`pr-policy` 校验分支、Issue、中文章节和粒度说明。任何必需检查失败都不得合入 `main`。
+
+## 双系统开发
+
+- 旧业务系统：`npm --prefix server run dev`（3001）与 `npm run dev`（8000）。
+- Neo 骨架：`corepack pnpm dev:api`（3100）、`corepack pnpm dev:worker`、`corepack pnpm dev:web`（5173）。
+- Neo Web 在双跑期仍把 `/api` 和 `/ws` 代理到旧后端 3001；业务域逐项迁移后再按路由切到 3100。
+- 环境配置分离：旧后端读取 `server/.env`，Neo API/Worker 读取根 `.env.neo`。不要复制真实凭据到 Issue、PR、日志或 fixture。
