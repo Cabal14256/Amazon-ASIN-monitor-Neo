@@ -15,16 +15,19 @@
     "build": "tsc -p tsconfig.json",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:generate:competitor": "drizzle-kit generate --config drizzle.competitor.config.ts",
-    "test": "vitest run --exclude test/environment.integration.test.ts --exclude test/schema.integration.test.ts",
-    "test:integration": "corepack pnpm --filter @asin-monitor/config build && vitest run test/environment.integration.test.ts test/schema.integration.test.ts",
+    "migrate:data": "node dist/migration/cli.js",
+    "test": "corepack pnpm --filter @asin-monitor/config build && corepack pnpm --filter @asin-monitor/contracts build && vitest run --exclude test/environment.integration.test.ts --exclude test/schema.integration.test.ts --exclude test/data-migration.integration.test.ts",
+    "test:integration": "corepack pnpm --filter @asin-monitor/config build && corepack pnpm --filter @asin-monitor/contracts build && vitest run test/environment.integration.test.ts test/schema.integration.test.ts && vitest run test/data-migration.integration.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@asin-monitor/config": "workspace:*",
+    "@asin-monitor/contracts": "workspace:*",
     "drizzle-orm": "^0.44.2",
+    "mysql2": "^3.15.3",
     "pg": "^8.16.3"
   },
   "devDependencies": {
-    "@asin-monitor/config": "workspace:*",
     "@types/node": "^22.15.0",
     "@types/pg": "^8.15.4",
     "drizzle-kit": "^0.31.4",

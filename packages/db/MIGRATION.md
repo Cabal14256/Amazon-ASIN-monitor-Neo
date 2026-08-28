@@ -77,10 +77,10 @@ corepack pnpm build:db
 corepack pnpm --filter db test:integration
 ```
 
-Integration 验证两库表集合（21 + 4）、全部列、显式索引、identity、生成列、CHECK、外键、触发器及四类种子。数据库 baseline 只能用于空 PG 双库；MySQL 数据导入和行数/字段/业务查询对拍属于 P1-T3。
+Integration 验证两库表集合（21 + 4）、全部列、显式索引、identity、生成列、CHECK、外键、触发器及四类种子。数据库 baseline 只能用于空 PG 双库；MySQL 数据导入、行数/字段/业务查询对拍和切换演练见 [`DATA_MIGRATION.md`](./DATA_MIGRATION.md)。
 
 回滚时：
 
 - 本地空验证库可在确认无数据后停止容器并删除 Neo 命名卷，再回到上一个 Git 提交重建；
 - 含数据环境不得直接删除表或卷，应恢复执行前备份并把应用连接切回仍保持只读兜底的 MySQL；
-- 任何后续 PG schema 变化都新增有序迁移，不修改 `0000_baseline.sql` 已经部署过的副本。进入生产迁移前，由 P1-T3 固化迁移版本表与最终同步/回滚流程。
+- 任何后续 PG schema 变化都新增有序迁移，不修改 `0000_baseline.sql` 已经部署过的副本。生产同步使用 P1-T3 固化的自定义 ETL、契约化对拍报告与写冻结/回滚流程。

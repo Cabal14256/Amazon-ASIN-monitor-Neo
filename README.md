@@ -86,6 +86,7 @@ macOS / Linux：
 cp .env.example .env
 cp server/.env.example server/.env
 cp .env.neo.example .env.neo
+cp .env.migration.example .env.migration
 ```
 
 PowerShell：
@@ -94,6 +95,7 @@ PowerShell：
 Copy-Item .env.example .env
 Copy-Item server/.env.example server/.env
 Copy-Item .env.neo.example .env.neo
+Copy-Item .env.migration.example .env.migration
 ```
 
 前端默认使用同源 `/api`，通常无需修改根目录 `.env`。后端启动前至少需要正确配置：
@@ -183,6 +185,14 @@ corepack pnpm --filter db test:integration
 ```
 
 `corepack pnpm db:down` 会停止容器但保留命名卷。只有在确认可以丢弃本地 Neo 数据时，才运行 `docker compose --env-file .env.neo -f compose.neo.yml down --volumes`；该操作不可从数据库恢复。没有 Docker 时，可将 `.env.neo` 的两条 PG URL 指向外部 PostgreSQL 16 + TimescaleDB 实例。执行、类型翻译、排序规则和回滚约定见 [`packages/db/MIGRATION.md`](./packages/db/MIGRATION.md)。
+
+MySQL 8 → PG16 的双库数据演练使用 `.env.migration`，会重置两个 PG 目标库，且只有 `MIGRATION_ALLOW_TARGET_RESET=true` 时才执行。运行前必须备份并确认目标可被清空：
+
+```bash
+corepack pnpm db:migrate:data
+```
+
+迁移采用主键 keyset 批次，自动对拍 25 张表的行数、确定性字段样本和 7 组关键业务查询，报告默认写入被 Git 忽略的 `artifacts/data-migration/report.json`。完整的写冻结、预演、失败恢复和回切步骤见 [`packages/db/DATA_MIGRATION.md`](./packages/db/DATA_MIGRATION.md)。
 
 再打开三个终端，从仓库根分别运行：
 
@@ -376,6 +386,7 @@ npm --prefix server run rebuild:agg
 | `corepack pnpm dev:web` | 启动 Vite Web（5173） |
 | `corepack pnpm db:up` | 启动本地 PG16/TimescaleDB |
 | `corepack pnpm db:baseline` | 为已有空双库幂等应用 PG baseline |
+| `corepack pnpm db:migrate:data` | 重置 PG 目标后迁移 MySQL 双库并生成对拍报告 |
 | `corepack pnpm db:status` | 查看本地数据库健康状态 |
 | `corepack pnpm db:logs` | 跟踪本地数据库日志 |
 | `corepack pnpm db:down` | 停止数据库并保留命名卷 |

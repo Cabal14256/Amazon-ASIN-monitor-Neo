@@ -64,6 +64,7 @@ jobs:
       INTEGRATION_MYSQL_HOST: 127.0.0.1
       INTEGRATION_MYSQL_PORT: 3306
       INTEGRATION_MYSQL_USER: root
+      INTEGRATION_MYSQL_PASSWORD: ''
       INTEGRATION_MYSQL_DATABASE: amazon_asin_monitor_ci_${{ github.run_id }}
       INTEGRATION_COMPETITOR_DATABASE: amazon_competitor_monitor_ci_${{ github.run_id }}
       INTEGRATION_ALLOW_DROP_DATABASES: 'true'
@@ -114,7 +115,7 @@ jobs:
       - name: Run Redis and MySQL integration tests
         run: pnpm --filter amazon-asin-monitor-server run test:integration
 
-      - name: Run PostgreSQL and TimescaleDB integration smoke tests
+      - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
       - name: Report integration duration

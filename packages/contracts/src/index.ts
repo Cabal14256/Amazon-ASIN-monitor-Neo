@@ -1,3 +1,4 @@
+export * from './dataMigration';
 export * from './domains';
 export * from './endpoints';
 export * from './envelope';

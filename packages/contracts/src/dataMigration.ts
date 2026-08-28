@@ -1,0 +1,129 @@
+import { z } from 'zod';
+
+const decimalCountSchema = z.string().regex(/^(0|[1-9]\d*)$/);
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+const migrationStatusSchema = z.enum(['passed', 'failed']);
+
+export const dataMigrationTableReportSchema = z
+  .object({
+    table: z.string().regex(/^[a-z][a-z0-9_]*$/),
+    sourceRows: decimalCountSchema,
+    targetRows: decimalCountSchema,
+    sampledRows: z.number().int().nonnegative(),
+    sourceSampleDigest: sha256Schema.nullable(),
+    targetSampleDigest: sha256Schema.nullable(),
+    durationMs: z.number().int().nonnegative(),
+    status: migrationStatusSchema,
+  })
+  .strict();
+
+export const dataMigrationQueryReportSchema = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9_]*$/),
+    sourceRows: decimalCountSchema,
+    targetRows: decimalCountSchema,
+    sourceDigest: sha256Schema,
+    targetDigest: sha256Schema,
+    status: migrationStatusSchema,
+  })
+  .strict();
+
+export const dataMigrationDatabaseReportSchema = z
+  .object({
+    logicalName: z.enum(['primary', 'competitor']),
+    tables: z.array(dataMigrationTableReportSchema).min(1),
+    businessQueries: z.array(dataMigrationQueryReportSchema).min(1),
+    durationMs: z.number().int().nonnegative(),
+    status: migrationStatusSchema,
+  })
+  .strict();
+
+export const dataMigrationFailureSchema = z
+  .object({
+    code: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+    scope: z.string().regex(/^[a-z][a-z0-9_.-]*$/),
+  })
+  .strict();
+
+export const dataMigrationReportSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    runId: z.string().uuid(),
+    strategy: z.literal('full-snapshot-cutover-sync'),
+    startedAt: z.string().datetime({ offset: true }),
+    finishedAt: z.string().datetime({ offset: true }),
+    batchSize: z.number().int().positive(),
+    sampleSize: z.number().int().nonnegative(),
+    targetResetAuthorized: z.boolean(),
+    databases: z.array(dataMigrationDatabaseReportSchema).max(2),
+    status: migrationStatusSchema,
+    failure: dataMigrationFailureSchema.optional(),
+  })
+  .strict()
+  .superRefine((report, context) => {
+    if (report.status === 'passed') {
+      if (!report.targetResetAuthorized) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'passed report requires explicit target reset authorization',
+          path: ['targetResetAuthorized'],
+        });
+      }
+
+      if (report.failure) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'passed report must not include failure',
+          path: ['failure'],
+        });
+      }
+
+      const logicalNames = report.databases.map(
+        ({ logicalName }) => logicalName,
+      );
+      if (
+        logicalNames.length !== 2 ||
+        !logicalNames.includes('primary') ||
+        !logicalNames.includes('competitor')
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'passed report must contain primary and competitor databases',
+          path: ['databases'],
+        });
+      }
+
+      if (
+        report.databases.some(
+          (database) =>
+            database.status !== 'passed' ||
+            database.tables.some((table) => table.status !== 'passed') ||
+            database.businessQueries.some((query) => query.status !== 'passed'),
+        )
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'passed report contains a failed nested check',
+          path: ['databases'],
+        });
+      }
+    } else if (!report.failure) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'failed report must include a failure code and scope',
+        path: ['failure'],
+      });
+    }
+  });
+
+export type DataMigrationTableReport = z.infer<
+  typeof dataMigrationTableReportSchema
+>;
+export type DataMigrationQueryReport = z.infer<
+  typeof dataMigrationQueryReportSchema
+>;
+export type DataMigrationDatabaseReport = z.infer<
+  typeof dataMigrationDatabaseReportSchema
+>;
+export type DataMigrationReport = z.infer<typeof dataMigrationReportSchema>;
