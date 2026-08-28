@@ -104,6 +104,13 @@ jobs:
           docker cp packages/db/docker/init/010-bootstrap-databases.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/010-bootstrap-databases.sh"
           docker exec --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/010-bootstrap-databases.sh
 
+      - name: Apply PostgreSQL baseline twice
+        run: |
+          docker cp packages/db/docker/apply-baseline.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-baseline.sh"
+          docker cp packages/db/migrations/0000_baseline.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0000_baseline.sql"
+          docker exec --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-baseline.sh /tmp/0000_baseline.sql
+          docker exec --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-baseline.sh /tmp/0000_baseline.sql
+
       - name: Run Redis and MySQL integration tests
         run: pnpm --filter amazon-asin-monitor-server run test:integration
 

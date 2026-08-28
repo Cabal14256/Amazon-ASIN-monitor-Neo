@@ -1,5 +1,7 @@
 # 已有数据库升级指南
 
+> **历史冻结（P1-T2）**：本目录的 MySQL 初始化文件与 33 个迁移文件自 PostgreSQL 基线落地后只作为 Legacy 生产和审计参考，不得改写、重排或在 PostgreSQL 上执行。Neo 空库统一使用 `packages/db/migrations/0000_baseline.sql`；迁移期若 Legacy 必须修复 schema，应新增明确的 MySQL bugfix 迁移，并在同一任务中同步 PG/Drizzle 事实源。
+
 本仓库没有自动迁移执行器，也没有记录已执行版本的 `schema_migrations` 表。`migrations/` 中的文件是历史补丁，存在编号重用、一次性 DDL 和数据回填，不能按文件名通配或仅按编号全部执行。
 
 ## 升级流程

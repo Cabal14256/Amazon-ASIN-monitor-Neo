@@ -28,6 +28,12 @@ describe('TimescaleDB 环境配置', () => {
     expect(compose).toContain(
       '- ./packages/db/docker/init/010-bootstrap-databases.sh:/docker-entrypoint-initdb.d/010-bootstrap-databases.sh:ro',
     );
+    expect(compose).toContain(
+      '- ./packages/db/docker/apply-baseline.sh:/docker-entrypoint-initdb.d/020-apply-baseline.sh:ro',
+    );
+    expect(compose).toContain(
+      '- ./packages/db/migrations/0000_baseline.sql:/opt/asin-monitor/0000_baseline.sql:ro',
+    );
     expect(compose).not.toContain(
       '- ./packages/db/docker/init:/docker-entrypoint-initdb.d:ro',
     );
@@ -67,6 +73,14 @@ describe('TimescaleDB 环境配置', () => {
       'COMPETITOR_DATABASE_URL=postgresql://postgres:neo_dev_only@127.0.0.1:5432/amazon_competitor_monitor',
     );
     expect(rootPackage.scripts['db:up']).toContain('compose.neo.yml');
+    expect(rootPackage.scripts['db:baseline']).toContain(
+      '020-apply-baseline.sh',
+    );
+    const baselineScript = read('packages/db/docker/apply-baseline.sh');
+    expect(baselineScript).toContain('validate_identifier');
+    expect(baselineScript).toContain(
+      'primary and competitor databases must be different',
+    );
     expect(rootPackage.scripts['db:down']).toContain('compose.neo.yml');
     expect(dbPackage.scripts['test:integration']).toContain(
       '@asin-monitor/config build',
@@ -75,5 +89,8 @@ describe('TimescaleDB 环境配置', () => {
     expect(workflow).toContain(
       'pnpm --filter @asin-monitor/db test:integration',
     );
+    expect(
+      workflow.match(/sh \/tmp\/apply-baseline\.sh \/tmp\/0000_baseline\.sql/g),
+    ).toHaveLength(2);
   });
 });

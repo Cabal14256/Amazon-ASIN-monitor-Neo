@@ -10,6 +10,7 @@
     "build:worker": "corepack pnpm --filter @asin-monitor/worker... build",
     "check-redis": "node scripts/check-redis.js",
     "check:changed-format": "node scripts/check-changed-format.js",
+    "db:baseline": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /docker-entrypoint-initdb.d/020-apply-baseline.sh",
     "db:down": "docker compose --env-file .env.neo -f compose.neo.yml down",
     "db:logs": "docker compose --env-file .env.neo -f compose.neo.yml logs -f timescaledb",
     "db:status": "docker compose --env-file .env.neo -f compose.neo.yml ps timescaledb",

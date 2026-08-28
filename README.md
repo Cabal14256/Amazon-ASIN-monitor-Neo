@@ -168,20 +168,21 @@ Umi 开发服务器会把 `/api` 代理到 `http://localhost:3001`，WebSocket �
 
 #### Neo 并行骨架
 
-先按 `.env.neo.example` 创建 `.env.neo`。仓库用固定的 `timescale/timescaledb:2.29.2-pg16` 镜像初始化主营/竞品两个 database，并在两库启用 TimescaleDB；数据库端口默认只绑定 `127.0.0.1`，Redis 仍需单独准备。
+先按 `.env.neo.example` 创建 `.env.neo`。仓库用固定的 `timescale/timescaledb:2.29.2-pg16` 镜像初始化主营/竞品两个 database，在两库启用 TimescaleDB，并为空数据卷自动执行 PG 21 + 4 表 baseline；数据库端口默认只绑定 `127.0.0.1`，Redis 仍需单独准备。
 
 ```bash
 corepack pnpm db:up
 corepack pnpm db:status
 ```
 
-数据库健康后可执行真实连接 smoke test：
+已有数据卷不会重复运行镜像初始化目录；已有的空 Neo 双库可显式、幂等地应用当前 baseline。数据库健康后执行真实结构 smoke test：
 
 ```bash
+corepack pnpm db:baseline
 corepack pnpm --filter db test:integration
 ```
 
-`corepack pnpm db:down` 会停止容器但保留命名卷。只有在确认可以丢弃本地 Neo 数据时，才运行 `docker compose --env-file .env.neo -f compose.neo.yml down --volumes`；该操作不可从数据库恢复。没有 Docker 时，可将 `.env.neo` 的两条 PG URL 指向外部 PostgreSQL 16 + TimescaleDB 实例。
+`corepack pnpm db:down` 会停止容器但保留命名卷。只有在确认可以丢弃本地 Neo 数据时，才运行 `docker compose --env-file .env.neo -f compose.neo.yml down --volumes`；该操作不可从数据库恢复。没有 Docker 时，可将 `.env.neo` 的两条 PG URL 指向外部 PostgreSQL 16 + TimescaleDB 实例。执行、类型翻译、排序规则和回滚约定见 [`packages/db/MIGRATION.md`](./packages/db/MIGRATION.md)。
 
 再打开三个终端，从仓库根分别运行：
 
@@ -374,6 +375,7 @@ npm --prefix server run rebuild:agg
 | `corepack pnpm dev:worker` | 启动 BullMQ Worker |
 | `corepack pnpm dev:web` | 启动 Vite Web（5173） |
 | `corepack pnpm db:up` | 启动本地 PG16/TimescaleDB |
+| `corepack pnpm db:baseline` | 为已有空双库幂等应用 PG baseline |
 | `corepack pnpm db:status` | 查看本地数据库健康状态 |
 | `corepack pnpm db:logs` | 跟踪本地数据库日志 |
 | `corepack pnpm db:down` | 停止数据库并保留命名卷 |
