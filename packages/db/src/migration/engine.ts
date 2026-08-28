@@ -127,7 +127,9 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
   const tableRows = await mysqlRows(
     context.source,
     `
-      SELECT table_name, engine
+      SELECT
+        TABLE_NAME AS table_name,
+        ENGINE AS engine
       FROM information_schema.tables
       WHERE table_schema = ?
         AND table_type = 'BASE TABLE'
@@ -157,7 +159,9 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
   const columnRows = await mysqlRows(
     context.source,
     `
-      SELECT table_name, column_name
+      SELECT
+        TABLE_NAME AS table_name,
+        COLUMN_NAME AS column_name
       FROM information_schema.columns
       WHERE table_schema = ?
       ORDER BY table_name, ordinal_position
