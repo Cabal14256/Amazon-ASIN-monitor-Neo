@@ -258,6 +258,13 @@ async function sourceBatch(
   cursor: readonly unknown[] | undefined,
   batchSize: number,
 ): Promise<MigrationRow[]> {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1_000) {
+    throw new DataMigrationError(
+      'MIGRATION_BATCH_SIZE_INVALID',
+      'migration.batch_size',
+      'migration batch size must be an integer between 1 and 1000',
+    );
+  }
   const columns = table.columns.map(quoteMysqlIdentifier).join(', ');
   const orderBy = table.primaryKeyColumns.map(quoteMysqlIdentifier).join(', ');
   const parameters: unknown[] = [];
@@ -273,8 +280,6 @@ async function sourceBatch(
     }
     parameters.push(...cursor);
   }
-  parameters.push(batchSize);
-
   return mysqlRows(
     context.source,
     `
@@ -282,7 +287,7 @@ async function sourceBatch(
       FROM ${quoteMysqlIdentifier(table.name)}
       ${where}
       ORDER BY ${orderBy}
-      LIMIT ?
+      LIMIT ${batchSize}
     `,
     parameters,
   );
