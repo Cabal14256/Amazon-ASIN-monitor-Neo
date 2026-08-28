@@ -11,6 +11,7 @@ import {
   sha256,
   transformSourceRow,
 } from '../src/migration/canonical';
+import { runDataMigrationCli } from '../src/migration/cli';
 import { parseDataMigrationConfig } from '../src/migration/config';
 import { runDataMigration } from '../src/migration/engine';
 import { DataMigrationError } from '../src/migration/errors';
@@ -280,6 +281,51 @@ describe('migration config and logging safety', () => {
       expect(JSON.parse(await readFile(reportPath, 'utf8'))).toEqual(report);
       expect(await readdir(join(directory, 'nested'))).toEqual(['report.json']);
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('CLI 在未授权重置时非零退出并落下契约化失败报告', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'asin-migration-cli-'));
+    const reportPath = join(directory, 'report.json');
+    vi.stubEnv('MIGRATION_MYSQL_HOST', '127.0.0.1');
+    vi.stubEnv('MIGRATION_MYSQL_USER', 'integration-reader');
+    vi.stubEnv('MIGRATION_MYSQL_PASSWORD', 'non-secret-fixture');
+    vi.stubEnv('MIGRATION_MYSQL_PRIMARY_DATABASE', 'source_primary');
+    vi.stubEnv('MIGRATION_MYSQL_COMPETITOR_DATABASE', 'source_competitor');
+    vi.stubEnv(
+      'DATABASE_URL',
+      'postgresql://integration:fixture@127.0.0.1:5432/target_primary',
+    );
+    vi.stubEnv(
+      'COMPETITOR_DATABASE_URL',
+      'postgresql://integration:fixture@127.0.0.1:5432/target_competitor',
+    );
+    vi.stubEnv('MIGRATION_ALLOW_TARGET_RESET', 'false');
+    vi.stubEnv('MIGRATION_REPORT_PATH', reportPath);
+    const silentLogger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+
+    try {
+      expect(await runDataMigrationCli(directory, silentLogger)).toBe(1);
+      const report = dataMigrationReportSchema.parse(
+        JSON.parse(await readFile(reportPath, 'utf8')),
+      );
+      expect(report).toMatchObject({
+        targetResetAuthorized: false,
+        databases: [],
+        status: 'failed',
+        failure: {
+          code: 'TARGET_RESET_NOT_AUTHORIZED',
+          scope: 'config.migration_allow_target_reset',
+        },
+      });
+    } finally {
+      vi.unstubAllEnvs();
       await rm(directory, { recursive: true, force: true });
     }
   });
