@@ -15,8 +15,8 @@
     "build": "tsc -p tsconfig.json",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:generate:competitor": "drizzle-kit generate --config drizzle.competitor.config.ts",
-    "test": "vitest run --exclude test/environment.integration.test.ts",
-    "test:integration": "corepack pnpm --filter @asin-monitor/config build && vitest run test/environment.integration.test.ts",
+    "test": "vitest run --exclude test/environment.integration.test.ts --exclude test/schema.integration.test.ts",
+    "test:integration": "corepack pnpm --filter @asin-monitor/config build && vitest run test/environment.integration.test.ts test/schema.integration.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
