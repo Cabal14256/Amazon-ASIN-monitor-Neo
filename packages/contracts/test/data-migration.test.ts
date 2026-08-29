@@ -1,38 +1,41 @@
 import { describe, expect, it } from 'vitest';
 
-import { dataMigrationReportSchema } from '../src/dataMigration';
+import {
+  dataMigrationEvidenceManifest,
+  dataMigrationReportSchema,
+} from '../src/dataMigration';
 
 const digest = 'a'.repeat(64);
 
 function database(logicalName: 'primary' | 'competitor') {
+  const expected = dataMigrationEvidenceManifest[logicalName];
   return {
     logicalName,
-    tables: [
-      {
-        table:
-          logicalName === 'primary' ? 'variant_groups' : 'competitor_asins',
-        sourceRows: '1',
-        targetRows: '1',
-        sampledRows: 1,
-        sourceSampleDigest: digest,
-        targetSampleDigest: digest,
-        durationMs: 12,
-        status: 'passed' as const,
-      },
-    ],
-    businessQueries: [
-      {
-        name: 'asin_health_by_country',
-        sourceRows: '1',
-        targetRows: '1',
-        sourceDigest: digest,
-        targetDigest: digest,
-        status: 'passed' as const,
-      },
-    ],
+    tables: expected.tables.map((table) => ({
+      table,
+      sourceRows: '1',
+      targetRows: '1',
+      sampledRows: 1,
+      sourceSampleDigest: digest,
+      targetSampleDigest: digest,
+      durationMs: 12,
+      status: 'passed' as const,
+    })),
+    businessQueries: expected.businessQueries.map((name) => ({
+      name,
+      sourceRows: '1',
+      targetRows: '1',
+      sourceDigest: digest,
+      targetDigest: digest,
+      status: 'passed' as const,
+    })),
     durationMs: 20,
     status: 'passed' as const,
   };
+}
+
+function passedReportDatabases() {
+  return [database('primary'), database('competitor')];
 }
 
 describe('dataMigrationReportSchema', () => {
@@ -46,7 +49,7 @@ describe('dataMigrationReportSchema', () => {
       batchSize: 500,
       sampleSize: 20,
       targetResetAuthorized: true,
-      databases: [database('primary'), database('competitor')],
+      databases: passedReportDatabases(),
       status: 'passed',
     });
 
@@ -130,6 +133,40 @@ describe('dataMigrationReportSchema', () => {
       dataMigrationReportSchema.safeParse({
         ...base,
         databases: mismatchedQuery,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('拒绝缺失或重复 25 表/7 查询证据的通过报告', () => {
+    const base = {
+      schemaVersion: 1,
+      runId: '7c4fc890-922b-4d5d-8491-d435bd939ca2',
+      strategy: 'full-snapshot-cutover-sync',
+      startedAt: '2026-08-28T07:00:00.000Z',
+      finishedAt: '2026-08-28T07:01:00.000Z',
+      batchSize: 500,
+      sampleSize: 20,
+      targetResetAuthorized: true,
+      status: 'passed',
+    } as const;
+    const incomplete = passedReportDatabases();
+    incomplete[0].tables = incomplete[0].tables.slice(1);
+    expect(
+      dataMigrationReportSchema.safeParse({
+        ...base,
+        databases: incomplete,
+      }).success,
+    ).toBe(false);
+
+    const duplicated = passedReportDatabases();
+    duplicated[1].businessQueries = [
+      duplicated[1].businessQueries[0],
+      duplicated[1].businessQueries[0],
+    ];
+    expect(
+      dataMigrationReportSchema.safeParse({
+        ...base,
+        databases: duplicated,
       }).success,
     ).toBe(false);
   });

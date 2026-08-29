@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  dataMigrationEvidenceManifest,
   dataMigrationReportSchema,
   type DataMigrationReport,
 } from '@asin-monitor/contracts';
@@ -20,6 +21,7 @@ import { parseDataMigrationConfig } from '../src/migration/config';
 import {
   isAllowedLegacyBackupTableName,
   runDataMigration,
+  targetCommitRiskError,
 } from '../src/migration/engine';
 import { DataMigrationError } from '../src/migration/errors';
 import {
@@ -32,29 +34,7 @@ import {
   writeDataMigrationReport,
 } from '../src/migration/report';
 
-const expectedPrimaryTables = [
-  'variant_groups',
-  'users',
-  'roles',
-  'permissions',
-  'feishu_config',
-  'sp_api_config',
-  'backup_config',
-  'asins',
-  'monitor_history',
-  'monitor_history_agg',
-  'monitor_history_agg_dim',
-  'monitor_history_agg_variant_group',
-  'analytics_refresh_watermark',
-  'monitor_history_status_interval',
-  'password_history',
-  'login_attempts',
-  'user_status_history',
-  'sessions',
-  'user_roles',
-  'role_permissions',
-  'audit_logs',
-];
+const expectedPrimaryTables = dataMigrationEvidenceManifest.primary.tables;
 
 const digest = 'a'.repeat(64);
 
@@ -70,10 +50,9 @@ function passedMigrationReport(): DataMigrationReport {
     targetResetAuthorized: true,
     databases: (['primary', 'competitor'] as const).map((logicalName) => ({
       logicalName,
-      tables: [
-        {
-          table:
-            logicalName === 'primary' ? 'variant_groups' : 'competitor_asins',
+      tables: dataMigrationEvidenceManifest[logicalName].tables.map(
+        (table) => ({
+          table,
           sourceRows: '1',
           targetRows: '1',
           sampledRows: 1,
@@ -81,18 +60,18 @@ function passedMigrationReport(): DataMigrationReport {
           targetSampleDigest: digest,
           durationMs: 1,
           status: 'passed',
-        },
-      ],
-      businessQueries: [
-        {
-          name: 'health_by_country',
-          sourceRows: '1',
-          targetRows: '1',
-          sourceDigest: digest,
-          targetDigest: digest,
-          status: 'passed',
-        },
-      ],
+        }),
+      ),
+      businessQueries: dataMigrationEvidenceManifest[
+        logicalName
+      ].businessQueries.map((name) => ({
+        name,
+        sourceRows: '1',
+        targetRows: '1',
+        sourceDigest: digest,
+        targetDigest: digest,
+        status: 'passed',
+      })),
       durationMs: 1,
       status: 'passed',
     })),
@@ -109,11 +88,13 @@ describe('P1-T3 migration registry', () => {
       expectedPrimaryTables,
     );
     expect(databaseMigrationSpecs[1].tables.map(({ name }) => name)).toEqual([
-      'competitor_variant_groups',
-      'competitor_asins',
-      'competitor_monitor_history',
-      'competitor_feishu_config',
+      ...dataMigrationEvidenceManifest.competitor.tables,
     ]);
+    for (const database of databaseMigrationSpecs) {
+      expect(database.businessQueries.map(({ name }) => name)).toEqual([
+        ...dataMigrationEvidenceManifest[database.logicalName].businessQueries,
+      ]);
+    }
   });
 
   it('从 Drizzle 推导 PK、BOOLEAN、JSONB、生成列与 identity', () => {
@@ -134,6 +115,28 @@ describe('P1-T3 migration registry', () => {
     ]);
     expect(monitorHistory?.insertColumns).not.toContain('month_ts');
     expect(monitorHistory?.identityColumns).toEqual(['id']);
+    expect(monitorHistory?.targetColumnSignatures).toContain(
+      'id|bigint|not-null|a|',
+    );
+    expect(monitorHistory?.targetColumnSignatures).toContain(
+      'hour_ts|timestamp without time zone|nullable||s',
+    );
+    expect(monitorHistory?.targetConstraintSignatures).toContain(
+      'p|monitor_history_pkey|id',
+    );
+    expect(monitorHistory?.targetIndexSignatures).toContain(
+      'monitor_history_pkey|unique',
+    );
+
+    const asins = databaseMigrationSpecs[0].tables.find(
+      ({ name }) => name === 'asins',
+    )!;
+    expect(asins.targetConstraintSignatures).toContain(
+      'u|uk_asins_asin_country|asin,country',
+    );
+    expect(asins.targetConstraintSignatures).toContain(
+      'f|fk_asins_variant_group|variant_group_id|variant_groups|id|no action|cascade',
+    );
   });
 
   it('仅忽略两个现有维护脚本产生的持久化备份表', () => {
@@ -372,6 +375,35 @@ describe('migration config and logging safety', () => {
       code: 'TARGET_RESET_NOT_AUTHORIZED',
       scope: 'config.migration_allow_target_reset',
     });
+  });
+
+  it('把无响应的 COMMIT 归类为结果不确定而非普通回滚失败', () => {
+    const cause = new DataMigrationError(
+      'UNEXPECTED_MIGRATION_ERROR',
+      'migration',
+      'fixture',
+    );
+    expect(
+      targetCommitRiskError(
+        [
+          { logicalName: 'primary', attempted: true, committed: false },
+          { logicalName: 'competitor', attempted: false, committed: false },
+        ],
+        cause,
+      ),
+    ).toMatchObject({
+      code: 'TARGET_COMMIT_INDETERMINATE',
+      scope: 'target.commit',
+    });
+    expect(
+      targetCommitRiskError(
+        [
+          { logicalName: 'primary', attempted: false, committed: false },
+          { logicalName: 'competitor', attempted: false, committed: false },
+        ],
+        cause,
+      ),
+    ).toBeUndefined();
   });
 
   it('原子写入经过契约校验的脱敏失败报告', async () => {

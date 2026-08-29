@@ -27,9 +27,9 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 4. MySQL 账号仅对两个源库拥有 `SELECT` 权限；
 5. 两个源库的 25 张表均使用 InnoDB；最终同步时，Legacy API、调度器和 Worker 已停止产生数据库写入，旧 Bull 队列已 drain。
 
-未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源与目标的表、列集合必须与迁移注册表完全一致。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
+未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源表/列集合，以及目标表、精确列类型与可空性、identity/生成列、主外键、唯一/CHECK 约束和索引必须与 Drizzle 迁移注册表完全一致。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
 
-两个 PG database 无法共享普通本地事务：工具先完成两库导入与对拍，再逐库提交。极端情况下第一个目标提交后、第二个目标提交失败，报告会返回 `TARGET_COMMIT_PARTIAL`；此时不得放量，应恢复或再次重置两个目标并从仍冻结的 MySQL 重新执行。
+两个 PG database 无法共享普通本地事务：工具先完成两库导入与对拍，再逐库提交。极端情况下第一个目标提交后、第二个目标提交失败，报告会返回 `TARGET_COMMIT_PARTIAL`；若已发送 `COMMIT` 但连接在确认响应前断开，则返回 `TARGET_COMMIT_INDETERMINATE`。两种情况都不得假设事务已回滚或直接放量，应先核验、恢复或再次重置两个目标，再从仍冻结的 MySQL 重新执行。
 
 ## 配置
 
@@ -78,7 +78,7 @@ corepack pnpm db:migrate:data
 - `DATETIME` 以 D8 `Asia/Shanghai` 的无时区文本传递；
 - bigint 全程以十进制字符串传递，避免 JavaScript 精度丢失；
 - PG generated columns 不写入，由目标表达式生成；
-- identity 保留源值，导入后把 sequence 调整到表内最大值。
+- identity 保留源值，导入后把 sequence 的下一值调整为 MySQL `AUTO_INCREMENT` 元数据中的实际下一值；即使高 ID 已删除或计数器被显式推进也不会复用旧编号。
 
 成功报告符合 `packages/contracts` 的 `dataMigrationReportSchema`，仅包含：
 
@@ -87,7 +87,7 @@ corepack pnpm db:migrate:data
 - 7 组关键业务查询的行数和 SHA-256 摘要；
 - 批次、耗时、运行 ID 与最终状态。
 
-报告不包含原始字段、账号、连接串或异常 payload。失败报告只记录稳定的错误 `code` 与 `scope`。成功标准是两库均为 `passed`、25 张表行数一致、全部样本摘要一致、7 组业务查询摘要一致。工具会在建立数据库连接前探测报告目录是否可写；若双库已经提交后最终成功报告仍写入失败，退出日志和尽力写入的失败报告使用 `POST_COMMIT_REPORT_WRITE_FAILED` / `report.write`，表示必须先核验两个目标，不能把它当作普通导入失败而直接重跑。
+报告不包含原始字段、账号、连接串或异常 payload。失败报告只记录稳定的错误 `code` 与 `scope`。成功契约要求两库均为 `passed`，并且包含唯一且完整的 25 张表与 7 组业务查询证据；所有行数、样本摘要和业务摘要必须一致。工具会在建立数据库连接前探测报告目录是否可写；若双库已经提交后最终成功报告仍写入失败，退出日志和尽力写入的失败报告使用 `POST_COMMIT_REPORT_WRITE_FAILED` / `report.write`，表示必须先核验两个目标，不能把它当作普通导入失败而直接重跑。
 
 ## 预演、最终同步与回滚
 
@@ -105,6 +105,6 @@ corepack pnpm db:migrate:data
 
 - 不切换流量，保持或恢复 Legacy 对 MySQL 的连接；
 - 普通失败会回滚尚未提交的 PG 事务，可修复根因后从头重跑；
-- `TARGET_COMMIT_PARTIAL` 必须恢复/重置两个 PG 目标后整体重跑；
+- `TARGET_COMMIT_PARTIAL` 或 `TARGET_COMMIT_INDETERMINATE` 必须先核验两个 PG 目标，再恢复/重置后整体重跑；
 - 若已尝试放量，先停止 Neo 写入，再按切换前备份恢复 PG，并把应用路由切回 MySQL；
 - 保存脱敏报告和时间线，另立 Issue 处理，不在现场修改冻结的 Legacy migration SQL。

@@ -145,6 +145,8 @@ async function seedPrimarySource(): Promise<void> {
         (id, user_id, username, action, resource, resource_id, method, path, request_data, response_status, create_time)
       VALUES
         (9007199254740998, 'user-ci-1', 'integration-user', 'UPDATE', 'asin', 'asin-ci-1', 'PATCH', '/integration/asins/asin-ci-1', '{"enabled":true,"labels":["a","b"]}', 200, '2026-08-28 09:06:00');
+
+      ALTER TABLE monitor_history AUTO_INCREMENT = 9007199254741999;
     `);
   } finally {
     await connection.end();
@@ -297,6 +299,24 @@ describe.skipIf(!integrationEnabled)(
       expect(after.rows[0].count).toBe(before.rows[0].count);
     });
 
+    it('目标约束漂移时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(
+        'ALTER TABLE asins DROP CONSTRAINT uk_asins_asin_country',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.asins.constraints',
+        });
+      } finally {
+        await primaryTarget.query(
+          'ALTER TABLE asins ADD CONSTRAINT uk_asins_asin_country UNIQUE (asin, country)',
+        );
+      }
+    });
+
     it('连续两次迁移 21 + 4 表且行数、样本和关键业务查询一致', async () => {
       const first = await runDataMigration(migrationConfig, logger);
       const second = await runDataMigration(migrationConfig, logger);
@@ -358,7 +378,7 @@ describe.skipIf(!integrationEnabled)(
         VALUES ('US', false, '2026-08-28 11:00:00', false)
         RETURNING id::text
       `);
-      expect(BigInt(nextIdentity.rows[0].id)).toBe(9007199254740994n);
+      expect(BigInt(nextIdentity.rows[0].id)).toBe(9007199254741999n);
     });
   },
 );

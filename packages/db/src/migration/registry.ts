@@ -43,6 +43,9 @@ export interface TableMigrationSpec {
   readonly jsonColumns: ReadonlySet<string>;
   readonly generatedColumns: ReadonlySet<string>;
   readonly identityColumns: readonly string[];
+  readonly targetColumnSignatures: readonly string[];
+  readonly targetConstraintSignatures: readonly string[];
+  readonly targetIndexSignatures: readonly string[];
 }
 
 export interface BusinessQuerySpec {
@@ -55,6 +58,27 @@ export interface DatabaseMigrationSpec {
   readonly logicalName: MigrationDatabaseName;
   readonly tables: readonly TableMigrationSpec[];
   readonly businessQueries: readonly BusinessQuerySpec[];
+}
+
+function postgresCatalogType(sqlType: string): string {
+  if (sqlType === 'timestamp') return 'timestamp without time zone';
+  if (sqlType.startsWith('varchar(')) {
+    return sqlType.replace(/^varchar/, 'character varying');
+  }
+  if (sqlType.startsWith('char(')) {
+    return sqlType.replace(/^char/, 'character');
+  }
+  return sqlType;
+}
+
+function requiredConstraintName(
+  value: string | undefined,
+  tableName: string,
+): string {
+  if (!value) {
+    throw new Error(`migration table ${tableName} has an unnamed constraint`);
+  }
+  return value;
 }
 
 function tableSpec(table: PgTable): TableMigrationSpec {
@@ -79,6 +103,80 @@ function tableSpec(table: PgTable): TableMigrationSpec {
       .filter((column) => Boolean(column.generated))
       .map((column) => column.name),
   );
+  const targetColumnSignatures = columns.map((column) => {
+    const identityKind = column.generatedIdentity
+      ? column.generatedIdentity.type === 'always'
+        ? 'a'
+        : 'd'
+      : '';
+    return [
+      column.name,
+      postgresCatalogType(column.getSQLType()),
+      column.notNull ? 'not-null' : 'nullable',
+      identityKind,
+      column.generated ? 's' : '',
+    ].join('|');
+  });
+  const targetConstraintSignatures: string[] = [];
+  const constraintIndexSignatures: string[] = [];
+  const addKeyConstraint = (
+    type: 'p' | 'u',
+    name: string,
+    constraintColumns: readonly string[],
+  ) => {
+    targetConstraintSignatures.push(
+      [type, name, constraintColumns.join(',')].join('|'),
+    );
+    constraintIndexSignatures.push(`${name}|unique`);
+  };
+  if (inlinePrimaryKeys.length > 0) {
+    addKeyConstraint('p', `${tableName}_pkey`, inlinePrimaryKeys);
+  }
+  for (const primaryKey of tableConfig.primaryKeys) {
+    addKeyConstraint(
+      'p',
+      primaryKey.getName(),
+      primaryKey.columns.map((column) => column.name),
+    );
+  }
+  for (const column of columns.filter(({ isUnique }) => isUnique)) {
+    addKeyConstraint(
+      'u',
+      requiredConstraintName(column.uniqueName, tableName),
+      [column.name],
+    );
+  }
+  for (const uniqueConstraint of tableConfig.uniqueConstraints) {
+    addKeyConstraint(
+      'u',
+      requiredConstraintName(uniqueConstraint.getName(), tableName),
+      uniqueConstraint.columns.map((column) => column.name),
+    );
+  }
+  for (const foreignKey of tableConfig.foreignKeys) {
+    const reference = foreignKey.reference();
+    targetConstraintSignatures.push(
+      [
+        'f',
+        reference.name,
+        reference.columns.map((column) => column.name).join(','),
+        getTableName(reference.foreignTable),
+        reference.foreignColumns.map((column) => column.name).join(','),
+        foreignKey.onUpdate ?? 'no action',
+        foreignKey.onDelete ?? 'no action',
+      ].join('|'),
+    );
+  }
+  for (const checkConstraint of tableConfig.checks) {
+    targetConstraintSignatures.push(`c|${checkConstraint.name}`);
+  }
+  const targetIndexSignatures = [
+    ...tableConfig.indexes.map(
+      (index) =>
+        `${index.config.name}|${index.config.unique ? 'unique' : 'non-unique'}`,
+    ),
+    ...constraintIndexSignatures,
+  ];
 
   return Object.freeze({
     table,
@@ -106,6 +204,11 @@ function tableSpec(table: PgTable): TableMigrationSpec {
         .filter((column) => Boolean(column.generatedIdentity))
         .map((column) => column.name),
     ),
+    targetColumnSignatures: Object.freeze(targetColumnSignatures.sort()),
+    targetConstraintSignatures: Object.freeze(
+      targetConstraintSignatures.sort(),
+    ),
+    targetIndexSignatures: Object.freeze(targetIndexSignatures.sort()),
   });
 }
 

@@ -4,6 +4,64 @@ const decimalCountSchema = z.string().regex(/^(0|[1-9]\d*)$/);
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const migrationStatusSchema = z.enum(['passed', 'failed']);
 
+export const dataMigrationEvidenceManifest = Object.freeze({
+  primary: Object.freeze({
+    tables: Object.freeze([
+      'variant_groups',
+      'users',
+      'roles',
+      'permissions',
+      'feishu_config',
+      'sp_api_config',
+      'backup_config',
+      'asins',
+      'monitor_history',
+      'monitor_history_agg',
+      'monitor_history_agg_dim',
+      'monitor_history_agg_variant_group',
+      'analytics_refresh_watermark',
+      'monitor_history_status_interval',
+      'password_history',
+      'login_attempts',
+      'user_status_history',
+      'sessions',
+      'user_roles',
+      'role_permissions',
+      'audit_logs',
+    ]),
+    businessQueries: Object.freeze([
+      'asin_health_by_country',
+      'variant_health_by_country',
+      'history_by_country_and_type',
+      'rbac_permissions_by_role',
+      'analytics_rows_by_granularity',
+    ]),
+  }),
+  competitor: Object.freeze({
+    tables: Object.freeze([
+      'competitor_variant_groups',
+      'competitor_asins',
+      'competitor_monitor_history',
+      'competitor_feishu_config',
+    ]),
+    businessQueries: Object.freeze([
+      'competitor_asin_health_by_country',
+      'competitor_history_by_country_and_type',
+    ]),
+  }),
+});
+
+function isExactUniqueSet(
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean {
+  return (
+    actual.length === expected.length &&
+    new Set(actual).size === actual.length &&
+    expected.every((value) => actual.includes(value))
+  );
+}
+
 export const dataMigrationTableReportSchema = z
   .object({
     table: z.string().regex(/^[a-z][a-z0-9_]*$/),
@@ -110,6 +168,34 @@ export const dataMigrationReportSchema = z
       }
 
       report.databases.forEach((database, databaseIndex) => {
+        const expectedEvidence =
+          dataMigrationEvidenceManifest[database.logicalName];
+        if (
+          !isExactUniqueSet(
+            database.tables.map(({ table }) => table),
+            expectedEvidence.tables,
+          )
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              'passed database report requires the complete unique table evidence set',
+            path: ['databases', databaseIndex, 'tables'],
+          });
+        }
+        if (
+          !isExactUniqueSet(
+            database.businessQueries.map(({ name }) => name),
+            expectedEvidence.businessQueries,
+          )
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              'passed database report requires the complete unique business query evidence set',
+            path: ['databases', databaseIndex, 'businessQueries'],
+          });
+        }
         database.tables.forEach((table, tableIndex) => {
           if (table.sourceRows !== table.targetRows) {
             context.addIssue({

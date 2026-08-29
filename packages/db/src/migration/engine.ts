@@ -44,6 +44,7 @@ interface DatabaseContext {
   readonly target: PoolClient;
   sourceTransactionOpen: boolean;
   targetTransactionOpen: boolean;
+  targetCommitAttempted: boolean;
   targetCommitted: boolean;
 }
 
@@ -222,20 +223,163 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
   const columnResult = await context.target.query<{
     table_name: string;
     column_name: string;
+    data_type: string;
+    is_not_null: boolean;
+    identity_kind: string;
+    generated_kind: string;
   }>(`
-    SELECT table_name, column_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-    ORDER BY table_name, ordinal_position
+    SELECT
+      relation.relname AS table_name,
+      attribute.attname AS column_name,
+      format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
+      attribute.attnotnull AS is_not_null,
+      attribute.attidentity AS identity_kind,
+      attribute.attgenerated AS generated_kind
+    FROM pg_attribute attribute
+    JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND relation.relkind IN ('r', 'p')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+    ORDER BY relation.relname, attribute.attnum
   `);
   for (const table of context.spec.tables) {
     compareExactSet(
-      table.columns,
+      table.targetColumnSignatures,
       columnResult.rows
         .filter(({ table_name }) => table_name === table.name)
-        .map(({ column_name }) => column_name),
+        .map(
+          ({
+            column_name,
+            data_type,
+            is_not_null,
+            identity_kind,
+            generated_kind,
+          }) =>
+            [
+              column_name,
+              data_type,
+              is_not_null ? 'not-null' : 'nullable',
+              identity_kind,
+              generated_kind,
+            ].join('|'),
+        ),
       'TARGET_SCHEMA_MISMATCH',
-      `${context.spec.logicalName}.target.${table.name}`,
+      `${context.spec.logicalName}.target.${table.name}.columns`,
+    );
+  }
+
+  const constraintResult = await context.target.query<{
+    table_name: string;
+    constraint_name: string;
+    constraint_type: 'p' | 'u' | 'f' | 'c';
+    columns: string[];
+    foreign_table: string | null;
+    foreign_columns: string[];
+    update_action: string;
+    delete_action: string;
+  }>(`
+    SELECT
+      relation.relname AS table_name,
+      constraint_row.conname AS constraint_name,
+      constraint_row.contype AS constraint_type,
+      ARRAY(
+        SELECT attribute.attname::text
+        FROM unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, position)
+        JOIN pg_attribute attribute
+          ON attribute.attrelid = constraint_row.conrelid
+         AND attribute.attnum = key.attnum
+        ORDER BY key.position
+      ) AS columns,
+      foreign_relation.relname AS foreign_table,
+      CASE WHEN constraint_row.contype = 'f' THEN ARRAY(
+        SELECT attribute.attname::text
+        FROM unnest(constraint_row.confkey) WITH ORDINALITY AS key(attnum, position)
+        JOIN pg_attribute attribute
+          ON attribute.attrelid = constraint_row.confrelid
+         AND attribute.attnum = key.attnum
+        ORDER BY key.position
+      ) ELSE ARRAY[]::text[] END AS foreign_columns,
+      constraint_row.confupdtype AS update_action,
+      constraint_row.confdeltype AS delete_action
+    FROM pg_constraint constraint_row
+    JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    LEFT JOIN pg_class foreign_relation
+      ON foreign_relation.oid = constraint_row.confrelid
+    WHERE namespace.nspname = 'public'
+      AND constraint_row.contype IN ('p', 'u', 'f', 'c')
+    ORDER BY relation.relname, constraint_row.conname
+  `);
+  const actionName = (action: string): string => {
+    const names: Record<string, string> = {
+      a: 'no action',
+      r: 'restrict',
+      c: 'cascade',
+      n: 'set null',
+      d: 'set default',
+    };
+    return names[action] ?? action;
+  };
+  for (const table of context.spec.tables) {
+    compareExactSet(
+      table.targetConstraintSignatures,
+      constraintResult.rows
+        .filter(({ table_name }) => table_name === table.name)
+        .map((constraint) => {
+          if (constraint.constraint_type === 'c') {
+            return `c|${constraint.constraint_name}`;
+          }
+          if (constraint.constraint_type === 'f') {
+            return [
+              'f',
+              constraint.constraint_name,
+              constraint.columns.join(','),
+              constraint.foreign_table ?? '',
+              constraint.foreign_columns.join(','),
+              actionName(constraint.update_action),
+              actionName(constraint.delete_action),
+            ].join('|');
+          }
+          return [
+            constraint.constraint_type,
+            constraint.constraint_name,
+            constraint.columns.join(','),
+          ].join('|');
+        }),
+      'TARGET_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.target.${table.name}.constraints`,
+    );
+  }
+
+  const indexResult = await context.target.query<{
+    table_name: string;
+    index_name: string;
+    is_unique: boolean;
+  }>(`
+    SELECT
+      table_relation.relname AS table_name,
+      index_relation.relname AS index_name,
+      index_row.indisunique AS is_unique
+    FROM pg_index index_row
+    JOIN pg_class table_relation ON table_relation.oid = index_row.indrelid
+    JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
+    JOIN pg_namespace namespace ON namespace.oid = table_relation.relnamespace
+    WHERE namespace.nspname = 'public'
+    ORDER BY table_relation.relname, index_relation.relname
+  `);
+  for (const table of context.spec.tables) {
+    compareExactSet(
+      table.targetIndexSignatures,
+      indexResult.rows
+        .filter(({ table_name }) => table_name === table.name)
+        .map(
+          ({ index_name, is_unique }) =>
+            `${index_name}|${is_unique ? 'unique' : 'non-unique'}`,
+        ),
+      'TARGET_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.target.${table.name}.indexes`,
     );
   }
 }
@@ -349,6 +493,38 @@ async function resetIdentitySequences(
   table: TableMigrationSpec,
 ): Promise<void> {
   for (const column of table.identityColumns) {
+    const sourceIdentityRows = await mysqlRows(
+      context.source,
+      `
+        SELECT
+          table_info.AUTO_INCREMENT AS next_value,
+          column_info.EXTRA AS extra
+        FROM information_schema.tables table_info
+        JOIN information_schema.columns column_info
+          ON column_info.TABLE_SCHEMA = table_info.TABLE_SCHEMA
+         AND column_info.TABLE_NAME = table_info.TABLE_NAME
+        WHERE table_info.TABLE_SCHEMA = ?
+          AND table_info.TABLE_NAME = ?
+          AND column_info.COLUMN_NAME = ?
+          AND table_info.TABLE_TYPE = 'BASE TABLE'
+      `,
+      [context.sourceDatabase, table.name, column],
+    );
+    const sourceIdentity = sourceIdentityRows[0];
+    const nextValue = String(sourceIdentity?.next_value ?? '');
+    if (
+      sourceIdentityRows.length !== 1 ||
+      !String(sourceIdentity?.extra ?? '')
+        .toLowerCase()
+        .includes('auto_increment') ||
+      !/^[1-9]\d*$/.test(nextValue)
+    ) {
+      throw new DataMigrationError(
+        'SOURCE_IDENTITY_METADATA_INVALID',
+        `${context.spec.logicalName}.${table.name}.${column}`,
+        `source AUTO_INCREMENT metadata is invalid for ${table.name}.${column}`,
+      );
+    }
     const sequenceResult = await context.target.query<{
       sequence_name: string | null;
     }>('SELECT pg_get_serial_sequence($1, $2) AS sequence_name', [
@@ -372,16 +548,21 @@ async function resetIdentitySequences(
       )})::text AS maximum FROM ${quotePgIdentifier(table.name)}`,
     );
     const maximum = maximumResult.rows[0]?.maximum;
-    if (maximum === null || maximum === undefined) {
-      await context.target.query('SELECT setval($1::regclass, 1, false)', [
-        sequenceName,
-      ]);
-    } else {
-      await context.target.query(
-        'SELECT setval($1::regclass, $2::bigint, true)',
-        [sequenceName, maximum],
+    if (
+      maximum !== null &&
+      maximum !== undefined &&
+      BigInt(nextValue) <= BigInt(maximum)
+    ) {
+      throw new DataMigrationError(
+        'SOURCE_IDENTITY_METADATA_INVALID',
+        `${context.spec.logicalName}.${table.name}.${column}`,
+        `source AUTO_INCREMENT does not exceed the migrated maximum for ${table.name}.${column}`,
       );
     }
+    await context.target.query(
+      'SELECT setval($1::regclass, $2::bigint, false)',
+      [sequenceName, nextValue],
+    );
   }
 }
 
@@ -600,6 +781,7 @@ async function createContext(
       target,
       sourceTransactionOpen: false,
       targetTransactionOpen: false,
+      targetCommitAttempted: false,
       targetCommitted: false,
     };
   } catch (error) {
@@ -653,6 +835,47 @@ export interface DataMigrationRunMetadata {
   readonly startedAt?: Date;
 }
 
+export interface TargetCommitState {
+  readonly logicalName: MigrationDatabaseName;
+  readonly attempted: boolean;
+  readonly committed: boolean;
+}
+
+export function targetCommitRiskError(
+  states: readonly TargetCommitState[],
+  cause: DataMigrationError,
+): DataMigrationError | undefined {
+  const indeterminate = states.filter(
+    ({ attempted, committed }) => attempted && !committed,
+  );
+  if (indeterminate.length > 0) {
+    return new DataMigrationError(
+      'TARGET_COMMIT_INDETERMINATE',
+      'target.commit',
+      'a target COMMIT was attempted but its outcome was not confirmed; verify and reset both targets before rerunning',
+      { cause },
+    );
+  }
+  const committed = states.filter(({ committed }) => committed);
+  if (committed.length > 0 && committed.length < states.length) {
+    return new DataMigrationError(
+      'TARGET_COMMIT_PARTIAL',
+      'target.commit',
+      'one target database committed before another target failed; reset and rerun both targets',
+      { cause },
+    );
+  }
+  if (committed.length === states.length && states.length > 0) {
+    return new DataMigrationError(
+      'POST_COMMIT_FINALIZATION_FAILED',
+      'migration.post_commit',
+      'both target databases committed but finalization failed; verify both targets before rerunning',
+      { cause },
+    );
+  }
+  return undefined;
+}
+
 export async function runDataMigration(
   config: DataMigrationConfig,
   logger: MigrationLogger = createMigrationLogger(),
@@ -693,6 +916,7 @@ export async function runDataMigration(
     }
 
     for (const context of contexts) {
+      context.targetCommitAttempted = true;
       await context.target.query('COMMIT');
       context.targetTransactionOpen = false;
       context.targetCommitted = true;
@@ -725,29 +949,29 @@ export async function runDataMigration(
     const committed = contexts
       .filter(({ targetCommitted }) => targetCommitted)
       .map(({ spec }) => spec.logicalName);
+    const indeterminate = contexts
+      .filter(
+        ({ targetCommitAttempted, targetCommitted }) =>
+          targetCommitAttempted && !targetCommitted,
+      )
+      .map(({ spec }) => spec.logicalName);
     logger.error('data_migration.failed', {
       runId,
       code: migrationError.code,
       scope: migrationError.scope,
       committedDatabases: committed,
+      indeterminateDatabases: indeterminate,
       error: migrationError,
     });
-    if (committed.length > 0 && committed.length < contexts.length) {
-      throw new DataMigrationError(
-        'TARGET_COMMIT_PARTIAL',
-        'target.commit',
-        'one target database committed before another target failed; reset and rerun both targets',
-        { cause: migrationError },
-      );
-    }
-    if (committed.length === contexts.length && contexts.length > 0) {
-      throw new DataMigrationError(
-        'POST_COMMIT_FINALIZATION_FAILED',
-        'migration.post_commit',
-        'both target databases committed but finalization failed; verify both targets before rerunning',
-        { cause: migrationError },
-      );
-    }
+    const commitRisk = targetCommitRiskError(
+      contexts.map((context) => ({
+        logicalName: context.spec.logicalName,
+        attempted: context.targetCommitAttempted,
+        committed: context.targetCommitted,
+      })),
+      migrationError,
+    );
+    if (commitRisk) throw commitRisk;
     throw migrationError;
   } finally {
     await Promise.all(
