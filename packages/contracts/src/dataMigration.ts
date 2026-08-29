@@ -108,6 +108,48 @@ export const dataMigrationReportSchema = z
           path: ['databases'],
         });
       }
+
+      report.databases.forEach((database, databaseIndex) => {
+        database.tables.forEach((table, tableIndex) => {
+          if (table.sourceRows !== table.targetRows) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'passed table report requires equal row counts',
+              path: ['databases', databaseIndex, 'tables', tableIndex],
+            });
+          }
+          if (table.sourceSampleDigest !== table.targetSampleDigest) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'passed table report requires equal sample digests',
+              path: ['databases', databaseIndex, 'tables', tableIndex],
+            });
+          }
+          const hasSamples = table.sampledRows > 0;
+          const hasSampleDigest = table.sourceSampleDigest !== null;
+          if (hasSamples !== hasSampleDigest) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                'sample count and digest presence must describe the same evidence',
+              path: ['databases', databaseIndex, 'tables', tableIndex],
+            });
+          }
+        });
+        database.businessQueries.forEach((query, queryIndex) => {
+          if (
+            query.sourceRows !== query.targetRows ||
+            query.sourceDigest !== query.targetDigest
+          ) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                'passed business query report requires equal counts and digests',
+              path: ['databases', databaseIndex, 'businessQueries', queryIndex],
+            });
+          }
+        });
+      });
     } else if (!report.failure) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

@@ -11,12 +11,28 @@ import {
   parseDataMigrationConfig,
   type DataMigrationConfig,
 } from './config';
-import { runDataMigration } from './engine';
-import { asDataMigrationError } from './errors';
+import { runDataMigration, type DataMigrationRunMetadata } from './engine';
+import { DataMigrationError, asDataMigrationError } from './errors';
 import { createMigrationLogger, type MigrationLogger } from './logger';
-import { writeDataMigrationReport } from './report';
+import {
+  prepareDataMigrationReportDestination,
+  writeDataMigrationReport,
+} from './report';
 
 const defaultReportPath = 'artifacts/data-migration/report.json';
+
+export interface DataMigrationCliDependencies {
+  readonly runMigration?: (
+    config: DataMigrationConfig,
+    logger: MigrationLogger,
+    metadata: DataMigrationRunMetadata,
+  ) => Promise<DataMigrationReport>;
+  readonly prepareReportDestination?: (reportPath: string) => Promise<void>;
+  readonly writeReport?: (
+    report: DataMigrationReport,
+    reportPath: string,
+  ) => Promise<void>;
+}
 
 function requestedReportPath(cwd: string): string {
   return resolve(
@@ -52,41 +68,63 @@ function failedReport(
 
 export async function runDataMigrationCli(
   cwd = process.cwd(),
-  logger: MigrationLogger = createMigrationLogger(),
+  logger?: MigrationLogger,
+  dependencies: DataMigrationCliDependencies = {},
 ): Promise<number> {
   const runId = randomUUID();
   const startedAt = new Date();
   let config: DataMigrationConfig | undefined;
   let reportPath = resolve(cwd, defaultReportPath);
+  let activeLogger = logger;
+  const runMigration = dependencies.runMigration ?? runDataMigration;
+  const prepareReportDestination =
+    dependencies.prepareReportDestination ??
+    prepareDataMigrationReportDestination;
+  const writeReport = dependencies.writeReport ?? writeDataMigrationReport;
   try {
     loadDataMigrationEnvironmentFiles(cwd);
+    activeLogger ??= createMigrationLogger();
     reportPath = requestedReportPath(cwd);
     config = parseDataMigrationConfig(process.env, cwd);
-    const report = await runDataMigration(config, logger, { runId, startedAt });
-    await writeDataMigrationReport(report, reportPath);
-    logger.info('data_migration.report_written', {
+    await prepareReportDestination(reportPath);
+    const report = await runMigration(config, activeLogger, {
+      runId,
+      startedAt,
+    });
+    try {
+      await writeReport(report, reportPath);
+    } catch (error) {
+      throw new DataMigrationError(
+        'POST_COMMIT_REPORT_WRITE_FAILED',
+        'report.write',
+        'both target databases committed but the success report could not be written; verify both targets before rerunning',
+        error instanceof Error ? { cause: error } : undefined,
+      );
+    }
+    activeLogger.info('data_migration.report_written', {
       runId,
       reportPath,
       status: report.status,
     });
     return 0;
   } catch (error) {
+    activeLogger ??= createMigrationLogger();
     const migrationError = asDataMigrationError(error);
     const report = failedReport(error, runId, startedAt, config);
     try {
-      await writeDataMigrationReport(report, reportPath);
-      logger.info('data_migration.report_written', {
+      await writeReport(report, reportPath);
+      activeLogger.info('data_migration.report_written', {
         runId,
         reportPath,
         status: report.status,
       });
     } catch (reportError) {
-      logger.error('data_migration.report_write_failed', {
+      activeLogger.error('data_migration.report_write_failed', {
         runId,
         error: reportError,
       });
     }
-    logger.error('data_migration.cli_failed', {
+    activeLogger.error('data_migration.cli_failed', {
       runId,
       code: migrationError.code,
       scope: migrationError.scope,

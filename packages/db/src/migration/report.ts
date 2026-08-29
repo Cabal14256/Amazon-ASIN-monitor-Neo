@@ -7,6 +7,32 @@ import {
   type DataMigrationReport,
 } from '@asin-monitor/contracts';
 
+import { DataMigrationError } from './errors';
+
+export async function prepareDataMigrationReportDestination(
+  reportPath: string,
+): Promise<void> {
+  const parentDirectory = dirname(reportPath);
+  const probePath = `${reportPath}.${randomUUID()}.probe`;
+  try {
+    await mkdir(parentDirectory, { recursive: true });
+    await writeFile(probePath, '', {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
+  } catch (error) {
+    throw new DataMigrationError(
+      'REPORT_DESTINATION_UNWRITABLE',
+      'report.preflight',
+      'migration report destination is not writable',
+      error instanceof Error ? { cause: error } : undefined,
+    );
+  } finally {
+    await rm(probePath, { force: true }).catch(() => undefined);
+  }
+}
+
 export async function writeDataMigrationReport(
   report: DataMigrationReport,
   reportPath: string,

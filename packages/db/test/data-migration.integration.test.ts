@@ -67,6 +67,8 @@ async function seedPrimarySource(): Promise<void> {
   });
   try {
     await connection.query(`
+      CREATE TABLE mh_bak_20260828_123456 LIKE monitor_history;
+
       INSERT INTO variant_groups
         (id, name, country, site, brand, is_broken, manual_broken, is_competitor, feishu_notify_enabled, last_check_time)
       VALUES
@@ -80,7 +82,9 @@ async function seedPrimarySource(): Promise<void> {
       INSERT INTO monitor_history
         (id, variant_group_id, variant_group_name, asin_id, asin_code, asin_name, site_snapshot, brand_snapshot, check_type, country, is_broken, check_time, check_result, notification_sent, create_time)
       VALUES
-        (9007199254740993, 'vg-ci-1', 'Integration Group', 'asin-ci-1', 'B000CI0001', 'Integration ASIN', '12', 'Fixture Brand', 'ASIN', 'US', 1, '2026-08-28 09:10:11', '{"nested":{"b":2,"a":1}}', 1, '2026-08-28 09:10:12');
+        (2, 'vg-ci-1', 'Integration Group', 'asin-ci-1', 'B000CI0001', 'Integration ASIN', '12', 'Fixture Brand', NULL, 'US', 0, '2026-08-28 09:08:11', NULL, 0, '2026-08-28 09:08:12'),
+        (3, 'vg-ci-1', 'Integration Group', 'asin-ci-1', 'B000CI0001', 'Integration ASIN', '12', 'Fixture Brand', '', 'US', 0, '2026-08-28 09:09:11', NULL, 0, '2026-08-28 09:09:12'),
+        (9007199254740993, 'vg-ci-1', 'Integration Group', 'asin-ci-1', 'B000CI0001', 'Integration ASIN', '12', 'Fixture Brand', 'ASIN', 'US', 1, '2026-08-28 09:10:11', '{"nested":{"b":2,"a":1},"large_id":9007199254740993}', 1, '2026-08-28 09:10:12');
 
       INSERT INTO monitor_history_agg
         (granularity, time_slot, country, asin_key, check_count, broken_count, has_broken, has_peak, first_check_time, last_check_time)
@@ -325,6 +329,7 @@ describe.skipIf(!integrationEnabled)(
         check_time: string;
         hour_ts: string;
         check_result: { nested: { a: number; b: number } };
+        large_json_id: string;
         notification_sent: boolean;
       }>(`
         SELECT
@@ -332,7 +337,8 @@ describe.skipIf(!integrationEnabled)(
           is_broken,
           to_char(check_time, 'YYYY-MM-DD HH24:MI:SS') AS check_time,
           to_char(hour_ts, 'YYYY-MM-DD HH24:MI:SS') AS hour_ts,
-          check_result,
+          check_result - 'large_id' AS check_result,
+          check_result ->> 'large_id' AS large_json_id,
           notification_sent
         FROM monitor_history
         WHERE id = 9007199254740993
@@ -343,6 +349,7 @@ describe.skipIf(!integrationEnabled)(
         check_time: '2026-08-28 09:10:11',
         hour_ts: '2026-08-28 09:00:00',
         check_result: { nested: { a: 1, b: 2 } },
+        large_json_id: '9007199254740993',
         notification_sent: true,
       });
 

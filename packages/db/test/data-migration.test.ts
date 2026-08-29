@@ -1,26 +1,36 @@
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { dataMigrationReportSchema } from '@asin-monitor/contracts';
+import {
+  dataMigrationReportSchema,
+  type DataMigrationReport,
+} from '@asin-monitor/contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  canonicalJson,
   DeterministicSampler,
+  migrationJsonText,
+  parseMigrationJsonDocument,
   sha256,
   transformSourceRow,
 } from '../src/migration/canonical';
 import { runDataMigrationCli } from '../src/migration/cli';
 import { parseDataMigrationConfig } from '../src/migration/config';
-import { runDataMigration } from '../src/migration/engine';
+import {
+  isAllowedLegacyBackupTableName,
+  runDataMigration,
+} from '../src/migration/engine';
 import { DataMigrationError } from '../src/migration/errors';
 import {
   createMigrationLogger,
   sanitizeMigrationErrorMessage,
 } from '../src/migration/logger';
 import { databaseMigrationSpecs } from '../src/migration/registry';
-import { writeDataMigrationReport } from '../src/migration/report';
+import {
+  prepareDataMigrationReportDestination,
+  writeDataMigrationReport,
+} from '../src/migration/report';
 
 const expectedPrimaryTables = [
   'variant_groups',
@@ -45,6 +55,50 @@ const expectedPrimaryTables = [
   'role_permissions',
   'audit_logs',
 ];
+
+const digest = 'a'.repeat(64);
+
+function passedMigrationReport(): DataMigrationReport {
+  return dataMigrationReportSchema.parse({
+    schemaVersion: 1,
+    runId: '00000000-0000-4000-8000-000000000001',
+    strategy: 'full-snapshot-cutover-sync',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    finishedAt: '2026-08-28T00:00:01.000Z',
+    batchSize: 500,
+    sampleSize: 20,
+    targetResetAuthorized: true,
+    databases: (['primary', 'competitor'] as const).map((logicalName) => ({
+      logicalName,
+      tables: [
+        {
+          table:
+            logicalName === 'primary' ? 'variant_groups' : 'competitor_asins',
+          sourceRows: '1',
+          targetRows: '1',
+          sampledRows: 1,
+          sourceSampleDigest: digest,
+          targetSampleDigest: digest,
+          durationMs: 1,
+          status: 'passed',
+        },
+      ],
+      businessQueries: [
+        {
+          name: 'health_by_country',
+          sourceRows: '1',
+          targetRows: '1',
+          sourceDigest: digest,
+          targetDigest: digest,
+          status: 'passed',
+        },
+      ],
+      durationMs: 1,
+      status: 'passed',
+    })),
+    status: 'passed',
+  });
+}
 
 describe('P1-T3 migration registry', () => {
   it('按 FK 安全顺序覆盖 21 + 4 张 Drizzle 表', () => {
@@ -81,6 +135,39 @@ describe('P1-T3 migration registry', () => {
     expect(monitorHistory?.insertColumns).not.toContain('month_ts');
     expect(monitorHistory?.identityColumns).toEqual(['id']);
   });
+
+  it('仅忽略两个现有维护脚本产生的持久化备份表', () => {
+    expect(
+      [
+        'mh_bak_20260828_123456',
+        'mha_bak_20260828_123456',
+        'mhad_bak_20260828_123456',
+        'mhavg_bak_20260828_123456',
+        'monitor_history_agg_bak_20260828_123456',
+        'monitor_history_agg_dim_bak_20260828_123456',
+        'monitor_history_agg_variant_group_bak_20260828_123456',
+        'monitor_history_status_interval_bak_20260828_123456',
+      ].every(isAllowedLegacyBackupTableName),
+    ).toBe(true);
+    expect(isAllowedLegacyBackupTableName('users_bak_20260828_123456')).toBe(
+      false,
+    );
+    expect(isAllowedLegacyBackupTableName('mh_bak_latest')).toBe(false);
+  });
+
+  it('历史对拍将 NULL 和空 check_type 归为同一确定性分组', () => {
+    for (const database of databaseMigrationSpecs) {
+      const query = database.businessQueries.find(({ name }) =>
+        name.includes('history'),
+      );
+      expect(query?.sourceSql).toContain(
+        "GROUP BY country, COALESCE(check_type, '')",
+      );
+      expect(query?.targetSql).toContain(
+        "GROUP BY country, COALESCE(check_type, '')",
+      );
+    }
+  });
 });
 
 describe('migration canonical conversion', () => {
@@ -116,11 +203,26 @@ describe('migration canonical conversion', () => {
       notification_sent: false,
       check_time: '2026-08-28 15:42:37',
       month_ts: '2026-08-01 00:00:00',
-      check_result: { nested: { b: 2, a: 1 } },
     });
-    expect(canonicalJson(transformed.check_result)).toBe(
-      '{"nested":{"a":1,"b":2}}',
+    expect(migrationJsonText(transformed.check_result)).toBe(
+      '{"nested":{"a":1e0,"b":2e0}}',
     );
+  });
+
+  it('JSON 数值全程无损并按数学值生成稳定摘要', () => {
+    const unsafe = parseMigrationJsonDocument(
+      '{"unsafe":9007199254740993,"same":1e2}',
+    );
+    const equivalent = parseMigrationJsonDocument(
+      '{"same":100.0,"unsafe":9007199254740993}',
+    );
+    const rounded = parseMigrationJsonDocument(
+      '{"same":100,"unsafe":9007199254740992}',
+    );
+
+    expect(migrationJsonText(unsafe)).toContain('9007199254740993');
+    expect(sha256(unsafe)).toBe(sha256(equivalent));
+    expect(sha256(unsafe)).not.toBe(sha256(rounded));
   });
 
   it('空 JSON 归一为 NULL，非空非法 JSON 以行哈希失败', () => {
@@ -215,6 +317,23 @@ describe('migration config and logging safety', () => {
     ).toThrow(/between 1 and 1000/);
   });
 
+  it('按主机、端口和库名识别 PG 目标，而不是只比较库名', () => {
+    expect(() =>
+      parseDataMigrationConfig({
+        ...validEnvironment,
+        DATABASE_URL: 'postgresql://one:secret@pg-a:5432/shared',
+        COMPETITOR_DATABASE_URL: 'postgresql://two:secret@pg-b:5432/shared',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      parseDataMigrationConfig({
+        ...validEnvironment,
+        DATABASE_URL: 'postgresql://one:secret@PG-A/shared',
+        COMPETITOR_DATABASE_URL: 'postgresql://two:other@pg-a:5432/shared',
+      }),
+    ).toThrow(/must be different/);
+  });
+
   it('脱敏连接串和敏感键值', () => {
     const message = sanitizeMigrationErrorMessage(
       'connect postgresql://user:secret@db:5432/name password=secret token=abc',
@@ -276,6 +395,8 @@ describe('migration config and logging safety', () => {
     });
 
     try {
+      await prepareDataMigrationReportDestination(reportPath);
+      expect(await readdir(join(directory, 'nested'))).toEqual([]);
       await writeDataMigrationReport(report, reportPath);
       await writeDataMigrationReport(report, reportPath);
       expect(JSON.parse(await readFile(reportPath, 'utf8'))).toEqual(report);
@@ -324,6 +445,114 @@ describe('migration config and logging safety', () => {
           scope: 'config.migration_allow_target_reset',
         },
       });
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('CLI 在加载 .env.migration 后才按 LOG_LEVEL 创建 logger', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'asin-migration-env-'));
+    const reportPath = join(directory, 'report.json');
+    await writeFile(join(directory, '.env.migration'), 'LOG_LEVEL=ERROR\n');
+    vi.stubEnv('LOG_LEVEL', undefined);
+    vi.stubEnv('MIGRATION_MYSQL_HOST', '127.0.0.1');
+    vi.stubEnv('MIGRATION_MYSQL_USER', 'integration-reader');
+    vi.stubEnv('MIGRATION_MYSQL_PASSWORD', 'non-secret-fixture');
+    vi.stubEnv('MIGRATION_MYSQL_PRIMARY_DATABASE', 'source_primary');
+    vi.stubEnv('MIGRATION_MYSQL_COMPETITOR_DATABASE', 'source_competitor');
+    vi.stubEnv(
+      'DATABASE_URL',
+      'postgresql://integration:fixture@127.0.0.1:5432/target_primary',
+    );
+    vi.stubEnv(
+      'COMPETITOR_DATABASE_URL',
+      'postgresql://integration:fixture@127.0.0.1:5432/target_competitor',
+    );
+    vi.stubEnv('MIGRATION_ALLOW_TARGET_RESET', 'true');
+    vi.stubEnv('MIGRATION_REPORT_PATH', reportPath);
+    const stdout = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      expect(
+        await runDataMigrationCli(directory, undefined, {
+          prepareReportDestination: vi.fn().mockResolvedValue(undefined),
+          runMigration: vi.fn(async (_config, logger) => {
+            logger.info('fixture.info');
+            logger.error('fixture.error');
+            return passedMigrationReport();
+          }),
+          writeReport: vi.fn().mockResolvedValue(undefined),
+        }),
+      ).toBe(0);
+      expect(stdout.mock.calls.flat().join('')).not.toContain('fixture.info');
+      expect(stderr.mock.calls.flat().join('')).toContain('fixture.error');
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('CLI 明确区分双库已提交后的成功报告写入失败', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'asin-migration-commit-'));
+    const reportPath = join(directory, 'report.json');
+    vi.stubEnv('MIGRATION_MYSQL_HOST', '127.0.0.1');
+    vi.stubEnv('MIGRATION_MYSQL_USER', 'integration-reader');
+    vi.stubEnv('MIGRATION_MYSQL_PASSWORD', 'non-secret-fixture');
+    vi.stubEnv('MIGRATION_MYSQL_PRIMARY_DATABASE', 'source_primary');
+    vi.stubEnv('MIGRATION_MYSQL_COMPETITOR_DATABASE', 'source_competitor');
+    vi.stubEnv(
+      'DATABASE_URL',
+      'postgresql://integration:fixture@127.0.0.1:5432/target_primary',
+    );
+    vi.stubEnv(
+      'COMPETITOR_DATABASE_URL',
+      'postgresql://integration:fixture@127.0.0.1:5432/target_competitor',
+    );
+    vi.stubEnv('MIGRATION_ALLOW_TARGET_RESET', 'true');
+    vi.stubEnv('MIGRATION_REPORT_PATH', reportPath);
+    const silentLogger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const writeReport = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fixture write failure'))
+      .mockResolvedValueOnce(undefined);
+
+    try {
+      expect(
+        await runDataMigrationCli(directory, silentLogger, {
+          prepareReportDestination: vi.fn().mockResolvedValue(undefined),
+          runMigration: vi.fn().mockResolvedValue(passedMigrationReport()),
+          writeReport,
+        }),
+      ).toBe(1);
+      expect(writeReport).toHaveBeenCalledTimes(2);
+      expect(writeReport.mock.calls[1][0]).toMatchObject({
+        targetResetAuthorized: true,
+        status: 'failed',
+        failure: {
+          code: 'POST_COMMIT_REPORT_WRITE_FAILED',
+          scope: 'report.write',
+        },
+      });
+      expect(silentLogger.error).toHaveBeenCalledWith(
+        'data_migration.cli_failed',
+        expect.objectContaining({
+          code: 'POST_COMMIT_REPORT_WRITE_FAILED',
+          scope: 'report.write',
+        }),
+      );
     } finally {
       vi.unstubAllEnvs();
       await rm(directory, { recursive: true, force: true });

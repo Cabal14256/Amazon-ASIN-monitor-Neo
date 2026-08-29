@@ -1,11 +1,60 @@
 import { createHash } from 'node:crypto';
 
+import {
+  isLosslessNumber,
+  LosslessNumber,
+  parse as parseLosslessJson,
+  stringify as stringifyLosslessJson,
+} from 'lossless-json';
+
 import { DataMigrationError } from './errors';
 import type { TableMigrationSpec } from './registry';
 
 export type MigrationRow = Record<string, unknown>;
 
+function canonicalNumberLexeme(value: string): string {
+  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value);
+  if (!match)
+    throw new Error('lossless JSON parser returned an invalid number');
+  const [, sign, integer, fraction = '', explicitExponent = '0'] = match;
+  let digits = `${integer}${fraction}`.replace(/^0+/, '');
+  if (!digits) return '0';
+  let exponent = BigInt(explicitExponent) - BigInt(fraction.length);
+  while (digits.endsWith('0')) {
+    digits = digits.slice(0, -1);
+    exponent += 1n;
+  }
+  return `${sign}${digits}e${exponent.toString()}`;
+}
+
+export class MigrationJsonDocument {
+  constructor(public readonly value: unknown) {}
+
+  toPostgres(): string {
+    return canonicalJson(this.value);
+  }
+}
+
+export function parseMigrationJsonDocument(
+  value: string,
+): MigrationJsonDocument {
+  return new MigrationJsonDocument(parseLosslessJson(value));
+}
+
+export function migrationJsonText(value: unknown): string {
+  if (!(value instanceof MigrationJsonDocument)) {
+    throw new Error('value is not a migration JSON document');
+  }
+  return value.toPostgres();
+}
+
 function normalizeCanonical(value: unknown): unknown {
+  if (value instanceof MigrationJsonDocument) {
+    return normalizeCanonical(value.value);
+  }
+  if (isLosslessNumber(value)) {
+    return new LosslessNumber(canonicalNumberLexeme(value.toString()));
+  }
   if (value instanceof Date) return value.toISOString();
   if (typeof value === 'bigint') return value.toString();
   if (Buffer.isBuffer(value)) return value.toString('base64');
@@ -22,7 +71,7 @@ function normalizeCanonical(value: unknown): unknown {
 }
 
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(normalizeCanonical(value));
+  return stringifyLosslessJson(normalizeCanonical(value)) ?? 'null';
 }
 
 export function sha256(value: unknown): string {
@@ -51,10 +100,17 @@ function jsonValue(
   rowKeyHash: string,
 ): unknown {
   if (value === null || value === undefined) return null;
-  if (typeof value !== 'string') return value;
+  if (value instanceof MigrationJsonDocument) return value;
+  if (typeof value !== 'string') {
+    throw new DataMigrationError(
+      'SOURCE_JSON_INVALID',
+      `${table}.${column}`,
+      `source JSON value has an unsupported representation in ${table}.${column} at row hash ${rowKeyHash}`,
+    );
+  }
   if (!value.trim()) return null;
   try {
-    return JSON.parse(value) as unknown;
+    return parseMigrationJsonDocument(value);
   } catch {
     throw new DataMigrationError(
       'SOURCE_JSON_INVALID',

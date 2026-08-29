@@ -21,6 +21,7 @@ import {
 import { createPgPool } from '../client';
 import {
   DeterministicSampler,
+  parseMigrationJsonDocument,
   sha256,
   transformSourceRow,
   type MigrationRow,
@@ -47,9 +48,17 @@ interface DatabaseContext {
 }
 
 const safeIdentifierPattern = /^[a-z][a-z0-9_]*$/;
+const legacyBackupTablePatterns = [
+  /^(?:mh|mha|mhad|mhavg)_bak_\d{8}_\d{6}$/,
+  /^monitor_history_(?:agg|agg_dim|agg_variant_group|status_interval)_bak_\d{8}_\d{6}$/,
+] as const;
 const stringPgTypeOids = new Set([20, 1114]); // int8, timestamp without time zone
+const losslessJsonPgTypeOids = new Set([114, 3802]); // json, jsonb
 const migrationPgTypes: NonNullable<PoolConfig['types']> = {
   getTypeParser(oid, format = 'text') {
+    if (format === 'text' && losslessJsonPgTypeOids.has(oid)) {
+      return parseMigrationJsonDocument;
+    }
     if (format === 'text' && stringPgTypeOids.has(oid)) {
       return (value: string) => value;
     }
@@ -77,6 +86,10 @@ function quotePgIdentifier(value: string): string {
     );
   }
   return `"${value}"`;
+}
+
+export function isAllowedLegacyBackupTableName(value: string): boolean {
+  return legacyBackupTablePatterns.some((pattern) => pattern.test(value));
 }
 
 function exactCount(value: unknown, scope: string): string {
@@ -137,14 +150,25 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
     `,
     [context.sourceDatabase],
   );
+  const expectedTableNames = context.spec.tables.map(({ name }) => name);
+  const expectedTableSet = new Set(expectedTableNames);
+  const sourceTableNames = tableRows.map(({ table_name }) =>
+    String(table_name),
+  );
   compareExactSet(
-    context.spec.tables.map(({ name }) => name),
-    tableRows.map(({ table_name }) => String(table_name)),
+    expectedTableNames,
+    sourceTableNames.filter(
+      (tableName) => !isAllowedLegacyBackupTableName(tableName),
+    ),
     'SOURCE_SCHEMA_MISMATCH',
     `${context.spec.logicalName}.source.tables`,
   );
   const nonTransactionalTables = tableRows
-    .filter(({ engine }) => String(engine).toLowerCase() !== 'innodb')
+    .filter(
+      ({ table_name, engine }) =>
+        expectedTableSet.has(String(table_name)) &&
+        String(engine).toLowerCase() !== 'innodb',
+    )
     .map(({ table_name }) => String(table_name));
   if (nonTransactionalTables.length > 0) {
     throw new DataMigrationError(
@@ -555,6 +579,7 @@ async function createContext(
     database: sourceDatabase,
     charset: 'utf8mb4',
     dateStrings: true,
+    jsonStrings: true,
     supportBigNumbers: true,
     bigNumberStrings: true,
     multipleStatements: false,

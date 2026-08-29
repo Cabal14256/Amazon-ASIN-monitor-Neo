@@ -198,8 +198,8 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
         CAST(COALESCE(SUM(CASE WHEN is_broken = 1 THEN 1 ELSE 0 END), 0) AS CHAR) AS broken_count,
         CAST(COALESCE(SUM(CASE WHEN notification_sent = 1 THEN 1 ELSE 0 END), 0) AS CHAR) AS notified_count
       FROM monitor_history
-      GROUP BY country, check_type
-      ORDER BY country, check_type
+      GROUP BY country, COALESCE(check_type, '')
+      ORDER BY country, COALESCE(check_type, '')
     `,
     targetSql: `
       SELECT
@@ -209,8 +209,8 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count,
         COALESCE(SUM(CASE WHEN notification_sent THEN 1 ELSE 0 END), 0)::text AS notified_count
       FROM monitor_history
-      GROUP BY country, check_type
-      ORDER BY country, check_type
+      GROUP BY country, COALESCE(check_type, '')
+      ORDER BY country, COALESCE(check_type, '')
     `,
   },
   {
@@ -298,8 +298,8 @@ const competitorBusinessQueries: readonly BusinessQuerySpec[] = [
         CAST(COUNT(*) AS CHAR) AS total_count,
         CAST(COALESCE(SUM(CASE WHEN is_broken = 1 THEN 1 ELSE 0 END), 0) AS CHAR) AS broken_count
       FROM competitor_monitor_history
-      GROUP BY country, check_type
-      ORDER BY country, check_type
+      GROUP BY country, COALESCE(check_type, '')
+      ORDER BY country, COALESCE(check_type, '')
     `,
     targetSql: `
       SELECT
@@ -308,8 +308,8 @@ const competitorBusinessQueries: readonly BusinessQuerySpec[] = [
         COUNT(*)::text AS total_count,
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count
       FROM competitor_monitor_history
-      GROUP BY country, check_type
-      ORDER BY country, check_type
+      GROUP BY country, COALESCE(check_type, '')
+      ORDER BY country, COALESCE(check_type, '')
     `,
   },
 ];

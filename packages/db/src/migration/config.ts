@@ -71,7 +71,7 @@ function databaseIdentifier(value: string, settingName: string): string {
   return value;
 }
 
-function postgresDatabaseName(value: string, settingName: string): string {
+function postgresTargetIdentity(value: string, settingName: string): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -97,7 +97,21 @@ function postgresDatabaseName(value: string, settingName: string): string {
       `${settingName} must name a target database`,
     );
   }
-  return databaseName;
+  const queryHost = parsed.searchParams.get('host');
+  const host = parsed.hostname
+    ? parsed.hostname.toLowerCase()
+    : queryHost
+    ? `socket:${queryHost}`
+    : '<default>';
+  const port = parsed.port || parsed.searchParams.get('port') || '5432';
+  if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
+    throw new DataMigrationError(
+      'MIGRATION_CONFIG_INVALID',
+      `config.${settingName.toLowerCase()}`,
+      `${settingName} contains an invalid PostgreSQL port`,
+    );
+  }
+  return `${host}\u0000${port}\u0000${databaseName}`;
 }
 
 export function loadDataMigrationEnvironmentFiles(cwd = process.cwd()): void {
@@ -132,8 +146,8 @@ export function parseDataMigrationConfig(
   const primaryUrl = required(source, 'DATABASE_URL');
   const competitorUrl = required(source, 'COMPETITOR_DATABASE_URL');
   if (
-    postgresDatabaseName(primaryUrl, 'DATABASE_URL') ===
-    postgresDatabaseName(competitorUrl, 'COMPETITOR_DATABASE_URL')
+    postgresTargetIdentity(primaryUrl, 'DATABASE_URL') ===
+    postgresTargetIdentity(competitorUrl, 'COMPETITOR_DATABASE_URL')
   ) {
     throw new DataMigrationError(
       'MIGRATION_CONFIG_INVALID',

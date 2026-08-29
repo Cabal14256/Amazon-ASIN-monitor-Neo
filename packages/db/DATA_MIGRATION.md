@@ -27,7 +27,7 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 4. MySQL 账号仅对两个源库拥有 `SELECT` 权限；
 5. 两个源库的 25 张表均使用 InnoDB；最终同步时，Legacy API、调度器和 Worker 已停止产生数据库写入，旧 Bull 队列已 drain。
 
-未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源与目标的表、列集合必须与迁移注册表完全一致。
+未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源与目标的表、列集合必须与迁移注册表完全一致。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
 
 两个 PG database 无法共享普通本地事务：工具先完成两库导入与对拍，再逐库提交。极端情况下第一个目标提交后、第二个目标提交失败，报告会返回 `TARGET_COMMIT_PARTIAL`；此时不得放量，应恢复或再次重置两个目标并从仍冻结的 MySQL 重新执行。
 
@@ -53,7 +53,7 @@ Copy-Item .env.migration.example .env.migration
 | `MIGRATION_MYSQL_PRIMARY_DATABASE` | 主营源库，默认 `amazon_asin_monitor` |
 | `MIGRATION_MYSQL_COMPETITOR_DATABASE` | 竞品源库，默认 `amazon_competitor_monitor` |
 | `DATABASE_URL` | PG 主营目标连接串 |
-| `COMPETITOR_DATABASE_URL` | PG 竞品目标连接串 |
+| `COMPETITOR_DATABASE_URL` | PG 竞品目标连接串；必须与主营目标的主机、端口、库名组合不同，同名库可位于不同主机 |
 | `MIGRATION_ALLOW_TARGET_RESET` | 破坏性目标重置授权；仅在本次运行确认后设为 `true` |
 | `MIGRATION_BATCH_SIZE` | keyset 批次，1–1000，默认 500 |
 | `MIGRATION_SAMPLE_SIZE` | 每表确定性样本数，0–100，默认 20 |
@@ -74,7 +74,7 @@ corepack pnpm db:migrate:data
 命令会构建 `config`、`contracts` 与 `db`，随后执行迁移。每张表使用主键 keyset 分页，不使用随数据量退化的 `OFFSET`。源数据转换规则包括：
 
 - `TINYINT(1)` → `boolean`；
-- JSON 文本 → 已解析的 `jsonb`，空文本 → `NULL`；
+- JSON 文本 → 由任意精度数值解析器无损转换的 `jsonb`，空文本 → `NULL`；包括超出 JavaScript 安全整数范围的 JSON 数值也不会先经过 `number`；
 - `DATETIME` 以 D8 `Asia/Shanghai` 的无时区文本传递；
 - bigint 全程以十进制字符串传递，避免 JavaScript 精度丢失；
 - PG generated columns 不写入，由目标表达式生成；
@@ -87,7 +87,7 @@ corepack pnpm db:migrate:data
 - 7 组关键业务查询的行数和 SHA-256 摘要；
 - 批次、耗时、运行 ID 与最终状态。
 
-报告不包含原始字段、账号、连接串或异常 payload。失败报告只记录稳定的错误 `code` 与 `scope`。成功标准是两库均为 `passed`、25 张表行数一致、全部样本摘要一致、7 组业务查询摘要一致。
+报告不包含原始字段、账号、连接串或异常 payload。失败报告只记录稳定的错误 `code` 与 `scope`。成功标准是两库均为 `passed`、25 张表行数一致、全部样本摘要一致、7 组业务查询摘要一致。工具会在建立数据库连接前探测报告目录是否可写；若双库已经提交后最终成功报告仍写入失败，退出日志和尽力写入的失败报告使用 `POST_COMMIT_REPORT_WRITE_FAILED` / `report.write`，表示必须先核验两个目标，不能把它当作普通导入失败而直接重跑。
 
 ## 预演、最终同步与回滚
 
