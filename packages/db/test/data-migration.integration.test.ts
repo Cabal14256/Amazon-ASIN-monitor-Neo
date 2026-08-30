@@ -971,7 +971,7 @@ describe.skipIf(!integrationEnabled)(
                 ), false) AS table_locked,
                 COALESCE(BOOL_OR(
                   relation = 'public.monitor_history_id_seq'::regclass::oid
-                  AND mode = 'AccessExclusiveLock'
+                  AND mode = 'ShareRowExclusiveLock'
                   AND granted
                 ), false) AS sequence_locked
               FROM pg_locks

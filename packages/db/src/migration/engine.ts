@@ -904,25 +904,24 @@ function targetTableList(context: DatabaseContext, only = false): string {
     .join(', ');
 }
 
-function targetSequenceList(context: DatabaseContext): string {
+function targetSequences(context: DatabaseContext): string[] {
   return context.spec.tables
     .flatMap((table) => table.targetSequenceSignatures)
     .map((signature) => {
       const [, schema, name] = signature.split('|');
       return `${quotePgIdentifier(schema)}.${quotePgIdentifier(name)}`;
-    })
-    .join(', ');
+    });
 }
 
 async function lockTargetTables(context: DatabaseContext): Promise<void> {
   await context.target.query(
     `LOCK TABLE ${targetTableList(context, true)} IN ACCESS EXCLUSIVE MODE`,
   );
-  const sequences = targetSequenceList(context);
-  if (sequences) {
-    await context.target.query(
-      `LOCK TABLE ${sequences} IN ACCESS EXCLUSIVE MODE`,
-    );
+  for (const sequence of targetSequences(context)) {
+    // PostgreSQL rejects LOCK TABLE for sequences. ALTER ... RESTART takes a
+    // transaction-held ShareRowExclusiveLock, and the restart itself rolls
+    // back on preflight failure. A successful migration resets it anyway.
+    await context.target.query(`ALTER SEQUENCE ${sequence} RESTART`);
   }
 }
 
