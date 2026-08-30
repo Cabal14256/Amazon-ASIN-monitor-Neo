@@ -861,7 +861,7 @@ describe.skipIf(!integrationEnabled)(
       expect(afterRoles.rows[0]).toEqual(beforeRoles.rows[0]);
     });
 
-    it('迁移覆盖连接参数中的 LATIN1 与 replica 会话默认值', async () => {
+    it('迁移固定 UTF8 并覆盖连接参数中的 replica 会话默认值', async () => {
       const unsafePrimaryUrl =
         targetUrlWithUnsafeSessionDefaults(primaryTargetUrl);
       const unsafeCompetitorUrl =
@@ -877,7 +877,7 @@ describe.skipIf(!integrationEnabled)(
             current_setting('session_replication_role') AS replication_role
         `);
         expect(settings.rows[0]).toEqual({
-          client_encoding: 'LATIN1',
+          client_encoding: 'UTF8',
           replication_role: 'replica',
         });
       } finally {
