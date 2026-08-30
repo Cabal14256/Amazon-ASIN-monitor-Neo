@@ -125,9 +125,7 @@ export const asins = pgTable(
 export const monitorHistory = pgTable(
   'monitor_history',
   {
-    id: bigint('id', { mode: 'bigint' })
-      .generatedAlwaysAsIdentity()
-      .primaryKey(),
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity(),
     variantGroupId: varchar('variant_group_id', { length: 50 }),
     variantGroupName: varchar('variant_group_name', { length: 255 }),
     asinId: varchar('asin_id', { length: 50 }),
@@ -153,6 +151,10 @@ export const monitorHistory = pgTable(
     createTime: timestampColumn('create_time').default(localTimestamp),
   },
   (table) => [
+    primaryKey({
+      name: 'monitor_history_pkey',
+      columns: [table.checkTime, table.id],
+    }),
     index('idx_monitor_history_variant_group_id').on(table.variantGroupId),
     index('idx_monitor_history_asin_id').on(table.asinId),
     index('idx_monitor_history_asin_code').on(table.asinCode),

@@ -114,14 +114,22 @@ describe('P1-T3 migration registry', () => {
     }
   });
 
-  it('业务核对只读取注册表本身而不递归读取继承子表', () => {
+  it('业务核对仅对 Timescale hypertable 递归读取合法 chunk', () => {
     for (const database of databaseMigrationSpecs) {
       for (const query of database.businessQueries) {
         expect(query.sourceSql).not.toMatch(/\b(?:FROM|JOIN)\s+ONLY\b/i);
         for (const table of database.tables) {
-          expect(query.targetSql).not.toMatch(
-            new RegExp(`\\b(?:FROM|JOIN)\\s+(?!ONLY\\s+)${table.name}\\b`, 'i'),
+          const unqualifiedReference = new RegExp(
+            `\\b(?:FROM|JOIN)\\s+(?!ONLY\\s+)${table.name}\\b`,
+            'i',
           );
+          if (table.targetStorage === 'timescale-hypertable') {
+            if (query.targetSql.match(new RegExp(`\\b${table.name}\\b`, 'i'))) {
+              expect(query.targetSql).toMatch(unqualifiedReference);
+            }
+          } else {
+            expect(query.targetSql).not.toMatch(unqualifiedReference);
+          }
         }
       }
     }
@@ -132,7 +140,13 @@ describe('P1-T3 migration registry', () => {
       ({ name }) => name === 'monitor_history',
     );
     expect(monitorHistory).toBeDefined();
-    expect(monitorHistory?.primaryKeyColumns).toEqual(['id']);
+    expect(monitorHistory?.sourcePrimaryKeyColumns).toEqual(['id']);
+    expect(monitorHistory?.targetPrimaryKeyColumns).toEqual([
+      'check_time',
+      'id',
+    ]);
+    expect(monitorHistory?.sourceKeysetColumns).toEqual([{ column: 'id' }]);
+    expect(monitorHistory?.targetStorage).toBe('timescale-hypertable');
     expect([...monitorHistory!.booleanColumns]).toEqual([
       'is_broken',
       'notification_sent',
@@ -166,10 +180,10 @@ describe('P1-T3 migration registry', () => {
       "hour_ts|timestamp without time zone|nullable||s|date_trunc('hour',check_time)|none",
     );
     expect(monitorHistory?.targetConstraintSignatures).toContain(
-      'p|monitor_history_pkey|id|not-deferrable|initially-immediate',
+      'p|monitor_history_pkey|check_time,id|not-deferrable|initially-immediate',
     );
     expect(monitorHistory?.targetIndexSignatures).toContain(
-      'monitor_history_pkey|unique|btree|id||valid|ready|',
+      'monitor_history_pkey|unique|btree|check_time,id||valid|ready|',
     );
     expect(monitorHistory?.targetIndexSignatures).toContain(
       'idx_monitor_history_status_interval_refresh|non-unique|btree|check_type,check_time,id||valid|ready|',

@@ -4,6 +4,10 @@ import { loadEnvironmentFiles } from '@asin-monitor/config';
 
 import { createPgPool } from '../src/client';
 import {
+  timescaleAggregateProjectionViewNames,
+  timescaleContinuousAggregateViewNames,
+} from '../src/timescale';
+import {
   competitorDrizzleTables,
   competitorTableNames,
   drizzleColumnKeys,
@@ -148,6 +152,119 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     expect(await uniqueConstraintNames(competitorPool)).toEqual([
       'competitor_feishu_config_country_unique',
       'uk_competitor_asins_asin_country',
+    ]);
+  });
+
+  it('monitor_history 是 7 天单时间维 hypertable 且复合主键包含分区键', async () => {
+    const hypertable = await primaryPool.query<{
+      hypertable_name: string;
+      num_dimensions: number;
+    }>(`
+      SELECT hypertable_name, num_dimensions
+      FROM timescaledb_information.hypertables
+      WHERE hypertable_schema = 'public'
+        AND hypertable_name = 'monitor_history'
+    `);
+    expect(hypertable.rows).toEqual([
+      { hypertable_name: 'monitor_history', num_dimensions: 1 },
+    ]);
+
+    const dimension = await primaryPool.query<{
+      column_name: string;
+      dimension_type: string;
+      time_interval: string;
+    }>(`
+      SELECT column_name, dimension_type, time_interval::text
+      FROM timescaledb_information.dimensions
+      WHERE hypertable_schema = 'public'
+        AND hypertable_name = 'monitor_history'
+    `);
+    expect(dimension.rows).toEqual([
+      {
+        column_name: 'check_time',
+        dimension_type: 'Time',
+        time_interval: '7 days',
+      },
+    ]);
+
+    const primaryKey = await primaryPool.query<{ columns: string[] }>(`
+      SELECT ARRAY_AGG(attribute.attname::text ORDER BY key.position) AS columns
+      FROM pg_constraint constraint_row
+      CROSS JOIN LATERAL
+        unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, position)
+      JOIN pg_attribute attribute
+        ON attribute.attrelid = constraint_row.conrelid
+       AND attribute.attnum = key.attnum
+      WHERE constraint_row.conrelid = 'public.monitor_history'::regclass
+        AND constraint_row.contype = 'p'
+    `);
+    expect(primaryKey.rows).toEqual([{ columns: ['check_time', 'id'] }]);
+
+    const competitorHypertables = await competitorPool.query<{
+      count: string;
+    }>(`
+      SELECT COUNT(*)::text AS count
+      FROM timescaledb_information.hypertables
+      WHERE hypertable_schema = 'public'
+    `);
+    expect(competitorHypertables.rows[0].count).toBe('0');
+  });
+
+  it('九个 CAGG 均为 materialized-only，三类只读投影视图和九条策略唯一', async () => {
+    const aggregates = await primaryPool.query<{
+      view_name: string;
+      materialized_only: boolean;
+      finalized: boolean;
+    }>(`
+      SELECT view_name, materialized_only, finalized
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+      ORDER BY view_name
+    `);
+    expect(aggregates.rows).toEqual(
+      [...timescaleContinuousAggregateViewNames].sort().map((view_name) => ({
+        view_name,
+        materialized_only: true,
+        finalized: true,
+      })),
+    );
+
+    const projections = await primaryPool.query<{ table_name: string }>(
+      `
+      SELECT table_name
+      FROM information_schema.views
+      WHERE table_schema = 'public'
+        AND table_name = ANY($1::text[])
+      ORDER BY table_name
+    `,
+      [timescaleAggregateProjectionViewNames],
+    );
+    expect(projections.rows.map(({ table_name }) => table_name)).toEqual(
+      [...timescaleAggregateProjectionViewNames].sort(),
+    );
+
+    const policies = await primaryPool.query<{
+      schedule_interval: string;
+      policy_count: string;
+    }>(
+      `
+      SELECT jobs.schedule_interval::text, COUNT(*)::text AS policy_count
+      FROM timescaledb_information.jobs jobs
+      JOIN timescaledb_information.continuous_aggregates aggregate_row
+        ON aggregate_row.materialization_hypertable_schema = jobs.hypertable_schema
+       AND aggregate_row.materialization_hypertable_name = jobs.hypertable_name
+      WHERE aggregate_row.view_schema = 'public'
+        AND aggregate_row.view_name = ANY($1::text[])
+        AND jobs.proc_name = 'policy_refresh_continuous_aggregate'
+      GROUP BY jobs.schedule_interval
+      ORDER BY jobs.schedule_interval
+    `,
+      [timescaleContinuousAggregateViewNames],
+    );
+    expect(policies.rows).toEqual([
+      { schedule_interval: '00:10:00', policy_count: '3' },
+      { schedule_interval: '01:00:00', policy_count: '3' },
+      { schedule_interval: '1 day', policy_count: '3' },
     ]);
   });
 

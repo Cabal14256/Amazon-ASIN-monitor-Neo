@@ -293,7 +293,9 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
   );
   for (const table of context.spec.tables) {
     compareExactSet(
-      table.primaryKeyColumns.map((column, index) => `${index + 1}|${column}`),
+      table.sourcePrimaryKeyColumns.map(
+        (column, index) => `${index + 1}|${column}`,
+      ),
       primaryKeyRows
         .filter(({ table_name }) => table_name === table.name)
         .map(
@@ -437,8 +439,60 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     `,
     [context.spec.tables.map(({ name }) => name)],
   );
+  const hypertableNames = context.spec.tables
+    .filter(({ targetStorage }) => targetStorage === 'timescale-hypertable')
+    .map(({ name }) => name);
+  const hypertableResult = await context.target.query<{
+    hypertable_name: string;
+  }>(
+    `
+      SELECT hypertable_name
+      FROM timescaledb_information.hypertables
+      WHERE hypertable_schema = 'public'
+        AND hypertable_name = ANY($1::text[])
+      ORDER BY hypertable_name
+    `,
+    [context.spec.tables.map(({ name }) => name)],
+  );
   compareExactSet(
-    [],
+    hypertableNames,
+    hypertableResult.rows.map(({ hypertable_name }) => hypertable_name),
+    'TARGET_SCHEMA_MISMATCH',
+    `${context.spec.logicalName}.target.hypertables`,
+  );
+
+  const chunkResult = await context.target.query<{
+    parent_name: string;
+    child_schema: string;
+    child_name: string;
+    child_kind: string;
+  }>(
+    `
+      SELECT
+        chunk.hypertable_name AS parent_name,
+        chunk.chunk_schema AS child_schema,
+        chunk.chunk_name AS child_name,
+        child_relation.relkind AS child_kind
+      FROM timescaledb_information.chunks chunk
+      JOIN pg_namespace child_namespace
+        ON child_namespace.nspname = chunk.chunk_schema
+      JOIN pg_class child_relation
+        ON child_relation.relnamespace = child_namespace.oid
+       AND child_relation.relname = chunk.chunk_name
+      WHERE chunk.hypertable_schema = 'public'
+        AND chunk.hypertable_name = ANY($1::text[])
+      ORDER BY
+        chunk.hypertable_name,
+        chunk.chunk_schema,
+        chunk.chunk_name
+    `,
+    [hypertableNames],
+  );
+  compareExactSet(
+    chunkResult.rows.map(
+      ({ parent_name, child_schema, child_name, child_kind }) =>
+        [parent_name, child_schema, child_name, child_kind].join('|'),
+    ),
     descendantResult.rows.map(
       ({ parent_name, child_schema, child_name, child_kind }) =>
         [parent_name, child_schema, child_name, child_kind].join('|'),
@@ -977,8 +1031,18 @@ async function resetTarget(context: DatabaseContext): Promise<void> {
 
 function targetTableList(context: DatabaseContext, only = false): string {
   return context.spec.tables
-    .map(({ name }) => `${only ? 'ONLY ' : ''}${quotePgIdentifier(name)}`)
+    .map(
+      (table) =>
+        `${
+          only && table.targetStorage === 'table' ? 'ONLY ' : ''
+        }${quotePgIdentifier(table.name)}`,
+    )
     .join(', ');
+}
+
+function targetTableReference(table: TableMigrationSpec): string {
+  const only = table.targetStorage === 'table' ? 'ONLY ' : '';
+  return `${only}${quotePgIdentifier(table.name)}`;
 }
 
 function targetSequences(context: DatabaseContext): string[] {
@@ -1021,9 +1085,7 @@ async function targetCount(
   table: TableMigrationSpec,
 ): Promise<string> {
   const result = await context.target.query<{ row_count: string }>(
-    `SELECT COUNT(*)::text AS row_count FROM ONLY ${quotePgIdentifier(
-      table.name,
-    )}`,
+    `SELECT COUNT(*)::text AS row_count FROM ${targetTableReference(table)}`,
   );
   return exactCount(
     result.rows[0]?.row_count,
@@ -1194,7 +1256,7 @@ async function resetIdentitySequences(
     }>(
       `SELECT MAX(${quotePgIdentifier(
         column,
-      )})::text AS maximum FROM ONLY ${quotePgIdentifier(table.name)}`,
+      )})::text AS maximum FROM ${targetTableReference(table)}`,
     );
     const maximum = maximumResult.rows[0]?.maximum;
     if (
@@ -1227,12 +1289,12 @@ async function targetSampleDigest(
   if (samples.length === 0) return null;
   const selectedRows: MigrationRow[] = [];
   for (const sample of samples) {
-    const where = table.primaryKeyColumns
+    const where = table.sourcePrimaryKeyColumns
       .map((column, index) => `${quotePgIdentifier(column)} = $${index + 1}`)
       .join(' AND ');
     const result = await context.target.query<MigrationRow>(
       `SELECT ${table.columns.map(quotePgIdentifier).join(', ')}
-       FROM ONLY ${quotePgIdentifier(table.name)}
+       FROM ${targetTableReference(table)}
        WHERE ${where}`,
       [...sample.keyValues],
     );
@@ -1277,13 +1339,13 @@ async function migrateTable(
     await insertBatch(context, table, transformed);
     for (const row of transformed) {
       sampler.add(
-        table.primaryKeyColumns.map((column) => row[column]),
+        table.sourcePrimaryKeyColumns.map((column) => row[column]),
         row,
       );
     }
     migratedRows += BigInt(transformed.length);
     const lastRow = batch.at(-1)!;
-    cursor = table.primaryKeyColumns.map((column) => lastRow[column]);
+    cursor = table.sourceKeysetColumns.map(({ column }) => lastRow[column]);
   }
 
   if (migratedRows.toString() !== expectedRows) {

@@ -134,7 +134,7 @@ export function transformSourceRow(
   sourceRow: MigrationRow,
 ): MigrationRow {
   const rowKeyHash = sha256(
-    spec.primaryKeyColumns.map((column) => sourceRow[column]),
+    spec.sourcePrimaryKeyColumns.map((column) => sourceRow[column]),
   );
   return Object.fromEntries(
     spec.columns.map((column) => {

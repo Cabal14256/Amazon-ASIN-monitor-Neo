@@ -16,6 +16,7 @@
     "db:migrate:data": "corepack pnpm --filter @asin-monitor/db... build && corepack pnpm --filter @asin-monitor/db migrate:data",
     "db:status": "docker compose --env-file .env.neo -f compose.neo.yml ps timescaledb",
     "db:up": "docker compose --env-file .env.neo -f compose.neo.yml up -d timescaledb",
+    "db:upgrade:timescale": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /docker-entrypoint-initdb.d/030-apply-timescale-aggregates.sh",
     "dev": "max dev",
     "dev:api": "corepack pnpm --filter @asin-monitor/api^... build && corepack pnpm --filter @asin-monitor/api start:dev",
     "dev:web": "corepack pnpm --filter @asin-monitor/web dev",
