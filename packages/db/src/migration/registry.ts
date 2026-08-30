@@ -45,6 +45,8 @@ export interface TableMigrationSpec {
   readonly insertColumns: readonly string[];
   readonly primaryKeyColumns: readonly string[];
   readonly sourceKeysetColumns: readonly SourceKeysetColumn[];
+  readonly sourceColumnTypeSignatures: readonly string[];
+  readonly sourceGeneratedColumns: readonly SourceGeneratedColumnSpec[];
   readonly booleanColumns: ReadonlySet<string>;
   readonly jsonColumns: ReadonlySet<string>;
   readonly generatedColumns: ReadonlySet<string>;
@@ -54,6 +56,11 @@ export interface TableMigrationSpec {
   readonly targetIndexSignatures: readonly string[];
   readonly targetSequenceSignatures: readonly string[];
   readonly targetTriggerSignatures: readonly string[];
+}
+
+export interface SourceGeneratedColumnSpec {
+  readonly column: string;
+  readonly expressions: readonly string[];
 }
 
 export interface BusinessQuerySpec {
@@ -185,6 +192,18 @@ export function normalizePostgresRoutineDefinition(value: string): string {
       .replace(/\s+/g, ' ')
       .replace(/\s*,\s*/g, ','),
   ).trim();
+}
+
+export function normalizeMysqlGeneratedExpression(value: string): string {
+  return stripOuterParentheses(
+    transformSqlOutsideStrings(value, (segment) =>
+      segment
+        .toLowerCase()
+        .replaceAll('`', '')
+        .replace(/_(?:utf8mb4|utf8mb3|utf8|latin1)\b/g, '')
+        .replace(/\s+/g, ''),
+    ).trim(),
+  );
 }
 
 export function normalizePostgresCheckExpression(
@@ -363,6 +382,67 @@ function requiredConstraintName(
   return value;
 }
 
+const sourceColumnTypeOverrides: Readonly<Record<string, string>> =
+  Object.freeze({
+    'monitor_history_agg.granularity': "enum('hour','day','month')",
+    'monitor_history_agg_dim.granularity': "enum('hour','day','month')",
+    'monitor_history_agg_variant_group.granularity':
+      "enum('hour','day','month')",
+    'users.status': "enum('active','inactive','locked','suspended','pending')",
+    'sessions.status': "enum('active','revoked')",
+  });
+
+function sourceColumnType(
+  tableName: string,
+  columnName: string,
+  postgresType: string,
+): string {
+  const override = sourceColumnTypeOverrides[`${tableName}.${columnName}`];
+  if (override) return override;
+  if (postgresType === 'boolean') return 'tinyint(1)';
+  if (postgresType === 'timestamp') return 'datetime';
+  if (postgresType === 'jsonb') return 'text';
+  if (postgresType === 'integer') return 'int';
+  return postgresType;
+}
+
+const monitorHistorySourceGeneratedColumns: readonly SourceGeneratedColumnSpec[] =
+  Object.freeze([
+    Object.freeze({
+      column: 'hour_ts',
+      expressions: Object.freeze([
+        normalizeMysqlGeneratedExpression(
+          "TIMESTAMP(DATE_FORMAT(check_time, '%Y-%m-%d %H:00:00'))",
+        ),
+      ]),
+    }),
+    Object.freeze({
+      column: 'day_ts',
+      expressions: Object.freeze([
+        normalizeMysqlGeneratedExpression('TIMESTAMP(DATE(check_time))'),
+        normalizeMysqlGeneratedExpression(
+          'TIMESTAMP(CAST(check_time AS DATE))',
+        ),
+      ]),
+    }),
+    Object.freeze({
+      column: 'month_ts',
+      expressions: Object.freeze([
+        normalizeMysqlGeneratedExpression(
+          "TIMESTAMP(DATE_FORMAT(check_time, '%Y-%m-01 00:00:00'))",
+        ),
+      ]),
+    }),
+  ]);
+
+function sourceGeneratedColumns(
+  tableName: string,
+): readonly SourceGeneratedColumnSpec[] {
+  return tableName === 'monitor_history'
+    ? monitorHistorySourceGeneratedColumns
+    : Object.freeze([]);
+}
+
 function tableSpec(table: PgTable): TableMigrationSpec {
   const tableName = getTableName(table);
   const columns = Object.values(getTableColumns(table));
@@ -384,6 +464,23 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     columns
       .filter((column) => Boolean(column.generated))
       .map((column) => column.name),
+  );
+  const expectedSourceGeneratedColumns = sourceGeneratedColumns(tableName);
+  if (
+    JSON.stringify([...generatedColumns].sort()) !==
+    JSON.stringify(
+      expectedSourceGeneratedColumns.map(({ column }) => column).sort(),
+    )
+  ) {
+    throw new Error(
+      `migration table ${tableName} source generated-column catalog is incomplete`,
+    );
+  }
+  const sourceColumnTypeSignatures = columns.map((column) =>
+    [
+      column.name,
+      sourceColumnType(tableName, column.name, column.getSQLType()),
+    ].join('|'),
   );
   const targetColumnSignatures = columns.map((column) => {
     const identityKind = column.generatedIdentity
@@ -547,6 +644,10 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     sourceKeysetColumns: Object.freeze(
       primaryKeyColumns.map((column) => sourceKeysetColumn(tableName, column)),
     ),
+    sourceColumnTypeSignatures: Object.freeze(
+      sourceColumnTypeSignatures.sort(),
+    ),
+    sourceGeneratedColumns: expectedSourceGeneratedColumns,
     booleanColumns: new Set(
       columns
         .filter((column) => column.getSQLType() === 'boolean')

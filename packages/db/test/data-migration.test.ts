@@ -40,6 +40,7 @@ import {
 } from '../src/migration/logger';
 import {
   databaseMigrationSpecs,
+  normalizeMysqlGeneratedExpression,
   normalizePostgresCheckExpression,
   normalizePostgresExpression,
   normalizePostgresRoutineDefinition,
@@ -130,6 +131,17 @@ describe('P1-T3 migration registry', () => {
     ]);
     expect(monitorHistory?.insertColumns).not.toContain('month_ts');
     expect(monitorHistory?.identityColumns).toEqual(['id']);
+    expect(monitorHistory?.sourceColumnTypeSignatures).toContain(
+      'check_result|text',
+    );
+    expect(monitorHistory?.sourceColumnTypeSignatures).toContain(
+      'is_broken|tinyint(1)',
+    );
+    expect(monitorHistory?.sourceGeneratedColumns).toEqual([
+      expect.objectContaining({ column: 'hour_ts' }),
+      expect.objectContaining({ column: 'day_ts' }),
+      expect.objectContaining({ column: 'month_ts' }),
+    ]);
     expect(monitorHistory?.targetSequenceSignatures).toEqual([
       'id|public|monitor_history_id_seq|bigint|1|1|1|9223372036854775807|1|no-cycle',
     ]);
@@ -187,6 +199,11 @@ describe('P1-T3 migration registry', () => {
   });
 
   it('将 PG catalog 重写的 CHECK 和表达式索引归一到 Drizzle 定义', () => {
+    expect(
+      normalizeMysqlGeneratedExpression(
+        "timestamp(date_format(`check_time`,_utf8mb4'%Y-%m-%d %H:00:00'))",
+      ),
+    ).toBe("timestamp(date_format(check_time,'%Y-%m-%d %H:00:00'))");
     expect(
       normalizePostgresCheckExpression(
         "CHECK (((granularity)::text = ANY ((ARRAY['hour'::character varying, 'day'::character varying, 'month'::character varying])::text[])))",
@@ -597,6 +614,22 @@ describe('migration config and logging safety', () => {
       await writeDataMigrationReport(report, reportPath);
       expect(JSON.parse(await readFile(reportPath, 'utf8'))).toEqual(report);
       expect(await readdir(join(directory, 'nested'))).toEqual(['report.json']);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('报告预检在数据库工作前拒绝目录目标', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'asin-report-directory-'));
+    const reportPath = join(directory, 'report.json');
+    try {
+      await mkdir(reportPath);
+      await expect(
+        prepareDataMigrationReportDestination(reportPath),
+      ).rejects.toMatchObject({
+        code: 'REPORT_DESTINATION_INVALID',
+        scope: 'report.preflight',
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

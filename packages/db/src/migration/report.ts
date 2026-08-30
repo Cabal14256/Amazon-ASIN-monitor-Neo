@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import {
@@ -16,12 +16,26 @@ export async function prepareDataMigrationReportDestination(
   const probePath = `${reportPath}.${randomUUID()}.probe`;
   try {
     await mkdir(parentDirectory, { recursive: true });
+    try {
+      const destination = await lstat(reportPath);
+      if (!destination.isFile()) {
+        throw new DataMigrationError(
+          'REPORT_DESTINATION_INVALID',
+          'report.preflight',
+          'migration report destination must be a regular file path',
+        );
+      }
+    } catch (error) {
+      if (error instanceof DataMigrationError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     await writeFile(probePath, '', {
       encoding: 'utf8',
       flag: 'wx',
       mode: 0o600,
     });
   } catch (error) {
+    if (error instanceof DataMigrationError) throw error;
     throw new DataMigrationError(
       'REPORT_DESTINATION_UNWRITABLE',
       'report.preflight',

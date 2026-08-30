@@ -497,6 +497,84 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标表变为 UNLOGGED 时在重置前拒绝迁移', async () => {
+      await primaryTarget.query('ALTER TABLE public.audit_logs SET UNLOGGED');
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.tables',
+        });
+      } finally {
+        await primaryTarget.query('ALTER TABLE public.audit_logs SET LOGGED');
+      }
+    });
+
+    it('源列类型、主键或生成表达式漂移时在重置前拒绝迁移', async () => {
+      const source = mysqlIdentifier(sourcePrimaryDatabase);
+      await mysqlAdmin.query(`
+        ALTER TABLE ${source}.audit_logs
+          MODIFY COLUMN response_status BIGINT NULL;
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'SOURCE_SCHEMA_MISMATCH',
+          scope: 'primary.source.audit_logs.column_types',
+        });
+      } finally {
+        await mysqlAdmin.query(`
+          ALTER TABLE ${source}.audit_logs
+            MODIFY COLUMN response_status INT NULL;
+        `);
+      }
+
+      await mysqlAdmin.query(`
+        ALTER TABLE ${source}.monitor_history_agg
+          DROP PRIMARY KEY,
+          ADD UNIQUE KEY migration_drift_key
+            (granularity, time_slot, country, asin_key);
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'SOURCE_SCHEMA_MISMATCH',
+          scope: 'primary.source.monitor_history_agg.primary_key',
+        });
+      } finally {
+        await mysqlAdmin.query(`
+          ALTER TABLE ${source}.monitor_history_agg
+            DROP INDEX migration_drift_key,
+            ADD PRIMARY KEY (granularity, time_slot, country, asin_key);
+        `);
+      }
+
+      await mysqlAdmin.query(`
+        ALTER TABLE ${source}.monitor_history
+          MODIFY COLUMN hour_ts DATETIME
+          GENERATED ALWAYS AS (TIMESTAMP(DATE(check_time))) STORED;
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'SOURCE_SCHEMA_MISMATCH',
+          scope: 'primary.source.monitor_history.generated_columns',
+        });
+      } finally {
+        await mysqlAdmin.query(`
+          ALTER TABLE ${source}.monitor_history
+            MODIFY COLUMN hour_ts DATETIME
+            GENERATED ALWAYS AS (
+              TIMESTAMP(DATE_FORMAT(check_time, '%Y-%m-%d %H:00:00'))
+            ) STORED;
+        `);
+      }
+    });
+
     it('目标默认值、更新时间触发器或函数漂移时在重置前拒绝迁移', async () => {
       await primaryTarget.query(
         "ALTER TABLE public.variant_groups ALTER COLUMN variant_status SET DEFAULT 'foo.NORMAL'",

@@ -35,6 +35,7 @@ import { DataMigrationError, asDataMigrationError } from './errors';
 import { createMigrationLogger, type MigrationLogger } from './logger';
 import {
   databaseMigrationSpecs,
+  normalizeMysqlGeneratedExpression,
   normalizePostgresCheckExpression,
   normalizePostgresExpression,
   normalizePostgresRoutineDefinition,
@@ -194,7 +195,10 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
     `
       SELECT
         TABLE_NAME AS table_name,
-        COLUMN_NAME AS column_name
+        COLUMN_NAME AS column_name,
+        LOWER(COLUMN_TYPE) AS column_type,
+        EXTRA AS extra,
+        COALESCE(GENERATION_EXPRESSION, '') AS generation_expression
       FROM information_schema.columns
       WHERE table_schema = ?
       ORDER BY table_name, ordinal_position
@@ -210,20 +214,102 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
       'SOURCE_SCHEMA_MISMATCH',
       `${context.spec.logicalName}.source.${table.name}`,
     );
+    compareExactSet(
+      table.sourceColumnTypeSignatures,
+      columnRows
+        .filter(({ table_name }) => table_name === table.name)
+        .map(({ column_name, column_type }) =>
+          [String(column_name), String(column_type)].join('|'),
+        ),
+      'SOURCE_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.source.${table.name}.column_types`,
+    );
+
+    const expectedGeneratedColumns = new Map(
+      table.sourceGeneratedColumns.map(({ column, expressions }) => [
+        column,
+        expressions,
+      ]),
+    );
+    const actualGeneratedColumns = columnRows.filter(
+      ({ table_name, extra, generation_expression }) =>
+        table_name === table.name &&
+        (/\b(?:stored|virtual) generated\b/i.test(String(extra)) ||
+          String(generation_expression).trim().length > 0),
+    );
+    compareExactSet(
+      [...expectedGeneratedColumns.keys()],
+      actualGeneratedColumns.map(({ column_name }) => String(column_name)),
+      'SOURCE_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.source.${table.name}.generated_columns`,
+    );
+    for (const generatedColumn of actualGeneratedColumns) {
+      const columnName = String(generatedColumn.column_name);
+      const acceptedExpressions = expectedGeneratedColumns.get(columnName);
+      const normalizedExpression = normalizeMysqlGeneratedExpression(
+        String(generatedColumn.generation_expression),
+      );
+      if (
+        !/\bstored generated\b/i.test(String(generatedColumn.extra)) ||
+        !acceptedExpressions?.includes(normalizedExpression)
+      ) {
+        throw new DataMigrationError(
+          'SOURCE_SCHEMA_MISMATCH',
+          `${context.spec.logicalName}.source.${table.name}.generated_columns`,
+          `source generated column definition mismatch for ${table.name}.${columnName}`,
+        );
+      }
+    }
+  }
+
+  const primaryKeyRows = await mysqlRows(
+    context.source,
+    `
+      SELECT
+        TABLE_NAME AS table_name,
+        COLUMN_NAME AS column_name,
+        SEQ_IN_INDEX AS sequence_in_index
+      FROM information_schema.statistics
+      WHERE table_schema = ?
+        AND index_name = 'PRIMARY'
+      ORDER BY table_name, sequence_in_index
+    `,
+    [context.sourceDatabase],
+  );
+  for (const table of context.spec.tables) {
+    compareExactSet(
+      table.primaryKeyColumns.map((column, index) => `${index + 1}|${column}`),
+      primaryKeyRows
+        .filter(({ table_name }) => table_name === table.name)
+        .map(
+          ({ sequence_in_index, column_name }) =>
+            `${String(sequence_in_index)}|${String(column_name)}`,
+        ),
+      'SOURCE_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.source.${table.name}.primary_key`,
+    );
   }
 }
 
 async function validateTargetSchema(context: DatabaseContext): Promise<void> {
-  const tableResult = await context.target.query<{ table_name: string }>(`
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name
+  const tableResult = await context.target.query<{
+    table_name: string;
+    persistence: string;
+  }>(`
+    SELECT
+      relation.relname AS table_name,
+      relation.relpersistence AS persistence
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND relation.relkind IN ('r', 'p')
+    ORDER BY relation.relname
   `);
   compareExactSet(
-    context.spec.tables.map(({ name }) => name),
-    tableResult.rows.map(({ table_name }) => table_name),
+    context.spec.tables.map(({ name }) => `${name}|p`),
+    tableResult.rows.map(
+      ({ table_name, persistence }) => `${table_name}|${persistence}`,
+    ),
     'TARGET_SCHEMA_MISMATCH',
     `${context.spec.logicalName}.target.tables`,
   );
@@ -959,7 +1045,7 @@ async function migrateTable(
   sampleSize: number,
   logger: MigrationLogger,
 ): Promise<DataMigrationTableReport> {
-  const startedAt = Date.now();
+  const startedAt = process.hrtime.bigint();
   const expectedRows = await sourceCount(context, table);
   const sampler = new DeterministicSampler(table.name, sampleSize);
   let cursor: readonly unknown[] | undefined;
@@ -1022,7 +1108,7 @@ async function migrateTable(
     sampledRows: sampler.samples().length,
     sourceSampleDigest,
     targetSampleDigest: targetDigest,
-    durationMs: Date.now() - startedAt,
+    durationMs: monotonicElapsedMilliseconds(startedAt),
     status: 'passed',
   };
   logger.info('data_migration.table_finished', {
@@ -1070,7 +1156,7 @@ async function migrateDatabase(
   config: DataMigrationConfig,
   logger: MigrationLogger,
 ): Promise<DataMigrationDatabaseReport> {
-  const startedAt = Date.now();
+  const startedAt = process.hrtime.bigint();
   const tables: DataMigrationTableReport[] = [];
   for (const table of context.spec.tables) {
     tables.push(
@@ -1088,7 +1174,7 @@ async function migrateDatabase(
     logicalName: context.spec.logicalName,
     tables,
     businessQueries,
-    durationMs: Date.now() - startedAt,
+    durationMs: monotonicElapsedMilliseconds(startedAt),
     status: 'passed',
   };
 }
@@ -1217,6 +1303,10 @@ function normalizeRunMetadata(metadata: DataMigrationRunMetadata): {
   };
 }
 
+function monotonicElapsedMilliseconds(startedAt: bigint): number {
+  return Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+}
+
 export interface TargetCommitState {
   readonly logicalName: MigrationDatabaseName;
   readonly attempted: boolean;
@@ -1273,6 +1363,7 @@ export async function runDataMigration(
   }
 
   const { runId, startedAt } = normalizeRunMetadata(metadata);
+  const monotonicStartedAt = process.hrtime.bigint();
   const contexts: DatabaseContext[] = [];
   logger.info('data_migration.started', {
     runId,
@@ -1323,7 +1414,7 @@ export async function runDataMigration(
     logger.info('data_migration.finished', {
       runId,
       status: report.status,
-      durationMs: new Date(report.finishedAt).getTime() - startedAt.getTime(),
+      durationMs: monotonicElapsedMilliseconds(monotonicStartedAt),
     });
     return report;
   } catch (error) {
