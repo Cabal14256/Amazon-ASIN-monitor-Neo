@@ -757,13 +757,15 @@ BEGIN
       jobs.scheduled,
       jobs.fixed_schedule,
       jobs.initial_start,
-      jobs.timezone,
+      catalog_job.timezone,
       jobs.config
     FROM selected_materialization expected_policy
     JOIN timescaledb_information.jobs jobs
       ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
      AND (jobs.config ->> 'mat_hypertable_id')::integer =
        expected_policy.materialization_hypertable_id
+    JOIN _timescaledb_catalog.bgw_job catalog_job
+      ON catalog_job.id = jobs.job_id
   )
   SELECT
     COUNT(*)::integer,

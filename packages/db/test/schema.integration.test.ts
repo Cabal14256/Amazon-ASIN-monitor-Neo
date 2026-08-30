@@ -286,11 +286,13 @@ describe('P1-T2 PostgreSQL schema integration', () => {
           AND jobs.scheduled
           AND jobs.fixed_schedule
           AND jobs.initial_start = TIMESTAMPTZ '2026-01-01 00:00:00+08'
-          AND jobs.timezone = 'Asia/Shanghai' AS policy_matches
+          AND catalog_job.timezone = 'Asia/Shanghai' AS policy_matches
       FROM selected_ids
       JOIN timescaledb_information.jobs jobs
         ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
        AND (jobs.config ->> 'mat_hypertable_id')::integer = selected_ids.id
+      JOIN _timescaledb_catalog.bgw_job catalog_job
+        ON catalog_job.id = jobs.job_id
       ORDER BY selected_ids.view_name
     `,
     );
