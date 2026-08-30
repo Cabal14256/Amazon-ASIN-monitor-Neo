@@ -17,6 +17,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  canonicalMultisetDigest,
   DeterministicSampler,
   migrationJsonText,
   parseMigrationJsonDocument,
@@ -408,6 +409,20 @@ describe('migration canonical conversion', () => {
     expect(forward.samples()).toHaveLength(2);
     expect(forward.digest(['id'])).toMatch(/^[a-f0-9]{64}$/);
     expect(sha256({ b: 2, a: 1 })).toBe(sha256({ a: 1, b: 2 }));
+  });
+
+  it('业务查询摘要忽略行顺序但保留重复行', () => {
+    const rows = [
+      { code: 'a-order', permission_count: '0' },
+      { code: 'B-order', permission_count: '0' },
+      { code: 'B-order', permission_count: '0' },
+    ];
+    expect(canonicalMultisetDigest(rows)).toBe(
+      canonicalMultisetDigest([...rows].reverse()),
+    );
+    expect(canonicalMultisetDigest(rows)).not.toBe(
+      canonicalMultisetDigest(rows.slice(1)),
+    );
   });
 });
 

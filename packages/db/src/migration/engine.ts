@@ -21,6 +21,7 @@ import {
 
 import { createPgPool } from '../client';
 import {
+  canonicalMultisetDigest,
   DeterministicSampler,
   parseMigrationJsonDocument,
   sha256,
@@ -31,7 +32,7 @@ import {
   validateDataMigrationConfig,
   type DataMigrationConfig,
 } from './config';
-import { DataMigrationError, asDataMigrationError } from './errors';
+import { asDataMigrationError, DataMigrationError } from './errors';
 import { createMigrationLogger, type MigrationLogger } from './logger';
 import {
   databaseMigrationSpecs,
@@ -893,20 +894,36 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
 
 async function resetTarget(context: DatabaseContext): Promise<void> {
   await context.target.query(
-    `TRUNCATE TABLE ${targetTableList(context)} RESTART IDENTITY`,
+    `TRUNCATE TABLE ${targetTableList(context, true)} RESTART IDENTITY`,
   );
 }
 
-function targetTableList(context: DatabaseContext): string {
+function targetTableList(context: DatabaseContext, only = false): string {
   return context.spec.tables
-    .map(({ name }) => quotePgIdentifier(name))
+    .map(({ name }) => `${only ? 'ONLY ' : ''}${quotePgIdentifier(name)}`)
+    .join(', ');
+}
+
+function targetSequenceList(context: DatabaseContext): string {
+  return context.spec.tables
+    .flatMap((table) => table.targetSequenceSignatures)
+    .map((signature) => {
+      const [, schema, name] = signature.split('|');
+      return `${quotePgIdentifier(schema)}.${quotePgIdentifier(name)}`;
+    })
     .join(', ');
 }
 
 async function lockTargetTables(context: DatabaseContext): Promise<void> {
   await context.target.query(
-    `LOCK TABLE ${targetTableList(context)} IN ACCESS EXCLUSIVE MODE`,
+    `LOCK TABLE ${targetTableList(context, true)} IN ACCESS EXCLUSIVE MODE`,
   );
+  const sequences = targetSequenceList(context);
+  if (sequences) {
+    await context.target.query(
+      `LOCK TABLE ${sequences} IN ACCESS EXCLUSIVE MODE`,
+    );
+  }
 }
 
 async function sourceCount(
@@ -1248,8 +1265,8 @@ async function reconcileBusinessQueries(
     const targetResult = await context.target.query<MigrationRow>(
       query.targetSql,
     );
-    const sourceDigest = sha256(sourceRows);
-    const targetDigest = sha256(targetResult.rows);
+    const sourceDigest = canonicalMultisetDigest(sourceRows);
+    const targetDigest = canonicalMultisetDigest(targetResult.rows);
     if (sourceDigest !== targetDigest) {
       throw new DataMigrationError(
         'BUSINESS_QUERY_MISMATCH',

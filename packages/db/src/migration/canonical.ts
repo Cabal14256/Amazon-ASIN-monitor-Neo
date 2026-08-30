@@ -78,6 +78,13 @@ export function sha256(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
 }
 
+export function canonicalMultisetDigest(values: readonly unknown[]): string {
+  const canonicalValues = values
+    .map(canonicalJson)
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  return sha256(canonicalValues);
+}
+
 function booleanValue(
   value: unknown,
   table: string,

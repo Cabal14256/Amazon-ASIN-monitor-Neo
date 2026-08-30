@@ -162,6 +162,11 @@ async function seedPrimarySource(): Promise<void> {
       INSERT INTO sp_api_config (config_key, config_value, description)
       VALUES ('integration_fixture', 'non-secret-fixture', 'integration fixture');
 
+      INSERT INTO roles (id, code, name, description)
+      VALUES
+        ('role-ci-order-a', 'a-order', 'Collation A', 'business digest ordering fixture'),
+        ('role-ci-order-b', 'B-order', 'Collation B', 'business digest ordering fixture');
+
       INSERT INTO users
         (id, username, password, real_name, status, force_password_change, failed_login_attempts)
       VALUES
@@ -940,10 +945,10 @@ describe.skipIf(!integrationEnabled)(
       expect(report.status).toBe('passed');
     });
 
-    it('在 schema 校验前持有全部目标表的排他锁', async () => {
+    it('在 schema 校验前持有全部目标表与 identity sequence 的排他锁', async () => {
       let lockProbe:
         | Promise<{
-            rows: Array<{ mode: string; granted: boolean }>;
+            rows: Array<{ table_locked: boolean; sequence_locked: boolean }>;
           }>
         | undefined;
       const lockLogger: MigrationLogger = {
@@ -955,13 +960,22 @@ describe.skipIf(!integrationEnabled)(
             !lockProbe
           ) {
             lockProbe = primaryTarget.query<{
-              mode: string;
-              granted: boolean;
+              table_locked: boolean;
+              sequence_locked: boolean;
             }>(`
-              SELECT mode, granted
+              SELECT
+                COALESCE(BOOL_OR(
+                  relation = 'public.audit_logs'::regclass::oid
+                  AND mode = 'AccessExclusiveLock'
+                  AND granted
+                ), false) AS table_locked,
+                COALESCE(BOOL_OR(
+                  relation = 'public.monitor_history_id_seq'::regclass::oid
+                  AND mode = 'AccessExclusiveLock'
+                  AND granted
+                ), false) AS sequence_locked
               FROM pg_locks
               WHERE locktype = 'relation'
-                AND relation = 'public.audit_logs'::regclass::oid
                 AND pid <> pg_backend_pid()
             `);
           }
@@ -972,10 +986,31 @@ describe.skipIf(!integrationEnabled)(
       const report = await runDataMigration(migrationConfig, lockLogger);
       expect(report.status).toBe('passed');
       expect(lockProbe).toBeDefined();
-      expect((await lockProbe!).rows).toContainEqual({
-        mode: 'AccessExclusiveLock',
-        granted: true,
+      expect((await lockProbe!).rows[0]).toEqual({
+        table_locked: true,
+        sequence_locked: true,
       });
+    });
+
+    it('重置注册表时不递归清空外部 schema 的继承子表', async () => {
+      await primaryTarget.query(`
+        CREATE SCHEMA migration_descendant;
+        CREATE TABLE migration_descendant.audit_logs_child ()
+          INHERITS (public.audit_logs);
+        INSERT INTO migration_descendant.audit_logs_child (id, action)
+        VALUES (9900000000000001, 'PRESERVE');
+      `);
+      try {
+        const report = await runDataMigration(migrationConfig, logger);
+        expect(report.status).toBe('passed');
+        const preserved = await primaryTarget.query<{ count: string }>(`
+          SELECT COUNT(*)::text AS count
+          FROM ONLY migration_descendant.audit_logs_child
+        `);
+        expect(preserved.rows[0].count).toBe('1');
+      } finally {
+        await primaryTarget.query('DROP SCHEMA migration_descendant CASCADE');
+      }
     });
 
     it('连续两次迁移 21 + 4 表且行数、样本和关键业务查询一致', async () => {
