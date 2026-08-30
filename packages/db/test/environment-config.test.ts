@@ -85,6 +85,15 @@ describe('TimescaleDB 环境配置', () => {
     expect(dbPackage.scripts['test:integration']).toContain(
       '@asin-monitor/config build',
     );
+    expect(dbPackage.scripts['test:integration']).toContain(
+      '@asin-monitor/contracts build',
+    );
+    expect(dbPackage.scripts['test:integration']).toContain(
+      'data-migration.integration.test.ts',
+    );
+    expect(rootPackage.scripts['db:migrate:data']).toContain(
+      '@asin-monitor/db migrate:data',
+    );
     expect(integrationTest).toContain('loadEnvironmentFiles();');
     expect(workflow).toContain(
       'pnpm --filter @asin-monitor/db test:integration',

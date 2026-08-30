@@ -5,6 +5,7 @@ server/node_modules/
 # 环境变量和配置
 .env
 .env.neo
+.env.migration
 .env.local
 .env.*.local
 server/.env
@@ -24,6 +25,7 @@ nginx.conf
 /.umi-test
 dist/
 coverage/
+/artifacts/
 /.mfsu
 .swc
 
