@@ -272,7 +272,7 @@ describe('P1-T2 PostgreSQL schema integration', () => {
           ON aggregate_row.view_schema = 'public'
          AND aggregate_row.view_name = expected_policy.view_name
       ), selected_ids AS (
-        SELECT selected_materializations.*, hypertable.id
+        SELECT materialization.*, hypertable.id
         FROM _timescaledb_catalog.hypertable hypertable
         JOIN selected_materializations materialization
           ON materialization.schema_name = hypertable.schema_name
