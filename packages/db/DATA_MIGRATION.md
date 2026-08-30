@@ -19,7 +19,7 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 
 ## 安全边界
 
-迁移会对两个 PG 目标库的全部 21 + 4 张业务表执行 `TRUNCATE ... RESTART IDENTITY CASCADE`。以下条件缺一不可：
+迁移会对两个 PG 目标库的全部 21 + 4 张业务表执行一次显式的 `TRUNCATE ... RESTART IDENTITY`，不会使用 `CASCADE` 清空注册表之外的跨 schema 引用表。若存在这类外部引用，重置会安全失败，必须先确认归属并解除引用，不能临时扩大清空范围。以下条件缺一不可：
 
 1. 两个目标库已应用 [`migrations/0000_baseline.sql`](./migrations/0000_baseline.sql)，且不是当前生产写库；
 2. 已完成可恢复备份，并记录恢复命令和负责人；
@@ -27,7 +27,7 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 4. MySQL 账号仅对两个源库拥有 `SELECT` 权限；
 5. 两个源库的 25 张表均使用 InnoDB；最终同步时，Legacy API、调度器和 Worker 已停止产生数据库写入，旧 Bull 队列已 drain。
 
-未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源表/列集合，以及目标表、精确列类型与可空性、identity/生成列、主外键、唯一/CHECK 约束和索引必须与 Drizzle 迁移注册表完全一致。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
+未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源表/列集合，以及目标表、精确列类型与可空性、identity/生成列、主外键、唯一/CHECK 约束定义和索引方法/列或表达式/谓词必须与 Drizzle 迁移注册表完全一致。目标事务还会把 `search_path` 固定为 `public, pg_catalog`，因此角色或 URL 的自定义 schema 不会截获迁移 DML。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
 
 两个 PG database 无法共享普通本地事务：工具先完成两库导入与对拍，再逐库提交。极端情况下第一个目标提交后、第二个目标提交失败，报告会返回 `TARGET_COMMIT_PARTIAL`；若已发送 `COMMIT` 但连接在确认响应前断开，则返回 `TARGET_COMMIT_INDETERMINATE`。两种情况都不得假设事务已回滚或直接放量，应先核验、恢复或再次重置两个目标，再从仍冻结的 MySQL 重新执行。
 
@@ -78,7 +78,7 @@ corepack pnpm db:migrate:data
 - `DATETIME` 以 D8 `Asia/Shanghai` 的无时区文本传递；
 - bigint 全程以十进制字符串传递，避免 JavaScript 精度丢失；
 - PG generated columns 不写入，由目标表达式生成；
-- identity 保留源值，导入后把 sequence 的下一值调整为 MySQL `AUTO_INCREMENT` 元数据中的实际下一值；即使高 ID 已删除或计数器被显式推进也不会复用旧编号。
+- identity 保留源值，导入后用事务化 `ALTER SEQUENCE ... RESTART WITH` 把下一值调整为 MySQL `AUTO_INCREMENT` 元数据中的实际下一值；即使高 ID 已删除或计数器被显式推进也不会复用旧编号，提交前普通失败也会随目标事务一起恢复原 sequence 状态。
 
 成功报告符合 `packages/contracts` 的 `dataMigrationReportSchema`，仅包含：
 

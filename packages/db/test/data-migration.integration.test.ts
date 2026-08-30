@@ -40,6 +40,12 @@ function mysqlIdentifier(name: string): string {
   return `\`${name}\``;
 }
 
+function targetUrlWithShadowSearchPath(value: string): string {
+  const url = new URL(value);
+  url.searchParams.set('options', '-csearch_path=migration_shadow,public');
+  return url.toString();
+}
+
 async function installLegacySchema(
   fileName: string,
   legacyDatabase: string,
@@ -217,8 +223,8 @@ describe.skipIf(!integrationEnabled)(
         competitorDatabase: sourceCompetitorDatabase,
       },
       postgres: {
-        primaryUrl: primaryTargetUrl,
-        competitorUrl: competitorTargetUrl,
+        primaryUrl: targetUrlWithShadowSearchPath(primaryTargetUrl),
+        competitorUrl: targetUrlWithShadowSearchPath(competitorTargetUrl),
       },
       batchSize: 2,
       sampleSize: 20,
@@ -266,9 +272,30 @@ describe.skipIf(!integrationEnabled)(
         connectionString: competitorTargetUrl,
         max: 1,
       });
+      await primaryTarget.query(`
+        CREATE SCHEMA migration_shadow;
+        CREATE TABLE migration_shadow.roles (
+          id text PRIMARY KEY,
+          marker text NOT NULL
+        );
+        INSERT INTO migration_shadow.roles VALUES ('shadow-role', 'preserve');
+      `);
+      await competitorTarget.query(`
+        CREATE SCHEMA migration_shadow;
+        CREATE TABLE migration_shadow.competitor_asins (
+          id text PRIMARY KEY,
+          marker text NOT NULL
+        );
+        INSERT INTO migration_shadow.competitor_asins
+        VALUES ('shadow-asin', 'preserve');
+      `);
     }, 30_000);
 
     afterAll(async () => {
+      await Promise.allSettled([
+        primaryTarget?.query('DROP SCHEMA migration_shadow CASCADE'),
+        competitorTarget?.query('DROP SCHEMA migration_shadow CASCADE'),
+      ]);
       await Promise.allSettled([primaryTarget?.end(), competitorTarget?.end()]);
       if (mysqlAdmin) {
         await mysqlAdmin.query(
@@ -317,6 +344,116 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标 CHECK 或索引定义漂移时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(`
+        ALTER TABLE public.users DROP CONSTRAINT ck_users_status;
+        ALTER TABLE public.users
+          ADD CONSTRAINT ck_users_status CHECK (status <> 'INVALID');
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.users.constraints',
+        });
+      } finally {
+        await primaryTarget.query(`
+          ALTER TABLE public.users DROP CONSTRAINT ck_users_status;
+          ALTER TABLE public.users
+            ADD CONSTRAINT ck_users_status
+            CHECK (status IN ('ACTIVE', 'INACTIVE', 'LOCKED', 'SUSPENDED', 'PENDING'));
+        `);
+      }
+
+      await primaryTarget.query(`
+        DROP INDEX public.idx_monitor_history_status_interval_refresh;
+        CREATE INDEX idx_monitor_history_status_interval_refresh
+          ON public.monitor_history (country);
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.monitor_history.indexes',
+        });
+      } finally {
+        await primaryTarget.query(`
+          DROP INDEX public.idx_monitor_history_status_interval_refresh;
+          CREATE INDEX idx_monitor_history_status_interval_refresh
+            ON public.monitor_history (check_type, check_time, id);
+        `);
+      }
+    });
+
+    it('拒绝跨 schema 级联重置并保留外部引用数据', async () => {
+      await primaryTarget.query(`
+        CREATE SCHEMA migration_external;
+        CREATE TABLE migration_external.role_refs (
+          id integer PRIMARY KEY,
+          role_id varchar(50) NOT NULL REFERENCES public.roles(id)
+        );
+        INSERT INTO migration_external.role_refs VALUES (1, 'role-003');
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({ code: 'UNEXPECTED_MIGRATION_ERROR' });
+        const preserved = await primaryTarget.query<{ count: string }>(
+          'SELECT COUNT(*)::text AS count FROM migration_external.role_refs',
+        );
+        expect(preserved.rows[0].count).toBe('1');
+      } finally {
+        await primaryTarget.query('DROP SCHEMA migration_external CASCADE');
+      }
+    });
+
+    it('普通失败回滚数据和事务化 sequence restart', async () => {
+      await primaryTarget.query(`
+        ALTER SEQUENCE public.monitor_history_id_seq RESTART WITH 7777;
+        CREATE FUNCTION public.reject_migration_audit_log()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'integration fixture rejects audit log';
+        END;
+        $$;
+        CREATE TRIGGER reject_migration_audit_log
+        BEFORE INSERT ON public.audit_logs
+        FOR EACH ROW EXECUTE FUNCTION public.reject_migration_audit_log();
+      `);
+      const beforeSequence = await primaryTarget.query<{
+        last_value: string;
+        is_called: boolean;
+      }>(
+        'SELECT last_value::text, is_called FROM public.monitor_history_id_seq',
+      );
+      const beforeRoles = await primaryTarget.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM public.roles',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({ code: 'UNEXPECTED_MIGRATION_ERROR' });
+      } finally {
+        await primaryTarget.query(`
+          DROP TRIGGER reject_migration_audit_log ON public.audit_logs;
+          DROP FUNCTION public.reject_migration_audit_log();
+        `);
+      }
+      const afterSequence = await primaryTarget.query<{
+        last_value: string;
+        is_called: boolean;
+      }>(
+        'SELECT last_value::text, is_called FROM public.monitor_history_id_seq',
+      );
+      const afterRoles = await primaryTarget.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM public.roles',
+      );
+      expect(afterSequence.rows[0]).toEqual(beforeSequence.rows[0]);
+      expect(afterRoles.rows[0]).toEqual(beforeRoles.rows[0]);
+    });
+
     it('连续两次迁移 21 + 4 表且行数、样本和关键业务查询一致', async () => {
       const first = await runDataMigration(migrationConfig, logger);
       const second = await runDataMigration(migrationConfig, logger);
@@ -340,6 +477,17 @@ describe.skipIf(!integrationEnabled)(
       expect(
         second.databases.flatMap(({ businessQueries }) => businessQueries),
       ).toHaveLength(7);
+      const shadowPrimary = await primaryTarget.query<{ marker: string }>(
+        'SELECT marker FROM migration_shadow.roles WHERE id = $1',
+        ['shadow-role'],
+      );
+      const shadowCompetitor = await competitorTarget.query<{
+        marker: string;
+      }>('SELECT marker FROM migration_shadow.competitor_asins WHERE id = $1', [
+        'shadow-asin',
+      ]);
+      expect(shadowPrimary.rows[0]?.marker).toBe('preserve');
+      expect(shadowCompetitor.rows[0]?.marker).toBe('preserve');
     }, 60_000);
 
     it('保留 bigint、D8 时间、生成列、JSONB 和布尔值并重置 identity', async () => {

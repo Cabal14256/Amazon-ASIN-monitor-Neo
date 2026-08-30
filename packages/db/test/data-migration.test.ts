@@ -28,7 +28,11 @@ import {
   createMigrationLogger,
   sanitizeMigrationErrorMessage,
 } from '../src/migration/logger';
-import { databaseMigrationSpecs } from '../src/migration/registry';
+import {
+  databaseMigrationSpecs,
+  normalizePostgresCheckExpression,
+  normalizePostgresExpression,
+} from '../src/migration/registry';
 import {
   prepareDataMigrationReportDestination,
   writeDataMigrationReport,
@@ -125,7 +129,10 @@ describe('P1-T3 migration registry', () => {
       'p|monitor_history_pkey|id',
     );
     expect(monitorHistory?.targetIndexSignatures).toContain(
-      'monitor_history_pkey|unique',
+      'monitor_history_pkey|unique|btree|id||valid|ready',
+    );
+    expect(monitorHistory?.targetIndexSignatures).toContain(
+      'idx_monitor_history_status_interval_refresh|non-unique|btree|check_type,check_time,id||valid|ready',
     );
 
     const asins = databaseMigrationSpecs[0].tables.find(
@@ -136,6 +143,27 @@ describe('P1-T3 migration registry', () => {
     );
     expect(asins.targetConstraintSignatures).toContain(
       'f|fk_asins_variant_group|variant_group_id|variant_groups|id|no action|cascade',
+    );
+
+    const aggregate = databaseMigrationSpecs[0].tables.find(
+      ({ name }) => name === 'monitor_history_agg',
+    )!;
+    expect(aggregate.targetConstraintSignatures).toContain(
+      "c|ck_monitor_history_agg_granularity|granularity|in|'hour','day','month'",
+    );
+    expect(asins.targetIndexSignatures).toContain(
+      'uq_asins_asin_country_ci|unique|btree|lower(asin),lower(country)||valid|ready',
+    );
+  });
+
+  it('将 PG catalog 重写的 CHECK 和表达式索引归一到 Drizzle 定义', () => {
+    expect(
+      normalizePostgresCheckExpression(
+        "CHECK (((granularity)::text = ANY ((ARRAY['hour'::character varying, 'day'::character varying, 'month'::character varying])::text[])))",
+      ),
+    ).toBe("granularity|in|'hour','day','month'");
+    expect(normalizePostgresExpression('lower((asin)::text)')).toBe(
+      'lower(asin)',
     );
   });
 

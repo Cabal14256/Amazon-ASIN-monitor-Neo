@@ -31,6 +31,8 @@ import { DataMigrationError, asDataMigrationError } from './errors';
 import { createMigrationLogger, type MigrationLogger } from './logger';
 import {
   databaseMigrationSpecs,
+  normalizePostgresCheckExpression,
+  normalizePostgresExpression,
   type DatabaseMigrationSpec,
   type MigrationDatabaseName,
   type TableMigrationSpec,
@@ -279,6 +281,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     foreign_columns: string[];
     update_action: string;
     delete_action: string;
+    check_expression: string | null;
   }>(`
     SELECT
       relation.relname AS table_name,
@@ -302,7 +305,11 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
         ORDER BY key.position
       ) ELSE ARRAY[]::text[] END AS foreign_columns,
       constraint_row.confupdtype AS update_action,
-      constraint_row.confdeltype AS delete_action
+      constraint_row.confdeltype AS delete_action,
+      CASE WHEN constraint_row.contype = 'c'
+        THEN pg_get_expr(constraint_row.conbin, constraint_row.conrelid, true)
+        ELSE NULL
+      END AS check_expression
     FROM pg_constraint constraint_row
     JOIN pg_class relation ON relation.oid = constraint_row.conrelid
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -329,7 +336,11 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
         .filter(({ table_name }) => table_name === table.name)
         .map((constraint) => {
           if (constraint.constraint_type === 'c') {
-            return `c|${constraint.constraint_name}`;
+            return `c|${
+              constraint.constraint_name
+            }|${normalizePostgresCheckExpression(
+              constraint.check_expression ?? '',
+            )}`;
           }
           if (constraint.constraint_type === 'f') {
             return [
@@ -357,14 +368,29 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     table_name: string;
     index_name: string;
     is_unique: boolean;
+    access_method: string;
+    expressions: string[];
+    predicate: string;
+    is_valid: boolean;
+    is_ready: boolean;
   }>(`
     SELECT
       table_relation.relname AS table_name,
       index_relation.relname AS index_name,
-      index_row.indisunique AS is_unique
+      index_row.indisunique AS is_unique,
+      access_method.amname AS access_method,
+      ARRAY(
+        SELECT pg_get_indexdef(index_row.indexrelid, position, true)
+        FROM generate_series(1, index_row.indnkeyatts) AS position
+        ORDER BY position
+      ) AS expressions,
+      COALESCE(pg_get_expr(index_row.indpred, index_row.indrelid, true), '') AS predicate,
+      index_row.indisvalid AS is_valid,
+      index_row.indisready AS is_ready
     FROM pg_index index_row
     JOIN pg_class table_relation ON table_relation.oid = index_row.indrelid
     JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
+    JOIN pg_am access_method ON access_method.oid = index_relation.relam
     JOIN pg_namespace namespace ON namespace.oid = table_relation.relnamespace
     WHERE namespace.nspname = 'public'
     ORDER BY table_relation.relname, index_relation.relname
@@ -375,8 +401,24 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       indexResult.rows
         .filter(({ table_name }) => table_name === table.name)
         .map(
-          ({ index_name, is_unique }) =>
-            `${index_name}|${is_unique ? 'unique' : 'non-unique'}`,
+          ({
+            index_name,
+            is_unique,
+            access_method,
+            expressions,
+            predicate,
+            is_valid,
+            is_ready,
+          }) =>
+            [
+              index_name,
+              is_unique ? 'unique' : 'non-unique',
+              access_method,
+              expressions.map(normalizePostgresExpression).join(','),
+              normalizePostgresExpression(predicate),
+              is_valid ? 'valid' : 'invalid',
+              is_ready ? 'ready' : 'not-ready',
+            ].join('|'),
         ),
       'TARGET_SCHEMA_MISMATCH',
       `${context.spec.logicalName}.target.${table.name}.indexes`,
@@ -388,9 +430,7 @@ async function resetTarget(context: DatabaseContext): Promise<void> {
   const tables = context.spec.tables
     .map(({ name }) => quotePgIdentifier(name))
     .join(', ');
-  await context.target.query(
-    `TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE`,
-  );
+  await context.target.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY`);
 }
 
 async function sourceCount(
@@ -526,13 +566,26 @@ async function resetIdentitySequences(
       );
     }
     const sequenceResult = await context.target.query<{
-      sequence_name: string | null;
-    }>('SELECT pg_get_serial_sequence($1, $2) AS sequence_name', [
-      table.name,
-      column,
-    ]);
-    const sequenceName = sequenceResult.rows[0]?.sequence_name;
-    if (!sequenceName) {
+      sequence_schema: string;
+      sequence_name: string;
+    }>(
+      `
+        SELECT
+          sequence_namespace.nspname AS sequence_schema,
+          sequence_relation.relname AS sequence_name
+        FROM pg_class sequence_relation
+        JOIN pg_namespace sequence_namespace
+          ON sequence_namespace.oid = sequence_relation.relnamespace
+        WHERE sequence_relation.oid = pg_get_serial_sequence($1, $2)::regclass
+      `,
+      [`public.${table.name}`, column],
+    );
+    const sequence = sequenceResult.rows[0];
+    if (
+      sequenceResult.rows.length !== 1 ||
+      sequence?.sequence_schema !== 'public' ||
+      !safeIdentifierPattern.test(sequence.sequence_name)
+    ) {
       throw new DataMigrationError(
         'TARGET_IDENTITY_SEQUENCE_MISSING',
         `${context.spec.logicalName}.${table.name}.${column}`,
@@ -560,8 +613,11 @@ async function resetIdentitySequences(
       );
     }
     await context.target.query(
-      'SELECT setval($1::regclass, $2::bigint, false)',
-      [sequenceName, nextValue],
+      `ALTER SEQUENCE ${quotePgIdentifier(
+        sequence.sequence_schema,
+      )}.${quotePgIdentifier(
+        sequence.sequence_name,
+      )} RESTART WITH ${nextValue}`,
     );
   }
 }
@@ -799,6 +855,7 @@ async function beginTransactions(context: DatabaseContext): Promise<void> {
   context.sourceTransactionOpen = true;
   await context.target.query('BEGIN');
   context.targetTransactionOpen = true;
+  await context.target.query('SET LOCAL search_path TO public, pg_catalog');
   await context.target.query("SET LOCAL TIME ZONE 'Asia/Shanghai'");
 }
 

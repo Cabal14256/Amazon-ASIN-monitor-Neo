@@ -1,5 +1,5 @@
-import { getTableColumns, getTableName } from 'drizzle-orm';
-import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
+import { getTableColumns, getTableName, type SQL } from 'drizzle-orm';
+import { getTableConfig, PgDialect, type PgTable } from 'drizzle-orm/pg-core';
 
 import {
   analyticsRefreshWatermark,
@@ -58,6 +58,127 @@ export interface DatabaseMigrationSpec {
   readonly logicalName: MigrationDatabaseName;
   readonly tables: readonly TableMigrationSpec[];
   readonly businessQueries: readonly BusinessQuerySpec[];
+}
+
+const postgresDialect = new PgDialect();
+
+function foldSqlOutsideStrings(value: string): string {
+  let result = '';
+  let inString = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "'") {
+      result += character;
+      if (inString && value[index + 1] === "'") {
+        result += value[index + 1];
+        index += 1;
+      } else {
+        inString = !inString;
+      }
+    } else {
+      result += inString ? character : character.toLowerCase();
+    }
+  }
+  return result;
+}
+
+function stripOuterParentheses(value: string): string {
+  let normalized = value.trim();
+  while (normalized.startsWith('(') && normalized.endsWith(')')) {
+    let depth = 0;
+    let inString = false;
+    let enclosesWholeExpression = true;
+    for (let index = 0; index < normalized.length; index += 1) {
+      const character = normalized[index];
+      if (character === "'") {
+        if (inString && normalized[index + 1] === "'") {
+          index += 1;
+        } else {
+          inString = !inString;
+        }
+      } else if (!inString && character === '(') {
+        depth += 1;
+      } else if (!inString && character === ')') {
+        depth -= 1;
+        if (depth === 0 && index < normalized.length - 1) {
+          enclosesWholeExpression = false;
+          break;
+        }
+      }
+    }
+    if (!enclosesWholeExpression || depth !== 0) break;
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized;
+}
+
+export function normalizePostgresExpression(value: string): string {
+  let normalized = foldSqlOutsideStrings(value)
+    .replaceAll('"', '')
+    .replace(/::\s*(?:character varying|text)(?:\[\])?/g, '')
+    .replace(/\b[a-z_][a-z0-9_]*\./g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*,\s*/g, ',')
+    .trim();
+  normalized = stripOuterParentheses(normalized);
+  let previous = '';
+  while (previous !== normalized) {
+    previous = normalized;
+    normalized = normalized.replace(/\(\(([a-z_][a-z0-9_]*)\)\)/g, '($1)');
+  }
+  return normalized;
+}
+
+export function normalizePostgresCheckExpression(value: string): string {
+  let normalized = normalizePostgresExpression(value);
+  if (normalized.startsWith('check')) {
+    normalized = stripOuterParentheses(normalized.slice(5).trim());
+  }
+  normalized = normalizePostgresExpression(normalized);
+  const inExpression = /^\(?([a-z][a-z0-9_]*)\)?\s+in\s*\((.*)\)$/.exec(
+    normalized,
+  );
+  if (inExpression) {
+    return `${inExpression[1]}|in|${normalizePostgresExpression(
+      inExpression[2],
+    )}`;
+  }
+  const anyArrayExpression =
+    /^\(?([a-z][a-z0-9_]*)\)?\s*=\s*any\s*\(\s*\(?\s*array\[(.*)\]\s*\)?\s*\)$/.exec(
+      normalized,
+    );
+  if (anyArrayExpression) {
+    return `${anyArrayExpression[1]}|in|${normalizePostgresExpression(
+      anyArrayExpression[2],
+    )}`;
+  }
+  return normalized;
+}
+
+function renderSql(value: SQL): string {
+  const rendered = postgresDialect.sqlToQuery(value);
+  if (rendered.params.length > 0) {
+    throw new Error('migration schema fingerprints cannot contain parameters');
+  }
+  return rendered.sql;
+}
+
+function indexSignature(
+  name: string,
+  unique: boolean,
+  method: string,
+  expressions: readonly string[],
+  predicate = '',
+): string {
+  return [
+    name,
+    unique ? 'unique' : 'non-unique',
+    method,
+    expressions.join(','),
+    predicate,
+    'valid',
+    'ready',
+  ].join('|');
 }
 
 function postgresCatalogType(sqlType: string): string {
@@ -127,7 +248,9 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     targetConstraintSignatures.push(
       [type, name, constraintColumns.join(',')].join('|'),
     );
-    constraintIndexSignatures.push(`${name}|unique`);
+    constraintIndexSignatures.push(
+      indexSignature(name, true, 'btree', constraintColumns),
+    );
   };
   if (inlinePrimaryKeys.length > 0) {
     addKeyConstraint('p', `${tableName}_pkey`, inlinePrimaryKeys);
@@ -168,13 +291,45 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     );
   }
   for (const checkConstraint of tableConfig.checks) {
-    targetConstraintSignatures.push(`c|${checkConstraint.name}`);
+    targetConstraintSignatures.push(
+      `c|${checkConstraint.name}|${normalizePostgresCheckExpression(
+        renderSql(checkConstraint.value),
+      )}`,
+    );
   }
   const targetIndexSignatures = [
-    ...tableConfig.indexes.map(
-      (index) =>
-        `${index.config.name}|${index.config.unique ? 'unique' : 'non-unique'}`,
-    ),
+    ...tableConfig.indexes.map((index) => {
+      const expressions = index.config.columns.map((column) => {
+        if ('name' in column && typeof column.name === 'string') {
+          const indexConfig = column.indexConfig ?? {
+            order: 'asc',
+            nulls: 'last',
+            opClass: undefined,
+          };
+          const order = indexConfig.order === 'desc' ? ' desc' : '';
+          const defaultNulls = indexConfig.order === 'desc' ? 'first' : 'last';
+          const nulls =
+            indexConfig.nulls !== defaultNulls
+              ? ` nulls ${indexConfig.nulls}`
+              : '';
+          const opClass = indexConfig.opClass ? ` ${indexConfig.opClass}` : '';
+          return normalizePostgresExpression(
+            `${column.name}${opClass}${order}${nulls}`,
+          );
+        }
+        return normalizePostgresExpression(renderSql(column as SQL));
+      });
+      const predicate = index.config.where
+        ? normalizePostgresExpression(renderSql(index.config.where))
+        : '';
+      return indexSignature(
+        requiredConstraintName(index.config.name, tableName),
+        index.config.unique,
+        index.config.method ?? 'btree',
+        expressions,
+        predicate,
+      );
+    }),
     ...constraintIndexSignatures,
   ];
 
