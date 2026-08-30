@@ -695,6 +695,8 @@ DO $cagg_postflight$
 DECLARE
   continuous_aggregate_count integer;
   materialized_only_count integer;
+  refresh_policy_count integer;
+  matching_refresh_policy_count integer;
 BEGIN
   SELECT
     COUNT(*)::integer,
@@ -719,6 +721,69 @@ BEGIN
       'continuous aggregate postflight mismatch (found %, materialized_only %)',
       continuous_aggregate_count,
       materialized_only_count;
+  END IF;
+
+  WITH expected_policy (
+    view_name,
+    start_offset,
+    end_offset,
+    schedule_interval
+  ) AS (
+    VALUES
+      ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+      ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+      ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+      ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+      ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+      ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+      ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
+      ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
+      ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day')
+  ), selected_materialization AS (
+    SELECT
+      expected_policy.*,
+      hypertable.id AS materialization_hypertable_id
+    FROM expected_policy
+    JOIN timescaledb_information.continuous_aggregates aggregate_row
+      ON aggregate_row.view_schema = 'public'
+     AND aggregate_row.view_name = expected_policy.view_name
+    JOIN _timescaledb_catalog.hypertable hypertable
+      ON hypertable.schema_name = aggregate_row.materialization_hypertable_schema
+     AND hypertable.table_name = aggregate_row.materialization_hypertable_name
+  ), selected_job AS (
+    SELECT
+      expected_policy.*,
+      jobs.schedule_interval AS actual_schedule_interval,
+      jobs.scheduled,
+      jobs.fixed_schedule,
+      jobs.initial_start,
+      jobs.timezone,
+      jobs.config
+    FROM selected_materialization expected_policy
+    JOIN timescaledb_information.jobs jobs
+      ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
+     AND (jobs.config ->> 'mat_hypertable_id')::integer =
+       expected_policy.materialization_hypertable_id
+  )
+  SELECT
+    COUNT(*)::integer,
+    COUNT(*) FILTER (
+      WHERE actual_schedule_interval = schedule_interval
+        AND (config ->> 'start_offset')::interval = start_offset
+        AND (config ->> 'end_offset')::interval = end_offset
+        AND scheduled
+        AND fixed_schedule
+        AND initial_start = TIMESTAMPTZ '2026-01-01 00:00:00+08'
+        AND timezone = 'Asia/Shanghai'
+    )::integer
+  INTO refresh_policy_count, matching_refresh_policy_count
+  FROM selected_job;
+
+  IF refresh_policy_count <> 9 OR matching_refresh_policy_count <> 9 THEN
+    RAISE EXCEPTION
+      'continuous aggregate refresh policy postflight mismatch (found %, matching %)',
+      refresh_policy_count,
+      matching_refresh_policy_count;
   END IF;
 END
 $cagg_postflight$;

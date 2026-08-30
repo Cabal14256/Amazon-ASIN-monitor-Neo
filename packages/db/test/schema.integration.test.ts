@@ -242,40 +242,63 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     );
 
     const policies = await primaryPool.query<{
-      schedule_interval: string;
-      policy_count: string;
+      view_name: string;
+      policy_matches: boolean;
     }>(
       `
-      WITH selected_materializations AS (
+      WITH expected_policy (
+        view_name,
+        start_offset,
+        end_offset,
+        schedule_interval
+      ) AS (
+        VALUES
+          ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+          ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+          ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+          ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
+          ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
+          ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day')
+      ), selected_materializations AS (
         SELECT
+          expected_policy.*,
           materialization_hypertable_schema AS schema_name,
           materialization_hypertable_name AS table_name
-        FROM timescaledb_information.continuous_aggregates
-        WHERE view_schema = 'public'
-          AND view_name = ANY($1::text[])
+        FROM expected_policy
+        JOIN timescaledb_information.continuous_aggregates aggregate_row
+          ON aggregate_row.view_schema = 'public'
+         AND aggregate_row.view_name = expected_policy.view_name
       ), selected_ids AS (
-        SELECT hypertable.id
+        SELECT selected_materializations.*, hypertable.id
         FROM _timescaledb_catalog.hypertable hypertable
         JOIN selected_materializations materialization
           ON materialization.schema_name = hypertable.schema_name
          AND materialization.table_name = hypertable.table_name
       )
-      SELECT jobs.schedule_interval::text, COUNT(*)::text AS policy_count
-      FROM timescaledb_information.jobs jobs
-      WHERE jobs.proc_name = 'policy_refresh_continuous_aggregate'
-        AND (jobs.config ->> 'mat_hypertable_id')::integer IN (
-          SELECT id FROM selected_ids
-        )
-      GROUP BY jobs.schedule_interval
-      ORDER BY jobs.schedule_interval
+      SELECT
+        selected_ids.view_name,
+        jobs.schedule_interval = selected_ids.schedule_interval
+          AND (jobs.config ->> 'start_offset')::interval = selected_ids.start_offset
+          AND (jobs.config ->> 'end_offset')::interval = selected_ids.end_offset
+          AND jobs.scheduled
+          AND jobs.fixed_schedule
+          AND jobs.initial_start = TIMESTAMPTZ '2026-01-01 00:00:00+08'
+          AND jobs.timezone = 'Asia/Shanghai' AS policy_matches
+      FROM selected_ids
+      JOIN timescaledb_information.jobs jobs
+        ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
+       AND (jobs.config ->> 'mat_hypertable_id')::integer = selected_ids.id
+      ORDER BY selected_ids.view_name
     `,
-      [timescaleContinuousAggregateViewNames],
     );
-    expect(policies.rows).toEqual([
-      { schedule_interval: '00:10:00', policy_count: '3' },
-      { schedule_interval: '01:00:00', policy_count: '3' },
-      { schedule_interval: '1 day', policy_count: '3' },
-    ]);
+    expect(policies.rows).toEqual(
+      [...timescaleContinuousAggregateViewNames]
+        .sort()
+        .map((view_name) => ({ view_name, policy_matches: true })),
+    );
   });
 
   it('PG 类型映射、identity、生成列与五个 CHECK 均生效', async () => {
