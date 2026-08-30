@@ -373,6 +373,12 @@ function postgresCatalogType(sqlType: string): string {
   return sqlType;
 }
 
+function postgresCatalogCollation(sqlType: string): string {
+  return /^(?:text|varchar|char)(?:\(|$)/.test(sqlType)
+    ? 'default-deterministic'
+    : 'none';
+}
+
 function requiredConstraintName(
   value: string | undefined,
   tableName: string,
@@ -515,6 +521,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
       identityKind,
       column.generated ? 's' : '',
       storedExpression,
+      postgresCatalogCollation(column.getSQLType()),
     ].join('|');
   });
   const targetConstraintSignatures: string[] = [];
@@ -525,7 +532,13 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     constraintColumns: readonly string[],
   ) => {
     targetConstraintSignatures.push(
-      [type, name, constraintColumns.join(',')].join('|'),
+      [
+        type,
+        name,
+        constraintColumns.join(','),
+        'not-deferrable',
+        'initially-immediate',
+      ].join('|'),
     );
     constraintIndexSignatures.push(
       indexSignature(name, true, 'btree', constraintColumns),
@@ -567,6 +580,8 @@ function tableSpec(table: PgTable): TableMigrationSpec {
         reference.foreignColumns.map((column) => column.name).join(','),
         foreignKey.onUpdate ?? 'no action',
         foreignKey.onDelete ?? 'no action',
+        'not-deferrable',
+        'initially-immediate',
       ].join('|'),
     );
   }

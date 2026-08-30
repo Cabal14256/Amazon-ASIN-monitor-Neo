@@ -133,16 +133,22 @@ function compareExactSet(
   const actualSorted = [...actual].sort();
   if (JSON.stringify(expectedSorted) === JSON.stringify(actualSorted)) return;
 
-  const missing = expectedSorted.filter(
+  const missingCount = expectedSorted.filter(
     (value) => !actualSorted.includes(value),
-  );
-  const extra = actualSorted.filter((value) => !expectedSorted.includes(value));
+  ).length;
+  const extraCount = actualSorted.filter(
+    (value) => !expectedSorted.includes(value),
+  ).length;
   throw new DataMigrationError(
     code,
     scope,
-    `${scope} mismatch (missing: ${missing.join(',') || 'none'}; extra: ${
-      extra.join(',') || 'none'
-    })`,
+    `${scope} mismatch (expected_count: ${
+      expectedSorted.length
+    }; actual_count: ${
+      actualSorted.length
+    }; missing_count: ${missingCount}; extra_count: ${extraCount}; expected_fingerprint: ${sha256(
+      expectedSorted,
+    )}; actual_fingerprint: ${sha256(actualSorted)})`,
   );
 }
 
@@ -300,13 +306,47 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
 }
 
 async function validateTargetSchema(context: DatabaseContext): Promise<void> {
+  const sessionResult = await context.target.query<{
+    client_encoding: string;
+    replication_role: string;
+  }>(`
+    SELECT
+      current_setting('client_encoding') AS client_encoding,
+      current_setting('session_replication_role') AS replication_role
+  `);
+  compareExactSet(
+    ['UTF8|origin'],
+    sessionResult.rows.map(
+      ({ client_encoding, replication_role }) =>
+        `${client_encoding}|${replication_role}`,
+    ),
+    'TARGET_SESSION_MISMATCH',
+    `${context.spec.logicalName}.target.session`,
+  );
+
+  const databaseResult = await context.target.query<{ encoding: string }>(`
+    SELECT pg_encoding_to_char(encoding) AS encoding
+    FROM pg_database
+    WHERE datname = current_database()
+  `);
+  compareExactSet(
+    ['UTF8'],
+    databaseResult.rows.map(({ encoding }) => encoding),
+    'TARGET_DATABASE_ENCODING_MISMATCH',
+    `${context.spec.logicalName}.target.database_encoding`,
+  );
+
   const tableResult = await context.target.query<{
     table_name: string;
     persistence: string;
+    row_security: boolean;
+    force_row_security: boolean;
   }>(`
     SELECT
       relation.relname AS table_name,
-      relation.relpersistence AS persistence
+      relation.relpersistence AS persistence,
+      relation.relrowsecurity AS row_security,
+      relation.relforcerowsecurity AS force_row_security
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname = 'public'
@@ -314,9 +354,15 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     ORDER BY relation.relname
   `);
   compareExactSet(
-    context.spec.tables.map(({ name }) => `${name}|p`),
+    context.spec.tables.map(({ name }) => `${name}|p|rls-off|force-rls-off`),
     tableResult.rows.map(
-      ({ table_name, persistence }) => `${table_name}|${persistence}`,
+      ({ table_name, persistence, row_security, force_row_security }) =>
+        [
+          table_name,
+          persistence,
+          row_security ? 'rls-on' : 'rls-off',
+          force_row_security ? 'force-rls-on' : 'force-rls-off',
+        ].join('|'),
     ),
     'TARGET_SCHEMA_MISMATCH',
     `${context.spec.logicalName}.target.tables`,
@@ -330,6 +376,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     identity_kind: string;
     generated_kind: string;
     stored_expression: string | null;
+    collation_kind: string;
   }>(`
     SELECT
       relation.relname AS table_name,
@@ -339,13 +386,22 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       attribute.attidentity AS identity_kind,
       attribute.attgenerated AS generated_kind,
       pg_get_expr(attribute_default.adbin, attribute_default.adrelid, true)
-        AS stored_expression
+        AS stored_expression,
+      CASE
+        WHEN attribute.attcollation = 0 THEN 'none'
+        WHEN attribute.attcollation = 'default'::regcollation::oid
+          AND collation_row.collisdeterministic
+          THEN 'default-deterministic'
+        ELSE 'non-default-or-nondeterministic'
+      END AS collation_kind
     FROM pg_attribute attribute
     JOIN pg_class relation ON relation.oid = attribute.attrelid
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     LEFT JOIN pg_attrdef attribute_default
       ON attribute_default.adrelid = attribute.attrelid
      AND attribute_default.adnum = attribute.attnum
+    LEFT JOIN pg_collation collation_row
+      ON collation_row.oid = attribute.attcollation
     WHERE namespace.nspname = 'public'
       AND relation.relkind IN ('r', 'p')
       AND attribute.attnum > 0
@@ -365,6 +421,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
             identity_kind,
             generated_kind,
             stored_expression,
+            collation_kind,
           }) =>
             [
               column_name,
@@ -373,6 +430,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               identity_kind,
               generated_kind,
               normalizePostgresExpression(stored_expression ?? '', table.name),
+              collation_kind,
             ].join('|'),
         ),
       'TARGET_SCHEMA_MISMATCH',
@@ -462,6 +520,8 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     update_action: string;
     delete_action: string;
     check_expression: string | null;
+    is_deferrable: boolean;
+    is_initially_deferred: boolean;
   }>(`
     SELECT
       relation.relname AS table_name,
@@ -487,6 +547,8 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       ) ELSE ARRAY[]::text[] END AS foreign_columns,
       constraint_row.confupdtype AS update_action,
       constraint_row.confdeltype AS delete_action,
+      constraint_row.condeferrable AS is_deferrable,
+      constraint_row.condeferred AS is_initially_deferred,
       CASE WHEN constraint_row.contype = 'c'
         THEN pg_get_expr(constraint_row.conbin, constraint_row.conrelid, true)
         ELSE NULL
@@ -536,12 +598,20 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               constraint.foreign_columns.join(','),
               actionName(constraint.update_action),
               actionName(constraint.delete_action),
+              constraint.is_deferrable ? 'deferrable' : 'not-deferrable',
+              constraint.is_initially_deferred
+                ? 'initially-deferred'
+                : 'initially-immediate',
             ].join('|');
           }
           return [
             constraint.constraint_type,
             constraint.constraint_name,
             constraint.columns.join(','),
+            constraint.is_deferrable ? 'deferrable' : 'not-deferrable',
+            constraint.is_initially_deferred
+              ? 'initially-deferred'
+              : 'initially-immediate',
           ].join('|');
         }),
       'TARGET_SCHEMA_MISMATCH',
@@ -1244,10 +1314,12 @@ async function beginTransactions(context: DatabaseContext): Promise<void> {
     'START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY',
   );
   context.sourceTransactionOpen = true;
+  await context.target.query("SET client_encoding TO 'UTF8'");
   await context.target.query('BEGIN');
   context.targetTransactionOpen = true;
   await context.target.query('SET LOCAL search_path TO public, pg_catalog');
   await context.target.query("SET LOCAL TIME ZONE 'Asia/Shanghai'");
+  await context.target.query('SET LOCAL session_replication_role TO origin');
 }
 
 async function cleanupContext(

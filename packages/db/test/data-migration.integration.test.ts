@@ -43,9 +43,36 @@ function mysqlIdentifier(name: string): string {
   return `\`${name}\``;
 }
 
-function targetUrlWithShadowSearchPath(value: string): string {
+function targetUrlWithOptions(
+  value: string,
+  settings: readonly string[],
+): string {
   const url = new URL(value);
-  url.searchParams.set('options', '-csearch_path=migration_shadow,public');
+  url.searchParams.set(
+    'options',
+    settings.map((setting) => `-c${setting}`).join(' '),
+  );
+  return url.toString();
+}
+
+function targetUrlWithShadowSearchPath(value: string): string {
+  return targetUrlWithOptions(value, ['search_path=migration_shadow,public']);
+}
+
+function targetUrlWithUnsafeSessionDefaults(value: string): string {
+  return targetUrlWithOptions(value, [
+    'search_path=migration_shadow,public',
+    'client_encoding=LATIN1',
+    'session_replication_role=replica',
+  ]);
+}
+
+function targetUrlForDatabase(value: string, database: string): string {
+  if (!/^[a-z][a-z0-9_]*$/.test(database)) {
+    throw new Error('unsafe integration PostgreSQL database name');
+  }
+  const url = new URL(value);
+  url.pathname = `/${database}`;
   return url.toString();
 }
 
@@ -429,6 +456,36 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标约束时序改为延迟校验时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(`
+        ALTER TABLE public.user_roles DROP CONSTRAINT fk_user_roles_role;
+        ALTER TABLE public.user_roles
+          ADD CONSTRAINT fk_user_roles_role
+          FOREIGN KEY (role_id)
+          REFERENCES public.roles(id)
+          ON DELETE CASCADE
+          DEFERRABLE INITIALLY DEFERRED;
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.user_roles.constraints',
+        });
+      } finally {
+        await primaryTarget.query(`
+          ALTER TABLE public.user_roles DROP CONSTRAINT fk_user_roles_role;
+          ALTER TABLE public.user_roles
+            ADD CONSTRAINT fk_user_roles_role
+            FOREIGN KEY (role_id)
+            REFERENCES public.roles(id)
+            ON DELETE CASCADE
+            NOT DEFERRABLE INITIALLY IMMEDIATE;
+        `);
+      }
+    });
+
     it('目标外键内部触发器被禁用时在重置前拒绝迁移', async () => {
       await primaryTarget.query(
         'ALTER TABLE public.user_roles DISABLE TRIGGER ALL',
@@ -511,6 +568,80 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标表启用 RLS 或列改用非默认排序规则时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(
+        'ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.tables',
+        });
+      } finally {
+        await primaryTarget.query(
+          'ALTER TABLE public.audit_logs DISABLE ROW LEVEL SECURITY',
+        );
+      }
+
+      await primaryTarget.query(`
+        ALTER TABLE public.audit_logs
+          ALTER COLUMN username TYPE varchar(50) COLLATE "C"
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.audit_logs.columns',
+        });
+      } finally {
+        await primaryTarget.query(`
+          ALTER TABLE public.audit_logs
+            ALTER COLUMN username TYPE varchar(50) COLLATE "default"
+        `);
+      }
+    });
+
+    it('非 UTF8 目标数据库在重置前被拒绝', async () => {
+      const database = 'amazon_asin_monitor_encoding_ci_latin1';
+      await primaryTarget.query(
+        `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`,
+      );
+      await primaryTarget.query(`
+        CREATE DATABASE "${database}"
+        WITH TEMPLATE template0
+        ENCODING 'LATIN1'
+        LC_COLLATE 'C'
+        LC_CTYPE 'C'
+      `);
+      try {
+        const latin1Url = targetUrlWithShadowSearchPath(
+          targetUrlForDatabase(primaryTargetUrl, database),
+        );
+        await expect(
+          runDataMigration(
+            {
+              ...migrationConfig,
+              postgres: {
+                ...migrationConfig.postgres,
+                primaryUrl: latin1Url,
+              },
+            },
+            logger,
+          ),
+        ).rejects.toMatchObject({
+          code: 'TARGET_DATABASE_ENCODING_MISMATCH',
+          scope: 'primary.target.database_encoding',
+        });
+      } finally {
+        await primaryTarget.query(
+          `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`,
+        );
+      }
+    });
+
     it('源列类型、主键或生成表达式漂移时在重置前拒绝迁移', async () => {
       const source = mysqlIdentifier(sourcePrimaryDatabase);
       await mysqlAdmin.query(`
@@ -577,15 +708,18 @@ describe.skipIf(!integrationEnabled)(
 
     it('目标默认值、更新时间触发器或函数漂移时在重置前拒绝迁移', async () => {
       await primaryTarget.query(
-        "ALTER TABLE public.variant_groups ALTER COLUMN variant_status SET DEFAULT 'foo.NORMAL'",
+        "ALTER TABLE public.variant_groups ALTER COLUMN variant_status SET DEFAULT 'private42'",
       );
       try {
-        await expect(
-          runDataMigration(migrationConfig, logger),
-        ).rejects.toMatchObject({
+        const failure = await runDataMigration(migrationConfig, logger).catch(
+          (error: unknown) => error,
+        );
+        expect(failure).toMatchObject({
           code: 'TARGET_SCHEMA_MISMATCH',
           scope: 'primary.target.variant_groups.columns',
         });
+        expect((failure as Error).message).not.toContain('private42');
+        expect((failure as Error).message).toContain('actual_fingerprint');
       } finally {
         await primaryTarget.query(
           "ALTER TABLE public.variant_groups ALTER COLUMN variant_status SET DEFAULT 'NORMAL'",
@@ -725,6 +859,42 @@ describe.skipIf(!integrationEnabled)(
       );
       expect(afterSequence.rows[0]).toEqual(beforeSequence.rows[0]);
       expect(afterRoles.rows[0]).toEqual(beforeRoles.rows[0]);
+    });
+
+    it('迁移覆盖连接参数中的 LATIN1 与 replica 会话默认值', async () => {
+      const unsafePrimaryUrl =
+        targetUrlWithUnsafeSessionDefaults(primaryTargetUrl);
+      const unsafeCompetitorUrl =
+        targetUrlWithUnsafeSessionDefaults(competitorTargetUrl);
+      const probe = new Pool({ connectionString: unsafePrimaryUrl, max: 1 });
+      try {
+        const settings = await probe.query<{
+          client_encoding: string;
+          replication_role: string;
+        }>(`
+          SELECT
+            current_setting('client_encoding') AS client_encoding,
+            current_setting('session_replication_role') AS replication_role
+        `);
+        expect(settings.rows[0]).toEqual({
+          client_encoding: 'LATIN1',
+          replication_role: 'replica',
+        });
+      } finally {
+        await probe.end();
+      }
+
+      const report = await runDataMigration(
+        {
+          ...migrationConfig,
+          postgres: {
+            primaryUrl: unsafePrimaryUrl,
+            competitorUrl: unsafeCompetitorUrl,
+          },
+        },
+        logger,
+      );
+      expect(report.status).toBe('passed');
     });
 
     it('连续两次迁移 21 + 4 表且行数、样本和关键业务查询一致', async () => {

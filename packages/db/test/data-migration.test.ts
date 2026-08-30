@@ -146,13 +146,13 @@ describe('P1-T3 migration registry', () => {
       'id|public|monitor_history_id_seq|bigint|1|1|1|9223372036854775807|1|no-cycle',
     ]);
     expect(monitorHistory?.targetColumnSignatures).toContain(
-      'id|bigint|not-null|a||',
+      'id|bigint|not-null|a|||none',
     );
     expect(monitorHistory?.targetColumnSignatures).toContain(
-      "hour_ts|timestamp without time zone|nullable||s|date_trunc('hour',check_time)",
+      "hour_ts|timestamp without time zone|nullable||s|date_trunc('hour',check_time)|none",
     );
     expect(monitorHistory?.targetConstraintSignatures).toContain(
-      'p|monitor_history_pkey|id',
+      'p|monitor_history_pkey|id|not-deferrable|initially-immediate',
     );
     expect(monitorHistory?.targetIndexSignatures).toContain(
       'monitor_history_pkey|unique|btree|id||valid|ready',
@@ -165,13 +165,16 @@ describe('P1-T3 migration registry', () => {
       ({ name }) => name === 'asins',
     )!;
     expect(asins.targetConstraintSignatures).toContain(
-      'u|uk_asins_asin_country|asin,country',
+      'u|uk_asins_asin_country|asin,country|not-deferrable|initially-immediate',
     );
     expect(asins.targetConstraintSignatures).toContain(
-      'f|fk_asins_variant_group|variant_group_id|public|variant_groups|id|no action|cascade',
+      'f|fk_asins_variant_group|variant_group_id|public|variant_groups|id|no action|cascade|not-deferrable|initially-immediate',
     );
     expect(asins.targetColumnSignatures).toContain(
-      'manual_broken|boolean|nullable|||false',
+      'manual_broken|boolean|nullable|||false|none',
+    );
+    expect(asins.targetColumnSignatures).toContain(
+      'asin|character varying(20)|not-null||||default-deterministic',
     );
     expect(asins.targetTriggerSignatures).toEqual([
       'trg_asins_update_time|19|O|public|set_updated_timestamp_column|7570646174655f74696d6500|||',
