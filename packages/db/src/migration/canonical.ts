@@ -12,6 +12,10 @@ import type { TableMigrationSpec } from './registry';
 
 export type MigrationRow = Record<string, unknown>;
 
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function canonicalNumberLexeme(value: string): string {
   const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value);
   if (!match)
@@ -62,7 +66,7 @@ function normalizeCanonical(value: unknown): unknown {
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareCodeUnits(left, right))
         .map(([key, entry]) => [key, normalizeCanonical(entry)]),
     );
   }
@@ -79,9 +83,7 @@ export function sha256(value: unknown): string {
 }
 
 export function canonicalMultisetDigest(values: readonly unknown[]): string {
-  const canonicalValues = values
-    .map(canonicalJson)
-    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  const canonicalValues = values.map(canonicalJson).sort(compareCodeUnits);
   return sha256(canonicalValues);
 }
 
@@ -170,7 +172,7 @@ export class DeterministicSampler {
       row,
     };
     this.entries.push(entry);
-    this.entries.sort((left, right) => left.rank.localeCompare(right.rank));
+    this.entries.sort((left, right) => compareCodeUnits(left.rank, right.rank));
     if (this.entries.length > this.maximumSize) this.entries.pop();
   }
 

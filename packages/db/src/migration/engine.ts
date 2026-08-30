@@ -340,6 +340,20 @@ async function validateTargetEnvironment(
   );
 }
 
+async function validateTargetConnectionDefaults(
+  context: DatabaseContext,
+): Promise<void> {
+  const result = await context.target.query<{ timezone: string }>(`
+    SELECT current_setting('TimeZone') AS timezone
+  `);
+  compareExactSet(
+    ['Asia/Shanghai'],
+    result.rows.map(({ timezone }) => timezone),
+    'TARGET_SESSION_MISMATCH',
+    `${context.spec.logicalName}.target.timezone`,
+  );
+}
+
 async function validateTargetSchema(context: DatabaseContext): Promise<void> {
   const tableResult = await context.target.query<{
     table_name: string;
@@ -838,6 +852,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     table_name: string;
     trigger_name: string;
     trigger_type: number;
+    update_columns: string;
     enabled_kind: string;
     function_schema: string;
     function_name: string;
@@ -850,6 +865,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       relation.relname AS table_name,
       trigger_row.tgname AS trigger_name,
       trigger_row.tgtype::integer AS trigger_type,
+      trigger_row.tgattr::text AS update_columns,
       trigger_row.tgenabled AS enabled_kind,
       function_namespace.nspname AS function_schema,
       procedure_row.proname AS function_name,
@@ -879,6 +895,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
           [
             trigger.trigger_name,
             String(trigger.trigger_type),
+            trigger.update_columns,
             trigger.enabled_kind,
             trigger.function_schema,
             trigger.function_name,
@@ -1563,6 +1580,9 @@ export async function runDataMigration(
   try {
     for (const spec of databaseMigrationSpecs) {
       contexts.push(await createContext(spec, config));
+    }
+    for (const context of contexts) {
+      await validateTargetConnectionDefaults(context);
     }
     for (const context of contexts) await beginTransactions(context);
     for (const context of contexts) await validateTargetEnvironment(context);

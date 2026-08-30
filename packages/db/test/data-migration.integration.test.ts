@@ -69,6 +69,10 @@ function targetUrlWithUnsafeSessionDefaults(value: string): string {
   ]);
 }
 
+function targetUrlWithConflictingTimezone(value: string): string {
+  return targetUrlWithOptions(value, ['TimeZone=UTC']);
+}
+
 function targetUrlForDatabase(value: string, database: string): string {
   if (!/^[a-z][a-z0-9_]*$/.test(database)) {
     throw new Error('unsafe integration PostgreSQL database name');
@@ -851,6 +855,30 @@ describe.skipIf(!integrationEnabled)(
       }
 
       await primaryTarget.query(`
+        DROP TRIGGER trg_users_update_time ON public.users;
+        CREATE TRIGGER trg_users_update_time
+        BEFORE UPDATE OF username ON public.users
+        FOR EACH ROW
+        EXECUTE FUNCTION public.set_updated_timestamp_column('update_time')
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.users.triggers',
+        });
+      } finally {
+        await primaryTarget.query(`
+          DROP TRIGGER trg_users_update_time ON public.users;
+          CREATE TRIGGER trg_users_update_time
+          BEFORE UPDATE ON public.users
+          FOR EACH ROW
+          EXECUTE FUNCTION public.set_updated_timestamp_column('update_time')
+        `);
+      }
+
+      await primaryTarget.query(`
         CREATE OR REPLACE FUNCTION public.set_updated_timestamp_column()
         RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
@@ -973,6 +1001,38 @@ describe.skipIf(!integrationEnabled)(
         logger,
       );
       expect(report.status).toBe('passed');
+    });
+
+    it('在事务内覆盖前拒绝连接参数篡改应用有效时区', async () => {
+      const unsafePrimaryUrl =
+        targetUrlWithConflictingTimezone(primaryTargetUrl);
+      const unsafeCompetitorUrl =
+        targetUrlWithConflictingTimezone(competitorTargetUrl);
+      const probe = new Pool({ connectionString: unsafePrimaryUrl, max: 1 });
+      try {
+        const settings = await probe.query<{ timezone: string }>(`
+          SELECT current_setting('TimeZone') AS timezone
+        `);
+        expect(settings.rows[0].timezone).toBe('UTC');
+      } finally {
+        await probe.end();
+      }
+
+      await expect(
+        runDataMigration(
+          {
+            ...migrationConfig,
+            postgres: {
+              primaryUrl: unsafePrimaryUrl,
+              competitorUrl: unsafeCompetitorUrl,
+            },
+          },
+          logger,
+        ),
+      ).rejects.toMatchObject({
+        code: 'TARGET_SESSION_MISMATCH',
+        scope: 'primary.target.timezone',
+      });
     });
 
     it('pg_catalog 优先于 public 中伪装的系统函数', async () => {

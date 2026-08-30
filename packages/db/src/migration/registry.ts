@@ -643,6 +643,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     [
       `trg_${tableName}_${name}`,
       '19',
+      '',
       'O',
       'public',
       'set_updated_timestamp_column',

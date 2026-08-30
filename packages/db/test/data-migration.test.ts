@@ -191,7 +191,7 @@ describe('P1-T3 migration registry', () => {
       'asin|character varying(20)|not-null||||default-deterministic',
     );
     expect(asins.targetTriggerSignatures).toEqual([
-      'trg_asins_update_time|19|O|public|set_updated_timestamp_column|7570646174655f74696d6500|||',
+      'trg_asins_update_time|19||O|public|set_updated_timestamp_column|7570646174655f74696d6500|||',
     ]);
 
     const aggregate = databaseMigrationSpecs[0].tables.find(
@@ -375,6 +375,15 @@ describe('migration canonical conversion', () => {
     expect(migrationJsonText(unsafe)).toContain('9007199254740993');
     expect(sha256(unsafe)).toBe(sha256(equivalent));
     expect(sha256(unsafe)).not.toBe(sha256(rounded));
+  });
+
+  it('JSON 对象键使用与宿主 locale 无关的 UTF-16 code-unit 顺序', () => {
+    const document = parseMigrationJsonDocument(
+      '{"z":2,"ä":3,"a":1,"nested":{"é":2,"e":1}}',
+    );
+    expect(migrationJsonText(document)).toBe(
+      '{"a":1e0,"nested":{"e":1e0,"é":2e0},"z":2e0,"ä":3e0}',
+    );
   });
 
   it('空 JSON 归一为 NULL，非空非法 JSON 以行哈希失败', () => {
