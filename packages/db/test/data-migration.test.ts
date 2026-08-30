@@ -114,6 +114,19 @@ describe('P1-T3 migration registry', () => {
     }
   });
 
+  it('业务核对只读取注册表本身而不递归读取继承子表', () => {
+    for (const database of databaseMigrationSpecs) {
+      for (const query of database.businessQueries) {
+        expect(query.sourceSql).not.toMatch(/\b(?:FROM|JOIN)\s+ONLY\b/i);
+        for (const table of database.tables) {
+          expect(query.targetSql).not.toMatch(
+            new RegExp(`\\b(?:FROM|JOIN)\\s+(?!ONLY\\s+)${table.name}\\b`, 'i'),
+          );
+        }
+      }
+    }
+  });
+
   it('从 Drizzle 推导 PK、BOOLEAN、JSONB、生成列与 identity', () => {
     const monitorHistory = databaseMigrationSpecs[0].tables.find(
       ({ name }) => name === 'monitor_history',

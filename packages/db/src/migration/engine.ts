@@ -944,7 +944,9 @@ async function targetCount(
   table: TableMigrationSpec,
 ): Promise<string> {
   const result = await context.target.query<{ row_count: string }>(
-    `SELECT COUNT(*)::text AS row_count FROM ${quotePgIdentifier(table.name)}`,
+    `SELECT COUNT(*)::text AS row_count FROM ONLY ${quotePgIdentifier(
+      table.name,
+    )}`,
   );
   return exactCount(
     result.rows[0]?.row_count,
@@ -1115,7 +1117,7 @@ async function resetIdentitySequences(
     }>(
       `SELECT MAX(${quotePgIdentifier(
         column,
-      )})::text AS maximum FROM ${quotePgIdentifier(table.name)}`,
+      )})::text AS maximum FROM ONLY ${quotePgIdentifier(table.name)}`,
     );
     const maximum = maximumResult.rows[0]?.maximum;
     if (
@@ -1153,7 +1155,7 @@ async function targetSampleDigest(
       .join(' AND ');
     const result = await context.target.query<MigrationRow>(
       `SELECT ${table.columns.map(quotePgIdentifier).join(', ')}
-       FROM ${quotePgIdentifier(table.name)}
+       FROM ONLY ${quotePgIdentifier(table.name)}
        WHERE ${where}`,
       [...sample.keyValues],
     );

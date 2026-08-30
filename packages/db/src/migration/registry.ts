@@ -749,7 +749,7 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
         COUNT(*)::text AS total_count,
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count,
         COALESCE(SUM(CASE WHEN manual_excluded_from_group THEN 1 ELSE 0 END), 0)::text AS excluded_count
-      FROM asins
+      FROM ONLY asins
       GROUP BY country
       ORDER BY country
     `,
@@ -772,7 +772,7 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
         COUNT(*)::text AS total_count,
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count,
         COALESCE(SUM(CASE WHEN manual_broken THEN 1 ELSE 0 END), 0)::text AS manual_count
-      FROM variant_groups
+      FROM ONLY variant_groups
       GROUP BY country
       ORDER BY country
     `,
@@ -797,7 +797,7 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
         COUNT(*)::text AS total_count,
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count,
         COALESCE(SUM(CASE WHEN notification_sent THEN 1 ELSE 0 END), 0)::text AS notified_count
-      FROM monitor_history
+      FROM ONLY monitor_history
       GROUP BY country, COALESCE(check_type, '')
       ORDER BY country, COALESCE(check_type, '')
     `,
@@ -817,8 +817,8 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
       SELECT
         roles.code,
         COUNT(role_permissions.permission_id)::text AS permission_count
-      FROM roles
-      LEFT JOIN role_permissions ON role_permissions.role_id = roles.id
+      FROM ONLY roles
+      LEFT JOIN ONLY role_permissions ON role_permissions.role_id = roles.id
       GROUP BY roles.code
       ORDER BY roles.code
     `,
@@ -846,15 +846,15 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
       SELECT aggregate_name, granularity, country, row_count
       FROM (
         SELECT 'asin' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
-        FROM monitor_history_agg
+        FROM ONLY monitor_history_agg
         GROUP BY granularity, country
         UNION ALL
         SELECT 'dimension' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
-        FROM monitor_history_agg_dim
+        FROM ONLY monitor_history_agg_dim
         GROUP BY granularity, country
         UNION ALL
         SELECT 'variant_group' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
-        FROM monitor_history_agg_variant_group
+        FROM ONLY monitor_history_agg_variant_group
         GROUP BY granularity, country
       ) aggregate_rows
       ORDER BY aggregate_name,
@@ -881,7 +881,7 @@ const competitorBusinessQueries: readonly BusinessQuerySpec[] = [
         country,
         COUNT(*)::text AS total_count,
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count
-      FROM competitor_asins
+      FROM ONLY competitor_asins
       GROUP BY country
       ORDER BY country
     `,
@@ -904,7 +904,7 @@ const competitorBusinessQueries: readonly BusinessQuerySpec[] = [
         COALESCE(check_type, '') AS check_type,
         COUNT(*)::text AS total_count,
         COALESCE(SUM(CASE WHEN is_broken THEN 1 ELSE 0 END), 0)::text AS broken_count
-      FROM competitor_monitor_history
+      FROM ONLY competitor_monitor_history
       GROUP BY country, COALESCE(check_type, '')
       ORDER BY country, COALESCE(check_type, '')
     `,
