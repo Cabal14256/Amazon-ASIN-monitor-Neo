@@ -146,6 +146,10 @@ function compareExactSet(
   );
 }
 
+function redactSqlStringLiterals(value: string): string {
+  return value.replace(/'(?:''|[^'])*'/g, "'[REDACTED]'");
+}
+
 async function validateSourceSchema(context: DatabaseContext): Promise<void> {
   const tableRows = await mysqlRows(
     context.source,
@@ -258,7 +262,9 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
           `${context.spec.logicalName}.source.${table.name}.generated_columns`,
           `source generated column definition mismatch for ${
             table.name
-          }.${columnName} (fingerprint: ${sha256(normalizedExpression)})`,
+          }.${columnName} (structure: ${redactSqlStringLiterals(
+            normalizedExpression,
+          )}; fingerprint: ${sha256(normalizedExpression)})`,
         );
       }
     }
