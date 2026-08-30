@@ -9,6 +9,7 @@ import {
 import {
   loadDataMigrationEnvironmentFiles,
   parseDataMigrationConfig,
+  resolveDataMigrationWorkspaceRoot,
   type DataMigrationConfig,
 } from './config';
 import { runDataMigration, type DataMigrationRunMetadata } from './engine';
@@ -67,7 +68,7 @@ function failedReport(
 }
 
 export async function runDataMigrationCli(
-  cwd = process.cwd(),
+  cwd = resolveDataMigrationWorkspaceRoot(),
   logger?: MigrationLogger,
   dependencies: DataMigrationCliDependencies = {},
 ): Promise<number> {

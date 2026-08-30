@@ -1,4 +1,11 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,7 +24,10 @@ import {
   transformSourceRow,
 } from '../src/migration/canonical';
 import { runDataMigrationCli } from '../src/migration/cli';
-import { parseDataMigrationConfig } from '../src/migration/config';
+import {
+  parseDataMigrationConfig,
+  resolveDataMigrationWorkspaceRoot,
+} from '../src/migration/config';
 import {
   isAllowedLegacyBackupTableName,
   runDataMigration,
@@ -120,6 +130,9 @@ describe('P1-T3 migration registry', () => {
     ]);
     expect(monitorHistory?.insertColumns).not.toContain('month_ts');
     expect(monitorHistory?.identityColumns).toEqual(['id']);
+    expect(monitorHistory?.targetSequenceSignatures).toEqual([
+      'id|public|monitor_history_id_seq|bigint|1|1|1|9223372036854775807|1|no-cycle',
+    ]);
     expect(monitorHistory?.targetColumnSignatures).toContain(
       'id|bigint|not-null|a||',
     );
@@ -182,6 +195,12 @@ describe('P1-T3 migration registry', () => {
     expect(normalizePostgresExpression('lower((asin)::text)')).toBe(
       'lower(asin)',
     );
+    expect(normalizePostgresExpression("'foo.NORMAL'::text")).toBe(
+      "'foo.NORMAL'",
+    );
+    expect(normalizePostgresExpression("'foo.NORMAL'::text")).not.toBe(
+      normalizePostgresExpression("'NORMAL'::text"),
+    );
     expect(
       normalizePostgresRoutineDefinition(
         'BEGIN NEW.update_time := LOCALTIMESTAMP; RETURN NEW; END;',
@@ -192,6 +211,9 @@ describe('P1-T3 migration registry', () => {
         'BEGIN OLD.update_time := LOCALTIMESTAMP; RETURN NEW; END;',
       ),
     ).not.toBe('begin new.update_time := localtimestamp; return new; end;');
+    expect(
+      normalizePostgresRoutineDefinition("RAISE NOTICE 'Keep,  Spaces'"),
+    ).toContain("'Keep,  Spaces'");
   });
 
   it('仅忽略两个现有维护脚本产生的持久化备份表', () => {
@@ -383,6 +405,23 @@ describe('migration config and logging safety', () => {
     );
   });
 
+  it('从 pnpm 子包或 INIT_CWD 向上解析仓库根目录', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'asin-workspace-root-'));
+    const packageDirectory = join(directory, 'packages', 'db');
+    await mkdir(packageDirectory, { recursive: true });
+    await writeFile(join(directory, 'pnpm-workspace.yaml'), 'packages: []\n');
+    vi.stubEnv('INIT_CWD', packageDirectory);
+    try {
+      expect(resolveDataMigrationWorkspaceRoot()).toBe(directory);
+      expect(resolveDataMigrationWorkspaceRoot(packageDirectory)).toBe(
+        directory,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('拒绝同名双库和越界批次', () => {
     expect(() =>
       parseDataMigrationConfig({
@@ -452,6 +491,22 @@ describe('migration config and logging safety', () => {
     await expect(runDataMigration(config)).rejects.toMatchObject({
       code: 'TARGET_RESET_NOT_AUTHORIZED',
       scope: 'config.migration_allow_target_reset',
+    });
+  });
+
+  it('直接调用迁移引擎时在连接前拒绝非法运行时配置', async () => {
+    const config = parseDataMigrationConfig(validEnvironment);
+    await expect(
+      runDataMigration({ ...config, sampleSize: Number.NaN }),
+    ).rejects.toMatchObject({
+      code: 'MIGRATION_CONFIG_INVALID',
+      scope: 'config.migration_sample_size',
+    });
+    await expect(
+      runDataMigration({ ...config, sampleSize: 101 }),
+    ).rejects.toMatchObject({
+      code: 'MIGRATION_CONFIG_INVALID',
+      scope: 'config.migration_sample_size',
     });
   });
 

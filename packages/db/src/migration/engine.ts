@@ -26,7 +26,10 @@ import {
   transformSourceRow,
   type MigrationRow,
 } from './canonical';
-import type { DataMigrationConfig } from './config';
+import {
+  validateDataMigrationConfig,
+  type DataMigrationConfig,
+} from './config';
 import { DataMigrationError, asDataMigrationError } from './errors';
 import { createMigrationLogger, type MigrationLogger } from './logger';
 import {
@@ -279,6 +282,77 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
         ),
       'TARGET_SCHEMA_MISMATCH',
       `${context.spec.logicalName}.target.${table.name}.columns`,
+    );
+  }
+
+  const sequenceResult = await context.target.query<{
+    table_name: string;
+    column_name: string;
+    sequence_schema: string;
+    sequence_name: string;
+    data_type: string;
+    start_value: string;
+    increment_value: string;
+    minimum_value: string;
+    maximum_value: string;
+    cache_size: string;
+    cycles: boolean;
+  }>(`
+    SELECT
+      table_relation.relname AS table_name,
+      attribute.attname AS column_name,
+      sequence_namespace.nspname AS sequence_schema,
+      sequence_relation.relname AS sequence_name,
+      format_type(sequence_row.seqtypid, NULL) AS data_type,
+      sequence_row.seqstart::text AS start_value,
+      sequence_row.seqincrement::text AS increment_value,
+      sequence_row.seqmin::text AS minimum_value,
+      sequence_row.seqmax::text AS maximum_value,
+      sequence_row.seqcache::text AS cache_size,
+      sequence_row.seqcycle AS cycles
+    FROM pg_class table_relation
+    JOIN pg_namespace table_namespace
+      ON table_namespace.oid = table_relation.relnamespace
+    JOIN pg_attribute attribute
+      ON attribute.attrelid = table_relation.oid
+     AND attribute.attidentity IN ('a', 'd')
+    CROSS JOIN LATERAL (
+      SELECT pg_get_serial_sequence(
+        format('%I.%I', table_namespace.nspname, table_relation.relname),
+        attribute.attname
+      )::regclass::oid AS sequence_oid
+    ) identity_sequence
+    JOIN pg_class sequence_relation
+      ON sequence_relation.oid = identity_sequence.sequence_oid
+     AND sequence_relation.relkind = 'S'
+    JOIN pg_namespace sequence_namespace
+      ON sequence_namespace.oid = sequence_relation.relnamespace
+    JOIN pg_sequence sequence_row
+      ON sequence_row.seqrelid = sequence_relation.oid
+    WHERE table_namespace.nspname = 'public'
+    ORDER BY table_relation.relname, attribute.attnum
+  `);
+  for (const table of context.spec.tables) {
+    compareExactSet(
+      table.targetSequenceSignatures,
+      sequenceResult.rows
+        .filter(({ table_name }) => table_name === table.name)
+        .map((sequence) =>
+          [
+            sequence.column_name,
+            sequence.sequence_schema,
+            sequence.sequence_name,
+            sequence.data_type,
+            sequence.start_value,
+            sequence.increment_value,
+            sequence.minimum_value,
+            sequence.maximum_value,
+            sequence.cache_size,
+            sequence.cycles ? 'cycle' : 'no-cycle',
+          ].join('|'),
+        ),
+      'TARGET_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.target.${table.name}.sequences`,
     );
   }
 
@@ -1108,6 +1182,7 @@ export async function runDataMigration(
   logger: MigrationLogger = createMigrationLogger(),
   metadata: DataMigrationRunMetadata = {},
 ): Promise<DataMigrationReport> {
+  config = validateDataMigrationConfig(config);
   if (!config.allowTargetReset) {
     throw new DataMigrationError(
       'TARGET_RESET_NOT_AUTHORIZED',

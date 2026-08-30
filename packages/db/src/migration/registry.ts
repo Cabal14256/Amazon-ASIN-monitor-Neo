@@ -52,6 +52,7 @@ export interface TableMigrationSpec {
   readonly targetColumnSignatures: readonly string[];
   readonly targetConstraintSignatures: readonly string[];
   readonly targetIndexSignatures: readonly string[];
+  readonly targetSequenceSignatures: readonly string[];
   readonly targetTriggerSignatures: readonly string[];
 }
 
@@ -70,24 +71,35 @@ export interface DatabaseMigrationSpec {
 
 const postgresDialect = new PgDialect();
 
-function foldSqlOutsideStrings(value: string): string {
+function transformSqlOutsideStrings(
+  value: string,
+  transform: (segment: string) => string,
+): string {
   let result = '';
-  let inString = false;
+  let outside = '';
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index];
-    if (character === "'") {
-      result += character;
-      if (inString && value[index + 1] === "'") {
-        result += value[index + 1];
-        index += 1;
-      } else {
-        inString = !inString;
+    if (character !== "'") {
+      outside += character;
+      continue;
+    }
+    result += transform(outside);
+    outside = '';
+    result += character;
+    for (index += 1; index < value.length; index += 1) {
+      const stringCharacter = value[index];
+      result += stringCharacter;
+      if (stringCharacter === "'") {
+        if (value[index + 1] === "'") {
+          result += value[index + 1];
+          index += 1;
+        } else {
+          break;
+        }
       }
-    } else {
-      result += inString ? character : character.toLowerCase();
     }
   }
-  return result;
+  return result + transform(outside);
 }
 
 function stripOuterParentheses(value: string): string {
@@ -121,27 +133,33 @@ function stripOuterParentheses(value: string): string {
 }
 
 export function normalizePostgresExpression(value: string): string {
-  let normalized = foldSqlOutsideStrings(value)
-    .replaceAll('"', '')
-    .replace(/::\s*(?:character varying|text)(?:\[\])?/g, '')
-    .replace(/\b[a-z_][a-z0-9_]*\./g, '')
-    .replace(/\s+/g, ' ')
-    .replace(/\s*,\s*/g, ',')
-    .trim();
+  let normalized = transformSqlOutsideStrings(value, (segment) =>
+    segment
+      .toLowerCase()
+      .replaceAll('"', '')
+      .replace(/::\s*(?:character varying|text)(?:\[\])?/g, '')
+      .replace(/\b[a-z_][a-z0-9_]*\./g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*,\s*/g, ','),
+  ).trim();
   normalized = stripOuterParentheses(normalized);
   let previous = '';
   while (previous !== normalized) {
     previous = normalized;
-    normalized = normalized.replace(/\(\(([a-z_][a-z0-9_]*)\)\)/g, '($1)');
+    normalized = transformSqlOutsideStrings(normalized, (segment) =>
+      segment.replace(/\(\(([a-z_][a-z0-9_]*)\)\)/g, '($1)'),
+    );
   }
   return normalized;
 }
 
 export function normalizePostgresRoutineDefinition(value: string): string {
-  return foldSqlOutsideStrings(value)
-    .replace(/\s+/g, ' ')
-    .replace(/\s*,\s*/g, ',')
-    .trim();
+  return transformSqlOutsideStrings(value, (segment) =>
+    segment
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .replace(/\s*,\s*/g, ','),
+  ).trim();
 }
 
 export function normalizePostgresCheckExpression(value: string): string {
@@ -215,6 +233,36 @@ function sourceKeysetColumn(
 
 function triggerArgumentHex(value: string): string {
   return Buffer.from(`${value}\0`, 'utf8').toString('hex');
+}
+
+function identitySequenceSignature(
+  tableName: string,
+  columnName: string,
+  sqlType: string,
+): string {
+  const maximum =
+    sqlType === 'bigint'
+      ? '9223372036854775807'
+      : sqlType === 'integer'
+      ? '2147483647'
+      : undefined;
+  if (!maximum) {
+    throw new Error(
+      `migration identity ${tableName}.${columnName} uses unsupported type ${sqlType}`,
+    );
+  }
+  return [
+    columnName,
+    'public',
+    `${tableName}_${columnName}_seq`,
+    sqlType,
+    '1',
+    '1',
+    '1',
+    maximum,
+    '1',
+    'no-cycle',
+  ].join('|');
 }
 
 const updatedTimestampFunctionBody = normalizePostgresRoutineDefinition(`
@@ -446,6 +494,12 @@ function tableSpec(table: PgTable): TableMigrationSpec {
       '',
     ].join('|'),
   );
+  const identityColumns = columns.filter((column) =>
+    Boolean(column.generatedIdentity),
+  );
+  const targetSequenceSignatures = identityColumns.map((column) =>
+    identitySequenceSignature(tableName, column.name, column.getSQLType()),
+  );
 
   return Object.freeze({
     table,
@@ -471,16 +525,13 @@ function tableSpec(table: PgTable): TableMigrationSpec {
         .map((column) => column.name),
     ),
     generatedColumns,
-    identityColumns: Object.freeze(
-      columns
-        .filter((column) => Boolean(column.generatedIdentity))
-        .map((column) => column.name),
-    ),
+    identityColumns: Object.freeze(identityColumns.map(({ name }) => name)),
     targetColumnSignatures: Object.freeze(targetColumnSignatures.sort()),
     targetConstraintSignatures: Object.freeze(
       targetConstraintSignatures.sort(),
     ),
     targetIndexSignatures: Object.freeze(targetIndexSignatures.sort()),
+    targetSequenceSignatures: Object.freeze(targetSequenceSignatures.sort()),
     targetTriggerSignatures: Object.freeze(targetTriggerSignatures.sort()),
   });
 }

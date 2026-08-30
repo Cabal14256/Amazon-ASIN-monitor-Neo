@@ -429,7 +429,43 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标 identity sequence 参数漂移时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(`
+        ALTER SEQUENCE public.monitor_history_id_seq
+        INCREMENT BY 2 CACHE 5 CYCLE
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.monitor_history.sequences',
+        });
+      } finally {
+        await primaryTarget.query(`
+          ALTER SEQUENCE public.monitor_history_id_seq
+          INCREMENT BY 1 CACHE 1 NO CYCLE
+        `);
+      }
+    });
+
     it('目标默认值、更新时间触发器或函数漂移时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(
+        "ALTER TABLE public.variant_groups ALTER COLUMN variant_status SET DEFAULT 'foo.NORMAL'",
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.variant_groups.columns',
+        });
+      } finally {
+        await primaryTarget.query(
+          "ALTER TABLE public.variant_groups ALTER COLUMN variant_status SET DEFAULT 'NORMAL'",
+        );
+      }
+
       await primaryTarget.query(
         'ALTER TABLE public.users ALTER COLUMN force_password_change DROP DEFAULT',
       );
