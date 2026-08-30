@@ -343,14 +343,25 @@ async function validateTargetConnectionDefaults(
     `${context.spec.logicalName}.target.database_encoding`,
   );
 
-  const result = await context.target.query<{ timezone: string }>(`
-    SELECT current_setting('TimeZone') AS timezone
+  const result = await context.target.query<{
+    timezone: string;
+    replication_role: string;
+  }>(`
+    SELECT
+      current_setting('TimeZone') AS timezone,
+      current_setting('session_replication_role') AS replication_role
   `);
   compareExactSet(
     ['Asia/Shanghai'],
     result.rows.map(({ timezone }) => timezone),
     'TARGET_SESSION_MISMATCH',
     `${context.spec.logicalName}.target.timezone`,
+  );
+  compareExactSet(
+    ['origin'],
+    result.rows.map(({ replication_role }) => replication_role),
+    'TARGET_SESSION_MISMATCH',
+    `${context.spec.logicalName}.target.replication_role`,
   );
 }
 

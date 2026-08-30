@@ -60,17 +60,20 @@ function targetUrlWithShadowSearchPath(value: string): string {
   return targetUrlWithOptions(value, ['search_path=migration_shadow,public']);
 }
 
-function targetUrlWithUnsafeSessionDefaults(value: string): string {
+function targetUrlWithOverridableSessionDefaults(value: string): string {
   return targetUrlWithOptions(value, [
     'search_path=migration_shadow,public',
     'client_encoding=LATIN1',
     'DateStyle=SQL,DMY',
-    'session_replication_role=replica',
   ]);
 }
 
 function targetUrlWithConflictingTimezone(value: string): string {
   return targetUrlWithOptions(value, ['TimeZone=UTC']);
+}
+
+function targetUrlWithReplicaSession(value: string): string {
+  return targetUrlWithOptions(value, ['session_replication_role=replica']);
 }
 
 function targetUrlForDatabase(value: string, database: string): string {
@@ -964,11 +967,11 @@ describe.skipIf(!integrationEnabled)(
       expect(afterRoles.rows[0]).toEqual(beforeRoles.rows[0]);
     });
 
-    it('迁移固定 UTF8、DateStyle 并覆盖连接参数中的 replica 会话默认值', async () => {
+    it('迁移固定 UTF8、DateStyle 并覆盖可安全的连接会话默认值', async () => {
       const unsafePrimaryUrl =
-        targetUrlWithUnsafeSessionDefaults(primaryTargetUrl);
+        targetUrlWithOverridableSessionDefaults(primaryTargetUrl);
       const unsafeCompetitorUrl =
-        targetUrlWithUnsafeSessionDefaults(competitorTargetUrl);
+        targetUrlWithOverridableSessionDefaults(competitorTargetUrl);
       const probe = new Pool({ connectionString: unsafePrimaryUrl, max: 1 });
       try {
         const settings = await probe.query<{
@@ -984,7 +987,7 @@ describe.skipIf(!integrationEnabled)(
         expect(settings.rows[0]).toEqual({
           client_encoding: 'UTF8',
           date_style: 'SQL, DMY',
-          replication_role: 'replica',
+          replication_role: 'origin',
         });
       } finally {
         await probe.end();
@@ -1001,6 +1004,37 @@ describe.skipIf(!integrationEnabled)(
         logger,
       );
       expect(report.status).toBe('passed');
+    });
+
+    it('在事务内覆盖前拒绝 replica 应用会话默认值', async () => {
+      const unsafePrimaryUrl = targetUrlWithReplicaSession(primaryTargetUrl);
+      const unsafeCompetitorUrl =
+        targetUrlWithReplicaSession(competitorTargetUrl);
+      const probe = new Pool({ connectionString: unsafePrimaryUrl, max: 1 });
+      try {
+        const settings = await probe.query<{ replication_role: string }>(`
+          SELECT current_setting('session_replication_role') AS replication_role
+        `);
+        expect(settings.rows[0].replication_role).toBe('replica');
+      } finally {
+        await probe.end();
+      }
+
+      await expect(
+        runDataMigration(
+          {
+            ...migrationConfig,
+            postgres: {
+              primaryUrl: unsafePrimaryUrl,
+              competitorUrl: unsafeCompetitorUrl,
+            },
+          },
+          logger,
+        ),
+      ).rejects.toMatchObject({
+        code: 'TARGET_SESSION_MISMATCH',
+        scope: 'primary.target.replication_role',
+      });
     });
 
     it('在事务内覆盖前拒绝连接参数篡改应用有效时区', async () => {
