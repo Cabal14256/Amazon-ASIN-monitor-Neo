@@ -125,24 +125,28 @@ function aggregateQuery(
       : '';
   const granularityFilter = legacy ? `AND aggregate_row.granularity = $3` : '';
   const offsetParameter = legacy ? '$4' : '$3';
-  const orderBy = projection.keys
-    .map((column) => `${quoteIdentifier(column)} COLLATE "C"`)
+  const valueColumns =
+    family === 'variant_group'
+      ? [...projection.keys, 'variant_group_name', ...commonValueColumns]
+      : [...projection.keys, ...commonValueColumns];
+  const orderBy = valueColumns
+    .map((column) => `normalized_row.${quoteIdentifier(column)} COLLATE "C"`)
     .join(', ');
   return {
     legacy,
     keyColumns: projection.keys,
-    valueColumns:
-      family === 'variant_group'
-        ? [...projection.keys, 'variant_group_name', ...commonValueColumns]
-        : [...projection.keys, ...commonValueColumns],
+    valueColumns,
     sql: `
-      SELECT
-        ${projection.select}
-      FROM public.${name} aggregate_row
-      ${join}
-      WHERE aggregate_row.time_slot >= $1::timestamp
-        AND aggregate_row.time_slot < $2::timestamp
-        ${granularityFilter}
+      SELECT normalized_row.*
+      FROM (
+        SELECT
+          ${projection.select}
+        FROM public.${name} aggregate_row
+        ${join}
+        WHERE aggregate_row.time_slot >= $1::timestamp
+          AND aggregate_row.time_slot < $2::timestamp
+          ${granularityFilter}
+      ) normalized_row
       ORDER BY ${orderBy}
       LIMIT ${pageSize}
       OFFSET ${offsetParameter}::integer
