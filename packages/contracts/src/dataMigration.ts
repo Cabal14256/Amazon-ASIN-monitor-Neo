@@ -67,7 +67,7 @@ export const dataMigrationTableReportSchema = z
     table: z.string().regex(/^[a-z][a-z0-9_]*$/),
     sourceRows: decimalCountSchema,
     targetRows: decimalCountSchema,
-    sampledRows: z.number().int().nonnegative(),
+    sampledRows: z.number().int().nonnegative().max(100),
     sourceSampleDigest: sha256Schema.nullable(),
     targetSampleDigest: sha256Schema.nullable(),
     durationMs: z.number().int().nonnegative(),
@@ -110,8 +110,8 @@ export const dataMigrationReportSchema = z
     strategy: z.literal('full-snapshot-cutover-sync'),
     startedAt: z.string().datetime({ offset: true }),
     finishedAt: z.string().datetime({ offset: true }),
-    batchSize: z.number().int().positive(),
-    sampleSize: z.number().int().nonnegative(),
+    batchSize: z.number().int().positive().max(1_000),
+    sampleSize: z.number().int().nonnegative().max(100),
     targetResetAuthorized: z.boolean(),
     databases: z.array(dataMigrationDatabaseReportSchema).max(2),
     status: migrationStatusSchema,
@@ -197,6 +197,10 @@ export const dataMigrationReportSchema = z
           });
         }
         database.tables.forEach((table, tableIndex) => {
+          const sourceRows = BigInt(table.sourceRows);
+          const sampleLimit = BigInt(report.sampleSize);
+          const expectedSampledRows =
+            sourceRows < sampleLimit ? Number(sourceRows) : report.sampleSize;
           if (table.sourceRows !== table.targetRows) {
             context.addIssue({
               code: z.ZodIssueCode.custom,
@@ -211,13 +215,29 @@ export const dataMigrationReportSchema = z
               path: ['databases', databaseIndex, 'tables', tableIndex],
             });
           }
-          const hasSamples = table.sampledRows > 0;
-          const hasSampleDigest = table.sourceSampleDigest !== null;
-          if (hasSamples !== hasSampleDigest) {
+          if (table.sampledRows !== expectedSampledRows) {
             context.addIssue({
               code: z.ZodIssueCode.custom,
               message:
-                'sample count and digest presence must describe the same evidence',
+                'passed table report requires the configured sample count',
+              path: [
+                'databases',
+                databaseIndex,
+                'tables',
+                tableIndex,
+                'sampledRows',
+              ],
+            });
+          }
+          const expectsDigest = expectedSampledRows > 0;
+          const hasBothDigests =
+            table.sourceSampleDigest !== null &&
+            table.targetSampleDigest !== null;
+          if (expectsDigest !== hasBothDigests) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                'configured sample count and digest presence must describe the same evidence',
               path: ['databases', databaseIndex, 'tables', tableIndex],
             });
           }

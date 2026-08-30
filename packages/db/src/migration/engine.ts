@@ -33,6 +33,7 @@ import {
   databaseMigrationSpecs,
   normalizePostgresCheckExpression,
   normalizePostgresExpression,
+  normalizePostgresRoutineDefinition,
   type DatabaseMigrationSpec,
   type MigrationDatabaseName,
   type SourceKeysetColumn,
@@ -286,6 +287,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     constraint_name: string;
     constraint_type: 'p' | 'u' | 'f' | 'c';
     columns: string[];
+    foreign_schema: string | null;
     foreign_table: string | null;
     foreign_columns: string[];
     update_action: string;
@@ -304,6 +306,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
          AND attribute.attnum = key.attnum
         ORDER BY key.position
       ) AS columns,
+      foreign_namespace.nspname AS foreign_schema,
       foreign_relation.relname AS foreign_table,
       CASE WHEN constraint_row.contype = 'f' THEN ARRAY(
         SELECT attribute.attname::text
@@ -324,6 +327,8 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     LEFT JOIN pg_class foreign_relation
       ON foreign_relation.oid = constraint_row.confrelid
+    LEFT JOIN pg_namespace foreign_namespace
+      ON foreign_namespace.oid = foreign_relation.relnamespace
     WHERE namespace.nspname = 'public'
       AND constraint_row.contype IN ('p', 'u', 'f', 'c')
     ORDER BY relation.relname, constraint_row.conname
@@ -356,6 +361,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               'f',
               constraint.constraint_name,
               constraint.columns.join(','),
+              constraint.foreign_schema ?? '',
               constraint.foreign_table ?? '',
               constraint.foreign_columns.join(','),
               actionName(constraint.update_action),
@@ -498,7 +504,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
           ? 'restricted'
           : 'unsafe',
         functionRow.configuration,
-        normalizePostgresExpression(functionRow.source_body),
+        normalizePostgresRoutineDefinition(functionRow.source_body),
       ].join('|'),
     ),
     'TARGET_SCHEMA_MISMATCH',
@@ -556,7 +562,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
             trigger.arguments_hex,
             trigger.old_transition_table,
             trigger.new_transition_table,
-            normalizePostgresExpression(trigger.when_expression),
+            normalizePostgresRoutineDefinition(trigger.when_expression),
           ].join('|'),
         ),
       'TARGET_SCHEMA_MISMATCH',

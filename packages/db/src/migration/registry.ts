@@ -137,6 +137,13 @@ export function normalizePostgresExpression(value: string): string {
   return normalized;
 }
 
+export function normalizePostgresRoutineDefinition(value: string): string {
+  return foldSqlOutsideStrings(value)
+    .replace(/\s+/g, ' ')
+    .replace(/\s*,\s*/g, ',')
+    .trim();
+}
+
 export function normalizePostgresCheckExpression(value: string): string {
   let normalized = normalizePostgresExpression(value);
   if (normalized.startsWith('check')) {
@@ -210,7 +217,7 @@ function triggerArgumentHex(value: string): string {
   return Buffer.from(`${value}\0`, 'utf8').toString('hex');
 }
 
-const updatedTimestampFunctionBody = normalizePostgresExpression(`
+const updatedTimestampFunctionBody = normalizePostgresRoutineDefinition(`
   BEGIN
     CASE TG_ARGV[0]
       WHEN 'update_time' THEN NEW.update_time := LOCALTIMESTAMP;
@@ -368,6 +375,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
         'f',
         reference.name,
         reference.columns.map((column) => column.name).join(','),
+        'public',
         getTableName(reference.foreignTable),
         reference.foreignColumns.map((column) => column.name).join(','),
         foreignKey.onUpdate ?? 'no action',

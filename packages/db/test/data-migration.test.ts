@@ -32,6 +32,7 @@ import {
   databaseMigrationSpecs,
   normalizePostgresCheckExpression,
   normalizePostgresExpression,
+  normalizePostgresRoutineDefinition,
 } from '../src/migration/registry';
 import {
   prepareDataMigrationReportDestination,
@@ -142,7 +143,7 @@ describe('P1-T3 migration registry', () => {
       'u|uk_asins_asin_country|asin,country',
     );
     expect(asins.targetConstraintSignatures).toContain(
-      'f|fk_asins_variant_group|variant_group_id|variant_groups|id|no action|cascade',
+      'f|fk_asins_variant_group|variant_group_id|public|variant_groups|id|no action|cascade',
     );
     expect(asins.targetColumnSignatures).toContain(
       'manual_broken|boolean|nullable|||false',
@@ -181,6 +182,16 @@ describe('P1-T3 migration registry', () => {
     expect(normalizePostgresExpression('lower((asin)::text)')).toBe(
       'lower(asin)',
     );
+    expect(
+      normalizePostgresRoutineDefinition(
+        'BEGIN NEW.update_time := LOCALTIMESTAMP; RETURN NEW; END;',
+      ),
+    ).toBe('begin new.update_time := localtimestamp; return new; end;');
+    expect(
+      normalizePostgresRoutineDefinition(
+        'BEGIN OLD.update_time := LOCALTIMESTAMP; RETURN NEW; END;',
+      ),
+    ).not.toBe('begin new.update_time := localtimestamp; return new; end;');
   });
 
   it('仅忽略两个现有维护脚本产生的持久化备份表', () => {

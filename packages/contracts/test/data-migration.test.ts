@@ -127,6 +127,27 @@ describe('dataMigrationReportSchema', () => {
       }).success,
     ).toBe(false);
 
+    const insufficientSample = [database('primary'), database('competitor')];
+    insufficientSample[0].tables[0] = {
+      ...insufficientSample[0].tables[0],
+      sourceRows: '25',
+      targetRows: '25',
+      sampledRows: 1,
+    };
+    expect(
+      dataMigrationReportSchema.safeParse({
+        ...base,
+        databases: insufficientSample,
+      }).success,
+    ).toBe(false);
+    expect(
+      dataMigrationReportSchema.safeParse({
+        ...base,
+        sampleSize: 101,
+        databases: passedReportDatabases(),
+      }).success,
+    ).toBe(false);
+
     const mismatchedQuery = [database('primary'), database('competitor')];
     mismatchedQuery[1].businessQueries[0].targetDigest = 'b'.repeat(64);
     expect(

@@ -27,7 +27,7 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 4. MySQL 账号仅对两个源库拥有 `SELECT` 权限；
 5. 两个源库的 25 张表均使用 InnoDB；最终同步时，Legacy API、调度器和 Worker 已停止产生数据库写入，旧 Bull 队列已 drain。
 
-未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源表/列集合，以及目标表、精确列类型与可空性、默认值、identity/生成表达式、主外键、唯一/CHECK 约束定义、索引方法/列或表达式/谓词，以及更新时间函数和触发器必须与迁移注册表完全一致。目标事务还会把 `search_path` 固定为 `public, pg_catalog`，因此角色或 URL 的自定义 schema 不会截获迁移 DML。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
+未显式授权重置时，工具在建立数据库连接之前失败，不会修改目标库。开始目标重置前，工具还会校验源表/列集合，以及目标表、精确列类型与可空性、默认值、identity/生成表达式、主外键（包括被引用的 `public` schema）、唯一/CHECK 约束定义、索引方法/列或表达式/谓词，以及更新时间函数和触发器必须与迁移注册表完全一致。目标事务还会把 `search_path` 固定为 `public, pg_catalog`，因此角色或 URL 的自定义 schema 不会截获迁移 DML。源库只额外容许两个现有维护脚本按固定时间戳格式生成的 `mh*_bak_YYYYMMDD_HHMMSS` 和 `monitor_history_*_bak_YYYYMMDD_HHMMSS` 持久化备份表；其他未知表仍会触发 schema mismatch，备份表本身不会迁移。
 
 两个 PG database 无法共享普通本地事务：工具先完成两库导入与对拍，再逐库提交。极端情况下第一个目标提交后、第二个目标提交失败，报告会返回 `TARGET_COMMIT_PARTIAL`；若已发送 `COMMIT` 但连接在确认响应前断开，则返回 `TARGET_COMMIT_INDETERMINATE`。两种情况都不得假设事务已回滚或直接放量，应先核验、恢复或再次重置两个目标，再从仍冻结的 MySQL 重新执行。
 
@@ -83,7 +83,7 @@ corepack pnpm db:migrate:data
 成功报告符合 `packages/contracts` 的 `dataMigrationReportSchema`，仅包含：
 
 - 两库及每表的源/目标行数；
-- 基于主键哈希排名的确定性字段样本数量和 SHA-256 摘要；
+- 基于主键哈希排名的确定性字段样本数量和 SHA-256 摘要；通过报告必须包含 `min(源行数, MIGRATION_SAMPLE_SIZE)` 个样本；
 - 7 组关键业务查询的行数和 SHA-256 摘要；
 - 批次、耗时、运行 ID 与最终状态。
 

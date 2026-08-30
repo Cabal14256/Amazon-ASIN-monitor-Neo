@@ -287,10 +287,12 @@ describe.skipIf(!integrationEnabled)(
       await primaryTarget.query(`
         CREATE SCHEMA migration_shadow;
         CREATE TABLE migration_shadow.roles (
-          id text PRIMARY KEY,
+          id varchar(50) PRIMARY KEY,
           marker text NOT NULL
         );
-        INSERT INTO migration_shadow.roles VALUES ('shadow-role', 'preserve');
+        INSERT INTO migration_shadow.roles VALUES
+          ('shadow-role', 'preserve'),
+          ('role-003', 'foreign-key-fixture');
       `);
       await competitorTarget.query(`
         CREATE SCHEMA migration_shadow;
@@ -395,6 +397,34 @@ describe.skipIf(!integrationEnabled)(
           DROP INDEX public.idx_monitor_history_status_interval_refresh;
           CREATE INDEX idx_monitor_history_status_interval_refresh
             ON public.monitor_history (check_type, check_time, id);
+        `);
+      }
+    });
+
+    it('目标外键改指向同名影子表时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(`
+        ALTER TABLE public.user_roles DROP CONSTRAINT fk_user_roles_role;
+        ALTER TABLE public.user_roles
+          ADD CONSTRAINT fk_user_roles_role
+          FOREIGN KEY (role_id)
+          REFERENCES migration_shadow.roles(id)
+          ON DELETE CASCADE;
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.user_roles.constraints',
+        });
+      } finally {
+        await primaryTarget.query(`
+          ALTER TABLE public.user_roles DROP CONSTRAINT fk_user_roles_role;
+          ALTER TABLE public.user_roles
+            ADD CONSTRAINT fk_user_roles_role
+            FOREIGN KEY (role_id)
+            REFERENCES public.roles(id)
+            ON DELETE CASCADE;
         `);
       }
     });
