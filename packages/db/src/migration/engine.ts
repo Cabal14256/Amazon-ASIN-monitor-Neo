@@ -326,7 +326,11 @@ async function validateTargetEnvironment(
     'TARGET_SESSION_MISMATCH',
     `${context.spec.logicalName}.target.session`,
   );
+}
 
+async function validateTargetConnectionDefaults(
+  context: DatabaseContext,
+): Promise<void> {
   const databaseResult = await context.target.query<{ encoding: string }>(`
     SELECT pg_encoding_to_char(encoding) AS encoding
     FROM pg_database
@@ -338,11 +342,7 @@ async function validateTargetEnvironment(
     'TARGET_DATABASE_ENCODING_MISMATCH',
     `${context.spec.logicalName}.target.database_encoding`,
   );
-}
 
-async function validateTargetConnectionDefaults(
-  context: DatabaseContext,
-): Promise<void> {
   const result = await context.target.query<{ timezone: string }>(`
     SELECT current_setting('TimeZone') AS timezone
   `);
