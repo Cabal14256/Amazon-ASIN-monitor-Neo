@@ -246,14 +246,26 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       policy_count: string;
     }>(
       `
+      WITH selected_materializations AS (
+        SELECT
+          materialization_hypertable_schema AS schema_name,
+          materialization_hypertable_name AS table_name
+        FROM timescaledb_information.continuous_aggregates
+        WHERE view_schema = 'public'
+          AND view_name = ANY($1::text[])
+      ), selected_ids AS (
+        SELECT hypertable.id
+        FROM _timescaledb_catalog.hypertable hypertable
+        JOIN selected_materializations materialization
+          ON materialization.schema_name = hypertable.schema_name
+         AND materialization.table_name = hypertable.table_name
+      )
       SELECT jobs.schedule_interval::text, COUNT(*)::text AS policy_count
       FROM timescaledb_information.jobs jobs
-      JOIN timescaledb_information.continuous_aggregates aggregate_row
-        ON aggregate_row.materialization_hypertable_schema = jobs.hypertable_schema
-       AND aggregate_row.materialization_hypertable_name = jobs.hypertable_name
-      WHERE aggregate_row.view_schema = 'public'
-        AND aggregate_row.view_name = ANY($1::text[])
-        AND jobs.proc_name = 'policy_refresh_continuous_aggregate'
+      WHERE jobs.proc_name = 'policy_refresh_continuous_aggregate'
+        AND (jobs.config ->> 'mat_hypertable_id')::integer IN (
+          SELECT id FROM selected_ids
+        )
       GROUP BY jobs.schedule_interval
       ORDER BY jobs.schedule_interval
     `,
