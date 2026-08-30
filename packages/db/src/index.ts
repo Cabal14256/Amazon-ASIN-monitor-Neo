@@ -1,3 +1,4 @@
+export * from './aggregate-reconciliation';
 export * from './client';
 export * from './migration';
 export * from './schema';
