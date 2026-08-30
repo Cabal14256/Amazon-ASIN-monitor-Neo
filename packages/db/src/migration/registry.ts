@@ -1,4 +1,4 @@
-import { getTableColumns, getTableName, type SQL } from 'drizzle-orm';
+import { getTableColumns, getTableName, SQL } from 'drizzle-orm';
 import { getTableConfig, PgDialect, type PgTable } from 'drizzle-orm/pg-core';
 
 import {
@@ -33,12 +33,18 @@ import {
 
 export type MigrationDatabaseName = 'primary' | 'competitor';
 
+export interface SourceKeysetColumn {
+  readonly column: string;
+  readonly enumOrder?: readonly string[];
+}
+
 export interface TableMigrationSpec {
   readonly table: PgTable;
   readonly name: string;
   readonly columns: readonly string[];
   readonly insertColumns: readonly string[];
   readonly primaryKeyColumns: readonly string[];
+  readonly sourceKeysetColumns: readonly SourceKeysetColumn[];
   readonly booleanColumns: ReadonlySet<string>;
   readonly jsonColumns: ReadonlySet<string>;
   readonly generatedColumns: ReadonlySet<string>;
@@ -46,6 +52,7 @@ export interface TableMigrationSpec {
   readonly targetColumnSignatures: readonly string[];
   readonly targetConstraintSignatures: readonly string[];
   readonly targetIndexSignatures: readonly string[];
+  readonly targetTriggerSignatures: readonly string[];
 }
 
 export interface BusinessQuerySpec {
@@ -58,6 +65,7 @@ export interface DatabaseMigrationSpec {
   readonly logicalName: MigrationDatabaseName;
   readonly tables: readonly TableMigrationSpec[];
   readonly businessQueries: readonly BusinessQuerySpec[];
+  readonly targetFunctionSignatures: readonly string[];
 }
 
 const postgresDialect = new PgDialect();
@@ -163,6 +171,74 @@ function renderSql(value: SQL): string {
   return rendered.sql;
 }
 
+function renderColumnExpression(value: unknown): string {
+  if (value === undefined) return '';
+  if (value instanceof SQL) return renderSql(value);
+  if (typeof value === 'string') return `'${value.replaceAll("'", "''")}'`;
+  if (
+    typeof value === 'boolean' ||
+    typeof value === 'number' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value);
+  }
+  throw new Error(
+    'migration schema fingerprint contains an unsupported default',
+  );
+}
+
+const aggregateTableNames = new Set([
+  'monitor_history_agg',
+  'monitor_history_agg_dim',
+  'monitor_history_agg_variant_group',
+]);
+const aggregateGranularityOrder = Object.freeze(['hour', 'day', 'month']);
+
+function sourceKeysetColumn(
+  tableName: string,
+  column: string,
+): SourceKeysetColumn {
+  return Object.freeze({
+    column,
+    ...(aggregateTableNames.has(tableName) && column === 'granularity'
+      ? { enumOrder: aggregateGranularityOrder }
+      : {}),
+  });
+}
+
+function triggerArgumentHex(value: string): string {
+  return Buffer.from(`${value}\0`, 'utf8').toString('hex');
+}
+
+const updatedTimestampFunctionBody = normalizePostgresExpression(`
+  BEGIN
+    CASE TG_ARGV[0]
+      WHEN 'update_time' THEN NEW.update_time := LOCALTIMESTAMP;
+      WHEN 'updated_at' THEN NEW.updated_at := LOCALTIMESTAMP;
+      ELSE
+        RAISE EXCEPTION 'unsupported timestamp column: %', TG_ARGV[0]
+          USING ERRCODE = '22023';
+    END CASE;
+    RETURN NEW;
+  END;
+`);
+
+const updatedTimestampFunctionSignature = [
+  'set_updated_timestamp_column',
+  'f',
+  'trigger',
+  '',
+  'plpgsql',
+  'v',
+  'not-strict',
+  'invoker',
+  'not-leakproof',
+  'not-set',
+  'unsafe',
+  '',
+  updatedTimestampFunctionBody,
+].join('|');
+
 function indexSignature(
   name: string,
   unique: boolean,
@@ -230,12 +306,21 @@ function tableSpec(table: PgTable): TableMigrationSpec {
         ? 'a'
         : 'd'
       : '';
+    const generatedExpression = column.generated
+      ? typeof column.generated.as === 'function'
+        ? column.generated.as()
+        : column.generated.as
+      : undefined;
+    const storedExpression = normalizePostgresExpression(
+      renderColumnExpression(generatedExpression ?? column.default),
+    );
     return [
       column.name,
       postgresCatalogType(column.getSQLType()),
       column.notNull ? 'not-null' : 'nullable',
       identityKind,
       column.generated ? 's' : '',
+      storedExpression,
     ].join('|');
   });
   const targetConstraintSignatures: string[] = [];
@@ -332,6 +417,27 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     }),
     ...constraintIndexSignatures,
   ];
+  const updatedTimestampColumns = columns.filter(({ name }) =>
+    ['update_time', 'updated_at'].includes(name),
+  );
+  if (updatedTimestampColumns.length > 1) {
+    throw new Error(
+      `migration table ${tableName} has multiple updated timestamp columns`,
+    );
+  }
+  const targetTriggerSignatures = updatedTimestampColumns.map(({ name }) =>
+    [
+      `trg_${tableName}_${name}`,
+      '19',
+      'O',
+      'public',
+      'set_updated_timestamp_column',
+      triggerArgumentHex(name),
+      '',
+      '',
+      '',
+    ].join('|'),
+  );
 
   return Object.freeze({
     table,
@@ -343,6 +449,9 @@ function tableSpec(table: PgTable): TableMigrationSpec {
         .filter((column) => !generatedColumns.has(column)),
     ),
     primaryKeyColumns: Object.freeze(primaryKeyColumns),
+    sourceKeysetColumns: Object.freeze(
+      primaryKeyColumns.map((column) => sourceKeysetColumn(tableName, column)),
+    ),
     booleanColumns: new Set(
       columns
         .filter((column) => column.getSQLType() === 'boolean')
@@ -364,6 +473,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
       targetConstraintSignatures.sort(),
     ),
     targetIndexSignatures: Object.freeze(targetIndexSignatures.sort()),
+    targetTriggerSignatures: Object.freeze(targetTriggerSignatures.sort()),
   });
 }
 
@@ -495,32 +605,40 @@ const primaryBusinessQueries: readonly BusinessQuerySpec[] = [
   {
     name: 'analytics_rows_by_granularity',
     sourceSql: `
-      SELECT 'asin' AS aggregate_name, granularity, country, CAST(COUNT(*) AS CHAR) AS row_count
-      FROM monitor_history_agg
-      GROUP BY granularity, country
-      UNION ALL
-      SELECT 'dimension' AS aggregate_name, granularity, country, CAST(COUNT(*) AS CHAR) AS row_count
-      FROM monitor_history_agg_dim
-      GROUP BY granularity, country
-      UNION ALL
-      SELECT 'variant_group' AS aggregate_name, granularity, country, CAST(COUNT(*) AS CHAR) AS row_count
-      FROM monitor_history_agg_variant_group
-      GROUP BY granularity, country
-      ORDER BY aggregate_name, granularity, country
+      SELECT aggregate_name, granularity, country, row_count
+      FROM (
+        SELECT 'asin' AS aggregate_name, granularity, country, CAST(COUNT(*) AS CHAR) AS row_count
+        FROM monitor_history_agg
+        GROUP BY granularity, country
+        UNION ALL
+        SELECT 'dimension' AS aggregate_name, granularity, country, CAST(COUNT(*) AS CHAR) AS row_count
+        FROM monitor_history_agg_dim
+        GROUP BY granularity, country
+        UNION ALL
+        SELECT 'variant_group' AS aggregate_name, granularity, country, CAST(COUNT(*) AS CHAR) AS row_count
+        FROM monitor_history_agg_variant_group
+        GROUP BY granularity, country
+      ) aggregate_rows
+      ORDER BY aggregate_name, FIELD(granularity, 'hour', 'day', 'month'), country
     `,
     targetSql: `
-      SELECT 'asin' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
-      FROM monitor_history_agg
-      GROUP BY granularity, country
-      UNION ALL
-      SELECT 'dimension' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
-      FROM monitor_history_agg_dim
-      GROUP BY granularity, country
-      UNION ALL
-      SELECT 'variant_group' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
-      FROM monitor_history_agg_variant_group
-      GROUP BY granularity, country
-      ORDER BY aggregate_name, granularity, country
+      SELECT aggregate_name, granularity, country, row_count
+      FROM (
+        SELECT 'asin' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
+        FROM monitor_history_agg
+        GROUP BY granularity, country
+        UNION ALL
+        SELECT 'dimension' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
+        FROM monitor_history_agg_dim
+        GROUP BY granularity, country
+        UNION ALL
+        SELECT 'variant_group' AS aggregate_name, granularity, country, COUNT(*)::text AS row_count
+        FROM monitor_history_agg_variant_group
+        GROUP BY granularity, country
+      ) aggregate_rows
+      ORDER BY aggregate_name,
+        CASE granularity WHEN 'hour' THEN 1 WHEN 'day' THEN 2 WHEN 'month' THEN 3 END,
+        country
     `,
   },
 ];
@@ -577,10 +695,16 @@ export const databaseMigrationSpecs: readonly DatabaseMigrationSpec[] = [
     logicalName: 'primary',
     tables: Object.freeze(primaryTables),
     businessQueries: Object.freeze(primaryBusinessQueries),
+    targetFunctionSignatures: Object.freeze([
+      updatedTimestampFunctionSignature,
+    ]),
   }),
   Object.freeze({
     logicalName: 'competitor',
     tables: Object.freeze(competitorTables),
     businessQueries: Object.freeze(competitorBusinessQueries),
+    targetFunctionSignatures: Object.freeze([
+      updatedTimestampFunctionSignature,
+    ]),
   }),
 ];

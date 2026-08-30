@@ -120,10 +120,10 @@ describe('P1-T3 migration registry', () => {
     expect(monitorHistory?.insertColumns).not.toContain('month_ts');
     expect(monitorHistory?.identityColumns).toEqual(['id']);
     expect(monitorHistory?.targetColumnSignatures).toContain(
-      'id|bigint|not-null|a|',
+      'id|bigint|not-null|a||',
     );
     expect(monitorHistory?.targetColumnSignatures).toContain(
-      'hour_ts|timestamp without time zone|nullable||s',
+      "hour_ts|timestamp without time zone|nullable||s|date_trunc('hour',check_time)",
     );
     expect(monitorHistory?.targetConstraintSignatures).toContain(
       'p|monitor_history_pkey|id',
@@ -144,6 +144,12 @@ describe('P1-T3 migration registry', () => {
     expect(asins.targetConstraintSignatures).toContain(
       'f|fk_asins_variant_group|variant_group_id|variant_groups|id|no action|cascade',
     );
+    expect(asins.targetColumnSignatures).toContain(
+      'manual_broken|boolean|nullable|||false',
+    );
+    expect(asins.targetTriggerSignatures).toEqual([
+      'trg_asins_update_time|19|O|public|set_updated_timestamp_column|7570646174655f74696d6500|||',
+    ]);
 
     const aggregate = databaseMigrationSpecs[0].tables.find(
       ({ name }) => name === 'monitor_history_agg',
@@ -151,9 +157,19 @@ describe('P1-T3 migration registry', () => {
     expect(aggregate.targetConstraintSignatures).toContain(
       "c|ck_monitor_history_agg_granularity|granularity|in|'hour','day','month'",
     );
+    expect(aggregate.sourceKeysetColumns[0]).toEqual({
+      column: 'granularity',
+      enumOrder: ['hour', 'day', 'month'],
+    });
     expect(asins.targetIndexSignatures).toContain(
       'uq_asins_asin_country_ci|unique|btree|lower(asin),lower(country)||valid|ready',
     );
+    for (const database of databaseMigrationSpecs) {
+      expect(database.targetFunctionSignatures).toHaveLength(1);
+      expect(database.targetFunctionSignatures[0]).toContain(
+        'set_updated_timestamp_column|f|trigger||plpgsql|v|not-strict|invoker|not-leakproof|not-set|unsafe||',
+      );
+    }
   });
 
   it('将 PG catalog 重写的 CHECK 和表达式索引归一到 Drizzle 定义', () => {
@@ -198,6 +214,29 @@ describe('P1-T3 migration registry', () => {
         "GROUP BY country, COALESCE(check_type, '')",
       );
     }
+  });
+
+  it('聚合 keyset 与业务对拍共享 hour/day/month 的显式顺序', () => {
+    const aggregateTables = databaseMigrationSpecs[0].tables.filter(
+      ({ name }) => name.startsWith('monitor_history_agg'),
+    );
+    expect(aggregateTables).toHaveLength(3);
+    for (const table of aggregateTables) {
+      expect(table.sourceKeysetColumns[0].enumOrder).toEqual([
+        'hour',
+        'day',
+        'month',
+      ]);
+    }
+    const query = databaseMigrationSpecs[0].businessQueries.find(
+      ({ name }) => name === 'analytics_rows_by_granularity',
+    );
+    expect(query?.sourceSql).toContain(
+      "FIELD(granularity, 'hour', 'day', 'month')",
+    );
+    expect(query?.targetSql).toContain(
+      "CASE granularity WHEN 'hour' THEN 1 WHEN 'day' THEN 2 WHEN 'month' THEN 3 END",
+    );
   });
 });
 
@@ -505,6 +544,19 @@ describe('migration config and logging safety', () => {
           scope: 'config.migration_allow_target_reset',
         },
       });
+      expect(JSON.stringify(silentLogger.info.mock.calls)).not.toContain(
+        reportPath,
+      );
+      expect(JSON.stringify(silentLogger.error.mock.calls)).not.toContain(
+        reportPath,
+      );
+      expect(silentLogger.info).toHaveBeenCalledWith(
+        'data_migration.report_written',
+        expect.objectContaining({
+          reportDestination: 'data-migration-report',
+          status: 'failed',
+        }),
+      );
     } finally {
       vi.unstubAllEnvs();
       await rm(directory, { recursive: true, force: true });
@@ -587,7 +639,7 @@ describe('migration config and logging safety', () => {
     const writeReport = vi
       .fn()
       .mockRejectedValueOnce(new Error('fixture write failure'))
-      .mockResolvedValueOnce(undefined);
+      .mockRejectedValueOnce(new Error(`cannot write ${reportPath}`));
 
     try {
       expect(
@@ -607,11 +659,18 @@ describe('migration config and logging safety', () => {
         },
       });
       expect(silentLogger.error).toHaveBeenCalledWith(
+        'data_migration.report_write_failed',
+        expect.objectContaining({ code: 'REPORT_WRITE_FAILED' }),
+      );
+      expect(silentLogger.error).toHaveBeenCalledWith(
         'data_migration.cli_failed',
         expect.objectContaining({
           code: 'POST_COMMIT_REPORT_WRITE_FAILED',
           scope: 'report.write',
         }),
+      );
+      expect(JSON.stringify(silentLogger.error.mock.calls)).not.toContain(
+        reportPath,
       );
     } finally {
       vi.unstubAllEnvs();

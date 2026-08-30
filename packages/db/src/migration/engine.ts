@@ -35,6 +35,7 @@ import {
   normalizePostgresExpression,
   type DatabaseMigrationSpec,
   type MigrationDatabaseName,
+  type SourceKeysetColumn,
   type TableMigrationSpec,
 } from './registry';
 
@@ -229,6 +230,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     is_not_null: boolean;
     identity_kind: string;
     generated_kind: string;
+    stored_expression: string | null;
   }>(`
     SELECT
       relation.relname AS table_name,
@@ -236,10 +238,15 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
       attribute.attnotnull AS is_not_null,
       attribute.attidentity AS identity_kind,
-      attribute.attgenerated AS generated_kind
+      attribute.attgenerated AS generated_kind,
+      pg_get_expr(attribute_default.adbin, attribute_default.adrelid, true)
+        AS stored_expression
     FROM pg_attribute attribute
     JOIN pg_class relation ON relation.oid = attribute.attrelid
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    LEFT JOIN pg_attrdef attribute_default
+      ON attribute_default.adrelid = attribute.attrelid
+     AND attribute_default.adnum = attribute.attnum
     WHERE namespace.nspname = 'public'
       AND relation.relkind IN ('r', 'p')
       AND attribute.attnum > 0
@@ -258,6 +265,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
             is_not_null,
             identity_kind,
             generated_kind,
+            stored_expression,
           }) =>
             [
               column_name,
@@ -265,6 +273,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               is_not_null ? 'not-null' : 'nullable',
               identity_kind,
               generated_kind,
+              normalizePostgresExpression(stored_expression ?? ''),
             ].join('|'),
         ),
       'TARGET_SCHEMA_MISMATCH',
@@ -424,6 +433,136 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       `${context.spec.logicalName}.target.${table.name}.indexes`,
     );
   }
+
+  const functionNames = context.spec.targetFunctionSignatures.map(
+    (signature) => signature.split('|', 1)[0],
+  );
+  const functionResult = await context.target.query<{
+    function_name: string;
+    function_kind: string;
+    result_type: string;
+    arguments: string;
+    language_name: string;
+    volatility: string;
+    is_strict: boolean;
+    is_security_definer: boolean;
+    is_leakproof: boolean;
+    returns_set: boolean;
+    parallel_safety: string;
+    configuration: string;
+    source_body: string;
+  }>(
+    `
+      SELECT
+        procedure_row.proname AS function_name,
+        procedure_row.prokind AS function_kind,
+        pg_get_function_result(procedure_row.oid) AS result_type,
+        pg_get_function_identity_arguments(procedure_row.oid) AS arguments,
+        language_row.lanname AS language_name,
+        procedure_row.provolatile AS volatility,
+        procedure_row.proisstrict AS is_strict,
+        procedure_row.prosecdef AS is_security_definer,
+        procedure_row.proleakproof AS is_leakproof,
+        procedure_row.proretset AS returns_set,
+        procedure_row.proparallel AS parallel_safety,
+        COALESCE(array_to_string(procedure_row.proconfig, E'\\n'), '') AS configuration,
+        procedure_row.prosrc AS source_body
+      FROM pg_proc procedure_row
+      JOIN pg_namespace namespace
+        ON namespace.oid = procedure_row.pronamespace
+      JOIN pg_language language_row
+        ON language_row.oid = procedure_row.prolang
+      WHERE namespace.nspname = 'public'
+        AND procedure_row.proname = ANY($1::text[])
+      ORDER BY procedure_row.proname, arguments
+    `,
+    [functionNames],
+  );
+  compareExactSet(
+    context.spec.targetFunctionSignatures,
+    functionResult.rows.map((functionRow) =>
+      [
+        functionRow.function_name,
+        functionRow.function_kind,
+        functionRow.result_type,
+        functionRow.arguments,
+        functionRow.language_name,
+        functionRow.volatility,
+        functionRow.is_strict ? 'strict' : 'not-strict',
+        functionRow.is_security_definer ? 'definer' : 'invoker',
+        functionRow.is_leakproof ? 'leakproof' : 'not-leakproof',
+        functionRow.returns_set ? 'set' : 'not-set',
+        functionRow.parallel_safety === 's'
+          ? 'safe'
+          : functionRow.parallel_safety === 'r'
+          ? 'restricted'
+          : 'unsafe',
+        functionRow.configuration,
+        normalizePostgresExpression(functionRow.source_body),
+      ].join('|'),
+    ),
+    'TARGET_SCHEMA_MISMATCH',
+    `${context.spec.logicalName}.target.functions`,
+  );
+
+  const triggerResult = await context.target.query<{
+    table_name: string;
+    trigger_name: string;
+    trigger_type: number;
+    enabled_kind: string;
+    function_schema: string;
+    function_name: string;
+    arguments_hex: string;
+    old_transition_table: string;
+    new_transition_table: string;
+    when_expression: string;
+  }>(`
+    SELECT
+      relation.relname AS table_name,
+      trigger_row.tgname AS trigger_name,
+      trigger_row.tgtype::integer AS trigger_type,
+      trigger_row.tgenabled AS enabled_kind,
+      function_namespace.nspname AS function_schema,
+      procedure_row.proname AS function_name,
+      encode(trigger_row.tgargs, 'hex') AS arguments_hex,
+      COALESCE(trigger_row.tgoldtable::text, '') AS old_transition_table,
+      COALESCE(trigger_row.tgnewtable::text, '') AS new_transition_table,
+      COALESCE(
+        pg_get_expr(trigger_row.tgqual, trigger_row.tgrelid, true),
+        ''
+      ) AS when_expression
+    FROM pg_trigger trigger_row
+    JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    JOIN pg_proc procedure_row ON procedure_row.oid = trigger_row.tgfoid
+    JOIN pg_namespace function_namespace
+      ON function_namespace.oid = procedure_row.pronamespace
+    WHERE namespace.nspname = 'public'
+      AND NOT trigger_row.tgisinternal
+    ORDER BY relation.relname, trigger_row.tgname
+  `);
+  for (const table of context.spec.tables) {
+    compareExactSet(
+      table.targetTriggerSignatures,
+      triggerResult.rows
+        .filter(({ table_name }) => table_name === table.name)
+        .map((trigger) =>
+          [
+            trigger.trigger_name,
+            String(trigger.trigger_type),
+            trigger.enabled_kind,
+            trigger.function_schema,
+            trigger.function_name,
+            trigger.arguments_hex,
+            trigger.old_transition_table,
+            trigger.new_transition_table,
+            normalizePostgresExpression(trigger.when_expression),
+          ].join('|'),
+        ),
+      'TARGET_SCHEMA_MISMATCH',
+      `${context.spec.logicalName}.target.${table.name}.triggers`,
+    );
+  }
 }
 
 async function resetTarget(context: DatabaseContext): Promise<void> {
@@ -460,6 +599,25 @@ async function targetCount(
   );
 }
 
+function sourceKeysetExpression(
+  key: SourceKeysetColumn,
+  cursorValue: boolean,
+): string {
+  const valueExpression = cursorValue ? '?' : quoteMysqlIdentifier(key.column);
+  if (!key.enumOrder) return valueExpression;
+  const enumLiterals = key.enumOrder.map((value) => {
+    if (!/^[a-z][a-z0-9_]*$/.test(value)) {
+      throw new DataMigrationError(
+        'MIGRATION_REGISTRY_INVALID',
+        'registry.source_keyset.enum_order',
+        'migration registry contains an unsafe source enum value',
+      );
+    }
+    return `'${value}'`;
+  });
+  return `FIELD(${valueExpression}, ${enumLiterals.join(', ')})`;
+}
+
 async function sourceBatch(
   context: DatabaseContext,
   table: TableMigrationSpec,
@@ -474,17 +632,23 @@ async function sourceBatch(
     );
   }
   const columns = table.columns.map(quoteMysqlIdentifier).join(', ');
-  const orderBy = table.primaryKeyColumns.map(quoteMysqlIdentifier).join(', ');
+  const orderExpressions = table.sourceKeysetColumns.map((key) =>
+    sourceKeysetExpression(key, false),
+  );
+  const cursorExpressions = table.sourceKeysetColumns.map((key) =>
+    sourceKeysetExpression(key, true),
+  );
+  const orderBy = orderExpressions.join(', ');
   const parameters: unknown[] = [];
   let where = '';
 
   if (cursor) {
-    if (table.primaryKeyColumns.length === 1) {
-      where = `WHERE ${quoteMysqlIdentifier(table.primaryKeyColumns[0])} > ?`;
+    if (table.sourceKeysetColumns.length === 1) {
+      where = `WHERE ${orderExpressions[0]} > ${cursorExpressions[0]}`;
     } else {
-      where = `WHERE (${table.primaryKeyColumns
-        .map(quoteMysqlIdentifier)
-        .join(', ')}) > (${table.primaryKeyColumns.map(() => '?').join(', ')})`;
+      where = `WHERE (${orderExpressions.join(
+        ', ',
+      )}) > (${cursorExpressions.join(', ')})`;
     }
     parameters.push(...cursor);
   }

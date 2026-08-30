@@ -103,7 +103,7 @@ export async function runDataMigrationCli(
     }
     activeLogger.info('data_migration.report_written', {
       runId,
-      reportPath,
+      reportDestination: 'data-migration-report',
       status: report.status,
     });
     return 0;
@@ -115,13 +115,13 @@ export async function runDataMigrationCli(
       await writeReport(report, reportPath);
       activeLogger.info('data_migration.report_written', {
         runId,
-        reportPath,
+        reportDestination: 'data-migration-report',
         status: report.status,
       });
-    } catch (reportError) {
+    } catch {
       activeLogger.error('data_migration.report_write_failed', {
         runId,
-        error: reportError,
+        code: 'REPORT_WRITE_FAILED',
       });
     }
     activeLogger.error('data_migration.cli_failed', {

@@ -8,7 +8,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { DataMigrationConfig } from '../src/migration/config';
 import { runDataMigration } from '../src/migration/engine';
-import { createMigrationLogger } from '../src/migration/logger';
+import {
+  createMigrationLogger,
+  type MigrationLogger,
+} from '../src/migration/logger';
 
 const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
 const sourcePrimaryDatabase =
@@ -95,17 +98,26 @@ async function seedPrimarySource(): Promise<void> {
       INSERT INTO monitor_history_agg
         (granularity, time_slot, country, asin_key, check_count, broken_count, has_broken, has_peak, first_check_time, last_check_time)
       VALUES
-        ('hour', '2026-08-28 09:00:00', 'US', 'asin-ci-1', 2, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 09:20:11');
+        ('hour', '2026-08-28 09:00:00', 'US', 'asin-ci-1', 2, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 09:20:11'),
+        ('hour', '2026-08-28 10:00:00', 'US', 'asin-ci-1', 1, 0, 0, 0, '2026-08-28 10:10:11', '2026-08-28 10:10:11'),
+        ('day', '2026-08-28 00:00:00', 'US', 'asin-ci-1', 3, 1, 1, 1, '2026-08-28 09:10:11', '2026-08-28 10:10:11'),
+        ('month', '2026-08-01 00:00:00', 'US', 'asin-ci-1', 3, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 10:10:11');
 
       INSERT INTO monitor_history_agg_dim
         (granularity, time_slot, country, site, brand, asin_key, check_count, broken_count, has_broken, has_peak, first_check_time, last_check_time)
       VALUES
-        ('day', '2026-08-28 00:00:00', 'US', '12', 'Fixture Brand', 'asin-ci-1', 2, 1, 1, 1, '2026-08-28 09:10:11', '2026-08-28 09:20:11');
+        ('hour', '2026-08-28 09:00:00', 'US', '12', 'Fixture Brand', 'asin-ci-1', 2, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 09:20:11'),
+        ('hour', '2026-08-28 10:00:00', 'US', '12', 'Fixture Brand', 'asin-ci-1', 1, 0, 0, 0, '2026-08-28 10:10:11', '2026-08-28 10:10:11'),
+        ('day', '2026-08-28 00:00:00', 'US', '12', 'Fixture Brand', 'asin-ci-1', 3, 1, 1, 1, '2026-08-28 09:10:11', '2026-08-28 10:10:11'),
+        ('month', '2026-08-01 00:00:00', 'US', '12', 'Fixture Brand', 'asin-ci-1', 3, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 10:10:11');
 
       INSERT INTO monitor_history_agg_variant_group
         (granularity, time_slot, country, variant_group_id, variant_group_name, asin_key, check_count, broken_count, has_broken, has_peak, first_check_time, last_check_time)
       VALUES
-        ('month', '2026-08-01 00:00:00', 'US', 'vg-ci-1', 'Integration Group', 'asin-ci-1', 2, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 09:20:11');
+        ('hour', '2026-08-28 09:00:00', 'US', 'vg-ci-1', 'Integration Group', 'asin-ci-1', 2, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 09:20:11'),
+        ('hour', '2026-08-28 10:00:00', 'US', 'vg-ci-1', 'Integration Group', 'asin-ci-1', 1, 0, 0, 0, '2026-08-28 10:10:11', '2026-08-28 10:10:11'),
+        ('day', '2026-08-28 00:00:00', 'US', 'vg-ci-1', 'Integration Group', 'asin-ci-1', 3, 1, 1, 1, '2026-08-28 09:10:11', '2026-08-28 10:10:11'),
+        ('month', '2026-08-01 00:00:00', 'US', 'vg-ci-1', 'Integration Group', 'asin-ci-1', 3, 1, 1, 0, '2026-08-28 09:10:11', '2026-08-28 10:10:11');
 
       INSERT INTO analytics_refresh_watermark
         (processor_name, last_history_id, last_check_time)
@@ -387,6 +399,76 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标默认值、更新时间触发器或函数漂移时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(
+        'ALTER TABLE public.users ALTER COLUMN force_password_change DROP DEFAULT',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.users.columns',
+        });
+      } finally {
+        await primaryTarget.query(
+          'ALTER TABLE public.users ALTER COLUMN force_password_change SET DEFAULT false',
+        );
+      }
+
+      await primaryTarget.query(
+        'DROP TRIGGER trg_users_update_time ON public.users',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.users.triggers',
+        });
+      } finally {
+        await primaryTarget.query(`
+          CREATE TRIGGER trg_users_update_time
+          BEFORE UPDATE ON public.users
+          FOR EACH ROW
+          EXECUTE FUNCTION public.set_updated_timestamp_column('update_time')
+        `);
+      }
+
+      await primaryTarget.query(`
+        CREATE OR REPLACE FUNCTION public.set_updated_timestamp_column()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.functions',
+        });
+      } finally {
+        await primaryTarget.query(`
+          CREATE OR REPLACE FUNCTION public.set_updated_timestamp_column()
+          RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            CASE TG_ARGV[0]
+              WHEN 'update_time' THEN NEW.update_time := LOCALTIMESTAMP;
+              WHEN 'updated_at' THEN NEW.updated_at := LOCALTIMESTAMP;
+              ELSE
+                RAISE EXCEPTION 'unsupported timestamp column: %', TG_ARGV[0]
+                  USING ERRCODE = '22023';
+            END CASE;
+            RETURN NEW;
+          END;
+          $$
+        `);
+      }
+    });
+
     it('拒绝跨 schema 级联重置并保留外部引用数据', async () => {
       await primaryTarget.query(`
         CREATE SCHEMA migration_external;
@@ -412,15 +494,6 @@ describe.skipIf(!integrationEnabled)(
     it('普通失败回滚数据和事务化 sequence restart', async () => {
       await primaryTarget.query(`
         ALTER SEQUENCE public.monitor_history_id_seq RESTART WITH 7777;
-        CREATE FUNCTION public.reject_migration_audit_log()
-        RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-          RAISE EXCEPTION 'integration fixture rejects audit log';
-        END;
-        $$;
-        CREATE TRIGGER reject_migration_audit_log
-        BEFORE INSERT ON public.audit_logs
-        FOR EACH ROW EXECUTE FUNCTION public.reject_migration_audit_log();
       `);
       const beforeSequence = await primaryTarget.query<{
         last_value: string;
@@ -431,16 +504,24 @@ describe.skipIf(!integrationEnabled)(
       const beforeRoles = await primaryTarget.query<{ count: string }>(
         'SELECT COUNT(*)::text AS count FROM public.roles',
       );
-      try {
-        await expect(
-          runDataMigration(migrationConfig, logger),
-        ).rejects.toMatchObject({ code: 'UNEXPECTED_MIGRATION_ERROR' });
-      } finally {
-        await primaryTarget.query(`
-          DROP TRIGGER reject_migration_audit_log ON public.audit_logs;
-          DROP FUNCTION public.reject_migration_audit_log();
-        `);
-      }
+      const rollbackLogger: MigrationLogger = {
+        ...logger,
+        info(event, context) {
+          if (
+            event === 'data_migration.table_finished' &&
+            context?.database === 'primary' &&
+            context.table === 'monitor_history'
+          ) {
+            throw new Error(
+              'integration fixture interrupts after sequence reset',
+            );
+          }
+          logger.info(event, context);
+        },
+      };
+      await expect(
+        runDataMigration(migrationConfig, rollbackLogger),
+      ).rejects.toMatchObject({ code: 'UNEXPECTED_MIGRATION_ERROR' });
       const afterSequence = await primaryTarget.query<{
         last_value: string;
         is_called: boolean;
