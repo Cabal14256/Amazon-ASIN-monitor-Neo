@@ -2,7 +2,7 @@
 
 ## 适用范围与策略
 
-P1-T3 采用“周期性全量预演 + 切换窗口写冻结后的最终全量同步”。当前数据规模不默认引入 Debezium、binlog CDC 或应用双写；如果后续实测停机窗口不能满足目标，再另立 Issue 评估增量链路。
+P1-T3 采用“周期性全量预演 + 切换窗口写冻结后的最终全量同步”。当前数据规模不默认引入 Debezium、binlog CDC 或应用双写；如果后续实测停机窗口不能满足目标，再另立 Issue 评估增量链路。P1-T4a 之后，正式 PG 目标必须先应用 baseline 和 `0001_timescale_aggregates.sql`，数据同步完成后再运行九组持续聚合对拍 Gate。
 
 迁移同时覆盖主营 21 张表和竞品 4 张表。MySQL 始终作为只读源，每个源 database 使用独立的 `REPEATABLE READ` 一致性快照；PostgreSQL 两个目标 database 分别在事务中重置、导入并校验。最终同步必须先冻结两个 MySQL database 的写入，避免两个独立快照之间产生跨库时间差。
 
@@ -21,7 +21,7 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 
 迁移会对两个 PG 目标库的全部 21 + 4 张业务表执行一次显式的 `TRUNCATE ... RESTART IDENTITY`，不会使用 `CASCADE` 清空注册表之外的跨 schema 引用表。若存在这类外部引用，重置会安全失败，必须先确认归属并解除引用，不能临时扩大清空范围。以下条件缺一不可：
 
-1. 两个目标库已应用 [`migrations/0000_baseline.sql`](./migrations/0000_baseline.sql)，且不是当前生产写库；
+1. 两个目标库已应用 [`migrations/0000_baseline.sql`](./migrations/0000_baseline.sql)，主营库已应用 [`migrations/0001_timescale_aggregates.sql`](./migrations/0001_timescale_aggregates.sql)，且都不是当前生产写库；
 2. 已完成可恢复备份，并记录恢复命令和负责人；
 3. `.env.migration` 显式设置 `MIGRATION_ALLOW_TARGET_RESET=true`；
 4. MySQL 账号仅对两个源库拥有 `SELECT` 权限；
@@ -64,10 +64,11 @@ Copy-Item .env.migration.example .env.migration
 
 ## 执行与报告
 
-先安装根 lockfile 中的依赖并完成 PG baseline，再运行：
+先安装根 lockfile 中的依赖，完成 PG baseline，并在维护窗口把主营 `monitor_history` 升级为 hypertable，再运行：
 
 ```bash
 corepack pnpm install --frozen-lockfile
+corepack pnpm db:upgrade:timescale
 corepack pnpm db:migrate:data
 ```
 
@@ -79,6 +80,8 @@ corepack pnpm db:migrate:data
 - bigint 全程以十进制字符串传递，避免 JavaScript 精度丢失；
 - PG generated columns 不写入，由目标表达式生成；
 - identity 保留源值，导入后用事务化 `ALTER SEQUENCE ... RESTART WITH` 把下一值调整为 MySQL `AUTO_INCREMENT` 元数据中的实际下一值；即使高 ID 已删除或计数器被显式推进也不会复用旧编号，提交前普通失败也会随目标事务一起恢复原 sequence 状态。
+
+`monitor_history` 是一个特殊但显式验证的目标：MySQL 源端仍以唯一 `id` 做 keyset，PG 端则验证 `(check_time,id)` 复合主键和唯一 Timescale 时间维。目标重置、计数、抽样和业务查询会覆盖 catalog 中属于该 hypertable 的全部 chunk；未知继承子表、伪造 chunk 或 schema 漂移均在重置前拒绝。其余普通表仍使用 `ONLY` 边界，不能借继承结构把额外数据混入迁移证据。
 
 成功报告符合 `packages/contracts` 的 `dataMigrationReportSchema`，仅包含：
 
@@ -97,9 +100,19 @@ corepack pnpm db:migrate:data
 2. 执行一次迁移，保留脱敏 JSON 报告；
 3. 立即再执行一次，确认重置与导入可重复，行数和摘要证据不变；
 4. 记录总耗时，并按最近完整预演耗时预留切换窗口；
-5. P1-T4 完成后，再叠加 hypertable/持续聚合的结果与性能 gate。
+5. 在同一个冻结快照结果上执行持续聚合有界刷新与正确性 Gate，保存九组脱敏摘要报告；
+6. P1-T4b 再叠加索引/columnstore/retention 与 ≥3× 性能 gate。
 
-最终同步按以下顺序执行：公告维护窗口 → 停止调度器和写入 Worker → drain 旧 Bull 队列 → 冻结 Legacy 写流量 → 确认 MySQL 无新增写入 → 备份 PG → 运行迁移 → 审核报告 → 执行应用 smoke test。报告通过前，MySQL 保持可回切且不得归档下线。
+持续聚合 Gate 的完整变量和报告语义见 [`MIGRATION.md`](./MIGRATION.md#有界历史回填与正确性-gate)。典型顺序为：
+
+```bash
+corepack pnpm db:migrate:data
+corepack pnpm db:timescale:aggregate:gate
+```
+
+两条命令都必须返回 0，且 `artifacts/data-migration/report.json` 和 `artifacts/timescale-aggregate/report.json` 均通过各自 contracts schema。聚合 Gate 的窗口必须覆盖本次审批的完整月边界；它会先刷新全部 9 个 materialized-only CAGG，再在只读一致性快照中比较三张 Legacy agg 表。差异报告不可被人工豁免为“近似一致”，而应修复语义或刷新边界后整体重跑。
+
+最终同步按以下顺序执行：公告维护窗口 → 停止调度器和写入 Worker → drain 旧 Bull 队列 → 冻结 Legacy 写流量 → 确认 MySQL 无新增写入 → 备份 PG → 运行数据迁移 → 刷新并对拍 9 个 CAGG → 审核两份报告 → 执行应用 smoke test。两份报告通过前不切流；切流后 MySQL 按阶段 1 回滚 runbook 保持只读、可回切且至少保留一个观察周期，不得归档下线。
 
 若迁移或 smoke test 失败：
 
@@ -108,3 +121,5 @@ corepack pnpm db:migrate:data
 - `TARGET_COMMIT_PARTIAL` 或 `TARGET_COMMIT_INDETERMINATE` 必须先核验两个 PG 目标，再恢复/重置后整体重跑；
 - 若已尝试放量，先停止 Neo 写入，再按切换前备份恢复 PG，并把应用路由切回 MySQL；
 - 保存脱敏报告和时间线，另立 Issue 处理，不在现场修改冻结的 Legacy migration SQL。
+
+阶段 1 的判定矩阵、CAGG 重建及恢复普通 PG 表边界见 [`../../docs/runbooks/phase-1-database-rollback.md`](../../docs/runbooks/phase-1-database-rollback.md)。
