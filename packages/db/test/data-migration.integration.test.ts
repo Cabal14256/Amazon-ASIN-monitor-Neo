@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { dataMigrationReportSchema } from '@asin-monitor/contracts';
 import mysql, { type Connection } from 'mysql2/promise';
@@ -75,6 +76,31 @@ function targetUrlForDatabase(value: string, database: string): string {
   const url = new URL(value);
   url.pathname = `/${database}`;
   return url.toString();
+}
+
+async function dropTargetDatabaseWhenIdle(
+  admin: Pool,
+  database: string,
+): Promise<void> {
+  if (!/^[a-z][a-z0-9_]*$/.test(database)) {
+    throw new Error('unsafe integration PostgreSQL database name');
+  }
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const active = await admin.query<{ connection_count: string }>(
+      `
+        SELECT COUNT(*)::text AS connection_count
+        FROM pg_stat_activity
+        WHERE datname = $1
+      `,
+      [database],
+    );
+    if (active.rows[0]?.connection_count === '0') {
+      await admin.query(`DROP DATABASE IF EXISTS "${database}"`);
+      return;
+    }
+    await delay(25);
+  }
+  throw new Error('integration PostgreSQL database still has active sessions');
 }
 
 async function installLegacySchema(
@@ -673,9 +699,7 @@ describe.skipIf(!integrationEnabled)(
 
     it('非 UTF8 目标数据库在重置前被拒绝', async () => {
       const database = 'amazon_asin_monitor_encoding_ci_latin1';
-      await primaryTarget.query(
-        `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`,
-      );
+      await dropTargetDatabaseWhenIdle(primaryTarget, database);
       await primaryTarget.query(`
         CREATE DATABASE "${database}"
         WITH TEMPLATE template0
@@ -703,9 +727,7 @@ describe.skipIf(!integrationEnabled)(
           scope: 'primary.target.database_encoding',
         });
       } finally {
-        await primaryTarget.query(
-          `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`,
-        );
+        await dropTargetDatabaseWhenIdle(primaryTarget, database);
       }
     });
 
