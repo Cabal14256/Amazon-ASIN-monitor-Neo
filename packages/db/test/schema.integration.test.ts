@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { loadEnvironmentFiles } from '@asin-monitor/config';
@@ -301,6 +304,89 @@ describe('P1-T2 PostgreSQL schema integration', () => {
         .sort()
         .map((view_name) => ({ view_name, policy_matches: true })),
     );
+  });
+
+  it('CAGG 文本分组显式采用 Legacy 大小写与重音不敏感排序规则', async () => {
+    const collation = await primaryPool.query<{
+      provider: string;
+      deterministic: boolean;
+      locale: string;
+    }>(`
+      SELECT
+        collprovider AS provider,
+        collisdeterministic AS deterministic,
+        colliculocale AS locale
+      FROM pg_collation
+      WHERE collname = 'legacy_utf8mb4_unicode_ci'
+        AND collnamespace = 'public'::regnamespace
+    `);
+    expect(collation.rows).toEqual([
+      { provider: 'i', deterministic: false, locale: 'und-u-ks-level1' },
+    ]);
+
+    const columns = await primaryPool.query<{ matching_columns: number }>(`
+      SELECT COUNT(*) FILTER (
+        WHERE attribute.attcollation =
+          'public.legacy_utf8mb4_unicode_ci'::regcollation::oid
+      )::integer AS matching_columns
+      FROM pg_attribute attribute
+      JOIN pg_class relation ON relation.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = 'public'
+        AND attribute.attnum > 0
+        AND NOT attribute.attisdropped
+        AND (
+          (relation.relname LIKE 'monitor_history_cagg_asin_%'
+            AND attribute.attname IN ('country', 'asin_key'))
+          OR (relation.relname LIKE 'monitor_history_cagg_dim_%'
+            AND attribute.attname IN ('country', 'site', 'brand', 'asin_key'))
+          OR (relation.relname LIKE 'monitor_history_cagg_variant_group_%'
+            AND attribute.attname IN (
+              'country', 'variant_group_id',
+              'variant_group_name_snapshot', 'asin_key'
+            ))
+        )
+    `);
+    expect(columns.rows).toEqual([{ matching_columns: 30 }]);
+  });
+
+  it('重复升级会拒绝已存在但参数错误的刷新策略', async () => {
+    const client = await primaryPool.connect();
+    let jobId: number | undefined;
+    try {
+      const job = await client.query<{ job_id: number }>(`
+        SELECT jobs.job_id
+        FROM timescaledb_information.jobs jobs
+        JOIN timescaledb_information.continuous_aggregates aggregate_row
+          ON aggregate_row.materialization_hypertable_schema = jobs.hypertable_schema
+         AND aggregate_row.materialization_hypertable_name = jobs.hypertable_name
+        WHERE aggregate_row.view_schema = 'public'
+          AND aggregate_row.view_name = 'monitor_history_cagg_asin_hour'
+          AND jobs.proc_name = 'policy_refresh_continuous_aggregate'
+      `);
+      expect(job.rows).toHaveLength(1);
+      jobId = job.rows[0].job_id;
+      await client.query(
+        `SELECT alter_job($1, schedule_interval => INTERVAL '11 minutes')`,
+        [jobId],
+      );
+      const migration = readFileSync(
+        resolve(__dirname, '../migrations/0001_timescale_aggregates.sql'),
+        'utf8',
+      );
+      await expect(client.query(migration)).rejects.toThrow(
+        /continuous aggregate refresh policy postflight mismatch/,
+      );
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (jobId !== undefined) {
+        await client.query(
+          `SELECT alter_job($1, schedule_interval => INTERVAL '10 minutes')`,
+          [jobId],
+        );
+      }
+      client.release();
+    }
   });
 
   it('PG 类型映射、identity、生成列与五个 CHECK 均生效', async () => {

@@ -147,6 +147,14 @@ describe('P1-T3 migration registry', () => {
     ]);
     expect(monitorHistory?.sourceKeysetColumns).toEqual([{ column: 'id' }]);
     expect(monitorHistory?.targetStorage).toBe('timescale-hypertable');
+    expect(monitorHistory?.targetHypertableDimensions).toEqual([
+      {
+        number: 1,
+        type: 'Time',
+        column: 'check_time',
+        timeInterval: '7 days',
+      },
+    ]);
     expect([...monitorHistory!.booleanColumns]).toEqual([
       'is_broken',
       'notification_sent',

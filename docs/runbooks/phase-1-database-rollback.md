@@ -38,9 +38,9 @@ corepack pnpm db:timescale:aggregate:gate
 审核证据：
 
 - `artifacts/data-migration/report.json`：21 + 4 表、样本和关键业务查询均为 `passed`；
-- `artifacts/timescale-aggregate/report.json`：固定 `[start,end)` 月边界内 9 组检查均为 `passed`；
+- `artifacts/timescale-aggregate/report.json`：`refreshRequested=true`，固定 `[start,end)` 月边界内 9 组检查均为 `passed`，且至少一组含非零 Legacy 证据；
 - `monitor_history` 在 Timescale catalog 中仅有 `check_time` 一个时间维，interval 为 7 天，主键为 `(check_time,id)`；
-- 9 个 CAGG 均为 `materialized_only`，9 个 refresh job 和 3 个只读兼容视图存在；
+- 9 个 CAGG 均为 `materialized_only`，文本列采用已核验的 Legacy 兼容 collation，9 个 refresh job 参数完全匹配且 3 个只读兼容视图存在；
 - API/Worker smoke test 通过，且维护窗口内仍无任何业务写入。
 
 只有全部成立才能切换读流量；观察完成后再单独批准写流量。切流和解除写冻结必须是两个可审计步骤。

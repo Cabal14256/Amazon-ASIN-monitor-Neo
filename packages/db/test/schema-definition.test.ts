@@ -133,6 +133,14 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     );
     expect(migration.match(/if_not_exists => true/g)).toHaveLength(9);
     expect(migration.match(/timezone => 'Asia\/Shanghai'/g)).toHaveLength(9);
+    expect(migration).toContain(
+      'CREATE COLLATION IF NOT EXISTS public.legacy_utf8mb4_unicode_ci',
+    );
+    expect(migration).toContain("locale = 'und-u-ks-level1'");
+    expect(migration).toContain('deterministic = false');
+    expect(
+      migration.match(/COLLATE public\.legacy_utf8mb4_unicode_ci/g)?.length,
+    ).toBeGreaterThanOrEqual(60);
   });
 
   it('CAGG 与兼容投影视图只暴露只读元数据，不伪装成 Drizzle 表', () => {

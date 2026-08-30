@@ -461,6 +461,53 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     `${context.spec.logicalName}.target.hypertables`,
   );
 
+  const dimensionResult = await context.target.query<{
+    hypertable_name: string;
+    dimension_number: number;
+    dimension_type: string;
+    column_name: string;
+    time_interval: string | null;
+  }>(
+    `
+      SELECT
+        hypertable_name,
+        dimension_number,
+        dimension_type,
+        column_name,
+        time_interval::text AS time_interval
+      FROM timescaledb_information.dimensions
+      WHERE hypertable_schema = 'public'
+        AND hypertable_name = ANY($1::text[])
+      ORDER BY hypertable_name, dimension_number
+    `,
+    [hypertableNames],
+  );
+  compareExactSet(
+    context.spec.tables.flatMap(({ name, targetHypertableDimensions }) =>
+      targetHypertableDimensions.map(({ number, type, column, timeInterval }) =>
+        [name, number, type, column, timeInterval].join('|'),
+      ),
+    ),
+    dimensionResult.rows.map(
+      ({
+        hypertable_name,
+        dimension_number,
+        dimension_type,
+        column_name,
+        time_interval,
+      }) =>
+        [
+          hypertable_name,
+          dimension_number,
+          dimension_type,
+          column_name,
+          time_interval ?? '',
+        ].join('|'),
+    ),
+    'TARGET_SCHEMA_MISMATCH',
+    `${context.spec.logicalName}.target.hypertable-dimensions`,
+  );
+
   const chunkResult = await context.target.query<{
     parent_name: string;
     child_schema: string;

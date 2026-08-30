@@ -65,6 +65,25 @@ describe('timescaleAggregateReportSchema', () => {
     ).toBe(false);
   });
 
+  it('拒绝将未刷新或全空窗口标记为通过', () => {
+    expect(
+      timescaleAggregateReportSchema.safeParse({
+        ...report(),
+        refreshRequested: false,
+      }).success,
+    ).toBe(false);
+
+    const empty = report();
+    empty.checks = empty.checks.map((check) => ({
+      ...check,
+      legacyRows: '0',
+      caggRows: '0',
+      legacyGroups: '0',
+      caggGroups: '0',
+    }));
+    expect(timescaleAggregateReportSchema.safeParse(empty).success).toBe(false);
+  });
+
   it('失败报告只暴露机器错误码和作用域', () => {
     const failed = {
       ...report(),

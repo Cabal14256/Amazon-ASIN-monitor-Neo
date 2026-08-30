@@ -19,13 +19,19 @@ import {
 
 type AggregateFamily = 'asin' | 'dimension' | 'variant_group';
 type AggregateGranularity = 'hour' | 'day' | 'month';
-type NormalizedRow = Record<string, string>;
+type PairedNormalizedRow = Record<string, string | boolean | null>;
 
-interface AggregateQuery {
+interface AggregatePairQuery {
   readonly sql: string;
   readonly keyColumns: readonly string[];
   readonly valueColumns: readonly string[];
-  readonly legacy: boolean;
+}
+
+interface AggregateScanResult {
+  readonly rows: string;
+  readonly groups: string;
+  readonly groupDigest: string;
+  readonly valueDigest: string;
 }
 
 export interface TimescaleAggregateRunMetadata {
@@ -111,83 +117,186 @@ function normalizedSelect(
   };
 }
 
-function aggregateQuery(
+function aggregatePairQuery(
   family: AggregateFamily,
-  relation: string,
-  legacy: boolean,
-  pageSize: number,
-): AggregateQuery {
-  const projection = normalizedSelect(family, !legacy);
-  const name = quoteIdentifier(relation);
-  const join =
-    family === 'variant_group' && !legacy
+  legacyRelation: string,
+  caggRelation: string,
+): AggregatePairQuery {
+  const legacyProjection = normalizedSelect(family, false);
+  const caggProjection = normalizedSelect(family, true);
+  const legacyName = quoteIdentifier(legacyRelation);
+  const caggName = quoteIdentifier(caggRelation);
+  const caggJoin =
+    family === 'variant_group'
       ? `LEFT JOIN public.variant_groups variant_group\n          ON variant_group.id = aggregate_row.variant_group_id`
       : '';
-  const granularityFilter = legacy ? `AND aggregate_row.granularity = $3` : '';
-  const offsetParameter = legacy ? '$4' : '$3';
   const valueColumns =
     family === 'variant_group'
-      ? [...projection.keys, 'variant_group_name', ...commonValueColumns]
-      : [...projection.keys, ...commonValueColumns];
-  const orderBy = valueColumns
-    .map((column) => `normalized_row.${quoteIdentifier(column)} COLLATE "C"`)
+      ? [...legacyProjection.keys, 'variant_group_name', ...commonValueColumns]
+      : [...legacyProjection.keys, ...commonValueColumns];
+  const joinConditions = legacyProjection.keys
+    .map((column) => {
+      const identifier = quoteIdentifier(column);
+      return column === 'time_slot'
+        ? `legacy_rows.${identifier} = cagg_rows.${identifier}`
+        : `legacy_rows.${identifier} COLLATE public.legacy_utf8mb4_unicode_ci = cagg_rows.${identifier} COLLATE public.legacy_utf8mb4_unicode_ci`;
+    })
+    .join('\n        AND ');
+  const canonicalKeyProjection = legacyProjection.keys.flatMap((column) => {
+    const identifier = quoteIdentifier(column);
+    const common = `LEAST(legacy_rows.${identifier} COLLATE "C", cagg_rows.${identifier} COLLATE "C")`;
+    return [
+      `CASE WHEN legacy_rows.time_slot IS NOT NULL AND cagg_rows.time_slot IS NOT NULL THEN ${common} ELSE legacy_rows.${identifier} COLLATE "C" END AS ${quoteIdentifier(
+        `legacy_${column}`,
+      )}`,
+      `CASE WHEN legacy_rows.time_slot IS NOT NULL AND cagg_rows.time_slot IS NOT NULL THEN ${common} ELSE cagg_rows.${identifier} COLLATE "C" END AS ${quoteIdentifier(
+        `cagg_${column}`,
+      )}`,
+    ];
+  });
+  const canonicalVariantNameProjection =
+    family === 'variant_group'
+      ? [
+          `CASE
+            WHEN legacy_rows.time_slot IS NOT NULL
+              AND cagg_rows.time_slot IS NOT NULL
+              AND legacy_rows.variant_group_name COLLATE public.legacy_utf8mb4_unicode_ci = cagg_rows.variant_group_name COLLATE public.legacy_utf8mb4_unicode_ci
+              THEN LEAST(legacy_rows.variant_group_name COLLATE "C", cagg_rows.variant_group_name COLLATE "C")
+            ELSE legacy_rows.variant_group_name COLLATE "C"
+          END AS legacy_variant_group_name`,
+          `CASE
+            WHEN legacy_rows.time_slot IS NOT NULL
+              AND cagg_rows.time_slot IS NOT NULL
+              AND legacy_rows.variant_group_name COLLATE public.legacy_utf8mb4_unicode_ci = cagg_rows.variant_group_name COLLATE public.legacy_utf8mb4_unicode_ci
+              THEN LEAST(legacy_rows.variant_group_name COLLATE "C", cagg_rows.variant_group_name COLLATE "C")
+            ELSE cagg_rows.variant_group_name COLLATE "C"
+          END AS cagg_variant_group_name`,
+        ]
+      : [];
+  const commonValueProjection = commonValueColumns.flatMap((column) => {
+    const identifier = quoteIdentifier(column);
+    return [
+      `legacy_rows.${identifier} AS ${quoteIdentifier(`legacy_${column}`)}`,
+      `cagg_rows.${identifier} AS ${quoteIdentifier(`cagg_${column}`)}`,
+    ];
+  });
+  const orderBy = legacyProjection.keys
+    .flatMap((column) => {
+      const identifier = quoteIdentifier(column);
+      if (column === 'time_slot') {
+        return [
+          `COALESCE(legacy_rows.${identifier} COLLATE "C", cagg_rows.${identifier} COLLATE "C")`,
+        ];
+      }
+      return [
+        `COALESCE(legacy_rows.${identifier} COLLATE public.legacy_utf8mb4_unicode_ci, cagg_rows.${identifier} COLLATE public.legacy_utf8mb4_unicode_ci)`,
+        `COALESCE(legacy_rows.${identifier} COLLATE "C", cagg_rows.${identifier} COLLATE "C")`,
+      ];
+    })
     .join(', ');
   return {
-    legacy,
-    keyColumns: projection.keys,
+    keyColumns: legacyProjection.keys,
     valueColumns,
     sql: `
-      SELECT normalized_row.*
-      FROM (
+      WITH legacy_rows AS (
         SELECT
-          ${projection.select}
-        FROM public.${name} aggregate_row
-        ${join}
+          ${legacyProjection.select}
+        FROM public.${legacyName} aggregate_row
         WHERE aggregate_row.time_slot >= $1::timestamp
           AND aggregate_row.time_slot < $2::timestamp
-          ${granularityFilter}
-      ) normalized_row
+          AND aggregate_row.granularity = $3
+      ), cagg_rows AS (
+        SELECT
+          ${caggProjection.select}
+        FROM public.${caggName} aggregate_row
+        ${caggJoin}
+        WHERE aggregate_row.time_slot >= $1::timestamp
+          AND aggregate_row.time_slot < $2::timestamp
+      )
+      SELECT
+        legacy_rows.time_slot IS NOT NULL AS legacy_present,
+        cagg_rows.time_slot IS NOT NULL AS cagg_present,
+        ${[
+          ...canonicalKeyProjection,
+          ...canonicalVariantNameProjection,
+          ...commonValueProjection,
+        ].join(',\n        ')}
+      FROM legacy_rows
+      FULL OUTER JOIN cagg_rows
+        ON ${joinConditions}
       ORDER BY ${orderBy}
-      LIMIT ${pageSize}
-      OFFSET ${offsetParameter}::integer
     `,
   };
 }
 
-async function scanAggregate(
+function digestColumns(
+  row: PairedNormalizedRow,
+  prefix: 'legacy' | 'cagg',
+  columns: readonly string[],
+): string[] {
+  return columns.map((column) => {
+    const value = row[`${prefix}_${column}`];
+    if (typeof value !== 'string') {
+      throw new DataMigrationError(
+        'AGGREGATE_ROW_INVALID',
+        'aggregate.reconciliation.row',
+        'aggregate reconciliation returned an invalid normalized row',
+      );
+    }
+    return value;
+  });
+}
+
+async function scanAggregatePair(
   client: PoolClient,
-  query: AggregateQuery,
+  query: AggregatePairQuery,
   config: TimescaleAggregateConfig,
   granularity: AggregateGranularity,
 ): Promise<{
-  readonly rows: string;
-  readonly groups: string;
-  readonly groupDigest: string;
-  readonly valueDigest: string;
+  readonly legacy: AggregateScanResult;
+  readonly cagg: AggregateScanResult;
 }> {
-  const groupDigest = new OrderedDigest();
-  const valueDigest = new OrderedDigest();
-  let offset = 0;
-  while (true) {
-    const parameters: unknown[] = [config.windowStart, config.windowEnd];
-    if (query.legacy) parameters.push(granularity);
-    parameters.push(offset);
-    const result = await client.query<NormalizedRow>(query.sql, parameters);
-    for (const row of result.rows) {
-      groupDigest.add(query.keyColumns.map((column) => row[column]));
-      valueDigest.add(query.valueColumns.map((column) => row[column]));
+  const cursorName = 'aggregate_reconciliation_cursor';
+  const digests = {
+    legacy: { group: new OrderedDigest(), value: new OrderedDigest() },
+    cagg: { group: new OrderedDigest(), value: new OrderedDigest() },
+  } as const;
+  let cursorOpen = false;
+  try {
+    await client.query(
+      `DECLARE ${cursorName} NO SCROLL CURSOR FOR ${query.sql}`,
+      [config.windowStart, config.windowEnd, granularity],
+    );
+    cursorOpen = true;
+    while (true) {
+      const result = await client.query<PairedNormalizedRow>(
+        `FETCH FORWARD ${config.pageSize} FROM ${cursorName}`,
+      );
+      for (const row of result.rows) {
+        for (const side of ['legacy', 'cagg'] as const) {
+          if (row[`${side}_present`] !== true) continue;
+          digests[side].group.add(digestColumns(row, side, query.keyColumns));
+          digests[side].value.add(digestColumns(row, side, query.valueColumns));
+        }
+      }
+      if (result.rows.length < config.pageSize) break;
     }
-    offset += result.rows.length;
-    if (result.rows.length < config.pageSize) break;
+  } finally {
+    if (cursorOpen) {
+      await client.query(`CLOSE ${cursorName}`).catch(() => undefined);
+    }
   }
-  const groups = groupDigest.result();
-  const values = valueDigest.result();
-  return {
-    rows: values.count,
-    groups: groups.count,
-    groupDigest: groups.digest,
-    valueDigest: values.digest,
+  const result = (side: 'legacy' | 'cagg'): AggregateScanResult => {
+    const groups = digests[side].group.result();
+    const values = digests[side].value.result();
+    return {
+      rows: values.count,
+      groups: groups.count,
+      groupDigest: groups.digest,
+      valueDigest: values.digest,
+    };
   };
+  return { legacy: result('legacy'), cagg: result('cagg') };
 }
 
 async function validateTarget(client: PoolClient): Promise<void> {
@@ -246,7 +355,7 @@ async function refreshAggregates(
 ): Promise<void> {
   for (const { caggRelation } of timescaleAggregateEvidenceManifest) {
     await client.query(
-      `CALL refresh_continuous_aggregate($1::regclass, $2::timestamp, $3::timestamp)`,
+      `CALL public.refresh_continuous_aggregate($1::regclass, $2::timestamp, $3::timestamp)`,
       [`public.${caggRelation}`, config.windowStart, config.windowEnd],
     );
     logger.info('timescale_aggregate.refreshed', {
@@ -273,6 +382,7 @@ export async function runTimescaleAggregateGate(
   const client = await pool.connect();
   let advisoryLockHeld = false;
   try {
+    await client.query('SET search_path TO pg_catalog, public');
     const lock = await client.query<{ acquired: boolean }>(`
       SELECT pg_try_advisory_lock(
         hashtextextended('amazon-asin-monitor:p1-t4a-aggregate-gate', 0)
@@ -293,24 +403,12 @@ export async function runTimescaleAggregateGate(
     const checks: TimescaleAggregateCheck[] = [];
     try {
       for (const evidence of timescaleAggregateEvidenceManifest) {
-        const legacy = await scanAggregate(
+        const { legacy, cagg } = await scanAggregatePair(
           client,
-          aggregateQuery(
+          aggregatePairQuery(
             evidence.family,
             evidence.legacyRelation,
-            true,
-            config.pageSize,
-          ),
-          config,
-          evidence.granularity,
-        );
-        const cagg = await scanAggregate(
-          client,
-          aggregateQuery(
-            evidence.family,
             evidence.caggRelation,
-            false,
-            config.pageSize,
           ),
           config,
           evidence.granularity,
@@ -346,7 +444,25 @@ export async function runTimescaleAggregateGate(
       throw error;
     }
 
-    const passed = checks.every(({ status }) => status === 'passed');
+    const checksMatch = checks.every(({ status }) => status === 'passed');
+    const hasEvidence = checks.some(({ legacyRows }) => legacyRows !== '0');
+    const failure = !checksMatch
+      ? {
+          code: 'AGGREGATE_RECONCILIATION_MISMATCH',
+          scope: 'aggregate.reconciliation',
+        }
+      : !hasEvidence
+      ? {
+          code: 'AGGREGATE_RECONCILIATION_EMPTY_WINDOW',
+          scope: 'aggregate.reconciliation',
+        }
+      : !config.refresh
+      ? {
+          code: 'AGGREGATE_REFRESH_REQUIRED',
+          scope: 'aggregate.refresh',
+        }
+      : undefined;
+    const passed = failure === undefined;
     return timescaleAggregateReportSchema.parse({
       schemaVersion: 1,
       runId,
@@ -362,14 +478,7 @@ export async function runTimescaleAggregateGate(
       refreshRequested: config.refresh,
       checks,
       status: passed ? 'passed' : 'failed',
-      ...(passed
-        ? {}
-        : {
-            failure: {
-              code: 'AGGREGATE_RECONCILIATION_MISMATCH',
-              scope: 'aggregate.reconciliation',
-            },
-          }),
+      ...(failure ? { failure } : {}),
     });
   } finally {
     if (advisoryLockHeld) {

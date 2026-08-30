@@ -48,6 +48,7 @@ export interface TableMigrationSpec {
   readonly targetPrimaryKeyColumns: readonly string[];
   readonly sourceKeysetColumns: readonly SourceKeysetColumn[];
   readonly targetStorage: TargetStorageKind;
+  readonly targetHypertableDimensions: readonly TargetHypertableDimensionSpec[];
   readonly sourceColumnTypeSignatures: readonly string[];
   readonly sourceGeneratedColumns: readonly SourceGeneratedColumnSpec[];
   readonly booleanColumns: ReadonlySet<string>;
@@ -59,6 +60,13 @@ export interface TableMigrationSpec {
   readonly targetIndexSignatures: readonly string[];
   readonly targetSequenceSignatures: readonly string[];
   readonly targetTriggerSignatures: readonly string[];
+}
+
+export interface TargetHypertableDimensionSpec {
+  readonly number: number;
+  readonly type: 'Time';
+  readonly column: string;
+  readonly timeInterval: string;
 }
 
 export interface SourceGeneratedColumnSpec {
@@ -481,6 +489,21 @@ function targetStorage(tableName: string): TargetStorageKind {
   return tableName === 'monitor_history' ? 'timescale-hypertable' : 'table';
 }
 
+function targetHypertableDimensions(
+  tableName: string,
+): readonly TargetHypertableDimensionSpec[] {
+  return tableName === 'monitor_history'
+    ? Object.freeze([
+        Object.freeze({
+          number: 1,
+          type: 'Time' as const,
+          column: 'check_time',
+          timeInterval: '7 days',
+        }),
+      ])
+    : Object.freeze([]);
+}
+
 function tableSpec(table: PgTable): TableMigrationSpec {
   const tableName = getTableName(table);
   const columns = Object.values(getTableColumns(table));
@@ -698,6 +721,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
       sourcePrimaryKeys.map((column) => sourceKeysetColumn(tableName, column)),
     ),
     targetStorage: targetStorage(tableName),
+    targetHypertableDimensions: targetHypertableDimensions(tableName),
     sourceColumnTypeSignatures: Object.freeze(
       sourceColumnTypeSignatures.sort(),
     ),

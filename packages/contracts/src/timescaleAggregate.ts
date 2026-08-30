@@ -129,6 +129,13 @@ export const timescaleAggregateReportSchema = z
         path: ['failure'],
       });
     }
+    if (!report.refreshRequested) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'passed aggregate report requires an in-run refresh',
+        path: ['refreshRequested'],
+      });
+    }
     if (report.checks.length !== timescaleAggregateEvidenceManifest.length) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -136,6 +143,13 @@ export const timescaleAggregateReportSchema = z
         path: ['checks'],
       });
       return;
+    }
+    if (report.checks.every(({ legacyRows }) => legacyRows === '0')) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'passed aggregate report requires non-empty legacy evidence',
+        path: ['checks'],
+      });
     }
 
     timescaleAggregateEvidenceManifest.forEach((expected, index) => {
