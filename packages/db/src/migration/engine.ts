@@ -256,7 +256,9 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
         throw new DataMigrationError(
           'SOURCE_SCHEMA_MISMATCH',
           `${context.spec.logicalName}.source.${table.name}.generated_columns`,
-          `source generated column definition mismatch for ${table.name}.${columnName}`,
+          `source generated column definition mismatch for ${
+            table.name
+          }.${columnName} (fingerprint: ${sha256(normalizedExpression)})`,
         );
       }
     }

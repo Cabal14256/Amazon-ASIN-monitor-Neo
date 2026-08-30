@@ -414,6 +414,9 @@ const monitorHistorySourceGeneratedColumns: readonly SourceGeneratedColumnSpec[]
         normalizeMysqlGeneratedExpression(
           "TIMESTAMP(DATE_FORMAT(check_time, '%Y-%m-%d %H:00:00'))",
         ),
+        normalizeMysqlGeneratedExpression(
+          "CAST(DATE_FORMAT(check_time, '%Y-%m-%d %H:00:00') AS DATETIME)",
+        ),
       ]),
     }),
     Object.freeze({
@@ -423,6 +426,10 @@ const monitorHistorySourceGeneratedColumns: readonly SourceGeneratedColumnSpec[]
         normalizeMysqlGeneratedExpression(
           'TIMESTAMP(CAST(check_time AS DATE))',
         ),
+        normalizeMysqlGeneratedExpression('CAST(DATE(check_time) AS DATETIME)'),
+        normalizeMysqlGeneratedExpression(
+          'CAST(CAST(check_time AS DATE) AS DATETIME)',
+        ),
       ]),
     }),
     Object.freeze({
@@ -430,6 +437,9 @@ const monitorHistorySourceGeneratedColumns: readonly SourceGeneratedColumnSpec[]
       expressions: Object.freeze([
         normalizeMysqlGeneratedExpression(
           "TIMESTAMP(DATE_FORMAT(check_time, '%Y-%m-01 00:00:00'))",
+        ),
+        normalizeMysqlGeneratedExpression(
+          "CAST(DATE_FORMAT(check_time, '%Y-%m-01 00:00:00') AS DATETIME)",
         ),
       ]),
     }),
