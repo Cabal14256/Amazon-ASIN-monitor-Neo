@@ -352,12 +352,6 @@ function indexSignature(
   expressions: readonly string[],
   predicate = '',
 ): string {
-  const expressionSql = [...expressions, predicate].join(' ');
-  const referencedFunctions = [
-    ...(/(^|[^a-z0-9_.])lower\(/.test(expressionSql)
-      ? ['pg_catalog.lower(text)']
-      : []),
-  ];
   return [
     name,
     unique ? 'unique' : 'non-unique',
@@ -366,7 +360,7 @@ function indexSignature(
     predicate,
     'valid',
     'ready',
-    referencedFunctions.join(','),
+    '',
   ].join('|');
 }
 

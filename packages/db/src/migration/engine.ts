@@ -305,7 +305,9 @@ async function validateSourceSchema(context: DatabaseContext): Promise<void> {
   }
 }
 
-async function validateTargetSchema(context: DatabaseContext): Promise<void> {
+async function validateTargetEnvironment(
+  context: DatabaseContext,
+): Promise<void> {
   const sessionResult = await context.target.query<{
     client_encoding: string;
     replication_role: string;
@@ -335,7 +337,9 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     'TARGET_DATABASE_ENCODING_MISMATCH',
     `${context.spec.logicalName}.target.database_encoding`,
   );
+}
 
+async function validateTargetSchema(context: DatabaseContext): Promise<void> {
   const tableResult = await context.target.query<{
     table_name: string;
     persistence: string;
@@ -1493,6 +1497,7 @@ export async function runDataMigration(
       contexts.push(await createContext(spec, config));
     }
     for (const context of contexts) await beginTransactions(context);
+    for (const context of contexts) await validateTargetEnvironment(context);
     for (const context of contexts) {
       await lockTargetTables(context);
       logger.info('data_migration.target_tables_locked', {

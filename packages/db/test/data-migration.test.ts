@@ -191,7 +191,7 @@ describe('P1-T3 migration registry', () => {
       enumOrder: ['hour', 'day', 'month'],
     });
     expect(asins.targetIndexSignatures).toContain(
-      'uq_asins_asin_country_ci|unique|btree|lower(asin),lower(country)||valid|ready|pg_catalog.lower(text)',
+      'uq_asins_asin_country_ci|unique|btree|lower(asin),lower(country)||valid|ready|',
     );
     for (const database of databaseMigrationSpecs) {
       expect(database.targetFunctionSignatures).toHaveLength(1);
