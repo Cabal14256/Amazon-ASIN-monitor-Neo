@@ -356,13 +356,15 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     try {
       const job = await client.query<{ job_id: number }>(`
         SELECT jobs.job_id
-        FROM timescaledb_information.jobs jobs
-        JOIN timescaledb_information.continuous_aggregates aggregate_row
-          ON aggregate_row.materialization_hypertable_schema = jobs.hypertable_schema
-         AND aggregate_row.materialization_hypertable_name = jobs.hypertable_name
+        FROM timescaledb_information.continuous_aggregates aggregate_row
+        JOIN _timescaledb_catalog.hypertable hypertable
+          ON hypertable.schema_name = aggregate_row.materialization_hypertable_schema
+         AND hypertable.table_name = aggregate_row.materialization_hypertable_name
+        JOIN timescaledb_information.jobs jobs
+          ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
+         AND (jobs.config ->> 'mat_hypertable_id')::integer = hypertable.id
         WHERE aggregate_row.view_schema = 'public'
           AND aggregate_row.view_name = 'monitor_history_cagg_asin_hour'
-          AND jobs.proc_name = 'policy_refresh_continuous_aggregate'
       `);
       expect(job.rows).toHaveLength(1);
       jobId = job.rows[0].job_id;
