@@ -143,7 +143,7 @@ describe('P1-T3 migration registry', () => {
       expect.objectContaining({ column: 'month_ts' }),
     ]);
     expect(monitorHistory?.targetSequenceSignatures).toEqual([
-      'id|public|monitor_history_id_seq|bigint|1|1|1|9223372036854775807|1|no-cycle',
+      'id|public|monitor_history_id_seq|p|bigint|1|1|1|9223372036854775807|1|no-cycle',
     ]);
     expect(monitorHistory?.targetColumnSignatures).toContain(
       'id|bigint|not-null|a|||none',
@@ -155,10 +155,10 @@ describe('P1-T3 migration registry', () => {
       'p|monitor_history_pkey|id|not-deferrable|initially-immediate',
     );
     expect(monitorHistory?.targetIndexSignatures).toContain(
-      'monitor_history_pkey|unique|btree|id||valid|ready',
+      'monitor_history_pkey|unique|btree|id||valid|ready|',
     );
     expect(monitorHistory?.targetIndexSignatures).toContain(
-      'idx_monitor_history_status_interval_refresh|non-unique|btree|check_type,check_time,id||valid|ready',
+      'idx_monitor_history_status_interval_refresh|non-unique|btree|check_type,check_time,id||valid|ready|',
     );
 
     const asins = databaseMigrationSpecs[0].tables.find(
@@ -191,7 +191,7 @@ describe('P1-T3 migration registry', () => {
       enumOrder: ['hour', 'day', 'month'],
     });
     expect(asins.targetIndexSignatures).toContain(
-      'uq_asins_asin_country_ci|unique|btree|lower(asin),lower(country)||valid|ready',
+      'uq_asins_asin_country_ci|unique|btree|lower(asin),lower(country)||valid|ready|pg_catalog.lower(text)',
     );
     for (const database of databaseMigrationSpecs) {
       expect(database.targetFunctionSignatures).toHaveLength(1);

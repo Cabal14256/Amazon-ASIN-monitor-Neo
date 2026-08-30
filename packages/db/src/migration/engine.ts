@@ -443,6 +443,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     column_name: string;
     sequence_schema: string;
     sequence_name: string;
+    persistence: string;
     data_type: string;
     start_value: string;
     increment_value: string;
@@ -456,6 +457,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       attribute.attname AS column_name,
       sequence_namespace.nspname AS sequence_schema,
       sequence_relation.relname AS sequence_name,
+      sequence_relation.relpersistence AS persistence,
       format_type(sequence_row.seqtypid, NULL) AS data_type,
       sequence_row.seqstart::text AS start_value,
       sequence_row.seqincrement::text AS increment_value,
@@ -495,6 +497,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
             sequence.column_name,
             sequence.sequence_schema,
             sequence.sequence_name,
+            sequence.persistence,
             sequence.data_type,
             sequence.start_value,
             sequence.increment_value,
@@ -628,6 +631,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     predicate: string;
     is_valid: boolean;
     is_ready: boolean;
+    referenced_functions: string[];
   }>(`
     SELECT
       table_relation.relname AS table_name,
@@ -641,7 +645,26 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       ) AS expressions,
       COALESCE(pg_get_expr(index_row.indpred, index_row.indrelid, true), '') AS predicate,
       index_row.indisvalid AS is_valid,
-      index_row.indisready AS is_ready
+      index_row.indisready AS is_ready,
+      ARRAY(
+        SELECT function_signature
+        FROM (
+          SELECT DISTINCT
+            function_namespace.nspname || '.' ||
+            function_row.proname || '(' ||
+            pg_get_function_identity_arguments(function_row.oid) || ')'
+              AS function_signature
+          FROM pg_depend dependency
+          JOIN pg_proc function_row
+            ON dependency.refclassid = 'pg_proc'::regclass
+           AND dependency.refobjid = function_row.oid
+          JOIN pg_namespace function_namespace
+            ON function_namespace.oid = function_row.pronamespace
+          WHERE dependency.classid = 'pg_class'::regclass
+            AND dependency.objid = index_row.indexrelid
+        ) referenced_function
+        ORDER BY function_signature
+      ) AS referenced_functions
     FROM pg_index index_row
     JOIN pg_class table_relation ON table_relation.oid = index_row.indrelid
     JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
@@ -664,6 +687,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
             predicate,
             is_valid,
             is_ready,
+            referenced_functions,
           }) =>
             [
               index_name,
@@ -677,6 +701,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               normalizePostgresExpression(predicate, table.name),
               is_valid ? 'valid' : 'invalid',
               is_ready ? 'ready' : 'not-ready',
+              referenced_functions.join(','),
             ].join('|'),
         ),
       'TARGET_SCHEMA_MISMATCH',
@@ -863,10 +888,21 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
 }
 
 async function resetTarget(context: DatabaseContext): Promise<void> {
-  const tables = context.spec.tables
+  await context.target.query(
+    `TRUNCATE TABLE ${targetTableList(context)} RESTART IDENTITY`,
+  );
+}
+
+function targetTableList(context: DatabaseContext): string {
+  return context.spec.tables
     .map(({ name }) => quotePgIdentifier(name))
     .join(', ');
-  await context.target.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY`);
+}
+
+async function lockTargetTables(context: DatabaseContext): Promise<void> {
+  await context.target.query(
+    `LOCK TABLE ${targetTableList(context)} IN ACCESS EXCLUSIVE MODE`,
+  );
 }
 
 async function sourceCount(
@@ -1457,6 +1493,13 @@ export async function runDataMigration(
       contexts.push(await createContext(spec, config));
     }
     for (const context of contexts) await beginTransactions(context);
+    for (const context of contexts) {
+      await lockTargetTables(context);
+      logger.info('data_migration.target_tables_locked', {
+        database: context.spec.logicalName,
+        tableCount: context.spec.tables.length,
+      });
+    }
     for (const context of contexts) {
       await validateSourceSchema(context);
       await validateTargetSchema(context);

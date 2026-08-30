@@ -504,7 +504,7 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
-    it('目标表达式索引改用影子 schema 函数时在重置前拒绝迁移', async () => {
+    it('目标表达式索引改用影子或大小写伪装函数时在重置前拒绝迁移', async () => {
       await primaryTarget.query(`
         CREATE SCHEMA migration_evil;
         CREATE FUNCTION migration_evil.lower(value text)
@@ -532,6 +532,33 @@ describe.skipIf(!integrationEnabled)(
           DROP SCHEMA migration_evil CASCADE;
         `);
       }
+
+      await primaryTarget.query(`
+        CREATE FUNCTION public."Lower"(value varchar)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        STRICT
+        AS 'SELECT value::text';
+        DROP INDEX public.uq_users_username_ci;
+        CREATE UNIQUE INDEX uq_users_username_ci
+          ON public.users (public."Lower"(username));
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.users.indexes',
+        });
+      } finally {
+        await primaryTarget.query(`
+          DROP INDEX IF EXISTS public.uq_users_username_ci;
+          CREATE UNIQUE INDEX uq_users_username_ci
+            ON public.users (lower(username));
+          DROP FUNCTION IF EXISTS public."Lower"(varchar);
+        `);
+      }
     });
 
     it('目标 identity sequence 参数漂移时在重置前拒绝迁移', async () => {
@@ -551,6 +578,22 @@ describe.skipIf(!integrationEnabled)(
           ALTER SEQUENCE public.monitor_history_id_seq
           INCREMENT BY 1 CACHE 1 NO CYCLE
         `);
+      }
+
+      await primaryTarget.query(
+        'ALTER SEQUENCE public.monitor_history_id_seq SET UNLOGGED',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.monitor_history.sequences',
+        });
+      } finally {
+        await primaryTarget.query(
+          'ALTER SEQUENCE public.monitor_history_id_seq SET LOGGED',
+        );
       }
     });
 
@@ -895,6 +938,44 @@ describe.skipIf(!integrationEnabled)(
         logger,
       );
       expect(report.status).toBe('passed');
+    });
+
+    it('在 schema 校验前持有全部目标表的排他锁', async () => {
+      let lockProbe:
+        | Promise<{
+            rows: Array<{ mode: string; granted: boolean }>;
+          }>
+        | undefined;
+      const lockLogger: MigrationLogger = {
+        ...logger,
+        info(event, context) {
+          if (
+            event === 'data_migration.target_tables_locked' &&
+            context?.database === 'primary' &&
+            !lockProbe
+          ) {
+            lockProbe = primaryTarget.query<{
+              mode: string;
+              granted: boolean;
+            }>(`
+              SELECT mode, granted
+              FROM pg_locks
+              WHERE locktype = 'relation'
+                AND relation = 'public.audit_logs'::regclass::oid
+                AND pid <> pg_backend_pid()
+            `);
+          }
+          logger.info(event, context);
+        },
+      };
+
+      const report = await runDataMigration(migrationConfig, lockLogger);
+      expect(report.status).toBe('passed');
+      expect(lockProbe).toBeDefined();
+      expect((await lockProbe!).rows).toContainEqual({
+        mode: 'AccessExclusiveLock',
+        granted: true,
+      });
     });
 
     it('连续两次迁移 21 + 4 表且行数、样本和关键业务查询一致', async () => {
