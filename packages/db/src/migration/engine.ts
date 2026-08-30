@@ -343,12 +343,14 @@ async function validateTargetEnvironment(
 async function validateTargetSchema(context: DatabaseContext): Promise<void> {
   const tableResult = await context.target.query<{
     table_name: string;
+    relation_kind: string;
     persistence: string;
     row_security: boolean;
     force_row_security: boolean;
   }>(`
     SELECT
       relation.relname AS table_name,
+      relation.relkind AS relation_kind,
       relation.relpersistence AS persistence,
       relation.relrowsecurity AS row_security,
       relation.relforcerowsecurity AS force_row_security
@@ -359,11 +361,18 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     ORDER BY relation.relname
   `);
   compareExactSet(
-    context.spec.tables.map(({ name }) => `${name}|p|rls-off|force-rls-off`),
+    context.spec.tables.map(({ name }) => `${name}|r|p|rls-off|force-rls-off`),
     tableResult.rows.map(
-      ({ table_name, persistence, row_security, force_row_security }) =>
+      ({
+        table_name,
+        relation_kind,
+        persistence,
+        row_security,
+        force_row_security,
+      }) =>
         [
           table_name,
+          relation_kind,
           persistence,
           row_security ? 'rls-on' : 'rls-off',
           force_row_security ? 'force-rls-on' : 'force-rls-off',
@@ -371,6 +380,46 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
     ),
     'TARGET_SCHEMA_MISMATCH',
     `${context.spec.logicalName}.target.tables`,
+  );
+
+  const descendantResult = await context.target.query<{
+    parent_name: string;
+    child_schema: string;
+    child_name: string;
+    child_kind: string;
+  }>(
+    `
+      SELECT
+        parent_relation.relname AS parent_name,
+        child_namespace.nspname AS child_schema,
+        child_relation.relname AS child_name,
+        child_relation.relkind AS child_kind
+      FROM pg_inherits inheritance
+      JOIN pg_class parent_relation
+        ON parent_relation.oid = inheritance.inhparent
+      JOIN pg_namespace parent_namespace
+        ON parent_namespace.oid = parent_relation.relnamespace
+      JOIN pg_class child_relation
+        ON child_relation.oid = inheritance.inhrelid
+      JOIN pg_namespace child_namespace
+        ON child_namespace.oid = child_relation.relnamespace
+      WHERE parent_namespace.nspname = 'public'
+        AND parent_relation.relname = ANY($1::text[])
+      ORDER BY
+        parent_relation.relname,
+        child_namespace.nspname,
+        child_relation.relname
+    `,
+    [context.spec.tables.map(({ name }) => name)],
+  );
+  compareExactSet(
+    [],
+    descendantResult.rows.map(
+      ({ parent_name, child_schema, child_name, child_kind }) =>
+        [parent_name, child_schema, child_name, child_kind].join('|'),
+    ),
+    'TARGET_SCHEMA_MISMATCH',
+    `${context.spec.logicalName}.target.descendants`,
   );
 
   const columnResult = await context.target.query<{

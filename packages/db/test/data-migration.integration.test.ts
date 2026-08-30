@@ -1073,7 +1073,11 @@ describe.skipIf(!integrationEnabled)(
       });
     });
 
-    it('重置注册表时不递归清空外部 schema 的继承子表', async () => {
+    it('在重置前拒绝注册表的继承子表并保留父子数据', async () => {
+      const beforeParent = await primaryTarget.query<{ count: string }>(`
+        SELECT COUNT(*)::text AS count
+        FROM ONLY public.audit_logs
+      `);
       await primaryTarget.query(`
         CREATE SCHEMA migration_descendant;
         CREATE TABLE migration_descendant.audit_logs_child ()
@@ -1082,13 +1086,22 @@ describe.skipIf(!integrationEnabled)(
         VALUES (9900000000000001, 'PRESERVE');
       `);
       try {
-        const report = await runDataMigration(migrationConfig, logger);
-        expect(report.status).toBe('passed');
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.descendants',
+        });
         const preserved = await primaryTarget.query<{ count: string }>(`
           SELECT COUNT(*)::text AS count
           FROM ONLY migration_descendant.audit_logs_child
         `);
         expect(preserved.rows[0].count).toBe('1');
+        const afterParent = await primaryTarget.query<{ count: string }>(`
+          SELECT COUNT(*)::text AS count
+          FROM ONLY public.audit_logs
+        `);
+        expect(afterParent.rows[0]).toEqual(beforeParent.rows[0]);
       } finally {
         await primaryTarget.query('DROP SCHEMA migration_descendant CASCADE');
       }
