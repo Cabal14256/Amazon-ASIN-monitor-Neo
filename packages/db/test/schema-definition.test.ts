@@ -141,6 +141,9 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(
       migration.match(/COLLATE public\.legacy_utf8mb4_unicode_ci/g)?.length,
     ).toBeGreaterThanOrEqual(60);
+    expect(
+      migration.match(/LEFT JOIN public\.variant_groups variant_group/g),
+    ).toHaveLength(3);
   });
 
   it('CAGG 与兼容投影视图只暴露只读元数据，不伪装成 Drizzle 表', () => {

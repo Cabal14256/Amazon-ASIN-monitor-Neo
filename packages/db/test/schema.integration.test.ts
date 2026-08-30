@@ -230,6 +230,26 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       })),
     );
 
+    const variantFallbacks = await primaryPool.query<{
+      view_name: string;
+      fallback_materialized: boolean;
+    }>(`
+      SELECT
+        view_name,
+        POSITION('variant_groups' IN view_definition) > 0
+          AS fallback_materialized
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+        AND view_name LIKE 'monitor_history_cagg_variant_group_%'
+      ORDER BY view_name
+    `);
+    expect(variantFallbacks.rows).toEqual(
+      ['day', 'hour', 'month'].map((granularity) => ({
+        view_name: `monitor_history_cagg_variant_group_${granularity}`,
+        fallback_materialized: true,
+      })),
+    );
+
     const projections = await primaryPool.query<{ table_name: string }>(
       `
       SELECT table_name

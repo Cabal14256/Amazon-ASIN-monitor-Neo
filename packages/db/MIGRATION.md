@@ -55,6 +55,7 @@ database 名仅允许字母、数字和下划线；本地 bootstrap 会拒绝其
 - `check_time` 是唯一时间维，chunk interval 为 7 天。它覆盖 hour policy 的 49 小时迟到刷新窗且不会让 32 天 day policy 落入过多小 chunk；最终大小与内存/查询指标仍由 P1-T4b 压测复核；
 - 新增 asin、dimension、variant-group × hour/day/month 共 9 个 `materialized_only=true` CAGG。全部以 `WITH NO DATA` 创建，不依赖 real-time aggregate；
 - CAGG 的文本筛选、分组和变体名 `MAX` 显式使用 ICU `und-u-ks-level1` 非确定性 collation，以复现 Legacy `utf8mb4_unicode_ci` 的大小写/重音不敏感语义；升级会拒绝同名但定义不符的 collation；
+- 变体组历史行没有名称快照时，刷新过程会把当时的 `variant_groups.name` fallback 一并物化；兼容视图不再实时关联当前名称，因此后续重命名或删除不会改写已经物化的历史标签；
 - `monitor_history_agg_v2`、`monitor_history_agg_dim_v2`、`monitor_history_agg_variant_group_v2` 只是只读兼容投影，应用不得向它们或 CAGG 写入；
 - 三张 Legacy agg 表、`analytics_refresh_watermark` 和 `monitor_history_status_interval` 均保留。状态区间不是聚合语义，不转为 CAGG。
 

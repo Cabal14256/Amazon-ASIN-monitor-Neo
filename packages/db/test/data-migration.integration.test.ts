@@ -1485,6 +1485,11 @@ describe.skipIf(!integrationEnabled)(
       );
       expect(second.checks).toEqual(first.checks);
 
+      await primaryTarget.query(`
+        UPDATE public.variant_groups
+        SET name = 'Renamed Current'
+        WHERE id = 'cagg-vg-fallback'
+      `);
       const diagnostic = await runTimescaleAggregateGate(
         { ...aggregateConfig, refresh: false },
         logger,
@@ -1540,6 +1545,11 @@ describe.skipIf(!integrationEnabled)(
           brand: '',
         },
       ]);
+      await primaryTarget.query(`
+        UPDATE public.variant_groups
+        SET name = 'Fallback Current'
+        WHERE id = 'cagg-vg-fallback'
+      `);
 
       const collationSemantics = await primaryTarget.query<{
         family: string;

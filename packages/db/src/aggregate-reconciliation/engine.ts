@@ -97,7 +97,7 @@ function normalizedSelect(
       : [
           `aggregate_row.variant_group_id::text AS variant_group_id`,
           cagg
-            ? `COALESCE(aggregate_row.variant_group_name_snapshot, NULLIF(variant_group.name, ''), '')::text AS variant_group_name`
+            ? `COALESCE(aggregate_row.variant_group_name_snapshot, '')::text AS variant_group_name`
             : `aggregate_row.variant_group_name::text AS variant_group_name`,
         ];
   return {
@@ -126,10 +126,6 @@ function aggregatePairQuery(
   const caggProjection = normalizedSelect(family, true);
   const legacyName = quoteIdentifier(legacyRelation);
   const caggName = quoteIdentifier(caggRelation);
-  const caggJoin =
-    family === 'variant_group'
-      ? `LEFT JOIN public.variant_groups variant_group\n          ON variant_group.id = aggregate_row.variant_group_id`
-      : '';
   const valueColumns =
     family === 'variant_group'
       ? [...legacyProjection.keys, 'variant_group_name', ...commonValueColumns]
@@ -209,7 +205,6 @@ function aggregatePairQuery(
         SELECT
           ${caggProjection.select}
         FROM public.${caggName} aggregate_row
-        ${caggJoin}
         WHERE aggregate_row.time_slot >= $1::timestamp
           AND aggregate_row.time_slot < $2::timestamp
       )
