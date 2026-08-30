@@ -1375,8 +1375,9 @@ async function beginTransactions(context: DatabaseContext): Promise<void> {
   await context.target.query("SET client_encoding TO 'UTF8'");
   await context.target.query('BEGIN');
   context.targetTransactionOpen = true;
-  await context.target.query('SET LOCAL search_path TO public, pg_catalog');
+  await context.target.query('SET LOCAL search_path TO pg_catalog, public');
   await context.target.query("SET LOCAL TIME ZONE 'Asia/Shanghai'");
+  await context.target.query("SET LOCAL DateStyle TO 'ISO, YMD'");
   await context.target.query('SET LOCAL session_replication_role TO origin');
 }
 
@@ -1527,6 +1528,9 @@ export async function runDataMigration(
       await validateSourceSchema(context);
       await validateTargetSchema(context);
     }
+    logger.info('data_migration.schemas_validated', {
+      databaseCount: contexts.length,
+    });
     for (const context of contexts) await resetTarget(context);
 
     const databases: DataMigrationDatabaseReport[] = [];
@@ -1535,6 +1539,7 @@ export async function runDataMigration(
     }
 
     for (const context of contexts) {
+      await validateTargetSchema(context);
       context.targetCommitAttempted = true;
       await context.target.query('COMMIT');
       context.targetTransactionOpen = false;

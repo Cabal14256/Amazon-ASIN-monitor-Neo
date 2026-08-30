@@ -63,6 +63,7 @@ function targetUrlWithUnsafeSessionDefaults(value: string): string {
   return targetUrlWithOptions(value, [
     'search_path=migration_shadow,public',
     'client_encoding=LATIN1',
+    'DateStyle=SQL,DMY',
     'session_replication_role=replica',
   ]);
 }
@@ -90,6 +91,24 @@ async function installLegacySchema(
     mysqlIdentifier(integrationDatabase),
   );
   await mysqlAdmin.query(rewritten);
+}
+
+async function restoreTimestampFunction(target: Pool): Promise<void> {
+  await target.query(`
+    CREATE OR REPLACE FUNCTION public.set_updated_timestamp_column()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      CASE TG_ARGV[0]
+        WHEN 'update_time' THEN NEW.update_time := LOCALTIMESTAMP;
+        WHEN 'updated_at' THEN NEW.updated_at := LOCALTIMESTAMP;
+        ELSE
+          RAISE EXCEPTION 'unsupported timestamp column: %', TG_ARGV[0]
+            USING ERRCODE = '22023';
+      END CASE;
+      RETURN NEW;
+    END;
+    $$
+  `);
 }
 
 async function seedPrimarySource(): Promise<void> {
@@ -825,21 +844,7 @@ describe.skipIf(!integrationEnabled)(
           scope: 'primary.target.functions',
         });
       } finally {
-        await primaryTarget.query(`
-          CREATE OR REPLACE FUNCTION public.set_updated_timestamp_column()
-          RETURNS trigger LANGUAGE plpgsql AS $$
-          BEGIN
-            CASE TG_ARGV[0]
-              WHEN 'update_time' THEN NEW.update_time := LOCALTIMESTAMP;
-              WHEN 'updated_at' THEN NEW.updated_at := LOCALTIMESTAMP;
-              ELSE
-                RAISE EXCEPTION 'unsupported timestamp column: %', TG_ARGV[0]
-                  USING ERRCODE = '22023';
-            END CASE;
-            RETURN NEW;
-          END;
-          $$
-        `);
+        await restoreTimestampFunction(primaryTarget);
       }
     });
 
@@ -909,7 +914,7 @@ describe.skipIf(!integrationEnabled)(
       expect(afterRoles.rows[0]).toEqual(beforeRoles.rows[0]);
     });
 
-    it('迁移固定 UTF8 并覆盖连接参数中的 replica 会话默认值', async () => {
+    it('迁移固定 UTF8、DateStyle 并覆盖连接参数中的 replica 会话默认值', async () => {
       const unsafePrimaryUrl =
         targetUrlWithUnsafeSessionDefaults(primaryTargetUrl);
       const unsafeCompetitorUrl =
@@ -918,14 +923,17 @@ describe.skipIf(!integrationEnabled)(
       try {
         const settings = await probe.query<{
           client_encoding: string;
+          date_style: string;
           replication_role: string;
         }>(`
           SELECT
             current_setting('client_encoding') AS client_encoding,
+            current_setting('DateStyle') AS date_style,
             current_setting('session_replication_role') AS replication_role
         `);
         expect(settings.rows[0]).toEqual({
           client_encoding: 'UTF8',
+          date_style: 'SQL, DMY',
           replication_role: 'replica',
         });
       } finally {
@@ -943,6 +951,57 @@ describe.skipIf(!integrationEnabled)(
         logger,
       );
       expect(report.status).toBe('passed');
+    });
+
+    it('pg_catalog 优先于 public 中伪装的系统函数', async () => {
+      await primaryTarget.query(`
+        CREATE FUNCTION public.pg_get_serial_sequence(text, text)
+        RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT NULL::text $$
+      `);
+      try {
+        const report = await runDataMigration(migrationConfig, logger);
+        expect(report.status).toBe('passed');
+      } finally {
+        await primaryTarget.query(
+          'DROP FUNCTION public.pg_get_serial_sequence(text, text)',
+        );
+      }
+    });
+
+    it('提交前重验初次预检后被并发替换的更新时间函数', async () => {
+      let driftPromise: Promise<unknown> | undefined;
+      const driftLogger: MigrationLogger = {
+        ...logger,
+        info(event, context) {
+          if (event === 'data_migration.schemas_validated' && !driftPromise) {
+            driftPromise = primaryTarget.query(`
+              CREATE OR REPLACE FUNCTION public.set_updated_timestamp_column()
+              RETURNS trigger LANGUAGE plpgsql AS $$
+              BEGIN
+                RETURN NEW;
+              END;
+              $$
+            `);
+          }
+          logger.info(event, context);
+        },
+      };
+
+      try {
+        const failure = await runDataMigration(
+          migrationConfig,
+          driftLogger,
+        ).catch((error: unknown) => error);
+        expect(driftPromise).toBeDefined();
+        await driftPromise;
+        expect(failure).toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.functions',
+        });
+      } finally {
+        await driftPromise?.catch(() => undefined);
+        await restoreTimestampFunction(primaryTarget);
+      }
     });
 
     it('在 schema 校验前持有全部目标表与 identity sequence 的排他锁', async () => {
