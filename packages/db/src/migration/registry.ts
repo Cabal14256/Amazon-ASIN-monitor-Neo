@@ -132,13 +132,38 @@ function stripOuterParentheses(value: string): string {
   return normalized;
 }
 
-export function normalizePostgresExpression(value: string): string {
+function stripRelationQualifier(
+  segment: string,
+  relationQualifier?: string,
+): string {
+  if (!relationQualifier) return segment;
+  const escapedQualifier = relationQualifier.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  );
+  const qualifiedIdentifier = new RegExp(
+    `(^|[^a-z0-9_.])((?:public\\.)?${escapedQualifier})\\.([a-z_][a-z0-9_]*)`,
+    'g',
+  );
+  return segment.replace(
+    qualifiedIdentifier,
+    (match, prefix: string, _qualifier: string, identifier: string, offset) => {
+      const following = segment.slice(offset + match.length);
+      return /^\s*\(/.test(following) ? match : `${prefix}${identifier}`;
+    },
+  );
+}
+
+export function normalizePostgresExpression(
+  value: string,
+  relationQualifier?: string,
+): string {
   let normalized = transformSqlOutsideStrings(value, (segment) =>
-    segment
-      .toLowerCase()
-      .replaceAll('"', '')
+    stripRelationQualifier(
+      segment.toLowerCase().replaceAll('"', ''),
+      relationQualifier,
+    )
       .replace(/::\s*(?:character varying|text)(?:\[\])?/g, '')
-      .replace(/\b[a-z_][a-z0-9_]*\./g, '')
       .replace(/\s+/g, ' ')
       .replace(/\s*,\s*/g, ','),
   ).trim();
@@ -162,18 +187,22 @@ export function normalizePostgresRoutineDefinition(value: string): string {
   ).trim();
 }
 
-export function normalizePostgresCheckExpression(value: string): string {
-  let normalized = normalizePostgresExpression(value);
+export function normalizePostgresCheckExpression(
+  value: string,
+  relationQualifier?: string,
+): string {
+  let normalized = normalizePostgresExpression(value, relationQualifier);
   if (normalized.startsWith('check')) {
     normalized = stripOuterParentheses(normalized.slice(5).trim());
   }
-  normalized = normalizePostgresExpression(normalized);
+  normalized = normalizePostgresExpression(normalized, relationQualifier);
   const inExpression = /^\(?([a-z][a-z0-9_]*)\)?\s+in\s*\((.*)\)$/.exec(
     normalized,
   );
   if (inExpression) {
     return `${inExpression[1]}|in|${normalizePostgresExpression(
       inExpression[2],
+      relationQualifier,
     )}`;
   }
   const anyArrayExpression =
@@ -183,6 +212,7 @@ export function normalizePostgresCheckExpression(value: string): string {
   if (anyArrayExpression) {
     return `${anyArrayExpression[1]}|in|${normalizePostgresExpression(
       anyArrayExpression[2],
+      relationQualifier,
     )}`;
   }
   return normalized;
@@ -368,6 +398,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
       : undefined;
     const storedExpression = normalizePostgresExpression(
       renderColumnExpression(generatedExpression ?? column.default),
+      tableName,
     );
     return [
       column.name,
@@ -435,6 +466,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     targetConstraintSignatures.push(
       `c|${checkConstraint.name}|${normalizePostgresCheckExpression(
         renderSql(checkConstraint.value),
+        tableName,
       )}`,
     );
   }
@@ -456,12 +488,13 @@ function tableSpec(table: PgTable): TableMigrationSpec {
           const opClass = indexConfig.opClass ? ` ${indexConfig.opClass}` : '';
           return normalizePostgresExpression(
             `${column.name}${opClass}${order}${nulls}`,
+            tableName,
           );
         }
-        return normalizePostgresExpression(renderSql(column as SQL));
+        return normalizePostgresExpression(renderSql(column as SQL), tableName);
       });
       const predicate = index.config.where
-        ? normalizePostgresExpression(renderSql(index.config.where))
+        ? normalizePostgresExpression(renderSql(index.config.where), tableName)
         : '';
       return indexSignature(
         requiredConstraintName(index.config.name, tableName),

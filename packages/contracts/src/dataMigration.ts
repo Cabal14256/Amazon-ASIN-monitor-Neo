@@ -103,10 +103,12 @@ export const dataMigrationFailureSchema = z
   })
   .strict();
 
+export const dataMigrationRunIdSchema = z.string().uuid();
+
 export const dataMigrationReportSchema = z
   .object({
     schemaVersion: z.literal(1),
-    runId: z.string().uuid(),
+    runId: dataMigrationRunIdSchema,
     strategy: z.literal('full-snapshot-cutover-sync'),
     startedAt: z.string().datetime({ offset: true }),
     finishedAt: z.string().datetime({ offset: true }),

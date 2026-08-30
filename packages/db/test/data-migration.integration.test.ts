@@ -429,6 +429,54 @@ describe.skipIf(!integrationEnabled)(
       }
     });
 
+    it('目标外键内部触发器被禁用时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(
+        'ALTER TABLE public.user_roles DISABLE TRIGGER ALL',
+      );
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.user_roles.foreign_key_triggers',
+        });
+      } finally {
+        await primaryTarget.query(
+          'ALTER TABLE public.user_roles ENABLE TRIGGER ALL',
+        );
+      }
+    });
+
+    it('目标表达式索引改用影子 schema 函数时在重置前拒绝迁移', async () => {
+      await primaryTarget.query(`
+        CREATE SCHEMA migration_evil;
+        CREATE FUNCTION migration_evil.lower(value text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        STRICT
+        AS 'SELECT value';
+        DROP INDEX public.uq_users_username_ci;
+        CREATE UNIQUE INDEX uq_users_username_ci
+          ON public.users (migration_evil.lower(username));
+      `);
+      try {
+        await expect(
+          runDataMigration(migrationConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'TARGET_SCHEMA_MISMATCH',
+          scope: 'primary.target.users.indexes',
+        });
+      } finally {
+        await primaryTarget.query(`
+          DROP INDEX IF EXISTS public.uq_users_username_ci;
+          CREATE UNIQUE INDEX uq_users_username_ci
+            ON public.users (lower(username));
+          DROP SCHEMA migration_evil CASCADE;
+        `);
+      }
+    });
+
     it('目标 identity sequence 参数漂移时在重置前拒绝迁移', async () => {
       await primaryTarget.query(`
         ALTER SEQUENCE public.monitor_history_id_seq

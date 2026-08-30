@@ -195,6 +195,21 @@ describe('P1-T3 migration registry', () => {
     expect(normalizePostgresExpression('lower((asin)::text)')).toBe(
       'lower(asin)',
     );
+    expect(
+      normalizePostgresExpression('lower("asins"."asin"::text)', 'asins'),
+    ).toBe('lower(asin)');
+    expect(normalizePostgresExpression('evil.lower(username)', 'users')).toBe(
+      'evil.lower(username)',
+    );
+    expect(normalizePostgresExpression('asins.lower(username)', 'asins')).toBe(
+      'asins.lower(username)',
+    );
+    expect(
+      normalizePostgresExpression(
+        'username OPERATOR(evil.=) username',
+        'users',
+      ),
+    ).toBe('username operator(evil.=) username');
     expect(normalizePostgresExpression("'foo.NORMAL'::text")).toBe(
       "'foo.NORMAL'",
     );
@@ -507,6 +522,22 @@ describe('migration config and logging safety', () => {
     ).rejects.toMatchObject({
       code: 'MIGRATION_CONFIG_INVALID',
       scope: 'config.migration_sample_size',
+    });
+  });
+
+  it('直接调用迁移引擎时在连接前校验并复制运行元数据', async () => {
+    const config = parseDataMigrationConfig(validEnvironment);
+    await expect(
+      runDataMigration(config, undefined, { runId: 'not-a-uuid' }),
+    ).rejects.toMatchObject({
+      code: 'MIGRATION_METADATA_INVALID',
+      scope: 'metadata.run_id',
+    });
+    await expect(
+      runDataMigration(config, undefined, { startedAt: new Date(Number.NaN) }),
+    ).rejects.toMatchObject({
+      code: 'MIGRATION_METADATA_INVALID',
+      scope: 'metadata.started_at',
     });
   });
 

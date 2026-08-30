@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   dataMigrationReportSchema,
+  dataMigrationRunIdSchema,
   type DataMigrationDatabaseReport,
   type DataMigrationQueryReport,
   type DataMigrationReport,
@@ -277,7 +278,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               is_not_null ? 'not-null' : 'nullable',
               identity_kind,
               generated_kind,
-              normalizePostgresExpression(stored_expression ?? ''),
+              normalizePostgresExpression(stored_expression ?? '', table.name),
             ].join('|'),
         ),
       'TARGET_SCHEMA_MISMATCH',
@@ -428,6 +429,7 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               constraint.constraint_name
             }|${normalizePostgresCheckExpression(
               constraint.check_expression ?? '',
+              table.name,
             )}`;
           }
           if (constraint.constraint_type === 'f') {
@@ -503,8 +505,12 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
               index_name,
               is_unique ? 'unique' : 'non-unique',
               access_method,
-              expressions.map(normalizePostgresExpression).join(','),
-              normalizePostgresExpression(predicate),
+              expressions
+                .map((expression) =>
+                  normalizePostgresExpression(expression, table.name),
+                )
+                .join(','),
+              normalizePostgresExpression(predicate, table.name),
               is_valid ? 'valid' : 'invalid',
               is_ready ? 'ready' : 'not-ready',
             ].join('|'),
@@ -642,6 +648,53 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       'TARGET_SCHEMA_MISMATCH',
       `${context.spec.logicalName}.target.${table.name}.triggers`,
     );
+  }
+
+  const foreignKeyTriggerResult = await context.target.query<{
+    table_name: string;
+    constraint_name: string;
+    trigger_name: string;
+    enabled_kind: string;
+  }>(`
+    SELECT
+      source_relation.relname AS table_name,
+      constraint_row.conname AS constraint_name,
+      trigger_row.tgname AS trigger_name,
+      trigger_row.tgenabled AS enabled_kind
+    FROM pg_constraint constraint_row
+    JOIN pg_class source_relation
+      ON source_relation.oid = constraint_row.conrelid
+    JOIN pg_namespace source_namespace
+      ON source_namespace.oid = source_relation.relnamespace
+    JOIN pg_trigger trigger_row
+      ON trigger_row.tgconstraint = constraint_row.oid
+     AND trigger_row.tgisinternal
+    WHERE source_namespace.nspname = 'public'
+      AND constraint_row.contype = 'f'
+    ORDER BY source_relation.relname, constraint_row.conname, trigger_row.tgname
+  `);
+  for (const table of context.spec.tables) {
+    const foreignKeyNames = table.targetConstraintSignatures
+      .filter((signature) => signature.startsWith('f|'))
+      .map((signature) => signature.split('|')[1]);
+    for (const constraintName of foreignKeyNames) {
+      const triggers = foreignKeyTriggerResult.rows.filter(
+        (trigger) =>
+          trigger.table_name === table.name &&
+          trigger.constraint_name === constraintName,
+      );
+      if (
+        triggers.length !== 4 ||
+        triggers.some(({ enabled_kind }) => enabled_kind !== 'O')
+      ) {
+        const scope = `${context.spec.logicalName}.target.${table.name}.foreign_key_triggers`;
+        throw new DataMigrationError(
+          'TARGET_SCHEMA_MISMATCH',
+          scope,
+          `${scope} mismatch (expected four origin-enabled internal triggers for ${constraintName})`,
+        );
+      }
+    }
   }
 }
 
@@ -1136,6 +1189,34 @@ export interface DataMigrationRunMetadata {
   readonly startedAt?: Date;
 }
 
+function normalizeRunMetadata(metadata: DataMigrationRunMetadata): {
+  readonly runId: string;
+  readonly startedAt: Date;
+} {
+  const runIdResult = dataMigrationRunIdSchema.safeParse(
+    metadata.runId ?? randomUUID(),
+  );
+  if (!runIdResult.success) {
+    throw new DataMigrationError(
+      'MIGRATION_METADATA_INVALID',
+      'metadata.run_id',
+      'migration run id must be a UUID',
+    );
+  }
+  const startedAt = metadata.startedAt ?? new Date();
+  if (!(startedAt instanceof Date) || !Number.isFinite(startedAt.getTime())) {
+    throw new DataMigrationError(
+      'MIGRATION_METADATA_INVALID',
+      'metadata.started_at',
+      'migration start time must be a valid Date',
+    );
+  }
+  return {
+    runId: runIdResult.data,
+    startedAt: new Date(startedAt.getTime()),
+  };
+}
+
 export interface TargetCommitState {
   readonly logicalName: MigrationDatabaseName;
   readonly attempted: boolean;
@@ -1191,8 +1272,7 @@ export async function runDataMigration(
     );
   }
 
-  const runId = metadata.runId ?? randomUUID();
-  const startedAt = metadata.startedAt ?? new Date();
+  const { runId, startedAt } = normalizeRunMetadata(metadata);
   const contexts: DatabaseContext[] = [];
   logger.info('data_migration.started', {
     runId,
