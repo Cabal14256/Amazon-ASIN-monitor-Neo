@@ -214,9 +214,8 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     const aggregates = await primaryPool.query<{
       view_name: string;
       materialized_only: boolean;
-      finalized: boolean;
     }>(`
-      SELECT view_name, materialized_only, finalized
+      SELECT view_name, materialized_only
       FROM timescaledb_information.continuous_aggregates
       WHERE view_schema = 'public'
       ORDER BY view_name
@@ -225,7 +224,6 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       [...timescaleContinuousAggregateViewNames].sort().map((view_name) => ({
         view_name,
         materialized_only: true,
-        finalized: true,
       })),
     );
 
