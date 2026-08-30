@@ -201,9 +201,9 @@ describe('P1-T3 migration registry', () => {
   it('将 PG catalog 重写的 CHECK 和表达式索引归一到 Drizzle 定义', () => {
     expect(
       normalizeMysqlGeneratedExpression(
-        "timestamp(date_format(`check_time`,_utf8mb4'%Y-%m-%d %H:00:00'))",
+        "cast(date_format(`check_time`,_utf8mb4\\'%Y-%m-%d %H:00:00\\') as datetime)",
       ),
-    ).toBe("timestamp(date_format(check_time,'%Y-%m-%d %H:00:00'))");
+    ).toBe("cast(date_format(check_time,'%Y-%m-%d %H:00:00')asdatetime)");
     expect(
       normalizePostgresCheckExpression(
         "CHECK (((granularity)::text = ANY ((ARRAY['hour'::character varying, 'day'::character varying, 'month'::character varying])::text[])))",

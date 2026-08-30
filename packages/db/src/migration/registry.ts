@@ -195,8 +195,9 @@ export function normalizePostgresRoutineDefinition(value: string): string {
 }
 
 export function normalizeMysqlGeneratedExpression(value: string): string {
+  const catalogExpression = value.replaceAll("\\'", "'");
   return stripOuterParentheses(
-    transformSqlOutsideStrings(value, (segment) =>
+    transformSqlOutsideStrings(catalogExpression, (segment) =>
       segment
         .toLowerCase()
         .replaceAll('`', '')
