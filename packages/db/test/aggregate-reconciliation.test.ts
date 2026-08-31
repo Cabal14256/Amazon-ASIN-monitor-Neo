@@ -132,4 +132,31 @@ describe('Timescale aggregate gate config and CLI', () => {
     ).toBe(0);
     vi.unstubAllEnvs();
   });
+
+  it('配置解析失败时覆盖用户指定位置的旧报告', async () => {
+    vi.stubEnv('DATABASE_URL', 'postgresql://db.example/asin_monitor');
+    vi.stubEnv('TIMESCALE_AGG_WINDOW_START', 'invalid-window');
+    vi.stubEnv('TIMESCALE_AGG_WINDOW_END', '2026-10-01 00:00:00');
+    vi.stubEnv(
+      'TIMESCALE_AGG_REPORT_PATH',
+      'artifacts/custom/aggregate-report.json',
+    );
+    const writeReport = vi.fn(async () => undefined);
+
+    expect(
+      await runTimescaleAggregateCli('D:/workspace', logger, { writeReport }),
+    ).toBe(1);
+    expect(writeReport).toHaveBeenCalledOnce();
+    expect(writeReport.mock.calls[0]?.[1].replaceAll('\\', '/')).toMatch(
+      /\/artifacts\/custom\/aggregate-report\.json$/,
+    );
+    expect(writeReport.mock.calls[0]?.[1].replaceAll('\\', '/')).not.toMatch(
+      /\/artifacts\/timescale-aggregate\/report\.json$/,
+    );
+    expect(writeReport.mock.calls[0]?.[0]).toMatchObject({
+      status: 'failed',
+      failure: { code: 'AGGREGATE_CONFIG_INVALID' },
+    });
+    vi.unstubAllEnvs();
+  });
 });

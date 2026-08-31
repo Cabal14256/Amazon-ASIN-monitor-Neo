@@ -152,17 +152,25 @@ export function parseTimescaleAggregateConfig(
   source: Record<string, string | undefined>,
   workspaceRoot: string,
 ): TimescaleAggregateConfig {
-  const requestedReportPath =
-    source.TIMESCALE_AGG_REPORT_PATH?.trim() ||
-    'artifacts/timescale-aggregate/report.json';
+  const reportPath = resolveTimescaleAggregateReportPath(source, workspaceRoot);
   return validateTimescaleAggregateConfig({
     databaseUrl: postgresUrl(required(source, 'DATABASE_URL')),
     windowStart: required(source, 'TIMESCALE_AGG_WINDOW_START'),
     windowEnd: required(source, 'TIMESCALE_AGG_WINDOW_END'),
     refresh: booleanSetting(source, 'TIMESCALE_AGG_REFRESH', true),
     pageSize: pageSize(source),
-    reportPath: isAbsolute(requestedReportPath)
-      ? requestedReportPath
-      : resolve(workspaceRoot, requestedReportPath),
+    reportPath,
   });
+}
+
+export function resolveTimescaleAggregateReportPath(
+  source: Record<string, string | undefined>,
+  workspaceRoot: string,
+): string {
+  const requestedReportPath =
+    source.TIMESCALE_AGG_REPORT_PATH?.trim() ||
+    'artifacts/timescale-aggregate/report.json';
+  return isAbsolute(requestedReportPath)
+    ? requestedReportPath
+    : resolve(workspaceRoot, requestedReportPath);
 }

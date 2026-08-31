@@ -40,7 +40,7 @@ corepack pnpm db:timescale:aggregate:gate
 - `artifacts/data-migration/report.json`：21 + 4 表、样本和关键业务查询均为 `passed`；
 - `artifacts/timescale-aggregate/report.json`：`refreshRequested=true`，覆盖全部迁移历史的 `[start,end)` 月边界内 9 组检查均为 `passed`，至少一组含非零 Legacy 证据，且 `coverage.rowsOutsideWindow=0`；
 - `monitor_history` 在 Timescale catalog 中仅有 `check_time` 一个时间维，interval 为 7 天，主键为 `(check_time,id)`；
-- 9 个 CAGG 均为 `materialized_only`，文本列采用已核验的 Legacy 兼容 collation，3 个只读兼容视图存在；迁移 postflight 与每次 promotion Gate 都必须确认 9 个 refresh job 存在、启用，且 offset、cadence、fixed schedule、initial start 和 timezone 完全匹配；
+- 9 个 CAGG 均为 `materialized_only`，文本键采用 PAD SPACE + Legacy 兼容 collation，3 个只读兼容视图存在；每次 promotion Gate 都必须确认 migration-owned 定义指纹和 v2 marker，迁移 postflight 与 Gate 都必须确认 9 个 refresh job 存在、启用，且 `end_offset=0`、其他 offset、cadence、fixed schedule、initial start 和 timezone 完全匹配；
 - API/Worker smoke test 通过，且维护窗口内仍无任何业务写入。
 
 只有全部成立才能切换读流量；观察完成后再单独批准写流量。切流和解除写冻结必须是两个可审计步骤。

@@ -312,18 +312,18 @@ function reportEvidence(report: Awaited<ReturnType<typeof runDataMigration>>) {
 
 async function rebuildLegacyAggregateFixture(): Promise<void> {
   const peakCase = `CASE
-    WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN
+    WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN
       (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6)
       OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 12)
-    WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN
+    WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN
       EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
       OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 0
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 2)
       OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6)
-    WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+    WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
       EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 20
       OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 5)
@@ -341,8 +341,8 @@ async function rebuildLegacyAggregateFixture(): Promise<void> {
     SELECT
       bucket.granularity,
       bucket.time_slot,
-      history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
         COLLATE public.legacy_utf8mb4_unicode_ci,
       COUNT(*)::integer,
       (COUNT(*) FILTER (WHERE history.is_broken IS TRUE))::integer,
@@ -357,16 +357,16 @@ async function rebuildLegacyAggregateFixture(): Promise<void> {
         ('day'::varchar(5), history.day_ts),
         ('month'::varchar(5), history.month_ts)
     ) bucket(granularity, time_slot)
-    WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+    WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
       AND (
         history.asin_id IS NOT NULL
-        OR NULLIF(history.asin_code, '') IS NOT NULL
+        OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
       )
     GROUP BY
       bucket.granularity,
       bucket.time_slot,
-      history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
         COLLATE public.legacy_utf8mb4_unicode_ci;
 
     INSERT INTO public.monitor_history_agg_dim (
@@ -376,10 +376,10 @@ async function rebuildLegacyAggregateFixture(): Promise<void> {
     SELECT
       bucket.granularity,
       bucket.time_slot,
-      history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(history.site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(history.brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
         COLLATE public.legacy_utf8mb4_unicode_ci,
       COUNT(*)::integer,
       (COUNT(*) FILTER (WHERE history.is_broken IS TRUE))::integer,
@@ -394,18 +394,18 @@ async function rebuildLegacyAggregateFixture(): Promise<void> {
         ('day'::varchar(5), history.day_ts),
         ('month'::varchar(5), history.month_ts)
     ) bucket(granularity, time_slot)
-    WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+    WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
       AND (
         history.asin_id IS NOT NULL
-        OR NULLIF(history.asin_code, '') IS NOT NULL
+        OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
       )
     GROUP BY
       bucket.granularity,
       bucket.time_slot,
-      history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(history.site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(history.brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
         COLLATE public.legacy_utf8mb4_unicode_ci;
 
     INSERT INTO public.monitor_history_agg_variant_group (
@@ -416,14 +416,14 @@ async function rebuildLegacyAggregateFixture(): Promise<void> {
     SELECT
       bucket.granularity,
       bucket.time_slot,
-      history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-      history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
       COALESCE(
-        MAX(NULLIF(history.variant_group_name, '') COLLATE public.legacy_utf8mb4_unicode_ci),
-        MAX(variant_group.name COLLATE public.legacy_utf8mb4_unicode_ci),
+        MAX(NULLIF(rtrim(history.variant_group_name), '') COLLATE public.legacy_utf8mb4_unicode_ci),
+        MAX(rtrim(variant_group.name) COLLATE public.legacy_utf8mb4_unicode_ci),
         ''
       ),
-      COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
         COLLATE public.legacy_utf8mb4_unicode_ci,
       COUNT(*)::integer,
       (COUNT(*) FILTER (WHERE history.is_broken IS TRUE))::integer,
@@ -433,25 +433,26 @@ async function rebuildLegacyAggregateFixture(): Promise<void> {
       MAX(history.check_time)
     FROM public.monitor_history history
     LEFT JOIN public.variant_groups variant_group
-      ON variant_group.id = history.variant_group_id
+      ON rtrim(variant_group.id) COLLATE public.legacy_utf8mb4_unicode_ci =
+        rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci
     CROSS JOIN LATERAL (
       VALUES
         ('hour'::varchar(5), history.hour_ts),
         ('day'::varchar(5), history.day_ts),
         ('month'::varchar(5), history.month_ts)
     ) bucket(granularity, time_slot)
-    WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+    WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
       AND history.variant_group_id IS NOT NULL
       AND (
         history.asin_id IS NOT NULL
-        OR NULLIF(history.asin_code, '') IS NOT NULL
+        OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
       )
     GROUP BY
       bucket.granularity,
       bucket.time_slot,
-      history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-      history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci,
-      COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
         COLLATE public.legacy_utf8mb4_unicode_ci;
   `);
 }
@@ -1452,12 +1453,18 @@ describe.skipIf(!integrationEnabled)(
       await primaryTarget.query(`
         DELETE FROM public.monitor_history;
         DELETE FROM public.variant_groups
-        WHERE id IN ('cagg-vg-us', 'cagg-vg-fallback', 'cagg-vg-collation');
+        WHERE id IN (
+          'cagg-vg-us',
+          'cagg-vg-fallback',
+          'cagg-vg-collation',
+          'cagg-vg-pad'
+        );
         INSERT INTO public.variant_groups (id, name, country, site, brand)
         VALUES
           ('cagg-vg-us', 'Current US Group', 'US', '12', 'Fixture'),
           ('cagg-vg-fallback', 'Fallback Current', 'UK', '12', 'Fixture'),
-          ('cagg-vg-collation', 'Resume Current', 'US', '12', 'Fixture');
+          ('cagg-vg-collation', 'Resume Current', 'US', '12', 'Fixture'),
+          ('cagg-vg-pad', 'Pad Current', 'US', 'Pad Site', 'Pad Brand');
 
         INSERT INTO public.monitor_history (
           variant_group_id, variant_group_name, asin_id, asin_code, asin_name,
@@ -1473,6 +1480,9 @@ describe.skipIf(!integrationEnabled)(
           (NULL, NULL, 'it-id', 'BLOWIT', 'IT Low', '12', 'Brand IT', 'ASIN', 'IT', false, '2026-08-15 22:00:00', false),
           ('cagg-vg-collation', 'Résumé', 'collation-a', 'BCOLLATE', 'Collation A', 'Store', 'Café', 'ASIN', 'US', false, '2026-08-20 02:10:00', false),
           ('cagg-vg-collation', 'resume', 'collation-b', 'bcollate', 'Collation B', 'store', 'CAFE', 'asin', 'us', true, '2026-08-20 02:20:00', false),
+          ('cagg-vg-pad', 'Pad Name', 'pad-a', 'BPAD', 'Pad A', 'Pad Site', 'Pad Brand', 'ASIN', 'US', false, '2026-08-21 02:10:00', false),
+          ('cagg-vg-pad   ', 'Pad Name   ', 'pad-b', 'BPAD   ', 'Pad B', 'Pad Site   ', 'Pad Brand   ', 'ASIN   ', 'US   ', true, '2026-08-21 02:20:00', false),
+          ('cagg-vg-pad', 'Pad Name', 'pad-fallback   ', '   ', 'Pad Fallback', 'Pad Site', 'Pad Brand', 'ASIN', 'US', false, '2026-08-21 03:10:00', false),
           ('cagg-vg-us', 'Excluded Group Row', 'excluded-id', 'BEXCLUDED', 'Excluded', '12', 'Fixture', 'GROUP', 'US', true, '2026-08-31 18:30:00', false);
       `);
       await rebuildLegacyAggregateFixture();
@@ -1484,6 +1494,44 @@ describe.skipIf(!integrationEnabled)(
         'passed',
       );
       expect(second.checks).toEqual(first.checks);
+
+      const definition = await primaryTarget.query<{
+        definition_marker: string | null;
+      }>(`
+        SELECT obj_description(
+          'public.monitor_history_cagg_asin_hour'::regclass,
+          'pg_class'
+        ) AS definition_marker
+      `);
+      const definitionMarker = definition.rows[0]?.definition_marker;
+      expect(definitionMarker).toMatch(
+        /^amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:[a-f0-9]{32}$/,
+      );
+      if (
+        !definitionMarker ||
+        !/^amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:[a-f0-9]{32}$/.test(
+          definitionMarker,
+        )
+      ) {
+        throw new Error('invalid integration CAGG definition marker');
+      }
+      try {
+        await primaryTarget.query(`
+          COMMENT ON VIEW public.monitor_history_cagg_asin_hour
+          IS 'gate-tampered-definition-marker'
+        `);
+        await expect(
+          runTimescaleAggregateGate(aggregateConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'AGGREGATE_TARGET_DEFINITION_MISMATCH',
+          scope: 'aggregate.target.cagg_definitions',
+        });
+      } finally {
+        await primaryTarget.query(`
+          COMMENT ON VIEW public.monitor_history_cagg_asin_hour
+          IS '${definitionMarker}'
+        `);
+      }
 
       const refreshPolicy = await primaryTarget.query<{ job_id: number }>(`
         SELECT jobs.job_id
@@ -1519,7 +1567,7 @@ describe.skipIf(!integrationEnabled)(
           SELECT add_continuous_aggregate_policy(
             'public.monitor_history_cagg_asin_hour'::regclass,
             start_offset => INTERVAL '49 hours',
-            end_offset => INTERVAL '1 hour',
+            end_offset => INTERVAL '0',
             schedule_interval => INTERVAL '10 minutes',
             initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
             timezone => 'Asia/Shanghai'
@@ -1676,6 +1724,90 @@ describe.skipIf(!integrationEnabled)(
           text_matches: true,
         },
       ]);
+
+      const padSpaceSemantics = await primaryTarget.query<{
+        family: string;
+        country: string;
+        asin_key: string;
+        dimension_one: string;
+        dimension_two: string;
+        check_count: string;
+        broken_count: string;
+      }>(`
+        SELECT
+          'asin' AS family,
+          country,
+          asin_key,
+          ''::text AS dimension_one,
+          ''::text AS dimension_two,
+          check_count::text,
+          broken_count::text
+        FROM public.monitor_history_cagg_asin_hour
+        WHERE time_slot = timestamp '2026-08-21 02:00:00'
+          AND asin_key = 'BPAD'
+        UNION ALL
+        SELECT
+          'dimension' AS family,
+          country,
+          asin_key,
+          site AS dimension_one,
+          brand AS dimension_two,
+          check_count::text,
+          broken_count::text
+        FROM public.monitor_history_cagg_dim_hour
+        WHERE time_slot = timestamp '2026-08-21 02:00:00'
+          AND asin_key = 'BPAD'
+        UNION ALL
+        SELECT
+          'variant_group' AS family,
+          country,
+          asin_key,
+          variant_group_id AS dimension_one,
+          variant_group_name_snapshot AS dimension_two,
+          check_count::text,
+          broken_count::text
+        FROM public.monitor_history_cagg_variant_group_hour
+        WHERE time_slot = timestamp '2026-08-21 02:00:00'
+          AND asin_key = 'BPAD'
+        ORDER BY family
+      `);
+      expect(padSpaceSemantics.rows).toEqual([
+        {
+          family: 'asin',
+          country: 'US',
+          asin_key: 'BPAD',
+          dimension_one: '',
+          dimension_two: '',
+          check_count: '2',
+          broken_count: '1',
+        },
+        {
+          family: 'dimension',
+          country: 'US',
+          asin_key: 'BPAD',
+          dimension_one: 'Pad Site',
+          dimension_two: 'Pad Brand',
+          check_count: '2',
+          broken_count: '1',
+        },
+        {
+          family: 'variant_group',
+          country: 'US',
+          asin_key: 'BPAD',
+          dimension_one: 'cagg-vg-pad',
+          dimension_two: 'Pad Name',
+          check_count: '2',
+          broken_count: '1',
+        },
+      ]);
+      const padSpaceFallback = await primaryTarget.query<{
+        asin_key: string;
+      }>(`
+        SELECT asin_key
+        FROM public.monitor_history_cagg_asin_hour
+        WHERE time_slot = timestamp '2026-08-21 03:00:00'
+      `);
+      expect(padSpaceFallback.rows).toEqual([{ asin_key: 'ID#pad-fallback' }]);
 
       const peakAndMonthBoundary = await primaryTarget.query<{
         time_slot: string;

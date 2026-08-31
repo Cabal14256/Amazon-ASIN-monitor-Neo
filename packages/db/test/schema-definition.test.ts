@@ -136,6 +136,7 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     );
     expect(migration.match(/if_not_exists => true/g)).toHaveLength(9);
     expect(migration.match(/timezone => 'Asia\/Shanghai'/g)).toHaveLength(9);
+    expect(migration.match(/end_offset => INTERVAL '0'/g)).toHaveLength(9);
     expect(migration).toContain(
       'CREATE COLLATION IF NOT EXISTS public.legacy_utf8mb4_unicode_ci',
     );
@@ -144,6 +145,7 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(
       migration.match(/COLLATE public\.legacy_utf8mb4_unicode_ci/g)?.length,
     ).toBeGreaterThanOrEqual(60);
+    expect(migration.match(/rtrim\(/g)?.length).toBeGreaterThanOrEqual(80);
     expect(
       migration.match(/LEFT JOIN public\.variant_groups variant_group/g),
     ).toHaveLength(3);

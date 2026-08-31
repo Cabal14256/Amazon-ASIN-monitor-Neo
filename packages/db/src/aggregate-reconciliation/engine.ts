@@ -91,22 +91,22 @@ function normalizedSelect(
       ? []
       : family === 'dimension'
       ? [
-          `aggregate_row.site::text AS site`,
-          `aggregate_row.brand::text AS brand`,
+          `rtrim(aggregate_row.site::text) AS site`,
+          `rtrim(aggregate_row.brand::text) AS brand`,
         ]
       : [
-          `aggregate_row.variant_group_id::text AS variant_group_id`,
+          `rtrim(aggregate_row.variant_group_id::text) AS variant_group_id`,
           cagg
-            ? `COALESCE(aggregate_row.variant_group_name_snapshot, '')::text AS variant_group_name`
-            : `aggregate_row.variant_group_name::text AS variant_group_name`,
+            ? `rtrim(COALESCE(aggregate_row.variant_group_name_snapshot, '')::text) AS variant_group_name`
+            : `rtrim(aggregate_row.variant_group_name::text) AS variant_group_name`,
         ];
   return {
     keys,
     select: [
       `to_char(aggregate_row.time_slot, 'YYYY-MM-DD HH24:MI:SS.US') AS time_slot`,
-      `aggregate_row.country::text AS country`,
+      `rtrim(aggregate_row.country::text) AS country`,
       ...familyColumns,
-      `aggregate_row.asin_key::text AS asin_key`,
+      `rtrim(aggregate_row.asin_key::text) AS asin_key`,
       `aggregate_row.check_count::text AS check_count`,
       `aggregate_row.broken_count::text AS broken_count`,
       `CASE WHEN aggregate_row.has_broken THEN '1' ELSE '0' END AS has_broken`,
@@ -323,11 +323,45 @@ async function validateTarget(client: PoolClient): Promise<void> {
   const result = await client.query<{
     view_name: string;
     materialized_only: boolean;
+    definition_matches: boolean | null;
+    marker_matches: boolean | null;
   }>(`
-    SELECT view_name, materialized_only
-    FROM timescaledb_information.continuous_aggregates
-    WHERE view_schema = 'public'
-    ORDER BY view_name
+    WITH expected_definition (view_name, definition_fingerprint) AS (
+      VALUES
+        ('monitor_history_cagg_asin_day', '1b7e82e30be65a827df91d5aa5b040c9'),
+        ('monitor_history_cagg_asin_hour', 'c8fbca31141d9ff2fd87bb2bc27a23da'),
+        ('monitor_history_cagg_asin_month', 'b7e5ab6f505add599994843dafe1b1e2'),
+        ('monitor_history_cagg_dim_day', 'f77caf1fe9c24ced94d2e3248847ef3f'),
+        ('monitor_history_cagg_dim_hour', 'fd463ab0f4fd3ee1984f43864b8bd130'),
+        ('monitor_history_cagg_dim_month', '37c470c8fe8198ada8aeb2b7f3fd6066'),
+        ('monitor_history_cagg_variant_group_day', '5ab32fcf37370bc31d3c5940d31c7b38'),
+        ('monitor_history_cagg_variant_group_hour', '188e2199865d8f41489bdc08f02ee4b9'),
+        ('monitor_history_cagg_variant_group_month', 'd23ff17c43d69097626a6232a37b725b')
+    )
+    SELECT
+      aggregate_row.view_name,
+      aggregate_row.materialized_only,
+      md5(regexp_replace(
+        aggregate_row.view_definition,
+        '[[:space:]]+',
+        ' ',
+        'g'
+      )) = expected_definition.definition_fingerprint AS definition_matches,
+      obj_description(
+        format(
+          '%I.%I',
+          aggregate_row.view_schema,
+          aggregate_row.view_name
+        )::regclass,
+        'pg_class'
+      ) =
+        'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:' ||
+        expected_definition.definition_fingerprint AS marker_matches
+    FROM timescaledb_information.continuous_aggregates aggregate_row
+    LEFT JOIN expected_definition
+      ON expected_definition.view_name = aggregate_row.view_name
+    WHERE aggregate_row.view_schema = 'public'
+    ORDER BY aggregate_row.view_name
   `);
   const expected = [...caggNames].sort();
   const actual = result.rows.map(({ view_name }) => view_name).sort();
@@ -339,6 +373,18 @@ async function validateTarget(client: PoolClient): Promise<void> {
       'AGGREGATE_TARGET_SCHEMA_MISMATCH',
       'aggregate.target.caggs',
       'aggregate target does not contain the exact materialized-only CAGG set',
+    );
+  }
+  if (
+    result.rows.some(
+      ({ definition_matches, marker_matches }) =>
+        definition_matches !== true || marker_matches !== true,
+    )
+  ) {
+    throw new DataMigrationError(
+      'AGGREGATE_TARGET_DEFINITION_MISMATCH',
+      'aggregate.target.cagg_definitions',
+      'aggregate target CAGG definitions do not match migration-owned fingerprints',
     );
   }
 
@@ -360,15 +406,15 @@ async function validateTarget(client: PoolClient): Promise<void> {
       schedule_interval
     ) AS (
       VALUES
-        ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-        ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-        ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-        ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-        ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-        ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-        ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
-        ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
-        ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day')
+        ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+        ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+        ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+        ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+        ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+        ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+        ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+        ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+        ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day')
     ), selected_materialization AS (
       SELECT
         expected_policy.*,
@@ -470,10 +516,10 @@ async function countRowsOutsideWindow(
         (
           SELECT COUNT(*)
           FROM public.monitor_history history
-          WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+          WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
             AND (
               history.asin_id IS NOT NULL
-              OR NULLIF(history.asin_code, '') IS NOT NULL
+              OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
             )
             AND (
               history.check_time < $1::timestamp

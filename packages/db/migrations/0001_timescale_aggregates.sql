@@ -143,15 +143,15 @@ $postflight$;
 DO $cagg_definition_preflight$
 DECLARE
   expected_definitions constant jsonb := '{
-    "monitor_history_cagg_asin_day": "1c8a08404bfa40e880f68a1542dda236",
-    "monitor_history_cagg_asin_hour": "a7dc38e04b7421d675be9fead5c6dca9",
-    "monitor_history_cagg_asin_month": "90916b03f62d7cff8d3643c021e109c5",
-    "monitor_history_cagg_dim_day": "ea3412e4519ba38af7867a72401f1f75",
-    "monitor_history_cagg_dim_hour": "42e83ef4ee3809c76e2721376418ee93",
-    "monitor_history_cagg_dim_month": "f24d7e1cbbc746c2741cf1289227b8a4",
-    "monitor_history_cagg_variant_group_day": "712d829f483f475e4ab86f48dda245a8",
-    "monitor_history_cagg_variant_group_hour": "14f1d858f60a5edac891b3694d964680",
-    "monitor_history_cagg_variant_group_month": "6372c4ddbf56a401c9cfef12ed279c30"
+    "monitor_history_cagg_asin_day": "1b7e82e30be65a827df91d5aa5b040c9",
+    "monitor_history_cagg_asin_hour": "c8fbca31141d9ff2fd87bb2bc27a23da",
+    "monitor_history_cagg_asin_month": "b7e5ab6f505add599994843dafe1b1e2",
+    "monitor_history_cagg_dim_day": "f77caf1fe9c24ced94d2e3248847ef3f",
+    "monitor_history_cagg_dim_hour": "fd463ab0f4fd3ee1984f43864b8bd130",
+    "monitor_history_cagg_dim_month": "37c470c8fe8198ada8aeb2b7f3fd6066",
+    "monitor_history_cagg_variant_group_day": "5ab32fcf37370bc31d3c5940d31c7b38",
+    "monitor_history_cagg_variant_group_hour": "188e2199865d8f41489bdc08f02ee4b9",
+    "monitor_history_cagg_variant_group_month": "d23ff17c43d69097626a6232a37b725b"
   }'::jsonb;
   existing_count integer;
   expected_count integer;
@@ -224,23 +224,23 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 hour', check_time) AS time_slot,
-  country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE is_broken IS TRUE) AS broken_count,
   BOOL_OR(is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 12
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 5
@@ -250,12 +250,12 @@ SELECT
   MIN(check_time) AS first_check_time,
   MAX(check_time) AS last_check_time
 FROM public.monitor_history
-WHERE check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
-  AND (asin_id IS NOT NULL OR NULLIF(asin_code, '') IS NOT NULL)
+WHERE rtrim(check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 hour', check_time),
-  country COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -267,23 +267,23 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 day', check_time) AS time_slot,
-  country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE is_broken IS TRUE) AS broken_count,
   BOOL_OR(is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 12
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 5
@@ -293,12 +293,12 @@ SELECT
   MIN(check_time) AS first_check_time,
   MAX(check_time) AS last_check_time
 FROM public.monitor_history
-WHERE check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
-  AND (asin_id IS NOT NULL OR NULLIF(asin_code, '') IS NOT NULL)
+WHERE rtrim(check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 day', check_time),
-  country COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -310,23 +310,23 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 month', check_time) AS time_slot,
-  country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE is_broken IS TRUE) AS broken_count,
   BOOL_OR(is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 12
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 5
@@ -336,12 +336,12 @@ SELECT
   MIN(check_time) AS first_check_time,
   MAX(check_time) AS last_check_time
 FROM public.monitor_history
-WHERE check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
-  AND (asin_id IS NOT NULL OR NULLIF(asin_code, '') IS NOT NULL)
+WHERE rtrim(check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 month', check_time),
-  country COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -353,25 +353,25 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 hour', check_time) AS time_slot,
-  country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  COALESCE(site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci AS site,
-  COALESCE(brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci AS brand,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  rtrim(COALESCE(site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci AS site,
+  rtrim(COALESCE(brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci AS brand,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE is_broken IS TRUE) AS broken_count,
   BOOL_OR(is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 12
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 5
@@ -381,14 +381,14 @@ SELECT
   MIN(check_time) AS first_check_time,
   MAX(check_time) AS last_check_time
 FROM public.monitor_history
-WHERE check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
-  AND (asin_id IS NOT NULL OR NULLIF(asin_code, '') IS NOT NULL)
+WHERE rtrim(check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 hour', check_time),
-  country COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(COALESCE(site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(COALESCE(brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -400,25 +400,25 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 day', check_time) AS time_slot,
-  country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  COALESCE(site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci AS site,
-  COALESCE(brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci AS brand,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  rtrim(COALESCE(site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci AS site,
+  rtrim(COALESCE(brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci AS brand,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE is_broken IS TRUE) AS broken_count,
   BOOL_OR(is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 12
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 5
@@ -428,14 +428,14 @@ SELECT
   MIN(check_time) AS first_check_time,
   MAX(check_time) AS last_check_time
 FROM public.monitor_history
-WHERE check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
-  AND (asin_id IS NOT NULL OR NULLIF(asin_code, '') IS NOT NULL)
+WHERE rtrim(check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 day', check_time),
-  country COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(COALESCE(site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(COALESCE(brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -447,25 +447,25 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 month', check_time) AS time_slot,
-  country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  COALESCE(site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci AS site,
-  COALESCE(brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci AS brand,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  rtrim(COALESCE(site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci AS site,
+  rtrim(COALESCE(brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci AS brand,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE is_broken IS TRUE) AS broken_count,
   BOOL_OR(is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 12
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 6
-      WHEN country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM check_time + INTERVAL '8 hours') < 5
@@ -475,14 +475,14 @@ SELECT
   MIN(check_time) AS first_check_time,
   MAX(check_time) AS last_check_time
 FROM public.monitor_history
-WHERE check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
-  AND (asin_id IS NOT NULL OR NULLIF(asin_code, '') IS NOT NULL)
+WHERE rtrim(check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 month', check_time),
-  country COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(site_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(brand_snapshot, '') COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(asin_code, ''), 'ID#' || asin_id)
+  rtrim(country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(COALESCE(site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(COALESCE(brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -494,29 +494,29 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 hour', history.check_time) AS time_slot,
-  history.country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci AS variant_group_id,
+  rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci AS variant_group_id,
   COALESCE(
-    MAX(NULLIF(history.variant_group_name, '') COLLATE public.legacy_utf8mb4_unicode_ci),
-    MAX(variant_group.name COLLATE public.legacy_utf8mb4_unicode_ci),
+    MAX(NULLIF(rtrim(history.variant_group_name), '') COLLATE public.legacy_utf8mb4_unicode_ci),
+    MAX(rtrim(variant_group.name) COLLATE public.legacy_utf8mb4_unicode_ci),
     ''
   ) AS variant_group_name_snapshot,
-  COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+  COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE history.is_broken IS TRUE) AS broken_count,
   BOOL_OR(history.is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 12
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 5
@@ -527,16 +527,16 @@ SELECT
   MAX(history.check_time) AS last_check_time
 FROM public.monitor_history history
 LEFT JOIN public.variant_groups variant_group
-  ON variant_group.id COLLATE public.legacy_utf8mb4_unicode_ci =
-    history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci
-WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  ON rtrim(variant_group.id) COLLATE public.legacy_utf8mb4_unicode_ci =
+    rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci
+WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
   AND history.variant_group_id IS NOT NULL
-  AND (history.asin_id IS NOT NULL OR NULLIF(history.asin_code, '') IS NOT NULL)
+  AND (history.asin_id IS NOT NULL OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 hour', history.check_time),
-  history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-  history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+  rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -548,29 +548,29 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 day', history.check_time) AS time_slot,
-  history.country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci AS variant_group_id,
+  rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci AS variant_group_id,
   COALESCE(
-    MAX(NULLIF(history.variant_group_name, '') COLLATE public.legacy_utf8mb4_unicode_ci),
-    MAX(variant_group.name COLLATE public.legacy_utf8mb4_unicode_ci),
+    MAX(NULLIF(rtrim(history.variant_group_name), '') COLLATE public.legacy_utf8mb4_unicode_ci),
+    MAX(rtrim(variant_group.name) COLLATE public.legacy_utf8mb4_unicode_ci),
     ''
   ) AS variant_group_name_snapshot,
-  COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+  COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE history.is_broken IS TRUE) AS broken_count,
   BOOL_OR(history.is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 12
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 5
@@ -581,16 +581,16 @@ SELECT
   MAX(history.check_time) AS last_check_time
 FROM public.monitor_history history
 LEFT JOIN public.variant_groups variant_group
-  ON variant_group.id COLLATE public.legacy_utf8mb4_unicode_ci =
-    history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci
-WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  ON rtrim(variant_group.id) COLLATE public.legacy_utf8mb4_unicode_ci =
+    rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci
+WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
   AND history.variant_group_id IS NOT NULL
-  AND (history.asin_id IS NOT NULL OR NULLIF(history.asin_code, '') IS NOT NULL)
+  AND (history.asin_id IS NOT NULL OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 day', history.check_time),
-  history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-  history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+  rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -602,29 +602,29 @@ WITH (
 ) AS
 SELECT
   time_bucket(INTERVAL '1 month', history.check_time) AS time_slot,
-  history.country COLLATE public.legacy_utf8mb4_unicode_ci AS country,
-  history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci AS variant_group_id,
+  rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci AS country,
+  rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci AS variant_group_id,
   COALESCE(
-    MAX(NULLIF(history.variant_group_name, '') COLLATE public.legacy_utf8mb4_unicode_ci),
-    MAX(variant_group.name COLLATE public.legacy_utf8mb4_unicode_ci),
+    MAX(NULLIF(rtrim(history.variant_group_name), '') COLLATE public.legacy_utf8mb4_unicode_ci),
+    MAX(rtrim(variant_group.name) COLLATE public.legacy_utf8mb4_unicode_ci),
     ''
   ) AS variant_group_name_snapshot,
-  COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+  COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci AS asin_key,
   COUNT(*) AS check_count,
   COUNT(*) FILTER (WHERE history.is_broken IS TRUE) AS broken_count,
   BOOL_OR(history.is_broken IS TRUE) AS has_broken,
   BOOL_OR(
     CASE
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 9
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 12
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 2
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 3
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6
-      WHEN history.country COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
         EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 20
         OR EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
         AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 5
@@ -635,16 +635,16 @@ SELECT
   MAX(history.check_time) AS last_check_time
 FROM public.monitor_history history
 LEFT JOIN public.variant_groups variant_group
-  ON variant_group.id COLLATE public.legacy_utf8mb4_unicode_ci =
-    history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci
-WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+  ON rtrim(variant_group.id) COLLATE public.legacy_utf8mb4_unicode_ci =
+    rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci
+WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
   AND history.variant_group_id IS NOT NULL
-  AND (history.asin_id IS NOT NULL OR NULLIF(history.asin_code, '') IS NOT NULL)
+  AND (history.asin_id IS NOT NULL OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL)
 GROUP BY
   time_bucket(INTERVAL '1 month', history.check_time),
-  history.country COLLATE public.legacy_utf8mb4_unicode_ci,
-  history.variant_group_id COLLATE public.legacy_utf8mb4_unicode_ci,
-  COALESCE(NULLIF(history.asin_code, ''), 'ID#' || history.asin_id)
+  rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+  rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
+  COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
@@ -653,8 +653,22 @@ DECLARE
   aggregate_row record;
   expected_definitions jsonb :=
     current_setting('asin_monitor.cagg_expected_definitions')::jsonb;
+  actual_definitions jsonb;
   matching_declared_definition_count integer;
 BEGIN
+  SELECT jsonb_object_agg(
+    aggregate_definition.view_name,
+    md5(regexp_replace(
+      aggregate_definition.view_definition,
+      '[[:space:]]+',
+      ' ',
+      'g'
+    ))
+  )
+  INTO actual_definitions
+  FROM timescaledb_information.continuous_aggregates aggregate_definition
+  WHERE aggregate_definition.view_schema = 'public';
+
   SELECT COUNT(*)::integer
   INTO matching_declared_definition_count
   FROM timescaledb_information.continuous_aggregates aggregate_definition
@@ -671,8 +685,9 @@ BEGIN
 
   IF matching_declared_definition_count <> 9 THEN
     RAISE EXCEPTION
-      'continuous aggregate declared definition fingerprint mismatch (matching %)',
-      matching_declared_definition_count;
+      'continuous aggregate declared definition fingerprint mismatch (matching %, actual %)',
+      matching_declared_definition_count,
+      actual_definitions;
   END IF;
 
   IF current_setting('asin_monitor.cagg_existing_count')::integer = 0 THEN
@@ -781,7 +796,7 @@ FROM public.monitor_history_cagg_variant_group_month aggregate_row;
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_asin_hour'::regclass,
   start_offset => INTERVAL '49 hours',
-  end_offset => INTERVAL '1 hour',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '10 minutes',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -790,7 +805,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_dim_hour'::regclass,
   start_offset => INTERVAL '49 hours',
-  end_offset => INTERVAL '1 hour',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '10 minutes',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -799,7 +814,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_variant_group_hour'::regclass,
   start_offset => INTERVAL '49 hours',
-  end_offset => INTERVAL '1 hour',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '10 minutes',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -809,7 +824,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_asin_day'::regclass,
   start_offset => INTERVAL '32 days',
-  end_offset => INTERVAL '1 day',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '1 hour',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -818,7 +833,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_dim_day'::regclass,
   start_offset => INTERVAL '32 days',
-  end_offset => INTERVAL '1 day',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '1 hour',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -827,7 +842,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_variant_group_day'::regclass,
   start_offset => INTERVAL '32 days',
-  end_offset => INTERVAL '1 day',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '1 hour',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -837,7 +852,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_asin_month'::regclass,
   start_offset => INTERVAL '25 months',
-  end_offset => INTERVAL '1 month',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '1 day',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -846,7 +861,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_dim_month'::regclass,
   start_offset => INTERVAL '25 months',
-  end_offset => INTERVAL '1 month',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '1 day',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -855,7 +870,7 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
   'public.monitor_history_cagg_variant_group_month'::regclass,
   start_offset => INTERVAL '25 months',
-  end_offset => INTERVAL '1 month',
+  end_offset => INTERVAL '0',
   schedule_interval => INTERVAL '1 day',
   if_not_exists => true,
   initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
@@ -1005,15 +1020,15 @@ BEGIN
     schedule_interval
   ) AS (
     VALUES
-      ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-      ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-      ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-      ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-      ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-      ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-      ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
-      ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
-      ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day')
+      ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+      ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+      ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+      ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+      ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+      ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+      ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+      ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+      ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day')
   ), selected_materialization AS (
     SELECT
       expected_policy.*,

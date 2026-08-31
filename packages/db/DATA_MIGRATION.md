@@ -110,7 +110,7 @@ corepack pnpm db:migrate:data
 corepack pnpm db:timescale:aggregate:gate
 ```
 
-两条命令都必须返回 0，且 `artifacts/data-migration/report.json` 和 `artifacts/timescale-aggregate/report.json` 均通过各自 contracts schema。聚合 Gate 的完整月边界窗口必须覆盖全部已迁移的合格原始历史和三张 Legacy agg 表；它会以 `force=true` 刷新全部 9 个 materialized-only CAGG，再在只读一致性快照中按 Legacy collation 比较三张 Legacy agg 表并要求 `coverage.rowsOutsideWindow=0`。`refresh=false` 仅用于诊断且必定非零；差异、全空或覆盖不全的报告也不可被人工豁免为“近似一致”，而应修复语义或刷新边界后整体重跑。
+两条命令都必须返回 0，且 `artifacts/data-migration/report.json` 和 `artifacts/timescale-aggregate/report.json` 均通过各自 contracts schema。聚合 Gate 的完整月边界窗口必须覆盖全部已迁移的合格原始历史和三张 Legacy agg 表；它会先复核 9 个 CAGG 的声明指纹、marker 和 refresh job，再以 `force=true` 刷新全部 materialized-only CAGG，并在只读一致性快照中按 PAD SPACE + Legacy collation 比较三张 Legacy agg 表并要求 `coverage.rowsOutsideWindow=0`。`refresh=false` 仅用于诊断且必定非零；差异、全空或覆盖不全的报告也不可被人工豁免为“近似一致”，而应修复语义或刷新边界后整体重跑。
 
 最终同步按以下顺序执行：公告维护窗口 → 停止调度器和写入 Worker → drain 旧 Bull 队列 → 冻结 Legacy 写流量 → 确认 MySQL 无新增写入 → 备份 PG → 运行数据迁移 → 刷新并对拍 9 个 CAGG → 审核两份报告 → 执行应用 smoke test。两份报告通过前不切流；切流后 MySQL 按阶段 1 回滚 runbook 保持只读、可回切且至少保留一个观察周期，不得归档下线。
 

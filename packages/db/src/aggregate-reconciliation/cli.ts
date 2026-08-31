@@ -17,6 +17,7 @@ import {
 import { prepareDataMigrationReportDestination } from '../migration/report';
 import {
   parseTimescaleAggregateConfig,
+  resolveTimescaleAggregateReportPath,
   type TimescaleAggregateConfig,
 } from './config';
 import {
@@ -85,8 +86,11 @@ export async function runTimescaleAggregateCli(
   try {
     loadDataMigrationEnvironmentFiles(workspaceRoot);
     activeLogger ??= createMigrationLogger();
+    reportPath = resolveTimescaleAggregateReportPath(
+      process.env,
+      workspaceRoot,
+    );
     config = parseTimescaleAggregateConfig(process.env, workspaceRoot);
-    reportPath = config.reportPath;
     await prepareReport(reportPath);
     const report = await runGate(config, activeLogger, { runId, startedAt });
     await writeReport(report, reportPath);

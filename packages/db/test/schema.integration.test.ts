@@ -254,57 +254,57 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     expect(definitionFingerprints.rows).toEqual([
       {
         view_name: 'monitor_history_cagg_asin_day',
-        definition_fingerprint: '1c8a08404bfa40e880f68a1542dda236',
+        definition_fingerprint: '1b7e82e30be65a827df91d5aa5b040c9',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:1c8a08404bfa40e880f68a1542dda236',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:1b7e82e30be65a827df91d5aa5b040c9',
       },
       {
         view_name: 'monitor_history_cagg_asin_hour',
-        definition_fingerprint: 'a7dc38e04b7421d675be9fead5c6dca9',
+        definition_fingerprint: 'c8fbca31141d9ff2fd87bb2bc27a23da',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:a7dc38e04b7421d675be9fead5c6dca9',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:c8fbca31141d9ff2fd87bb2bc27a23da',
       },
       {
         view_name: 'monitor_history_cagg_asin_month',
-        definition_fingerprint: '90916b03f62d7cff8d3643c021e109c5',
+        definition_fingerprint: 'b7e5ab6f505add599994843dafe1b1e2',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:90916b03f62d7cff8d3643c021e109c5',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:b7e5ab6f505add599994843dafe1b1e2',
       },
       {
         view_name: 'monitor_history_cagg_dim_day',
-        definition_fingerprint: 'ea3412e4519ba38af7867a72401f1f75',
+        definition_fingerprint: 'f77caf1fe9c24ced94d2e3248847ef3f',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:ea3412e4519ba38af7867a72401f1f75',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:f77caf1fe9c24ced94d2e3248847ef3f',
       },
       {
         view_name: 'monitor_history_cagg_dim_hour',
-        definition_fingerprint: '42e83ef4ee3809c76e2721376418ee93',
+        definition_fingerprint: 'fd463ab0f4fd3ee1984f43864b8bd130',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:42e83ef4ee3809c76e2721376418ee93',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:fd463ab0f4fd3ee1984f43864b8bd130',
       },
       {
         view_name: 'monitor_history_cagg_dim_month',
-        definition_fingerprint: 'f24d7e1cbbc746c2741cf1289227b8a4',
+        definition_fingerprint: '37c470c8fe8198ada8aeb2b7f3fd6066',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:f24d7e1cbbc746c2741cf1289227b8a4',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:37c470c8fe8198ada8aeb2b7f3fd6066',
       },
       {
         view_name: 'monitor_history_cagg_variant_group_day',
-        definition_fingerprint: '712d829f483f475e4ab86f48dda245a8',
+        definition_fingerprint: '5ab32fcf37370bc31d3c5940d31c7b38',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:712d829f483f475e4ab86f48dda245a8',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:5ab32fcf37370bc31d3c5940d31c7b38',
       },
       {
         view_name: 'monitor_history_cagg_variant_group_hour',
-        definition_fingerprint: '14f1d858f60a5edac891b3694d964680',
+        definition_fingerprint: '188e2199865d8f41489bdc08f02ee4b9',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:14f1d858f60a5edac891b3694d964680',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:188e2199865d8f41489bdc08f02ee4b9',
       },
       {
         view_name: 'monitor_history_cagg_variant_group_month',
-        definition_fingerprint: '6372c4ddbf56a401c9cfef12ed279c30',
+        definition_fingerprint: 'd23ff17c43d69097626a6232a37b725b',
         definition_marker:
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:6372c4ddbf56a401c9cfef12ed279c30',
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:d23ff17c43d69097626a6232a37b725b',
       },
     ]);
 
@@ -354,15 +354,15 @@ describe('P1-T2 PostgreSQL schema integration', () => {
         schedule_interval
       ) AS (
         VALUES
-          ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-          ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-          ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
-          ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-          ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-          ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
-          ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
-          ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
-          ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day')
+          ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+          ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+          ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+          ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+          ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+          ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day')
       ), selected_materializations AS (
         SELECT
           expected_policy.*,
@@ -488,7 +488,7 @@ describe('P1-T2 PostgreSQL schema integration', () => {
           SELECT add_continuous_aggregate_policy(
             'public.monitor_history_cagg_asin_hour'::regclass,
             start_offset => INTERVAL '49 hours',
-            end_offset => INTERVAL '1 hour',
+            end_offset => INTERVAL '0',
             schedule_interval => INTERVAL '10 minutes',
             initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
             timezone => 'Asia/Shanghai'
