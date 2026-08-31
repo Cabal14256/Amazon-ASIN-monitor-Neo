@@ -131,11 +131,10 @@ describe('HealthService', () => {
     });
     expect(JSON.stringify(health)).not.toContain('raw-secret');
     expect(JSON.stringify(warn.mock.calls)).not.toContain('raw-secret');
-    expect(warn).toHaveBeenCalledWith(
-      '健康依赖不可用',
-      'HealthService',
-      { dependency: 'competitor_database', reason: 'probe_failed' },
-    );
+    expect(warn).toHaveBeenCalledWith('健康依赖不可用', 'HealthService', {
+      dependency: 'competitor_database',
+      reason: 'probe_failed',
+    });
     metrics.onModuleDestroy();
   });
 
