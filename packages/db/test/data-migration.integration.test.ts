@@ -1485,6 +1485,48 @@ describe.skipIf(!integrationEnabled)(
       );
       expect(second.checks).toEqual(first.checks);
 
+      const refreshPolicy = await primaryTarget.query<{ job_id: number }>(`
+        SELECT jobs.job_id
+        FROM timescaledb_information.jobs jobs
+        JOIN timescaledb_information.continuous_aggregates aggregate_row
+          ON aggregate_row.view_schema = 'public'
+         AND aggregate_row.view_name = 'monitor_history_cagg_asin_hour'
+        JOIN _timescaledb_catalog.hypertable hypertable
+          ON hypertable.schema_name =
+            aggregate_row.materialization_hypertable_schema
+         AND hypertable.table_name =
+            aggregate_row.materialization_hypertable_name
+         AND (jobs.config ->> 'mat_hypertable_id')::integer = hypertable.id
+        WHERE jobs.proc_name = 'policy_refresh_continuous_aggregate'
+      `);
+      expect(refreshPolicy.rows).toHaveLength(1);
+      try {
+        await primaryTarget.query(`SELECT alter_job($1, scheduled => false)`, [
+          refreshPolicy.rows[0].job_id,
+        ]);
+        await expect(
+          runTimescaleAggregateGate(aggregateConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'AGGREGATE_TARGET_POLICY_MISMATCH',
+          scope: 'aggregate.target.policies',
+        });
+      } finally {
+        await primaryTarget.query(`
+          SELECT remove_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            if_exists => true
+          );
+          SELECT add_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            start_offset => INTERVAL '49 hours',
+            end_offset => INTERVAL '1 hour',
+            schedule_interval => INTERVAL '10 minutes',
+            initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
+            timezone => 'Asia/Shanghai'
+          );
+        `);
+      }
+
       await primaryTarget.query(`
         UPDATE public.variant_groups
         SET name = 'Renamed Current'

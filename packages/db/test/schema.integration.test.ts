@@ -480,10 +480,20 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     } finally {
       await client.query('ROLLBACK').catch(() => undefined);
       if (jobId !== undefined) {
-        await client.query(
-          `SELECT alter_job($1, schedule_interval => INTERVAL '10 minutes')`,
-          [jobId],
-        );
+        await client.query(`
+          SELECT remove_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            if_exists => true
+          );
+          SELECT add_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            start_offset => INTERVAL '49 hours',
+            end_offset => INTERVAL '1 hour',
+            schedule_interval => INTERVAL '10 minutes',
+            initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
+            timezone => 'Asia/Shanghai'
+          );
+        `);
       }
       client.release();
     }

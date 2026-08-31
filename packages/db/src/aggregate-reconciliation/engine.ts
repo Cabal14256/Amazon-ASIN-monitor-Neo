@@ -341,6 +341,100 @@ async function validateTarget(client: PoolClient): Promise<void> {
       'aggregate target does not contain the exact materialized-only CAGG set',
     );
   }
+
+  const policies = await client.query<{
+    view_name: string;
+    policy_present: boolean;
+    schedule_interval_matches: boolean | null;
+    start_offset_matches: boolean | null;
+    end_offset_matches: boolean | null;
+    scheduled_matches: boolean | null;
+    fixed_schedule_matches: boolean | null;
+    initial_start_matches: boolean | null;
+    timezone_matches: boolean | null;
+  }>(`
+    WITH expected_policy (
+      view_name,
+      start_offset,
+      end_offset,
+      schedule_interval
+    ) AS (
+      VALUES
+        ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+        ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+        ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '1 hour', INTERVAL '10 minutes'),
+        ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+        ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+        ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '1 day', INTERVAL '1 hour'),
+        ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
+        ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day'),
+        ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '1 month', INTERVAL '1 day')
+    ), selected_materialization AS (
+      SELECT
+        expected_policy.*,
+        hypertable.id AS materialization_hypertable_id
+      FROM expected_policy
+      JOIN timescaledb_information.continuous_aggregates aggregate_row
+        ON aggregate_row.view_schema = 'public'
+       AND aggregate_row.view_name = expected_policy.view_name
+      JOIN _timescaledb_catalog.hypertable hypertable
+        ON hypertable.schema_name = aggregate_row.materialization_hypertable_schema
+       AND hypertable.table_name = aggregate_row.materialization_hypertable_name
+    )
+    SELECT
+      expected_policy.view_name,
+      jobs.job_id IS NOT NULL AS policy_present,
+      jobs.schedule_interval = expected_policy.schedule_interval
+        AS schedule_interval_matches,
+      (jobs.config ->> 'start_offset')::interval = expected_policy.start_offset
+        AS start_offset_matches,
+      (jobs.config ->> 'end_offset')::interval = expected_policy.end_offset
+        AS end_offset_matches,
+      jobs.scheduled IS TRUE AS scheduled_matches,
+      jobs.fixed_schedule IS TRUE AS fixed_schedule_matches,
+      jobs.initial_start = TIMESTAMPTZ '2026-01-01 00:00:00+08'
+        AS initial_start_matches,
+      catalog_job.timezone = 'Asia/Shanghai' AS timezone_matches
+    FROM selected_materialization expected_policy
+      LEFT JOIN timescaledb_information.jobs jobs
+        ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
+       AND (jobs.config ->> 'mat_hypertable_id')::integer =
+         expected_policy.materialization_hypertable_id
+      LEFT JOIN _timescaledb_catalog.bgw_job catalog_job
+        ON catalog_job.id = jobs.job_id
+    ORDER BY expected_policy.view_name
+  `);
+  const policyFields = [
+    'policy_present',
+    'schedule_interval_matches',
+    'start_offset_matches',
+    'end_offset_matches',
+    'scheduled_matches',
+    'fixed_schedule_matches',
+    'initial_start_matches',
+    'timezone_matches',
+  ] as const;
+  const actualPolicyNames = policies.rows.map(({ view_name }) => view_name);
+  const mismatches = policies.rows.flatMap((policy) => {
+    const fields = policyFields.filter((field) => policy[field] !== true);
+    return fields.length === 0
+      ? []
+      : [`${policy.view_name}:${fields.join(',')}`];
+  });
+  if (
+    JSON.stringify(expected) !== JSON.stringify(actualPolicyNames) ||
+    mismatches.length > 0
+  ) {
+    throw new DataMigrationError(
+      'AGGREGATE_TARGET_POLICY_MISMATCH',
+      'aggregate.target.policies',
+      `aggregate target refresh-policy mismatch (relations ${
+        JSON.stringify(expected) === JSON.stringify(actualPolicyNames)
+          ? 'exact'
+          : 'mismatch'
+      }; fields ${mismatches.join(';') || 'unknown'})`,
+    );
+  }
 }
 
 async function refreshAggregates(
