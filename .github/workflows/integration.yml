@@ -136,6 +136,11 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
+      - name: Smoke test Timescale storage-policy rollback
+        run: |
+          docker cp packages/db/migrations/0002_timescale_storage_policies.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0002_timescale_storage_policies.rollback.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0002_timescale_storage_policies.rollback.sql
+
       - name: Upload sanitized Timescale performance evidence
         if: always()
         uses: actions/upload-artifact@v7

@@ -240,6 +240,33 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     const rollback = read(storagePolicyRollbackPath);
     expect(rollback).not.toContain("relation.relname LIKE 'idx_cagg_%'");
     expect(rollback.match(/'idx_cagg_[a-z0-9_]+'/g)).toHaveLength(30);
+    expect(rollback).toContain('if_columnstore => true');
+    expect(rollback).not.toContain('if_compressed => true');
+
+    const dataMigrationGuide = read('packages/db/DATA_MIGRATION.md');
+    const aggregateUpgradeOffset = dataMigrationGuide.indexOf(
+      'corepack pnpm db:upgrade:timescale\n',
+    );
+    const storageUpgradeOffset = dataMigrationGuide.indexOf(
+      'corepack pnpm db:upgrade:timescale-storage\n',
+    );
+    const dataMigrationOffset = dataMigrationGuide.indexOf(
+      'corepack pnpm db:migrate:data\n',
+    );
+    expect(aggregateUpgradeOffset).toBeGreaterThanOrEqual(0);
+    expect(storageUpgradeOffset).toBeGreaterThan(aggregateUpgradeOffset);
+    expect(dataMigrationOffset).toBeGreaterThan(storageUpgradeOffset);
+
+    const performanceGate = read(
+      'packages/db/test/storage-performance.integration.test.ts',
+    );
+    expect(performanceGate).toContain('maximumConcurrentReadP95Ms: 2_000');
+    expect(performanceGate).toContain(
+      'concurrentReadP95Ms < report.gate.maximumConcurrentReadP95Ms',
+    );
+    expect(performanceGate).toContain(
+      "'concurrent-write-read: missing analytical P95 evidence'",
+    );
 
     const rootPackage = JSON.parse(read('package.json')) as {
       scripts: Record<string, string>;

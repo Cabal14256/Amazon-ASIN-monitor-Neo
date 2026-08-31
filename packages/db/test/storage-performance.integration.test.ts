@@ -77,7 +77,12 @@ type PerformanceReport = {
     brands: number;
     asins: number;
   };
-  gate: { requiredP95Speedup: number; passed: boolean; failures: string[] };
+  gate: {
+    requiredP95Speedup: number;
+    maximumConcurrentReadP95Ms: number;
+    passed: boolean;
+    failures: string[];
+  };
   indexEvidence: ExplainEvidence[];
   benchmarks: BenchmarkEvidence[];
   storageRegression: {
@@ -107,7 +112,12 @@ const report: PerformanceReport = {
     brands: 4,
     asins: 24,
   },
-  gate: { requiredP95Speedup: 3, passed: false, failures: [] },
+  gate: {
+    requiredP95Speedup: 3,
+    maximumConcurrentReadP95Ms: 2_000,
+    passed: false,
+    failures: [],
+  },
   indexEvidence: [],
   benchmarks: [],
   storageRegression: {
@@ -502,6 +512,19 @@ async function convertFixtureCaggChunksToColumnstore(): Promise<void> {
 
 async function writeReportAtomically(): Promise<void> {
   report.generatedAt = new Date().toISOString();
+  const concurrentReadP95Ms =
+    report.storageRegression.analyticalReadsDuringWrites?.p95Ms ?? null;
+  const concurrentReadPassed =
+    concurrentReadP95Ms !== null &&
+    concurrentReadP95Ms < report.gate.maximumConcurrentReadP95Ms;
+  if (!concurrentReadPassed) {
+    const reason =
+      concurrentReadP95Ms === null
+        ? 'concurrent-write-read: missing analytical P95 evidence'
+        : `concurrent-write-read: analytical P95 ${concurrentReadP95Ms}ms is not below ${report.gate.maximumConcurrentReadP95Ms}ms`;
+    if (!report.gate.failures.includes(reason))
+      report.gate.failures.push(reason);
+  }
   report.gate.passed =
     report.gate.failures.length === 0 &&
     report.indexEvidence.length ===
@@ -513,7 +536,8 @@ async function writeReportAtomically(): Promise<void> {
     report.storageRegression.lateWriteVisible &&
     report.storageRegression.sustainedWriteRows >= 2_500 &&
     report.storageRegression.analyticalReadsDuringWrites !== null &&
-    report.storageRegression.analyticalReadDuringWriteMs !== null;
+    report.storageRegression.analyticalReadDuringWriteMs !== null &&
+    concurrentReadPassed;
   await mkdir(resolve(reportPath, '..'), { recursive: true });
   const temporaryPath = `${reportPath}.${process.pid}.tmp`;
   await writeFile(
@@ -842,7 +866,9 @@ describe.skipIf(!integrationEnabled)(
           concurrentReadStats.p95Ms;
         expect(report.storageRegression.sustainedWriteRows).toBe(2_500);
         expect(concurrentReadStats.samples).toBe(10);
-        expect(concurrentReadStats.p95Ms).toBeLessThan(2_000);
+        expect(concurrentReadStats.p95Ms).toBeLessThan(
+          report.gate.maximumConcurrentReadP95Ms,
+        );
       } catch (error) {
         throw error;
       } finally {

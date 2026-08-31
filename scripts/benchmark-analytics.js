@@ -3,8 +3,9 @@
  * Analytics correctness and performance promotion gate.
  *
  * The machine report intentionally contains only timings, HTTP status codes,
- * normalized-response digests, shapes, and first-difference paths. Bearer
- * tokens, cookies, response payloads, and filter values are never persisted.
+ * normalized-response digests, shapes, window boundaries, and first-difference
+ * paths. Bearer tokens, cookies, response payloads, and filter values are never
+ * persisted.
  */
 
 const crypto = require('crypto');
@@ -169,7 +170,7 @@ function responseShape(value) {
   return { type: typeof value };
 }
 
-function responseCardinality(value, pathSegments) {
+function responseCardinality(value, pathSegments, itemField) {
   let selected = value;
   for (const segment of pathSegments) {
     if (
@@ -181,7 +182,23 @@ function responseCardinality(value, pathSegments) {
     }
     selected = selected[segment];
   }
-  if (Array.isArray(selected)) return selected.length;
+  if (Array.isArray(selected)) {
+    if (!itemField) return selected.length;
+    let total = 0;
+    for (const item of selected) {
+      if (
+        item === null ||
+        typeof item !== 'object' ||
+        !Object.prototype.hasOwnProperty.call(item, itemField)
+      ) {
+        return null;
+      }
+      const numericValue = Number(item[itemField]);
+      if (!Number.isFinite(numericValue)) return null;
+      total += numericValue;
+    }
+    return total;
+  }
   if (typeof selected === 'number' && Number.isFinite(selected)) {
     return selected;
   }
@@ -235,6 +252,33 @@ function requireText(value, name) {
   return text;
 }
 
+function validateWindows(windows) {
+  const parsed = {};
+  for (const windowName of REQUIRED_WINDOWS) {
+    const window = windows[windowName];
+    const startMs = Date.parse(window.startTime);
+    const endMs = Date.parse(window.endTime);
+    if (!Number.isFinite(startMs)) {
+      throw new Error(`--${windowName}-start-time must be a valid timestamp`);
+    }
+    if (!Number.isFinite(endMs)) {
+      throw new Error(`--${windowName}-end-time must be a valid timestamp`);
+    }
+    if (startMs >= endMs) {
+      throw new Error(
+        `--${windowName}-start-time must be earlier than --${windowName}-end-time`,
+      );
+    }
+    parsed[windowName] = { startMs, endMs };
+  }
+  if (parsed.cold.endMs > parsed.hot.startMs) {
+    throw new Error(
+      '--cold-end-time must be earlier than or equal to --hot-start-time',
+    );
+  }
+  return windows;
+}
+
 function parseTimeSlots(value) {
   const slots = [
     ...new Set(
@@ -275,6 +319,7 @@ function buildMatrix(config) {
           path: '/monitor-history/statistics/region-summary',
           params: common,
           cardinalityPath: ['data'],
+          cardinalityItemField: 'totalChecks',
         },
         {
           suffix: 'period-unfiltered',
@@ -306,6 +351,7 @@ function buildMatrix(config) {
           queryKeys: Object.keys(endpoint.params).sort(),
           expectedStatus: 200,
           cardinalityPath: endpoint.cardinalityPath,
+          cardinalityItemField: endpoint.cardinalityItemField,
           minimumCardinality: 1,
         });
       }
@@ -432,10 +478,12 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
   const oldCardinality = responseCardinality(
     oldResult.comparable,
     benchmarkCase.cardinalityPath,
+    benchmarkCase.cardinalityItemField,
   );
   const newCardinality = responseCardinality(
     newResult.comparable,
     benchmarkCase.cardinalityPath,
+    benchmarkCase.cardinalityItemField,
   );
   const cardinalityMatches =
     oldCardinality !== null &&
@@ -463,7 +511,11 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     oldStatus: oldResult.status,
     newStatus: newResult.status,
     cardinalityMatches,
-    cardinalityPath: `$.${benchmarkCase.cardinalityPath.join('.')}`,
+    cardinalityPath: `$.${benchmarkCase.cardinalityPath.join('.')}${
+      benchmarkCase.cardinalityItemField
+        ? `[*].${benchmarkCase.cardinalityItemField} (sum)`
+        : ''
+    }`,
     minimumCardinality: benchmarkCase.minimumCardinality,
     oldCardinality,
     newCardinality,
@@ -676,28 +728,29 @@ function buildConfig(args) {
   if (!oldBase || !newBase) {
     throw new Error('Missing required --old-base or --new-base');
   }
+  const windows = validateWindows({
+    hot: {
+      startTime: requireText(
+        args['hot-start-time'] || args['start-time'],
+        'hot-start-time',
+      ),
+      endTime: requireText(
+        args['hot-end-time'] || args['end-time'],
+        'hot-end-time',
+      ),
+    },
+    cold: {
+      startTime: requireText(args['cold-start-time'], 'cold-start-time'),
+      endTime: requireText(args['cold-end-time'], 'cold-end-time'),
+    },
+  });
   return {
     oldBase,
     newBase,
     oldLabel: String(args['label-old'] || 'old'),
     newLabel: String(args['label-new'] || 'new'),
     token: String(args.token || process.env.BENCH_TOKEN || ''),
-    windows: {
-      hot: {
-        startTime: requireText(
-          args['hot-start-time'] || args['start-time'],
-          'hot-start-time',
-        ),
-        endTime: requireText(
-          args['hot-end-time'] || args['end-time'],
-          'hot-end-time',
-        ),
-      },
-      cold: {
-        startTime: requireText(args['cold-start-time'], 'cold-start-time'),
-        endTime: requireText(args['cold-end-time'], 'cold-end-time'),
-      },
-    },
+    windows,
     filters: {
       country: requireText(args.country, 'country'),
       site: requireText(args.site, 'site'),
@@ -805,6 +858,7 @@ async function main() {
       oldBase: config.oldBase,
       newBase: config.newBase,
       windows: REQUIRED_WINDOWS,
+      windowRanges: config.windows,
       timeSlots: REQUIRED_TIME_SLOTS,
       warmup: config.warmup,
       runs: config.runs,
@@ -864,4 +918,5 @@ module.exports = {
   percentile,
   responseCardinality,
   responseShape,
+  validateWindows,
 };

@@ -125,6 +125,30 @@ test('promotion matrix covers two windows, three granularities and filters', () 
     /--min-speedup must be a number >= 3/,
   );
   assert.equal(config.minSpeedup, 3);
+  assert.throws(
+    () =>
+      buildConfig(
+        completeArgs({
+          'cold-start-time': '2026-08-24 00:00:00',
+          'cold-end-time': '2026-08-31 00:00:00',
+        }),
+      ),
+    /--cold-end-time must be earlier than or equal to --hot-start-time/,
+  );
+  assert.throws(
+    () => buildConfig(completeArgs({ 'hot-start-time': 'not-a-time' })),
+    /--hot-start-time must be a valid timestamp/,
+  );
+  assert.throws(
+    () =>
+      buildConfig(
+        completeArgs({
+          'cold-start-time': '2026-03-01 00:00:00',
+          'cold-end-time': '2026-02-01 00:00:00',
+        }),
+      ),
+    /--cold-start-time must be earlier than --cold-end-time/,
+  );
   assert.ok(
     matrix.every(
       (benchmarkCase) =>
@@ -158,12 +182,61 @@ test('cardinality gate rejects empty and missing business results', () => {
     42,
   );
   assert.equal(
+    responseCardinality(
+      comparableResponse({
+        success: true,
+        data: [
+          { region: 'NA', totalChecks: 0 },
+          { region: 'EU', totalChecks: '0' },
+        ],
+      }),
+      ['data'],
+      'totalChecks',
+    ),
+    0,
+  );
+  assert.equal(
+    responseCardinality(
+      comparableResponse({
+        success: true,
+        data: [
+          { region: 'NA', totalChecks: 4 },
+          { region: 'EU', totalChecks: '3' },
+        ],
+      }),
+      ['data'],
+      'totalChecks',
+    ),
+    7,
+  );
+  assert.equal(
     responseCardinality(comparableResponse({ success: true, data: {} }), [
       'data',
       'list',
     ]),
     null,
   );
+});
+
+test('region summaries gate on summed checks instead of fixed region count', () => {
+  const regionCase = buildMatrix(buildConfig(completeArgs())).find(({ name }) =>
+    name.endsWith('-region'),
+  );
+  assert.equal(regionCase.cardinalityItemField, 'totalChecks');
+  const result = (totalChecks) => ({
+    status: 200,
+    comparable: comparableResponse({
+      success: true,
+      data: Array.from({ length: 7 }, (_, index) => ({
+        region: `region-${index}`,
+        totalChecks,
+      })),
+    }),
+  });
+  const emptyRegions = comparePairResults(result(0), result(0), regionCase, 1);
+  assert.equal(emptyRegions.oldCardinality, 0);
+  assert.equal(emptyRegions.matches, false);
+  assert.equal(emptyRegions.differencePath, '$.__cardinality');
 });
 
 test('pair comparison rejects empty results and divergent success statuses', () => {

@@ -9,7 +9,7 @@ The script generates this report automatically. Do not paste response bodies, to
 - Environment label:
 - Synthetic/representative dataset rows:
 - Non-sensitive dataset profile:
-- Hot and cold windows:
+- Hot and cold window boundaries (cold must end before hot starts):
 - Warmup / measured runs:
 - Required P95 speedup: `3x`
 

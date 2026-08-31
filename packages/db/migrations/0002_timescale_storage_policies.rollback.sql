@@ -45,7 +45,7 @@ BEGIN
   LOOP
     FOR managed_chunk IN SELECT show_chunks(managed_relation)
     LOOP
-      CALL convert_to_rowstore(managed_chunk, if_compressed => true);
+      CALL convert_to_rowstore(managed_chunk, if_columnstore => true);
     END LOOP;
   END LOOP;
 END
