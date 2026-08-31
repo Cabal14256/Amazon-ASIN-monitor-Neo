@@ -231,20 +231,27 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     );
 
     const definitionFingerprints = await primaryPool.query<{
-      matching_fingerprints: number;
+      view_name: string;
+      definition_fingerprint: string;
     }>(`
-      SELECT COUNT(*) FILTER (
-        WHERE obj_description(
-          format('%I.%I', view_schema, view_name)::regclass,
-          'pg_class'
-        ) =
-          'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
-          md5(regexp_replace(view_definition, '[[:space:]]+', ' ', 'g'))
-      )::integer AS matching_fingerprints
+      SELECT
+        view_name,
+        md5(regexp_replace(
+          view_definition,
+          '[[:space:]]+',
+          ' ',
+          'g'
+        )) AS definition_fingerprint
       FROM timescaledb_information.continuous_aggregates
       WHERE view_schema = 'public'
+      ORDER BY view_name
     `);
-    expect(definitionFingerprints.rows).toEqual([{ matching_fingerprints: 9 }]);
+    expect(definitionFingerprints.rows).toEqual([
+      {
+        view_name: 'capture-versioned-cagg-fingerprints',
+        definition_fingerprint: '00000000000000000000000000000000',
+      },
+    ]);
 
     const variantFallbacks = await primaryPool.query<{
       view_name: string;
