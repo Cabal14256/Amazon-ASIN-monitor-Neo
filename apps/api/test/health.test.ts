@@ -39,6 +39,7 @@ const poolSnapshot = {
 function buildService(
   options: {
     env?: Env;
+    logger?: AppLogger;
     queryPrimary?: () => Promise<void>;
     queryCompetitor?: () => Promise<void>;
     pingRedis?: () => Promise<void>;
@@ -58,7 +59,7 @@ function buildService(
   const service = new HealthService(
     env,
     dependencies,
-    new AppLogger(),
+    options.logger ?? new AppLogger(),
     metrics,
     errorStats,
   );
@@ -110,8 +111,10 @@ describe('HealthService', () => {
   });
 
   it('依赖失败返回通用错误与 degraded，日志不包含连接串或凭据', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const warn = vi.fn();
+    const logger = { warn, info: vi.fn() } as unknown as AppLogger;
     const { service, metrics } = buildService({
+      logger,
       queryCompetitor: vi
         .fn()
         .mockRejectedValue(
@@ -129,18 +132,20 @@ describe('HealthService', () => {
     expect(JSON.stringify(health)).not.toContain('raw-secret');
     expect(JSON.stringify(warn.mock.calls)).not.toContain('raw-secret');
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('[WARN] [HealthService]'),
       '健康依赖不可用',
+      'HealthService',
       { dependency: 'competitor_database', reason: 'probe_failed' },
     );
     metrics.onModuleDestroy();
   });
 
   it('超时探针有界失败并报告 probe_timeout', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const warn = vi.fn();
+    const logger = { warn, info: vi.fn() } as unknown as AppLogger;
     const env = loadEnv({ ...validEnv, HEALTH_PROBE_TIMEOUT_MS: '50' });
     const { service, metrics } = buildService({
       env,
+      logger,
       queryPrimary: () => new Promise(() => undefined),
     });
 
