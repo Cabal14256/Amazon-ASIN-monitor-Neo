@@ -196,6 +196,9 @@ describe('P1-T3 migration registry', () => {
     expect(monitorHistory?.targetIndexSignatures).toContain(
       'idx_monitor_history_status_interval_refresh|non-unique|btree|check_type,check_time,id||valid|ready|',
     );
+    expect(monitorHistory?.targetIndexSignatures).toContain(
+      'idx_monitor_history_variant_group_time|non-unique|btree|variant_group_id,check_time desc,id desc||valid|ready|',
+    );
 
     const asins = databaseMigrationSpecs[0].tables.find(
       ({ name }) => name === 'asins',
