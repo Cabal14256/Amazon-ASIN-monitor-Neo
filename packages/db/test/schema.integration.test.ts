@@ -432,7 +432,7 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     try {
       await client.query('BEGIN');
       await client.query(`
-        COMMENT ON MATERIALIZED VIEW public.monitor_history_cagg_asin_hour
+        COMMENT ON VIEW public.monitor_history_cagg_asin_hour
         IS 'unmanaged-definition'
       `);
       const migration = readFileSync(

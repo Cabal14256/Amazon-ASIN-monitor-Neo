@@ -644,7 +644,7 @@ BEGIN
       ORDER BY view_name
     LOOP
       EXECUTE format(
-        'COMMENT ON MATERIALIZED VIEW public.%I IS %L',
+        'COMMENT ON VIEW public.%I IS %L',
         aggregate_row.view_name,
         'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
           md5(regexp_replace(
