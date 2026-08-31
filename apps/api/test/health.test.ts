@@ -111,10 +111,25 @@ describe('HealthService', () => {
     metrics.onModuleDestroy();
   });
 
-  it('共享应用数据库池消费空闲连接错误且不记录原始异常', async () => {
+  it('共享应用数据库池仅对探针应用超时并安全消费空闲连接错误', async () => {
     const warn = vi.fn();
     const logger = { warn: warn } as unknown as AppLogger;
     const pools = new ApplicationDatabasePools(loadEnv(validEnv), logger);
+    const query = vi
+      .spyOn(pools.primaryPool, 'query')
+      .mockResolvedValue({} as never);
+
+    await pools.probePrimary(750);
+
+    expect(pools.primaryPool.options).not.toHaveProperty(
+      'connectionTimeoutMillis',
+    );
+    expect(pools.primaryPool.options).not.toHaveProperty('query_timeout');
+    expect(pools.primaryPool.options).not.toHaveProperty('statement_timeout');
+    expect(query).toHaveBeenCalledWith({
+      text: 'SELECT 1',
+      query_timeout: 750,
+    });
 
     (
       pools.primaryPool as unknown as {
@@ -151,8 +166,8 @@ describe('HealthService', () => {
 
   it('健康运行依赖委托给共享应用数据库池而不创建独立 PG 池', async () => {
     const databasePools = {
-      queryPrimary: vi.fn().mockResolvedValue(undefined),
-      queryCompetitor: vi.fn().mockResolvedValue(undefined),
+      probePrimary: vi.fn().mockResolvedValue(undefined),
+      probeCompetitor: vi.fn().mockResolvedValue(undefined),
       primaryPoolSnapshot: vi.fn(() => poolSnapshot),
       competitorPoolSnapshot: vi.fn(() => poolSnapshot),
     } as unknown as ApplicationDatabasePools;
@@ -165,8 +180,8 @@ describe('HealthService', () => {
     await dependencies.queryPrimary();
     await dependencies.queryCompetitor();
 
-    expect(databasePools.queryPrimary).toHaveBeenCalledOnce();
-    expect(databasePools.queryCompetitor).toHaveBeenCalledOnce();
+    expect(databasePools.probePrimary).toHaveBeenCalledWith(2_000);
+    expect(databasePools.probeCompetitor).toHaveBeenCalledWith(2_000);
     expect(dependencies.primaryPoolSnapshot()).toBe(poolSnapshot);
     expect(dependencies.competitorPoolSnapshot()).toBe(poolSnapshot);
     dependencies.onModuleDestroy();

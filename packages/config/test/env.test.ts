@@ -93,6 +93,18 @@ describe('loadEnv', () => {
     ).toThrow(EnvValidationError);
   });
 
+  it('拒绝凭据、协议别名和默认端口不同但目标相同的双 PostgreSQL URL', () => {
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL:
+          'postgres://primary:one@localhost/amazon_asin_monitor?sslmode=require',
+        COMPETITOR_DATABASE_URL:
+          'postgresql://competitor:two@LOCALHOST:5432/amazon_asin_monitor',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+  });
+
   it('BULL_PREFIX 保留 legacy 命名空间并将空白回退 bull', () => {
     expect(loadEnv({ ...validEnv, BULL_PREFIX: ' staging ' }).BULL_PREFIX).toBe(
       'staging',

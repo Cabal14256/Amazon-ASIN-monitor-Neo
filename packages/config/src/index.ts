@@ -17,7 +17,31 @@ const healthRatioSchema = z.coerce
   .default(0.9)
   .transform((value) => (value >= 1 ? value / 100 : value));
 
-export const envSchema = z.object({
+function postgresTargetIdentity(value: string): string | undefined {
+  try {
+    const parsed = new URL(value.trim());
+    if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
+      return undefined;
+    }
+    const databaseName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+    if (!databaseName) return undefined;
+    const queryHost = parsed.searchParams.get('host');
+    const host = parsed.hostname
+      ? parsed.hostname.toLowerCase()
+      : queryHost
+      ? `socket:${queryHost}`
+      : '<default>';
+    const port = parsed.port || parsed.searchParams.get('port') || '5432';
+    if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
+      return undefined;
+    }
+    return `${host}\u0000${port}\u0000${databaseName}`;
+  } catch {
+    return undefined;
+  }
+}
+
+const envObjectSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
     .default('development'),
@@ -82,6 +106,18 @@ export const envSchema = z.object({
     .int()
     .positive()
     .optional(),
+});
+
+export const envSchema = envObjectSchema.superRefine((env, context) => {
+  const primary = postgresTargetIdentity(env.DATABASE_URL);
+  const competitor = postgresTargetIdentity(env.COMPETITOR_DATABASE_URL);
+  if (primary && competitor && primary === competitor) {
+    context.addIssue({
+      code: 'custom',
+      path: ['COMPETITOR_DATABASE_URL'],
+      message: '主库与竞品库必须指向不同的 PostgreSQL database',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;

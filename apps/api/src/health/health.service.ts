@@ -189,10 +189,7 @@ export class ApplicationDatabasePools implements OnModuleDestroy {
   constructor(@Inject(ENV) env: Env, @Inject(AppLogger) logger: AppLogger) {
     const poolOptions = {
       max: 10,
-      connectionTimeoutMillis: env.HEALTH_PROBE_TIMEOUT_MS,
       idleTimeoutMillis: 30_000,
-      query_timeout: env.HEALTH_PROBE_TIMEOUT_MS,
-      statement_timeout: env.HEALTH_PROBE_TIMEOUT_MS,
       application_name: 'amazon-asin-monitor-neo-api',
     };
     this.primaryPool = new Pool({
@@ -224,12 +221,14 @@ export class ApplicationDatabasePools implements OnModuleDestroy {
     });
   }
 
-  async queryPrimary(): Promise<void> {
-    await this.primaryPool.query('SELECT 1');
+  async probePrimary(timeoutMs: number): Promise<void> {
+    const query = { text: 'SELECT 1', query_timeout: timeoutMs };
+    await this.primaryPool.query(query);
   }
 
-  async queryCompetitor(): Promise<void> {
-    await this.competitorPool.query('SELECT 1');
+  async probeCompetitor(timeoutMs: number): Promise<void> {
+    const query = { text: 'SELECT 1', query_timeout: timeoutMs };
+    await this.competitorPool.query(query);
   }
 
   primaryPoolSnapshot(): PoolSnapshot {
@@ -276,11 +275,11 @@ export class HealthRuntimeDependencies implements OnModuleDestroy {
   }
 
   async queryPrimary(): Promise<void> {
-    await this.databasePools.queryPrimary();
+    await this.databasePools.probePrimary(this.env.HEALTH_PROBE_TIMEOUT_MS);
   }
 
   async queryCompetitor(): Promise<void> {
-    await this.databasePools.queryCompetitor();
+    await this.databasePools.probeCompetitor(this.env.HEALTH_PROBE_TIMEOUT_MS);
   }
 
   async pingRedis(): Promise<void> {
