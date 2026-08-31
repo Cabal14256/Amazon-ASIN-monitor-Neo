@@ -1,0 +1,297 @@
+import { ServiceUnavailableException } from '@nestjs/common';
+import {
+  FastifyAdapter,
+  type NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { Test } from '@nestjs/testing';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { loadEnv, type Env } from '@asin-monitor/config';
+import { healthSchema, type Health } from '@asin-monitor/contracts';
+import { ApiExceptionFilter } from '../src/common/api-exception.filter';
+import { HealthController } from '../src/health/health.controller';
+import {
+  HealthErrorStatsService,
+  HealthRuntimeDependencies,
+  HealthService,
+  memoryHealth,
+} from '../src/health/health.service';
+import { configureHttpApp } from '../src/http-app';
+import { AppLogger } from '../src/logger/app-logger.service';
+import { MetricsService } from '../src/metrics/metrics.service';
+
+const validEnv = {
+  DATABASE_URL: 'postgresql://localhost/amazon_asin_monitor',
+  COMPETITOR_DATABASE_URL: 'postgresql://localhost/amazon_competitor_monitor',
+  REDIS_URL: 'redis://localhost:6379',
+  JWT_SECRET: 'test-secret',
+};
+const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
+
+const poolSnapshot = {
+  totalConnections: 2,
+  freeConnections: 1,
+  activeConnections: 1,
+  queueLength: 0,
+  config: { connectionLimit: 10, queueLimit: 0 },
+};
+
+function buildService(
+  options: {
+    env?: Env;
+    queryPrimary?: () => Promise<void>;
+    queryCompetitor?: () => Promise<void>;
+    pingRedis?: () => Promise<void>;
+  } = {},
+) {
+  const env = options.env ?? loadEnv(validEnv);
+  const dependencies = {
+    queryPrimary: options.queryPrimary ?? vi.fn().mockResolvedValue(undefined),
+    queryCompetitor:
+      options.queryCompetitor ?? vi.fn().mockResolvedValue(undefined),
+    pingRedis: options.pingRedis ?? vi.fn().mockResolvedValue(undefined),
+    primaryPoolSnapshot: vi.fn(() => poolSnapshot),
+    competitorPoolSnapshot: vi.fn(() => poolSnapshot),
+  } as unknown as HealthRuntimeDependencies;
+  const metrics = new MetricsService();
+  const errorStats = new HealthErrorStatsService();
+  const service = new HealthService(
+    env,
+    dependencies,
+    new AppLogger(),
+    metrics,
+    errorStats,
+  );
+  return { service, metrics, errorStats };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+describe('HealthService', () => {
+  it('真实汇总双 PostgreSQL、Redis、内存与错误统计并记录低基数指标', async () => {
+    const { service, metrics, errorStats } = buildService();
+    errorStats.recordStatus(429);
+    const health = await service.getHealth();
+
+    expect(healthSchema.parse(health).status).toBe('ok');
+    expect(health.database).toMatchObject({
+      status: 'ok',
+      connected: true,
+      usagePercent: '10.00',
+    });
+    expect(health.competitorDatabase?.connected).toBe(true);
+    expect(health.cache).toMatchObject({
+      status: 'ok',
+      connected: true,
+      backend: 'redis',
+    });
+    expect(health.rateLimiter).toMatchObject({
+      status: 'ok',
+      stats: { mode: 'redis-backend-ready', redisAvailable: true },
+    });
+    expect(health.errorStats).toMatchObject({
+      recent: { count: 1, byType: { RATE_LIMIT: 1 } },
+    });
+
+    const rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_health_dependency_up{dependency="database"} 1',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_health_dependency_up{dependency="competitor_database"} 1',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_health_dependency_up{dependency="redis"} 1',
+    );
+    metrics.onModuleDestroy();
+  });
+
+  it('依赖失败返回通用错误与 degraded，日志不包含连接串或凭据', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { service, metrics } = buildService({
+      queryCompetitor: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('postgresql://operator:raw-secret@db.internal/competitor'),
+        ),
+    });
+
+    const health = await service.getHealth();
+    expect(health.status).toBe('degraded');
+    expect(health.competitorDatabase).toMatchObject({
+      status: 'error',
+      connected: false,
+      error: 'probe_failed',
+    });
+    expect(JSON.stringify(health)).not.toContain('raw-secret');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('raw-secret');
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('[WARN] [HealthService]'),
+      '健康依赖不可用',
+      { dependency: 'competitor_database', reason: 'probe_failed' },
+    );
+    metrics.onModuleDestroy();
+  });
+
+  it('超时探针有界失败并报告 probe_timeout', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const env = loadEnv({ ...validEnv, HEALTH_PROBE_TIMEOUT_MS: '50' });
+    const { service, metrics } = buildService({
+      env,
+      queryPrimary: () => new Promise(() => undefined),
+    });
+
+    const health = await service.getHealth();
+    expect(health.status).toBe('degraded');
+    expect(health.database).toMatchObject({
+      connected: false,
+      error: 'probe_timeout',
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    metrics.onModuleDestroy();
+  });
+
+  it('内存阈值按 heap limit 和可选 RSS 绝对值判定', () => {
+    const env = loadEnv({
+      ...validEnv,
+      HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: '50',
+      HEALTH_MEMORY_RSS_DEGRADED_MB: '100',
+    });
+    const memory = memoryHealth(
+      env,
+      {
+        rss: 101 * 1024 * 1024,
+        heapTotal: 80 * 1024 * 1024,
+        heapUsed: 60 * 1024 * 1024,
+        external: 1 * 1024 * 1024,
+        arrayBuffers: 0,
+      },
+      100 * 1024 * 1024,
+    );
+    expect(memory.status).toBe('degraded');
+    expect(memory.heapLimitUsagePercent).toBe('60.00');
+    expect(memory.thresholdPercent).toBe('50.00');
+  });
+
+  it('全局异常过滤器把低基数错误分类写入健康统计', () => {
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const stats = new HealthErrorStatsService();
+    const reply = {
+      status: vi.fn().mockReturnThis(),
+      send: vi.fn(),
+    };
+    const host = {
+      switchToHttp: () => ({ getResponse: () => reply }),
+    };
+    const filter = new ApiExceptionFilter(new AppLogger(), stats);
+
+    filter.catch(
+      new ServiceUnavailableException('postgresql://user:secret@db/primary'),
+      host as never,
+    );
+
+    expect(stats.snapshot()).toMatchObject({
+      recent: { count: 1, byType: { SERVER_ERROR: 1 } },
+      byType: { SERVER_ERROR: 1 },
+    });
+    expect(reply.status).toHaveBeenCalledWith(503);
+    expect(reply.send).toHaveBeenCalledWith({
+      success: false,
+      errorMessage: '服务器内部错误',
+      errorCode: 503,
+    });
+    expect(JSON.stringify(error.mock.calls)).not.toContain('secret@db');
+  });
+});
+
+describe.skipIf(!integrationEnabled)(
+  'HealthRuntimeDependencies integration',
+  () => {
+    it('对 CI 的双 PostgreSQL 与 Redis 执行真实有界探针', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const dependencies = new HealthRuntimeDependencies(env, logger);
+      const metrics = new MetricsService();
+      const service = new HealthService(
+        env,
+        dependencies,
+        logger,
+        metrics,
+        new HealthErrorStatsService(),
+      );
+      try {
+        const health = await service.getHealth();
+        expect(healthSchema.parse(health).status).toBe('ok');
+        expect(health.database?.connected).toBe(true);
+        expect(health.competitorDatabase?.connected).toBe(true);
+        expect(health.cache).toMatchObject({ connected: true });
+      } finally {
+        await dependencies.onModuleDestroy();
+        metrics.onModuleDestroy();
+      }
+    }, 30_000);
+  },
+);
+
+describe('HealthController compatibility routes', () => {
+  async function createApp(health: Health) {
+    const healthService = { getHealth: vi.fn().mockResolvedValue(health) };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [HealthController],
+      providers: [{ provide: HealthService, useValue: healthService }],
+    }).compile();
+    const app = moduleRef.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter({ logger: false }),
+    );
+    configureHttpApp(app);
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+    return app;
+  }
+
+  it('两条兼容路由共享响应且不生成重复 /api 前缀', async () => {
+    const health: Health = {
+      status: 'ok',
+      timestamp: '2026-08-31T21:00:00.000+08:00',
+      uptime: 10,
+    };
+    const app = await createApp(health);
+    const fastify = app.getHttpAdapter().getInstance();
+    const root = await fastify.inject({ method: 'GET', url: '/health' });
+    const versioned = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/health',
+    });
+    const duplicated = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/api/v1/health',
+    });
+
+    expect(root.statusCode).toBe(200);
+    expect(versioned.statusCode).toBe(200);
+    expect(root.json()).toEqual(versioned.json());
+    expect(duplicated.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('任一关键依赖降级时返回 HTTP 503 而不是成功码', async () => {
+    const app = await createApp({
+      status: 'degraded',
+      timestamp: '2026-08-31T21:00:00.000+08:00',
+      database: { status: 'error', connected: false, error: 'probe_failed' },
+    });
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({ method: 'GET', url: '/health' });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ status: 'degraded' });
+    await app.close();
+  });
+});

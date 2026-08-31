@@ -9,6 +9,7 @@ import {
 import { loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
 import { ENV } from './config/config.module';
+import { HealthErrorStatsService } from './health/health.service';
 import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
 import { createNestLoggerAdapter } from './logger/nest-logger.adapter';
@@ -32,7 +33,13 @@ async function bootstrap(): Promise<void> {
 
   const env = app.get<Env>(ENV);
   const metrics = app.get(MetricsService);
-  configureHttpApp(app, { corsOrigin: env.CORS_ORIGIN, logger, metrics });
+  const errorStats = app.get(HealthErrorStatsService);
+  configureHttpApp(app, {
+    corsOrigin: env.CORS_ORIGIN,
+    logger,
+    metrics,
+    errorStats,
+  });
 
   const port = env.PORT;
   await app.listen(port, '0.0.0.0');

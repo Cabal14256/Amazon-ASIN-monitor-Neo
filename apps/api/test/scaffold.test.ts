@@ -1,15 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
-import {
-  FastifyAdapter,
-  type NestFastifyApplication,
-} from '@nestjs/platform-fastify';
-import { Test } from '@nestjs/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { z } from 'zod';
 import { ZodValidationPipe } from '../src/common/zod-validation.pipe';
-import { HealthController } from '../src/health/health.controller';
-import { configureHttpApp } from '../src/http-app';
 import { AppLogger, sanitize, utc8Iso } from '../src/logger/app-logger.service';
 import { createNestLoggerAdapter } from '../src/logger/nest-logger.adapter';
 
@@ -17,41 +10,6 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.useRealTimers();
-});
-
-describe('HealthController', () => {
-  it('返回 ok 状态与运行时间', () => {
-    const controller = new HealthController();
-    const health = controller.getHealth();
-    expect(health.status).toBe('ok');
-    expect(typeof health.uptime).toBe('number');
-  });
-
-  it('同时暴露 /health 与 /api/v1/health，且不产生双 /api 前缀', async () => {
-    const moduleRef = await Test.createTestingModule({
-      controllers: [HealthController],
-    }).compile();
-    const app = moduleRef.createNestApplication<NestFastifyApplication>(
-      new FastifyAdapter({ logger: false }),
-    );
-    configureHttpApp(app);
-    await app.init();
-    const fastify = app.getHttpAdapter().getInstance();
-    await fastify.ready();
-
-    expect(
-      (await fastify.inject({ method: 'GET', url: '/health' })).statusCode,
-    ).toBe(200);
-    expect(
-      (await fastify.inject({ method: 'GET', url: '/api/v1/health' }))
-        .statusCode,
-    ).toBe(200);
-    expect(
-      (await fastify.inject({ method: 'GET', url: '/api/v1/api/v1/health' }))
-        .statusCode,
-    ).toBe(404);
-    await app.close();
-  });
 });
 
 describe('AppLogger.sanitize（对齐旧 logger.js 脱敏清单）', () => {

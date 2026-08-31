@@ -10,6 +10,13 @@ import { z } from 'zod';
  * 新增 PG / Redis / 调度相关变量按目标架构（总体计划 §2）定义。
  */
 
+const healthRatioSchema = z.coerce
+  .number()
+  .positive()
+  .max(100)
+  .default(0.9)
+  .transform((value) => (value >= 1 ? value / 100 : value));
+
 export const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
@@ -41,6 +48,17 @@ export const envSchema = z.object({
     .default('bull'),
 
   JWT_SECRET: z.string().min(1, '缺少 JWT_SECRET'),
+
+  // Neo 健康探针：比例同时接受 0.9 或 90 两种 Legacy 配置写法。
+  HEALTH_PROBE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(30_000)
+    .default(2_000),
+  HEALTH_DB_POOL_DEGRADED_THRESHOLD: healthRatioSchema,
+  HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: healthRatioSchema,
+  HEALTH_MEMORY_RSS_DEGRADED_MB: z.coerce.number().nonnegative().default(0),
 
   // 进程拓扑：api | worker | all；单调度器语义
   PROCESS_ROLE: z

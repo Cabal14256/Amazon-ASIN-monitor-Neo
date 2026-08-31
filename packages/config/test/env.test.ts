@@ -27,6 +27,10 @@ describe('loadEnv', () => {
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
+    expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(2_000);
+    expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
+    expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.9);
+    expect(env.HEALTH_MEMORY_RSS_DEGRADED_MB).toBe(0);
   });
 
   it('缺少必需变量时抛出 EnvValidationError 并列出全部缺失项', () => {
@@ -70,6 +74,23 @@ describe('loadEnv', () => {
 
   it('PORT 支持字符串数字', () => {
     expect(loadEnv({ ...validEnv, PORT: '3100' }).PORT).toBe(3100);
+  });
+
+  it('健康阈值兼容比例和百分数写法，并约束探针超时', () => {
+    const env = loadEnv({
+      ...validEnv,
+      HEALTH_PROBE_TIMEOUT_MS: '750',
+      HEALTH_DB_POOL_DEGRADED_THRESHOLD: '85',
+      HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: '0.8',
+      HEALTH_MEMORY_RSS_DEGRADED_MB: '1024',
+    });
+    expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(750);
+    expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.85);
+    expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.8);
+    expect(env.HEALTH_MEMORY_RSS_DEGRADED_MB).toBe(1024);
+    expect(() =>
+      loadEnv({ ...validEnv, HEALTH_PROBE_TIMEOUT_MS: '0' }),
+    ).toThrow(EnvValidationError);
   });
 
   it('BULL_PREFIX 保留 legacy 命名空间并将空白回退 bull', () => {
