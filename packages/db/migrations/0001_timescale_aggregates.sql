@@ -142,25 +142,24 @@ $postflight$;
 
 DO $cagg_definition_preflight$
 DECLARE
+  expected_definitions constant jsonb := '{
+    "monitor_history_cagg_asin_day": "1c8a08404bfa40e880f68a1542dda236",
+    "monitor_history_cagg_asin_hour": "a7dc38e04b7421d675be9fead5c6dca9",
+    "monitor_history_cagg_asin_month": "90916b03f62d7cff8d3643c021e109c5",
+    "monitor_history_cagg_dim_day": "ea3412e4519ba38af7867a72401f1f75",
+    "monitor_history_cagg_dim_hour": "42e83ef4ee3809c76e2721376418ee93",
+    "monitor_history_cagg_dim_month": "f24d7e1cbbc746c2741cf1289227b8a4",
+    "monitor_history_cagg_variant_group_day": "712d829f483f475e4ab86f48dda245a8",
+    "monitor_history_cagg_variant_group_hour": "14f1d858f60a5edac891b3694d964680",
+    "monitor_history_cagg_variant_group_month": "6372c4ddbf56a401c9cfef12ed279c30"
+  }'::jsonb;
   existing_count integer;
   expected_count integer;
   matching_fingerprint_count integer;
 BEGIN
   SELECT
     COUNT(*)::integer,
-    COUNT(*) FILTER (
-      WHERE view_name IN (
-        'monitor_history_cagg_asin_hour',
-        'monitor_history_cagg_asin_day',
-        'monitor_history_cagg_asin_month',
-        'monitor_history_cagg_dim_hour',
-        'monitor_history_cagg_dim_day',
-        'monitor_history_cagg_dim_month',
-        'monitor_history_cagg_variant_group_hour',
-        'monitor_history_cagg_variant_group_day',
-        'monitor_history_cagg_variant_group_month'
-      )
-    )::integer
+    COUNT(*) FILTER (WHERE expected_definitions ? view_name)::integer
   INTO existing_count, expected_count
   FROM timescaledb_information.continuous_aggregates
   WHERE view_schema = 'public';
@@ -173,17 +172,29 @@ BEGIN
   END IF;
 
   IF existing_count = 9 THEN
-    SELECT COUNT(*) FILTER (
-      WHERE obj_description(
-        format('%I.%I', view_schema, view_name)::regclass,
+    SELECT COUNT(*)::integer
+    INTO matching_fingerprint_count
+    FROM timescaledb_information.continuous_aggregates aggregate_row
+    JOIN jsonb_each_text(expected_definitions)
+      expected(view_name, definition_fingerprint)
+      ON expected.view_name = aggregate_row.view_name
+    WHERE aggregate_row.view_schema = 'public'
+      AND md5(regexp_replace(
+        aggregate_row.view_definition,
+        '[[:space:]]+',
+        ' ',
+        'g'
+      )) = expected.definition_fingerprint
+      AND obj_description(
+        format(
+          '%I.%I',
+          aggregate_row.view_schema,
+          aggregate_row.view_name
+        )::regclass,
         'pg_class'
       ) =
-        'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
-        md5(regexp_replace(view_definition, '[[:space:]]+', ' ', 'g'))
-    )::integer
-    INTO matching_fingerprint_count
-    FROM timescaledb_information.continuous_aggregates
-    WHERE view_schema = 'public';
+        'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:' ||
+        expected.definition_fingerprint;
 
     IF matching_fingerprint_count <> 9 THEN
       RAISE EXCEPTION
@@ -195,6 +206,11 @@ BEGIN
   PERFORM set_config(
     'asin_monitor.cagg_existing_count',
     existing_count::text,
+    true
+  );
+  PERFORM set_config(
+    'asin_monitor.cagg_expected_definitions',
+    expected_definitions::text,
     true
   );
 END
@@ -635,24 +651,42 @@ WITH NO DATA;
 DO $cagg_definition_fingerprint$
 DECLARE
   aggregate_row record;
+  expected_definitions jsonb :=
+    current_setting('asin_monitor.cagg_expected_definitions')::jsonb;
+  matching_declared_definition_count integer;
 BEGIN
+  SELECT COUNT(*)::integer
+  INTO matching_declared_definition_count
+  FROM timescaledb_information.continuous_aggregates aggregate_definition
+  JOIN jsonb_each_text(expected_definitions)
+    expected(view_name, definition_fingerprint)
+    ON expected.view_name = aggregate_definition.view_name
+  WHERE aggregate_definition.view_schema = 'public'
+    AND md5(regexp_replace(
+      aggregate_definition.view_definition,
+      '[[:space:]]+',
+      ' ',
+      'g'
+    )) = expected.definition_fingerprint;
+
+  IF matching_declared_definition_count <> 9 THEN
+    RAISE EXCEPTION
+      'continuous aggregate declared definition fingerprint mismatch (matching %)',
+      matching_declared_definition_count;
+  END IF;
+
   IF current_setting('asin_monitor.cagg_existing_count')::integer = 0 THEN
     FOR aggregate_row IN
-      SELECT view_name, view_definition
-      FROM timescaledb_information.continuous_aggregates
-      WHERE view_schema = 'public'
-      ORDER BY view_name
+      SELECT expected.view_name, expected.definition_fingerprint
+      FROM jsonb_each_text(expected_definitions)
+        expected(view_name, definition_fingerprint)
+      ORDER BY expected.view_name
     LOOP
       EXECUTE format(
         'COMMENT ON VIEW public.%I IS %L',
         aggregate_row.view_name,
-        'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
-          md5(regexp_replace(
-            aggregate_row.view_definition,
-            '[[:space:]]+',
-            ' ',
-            'g'
-          ))
+        'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:' ||
+          aggregate_row.definition_fingerprint
       );
     END LOOP;
   END IF;
@@ -830,6 +864,8 @@ SELECT add_continuous_aggregate_policy(
 
 DO $cagg_postflight$
 DECLARE
+  expected_definitions jsonb :=
+    current_setting('asin_monitor.cagg_expected_definitions')::jsonb;
   continuous_aggregate_count integer;
   materialized_only_count integer;
   legacy_collation_column_count integer;
@@ -863,28 +899,29 @@ BEGIN
       materialized_only_count;
   END IF;
 
-  SELECT COUNT(*) FILTER (
-    WHERE obj_description(
-      format('%I.%I', view_schema, view_name)::regclass,
+  SELECT COUNT(*)::integer
+  INTO matching_definition_fingerprint_count
+  FROM timescaledb_information.continuous_aggregates aggregate_row
+  JOIN jsonb_each_text(expected_definitions)
+    expected(view_name, definition_fingerprint)
+    ON expected.view_name = aggregate_row.view_name
+  WHERE aggregate_row.view_schema = 'public'
+    AND md5(regexp_replace(
+      aggregate_row.view_definition,
+      '[[:space:]]+',
+      ' ',
+      'g'
+    )) = expected.definition_fingerprint
+    AND obj_description(
+      format(
+        '%I.%I',
+        aggregate_row.view_schema,
+        aggregate_row.view_name
+      )::regclass,
       'pg_class'
     ) =
-      'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
-      md5(regexp_replace(view_definition, '[[:space:]]+', ' ', 'g'))
-  )::integer
-  INTO matching_definition_fingerprint_count
-  FROM timescaledb_information.continuous_aggregates
-  WHERE view_schema = 'public'
-    AND view_name IN (
-      'monitor_history_cagg_asin_hour',
-      'monitor_history_cagg_asin_day',
-      'monitor_history_cagg_asin_month',
-      'monitor_history_cagg_dim_hour',
-      'monitor_history_cagg_dim_day',
-      'monitor_history_cagg_dim_month',
-      'monitor_history_cagg_variant_group_hour',
-      'monitor_history_cagg_variant_group_day',
-      'monitor_history_cagg_variant_group_month'
-    );
+      'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:' ||
+      expected.definition_fingerprint;
 
   IF matching_definition_fingerprint_count <> 9 THEN
     RAISE EXCEPTION

@@ -233,6 +233,7 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     const definitionFingerprints = await primaryPool.query<{
       view_name: string;
       definition_fingerprint: string;
+      definition_marker: string | null;
     }>(`
       SELECT
         view_name,
@@ -241,15 +242,69 @@ describe('P1-T2 PostgreSQL schema integration', () => {
           '[[:space:]]+',
           ' ',
           'g'
-        )) AS definition_fingerprint
+        )) AS definition_fingerprint,
+        obj_description(
+          format('%I.%I', view_schema, view_name)::regclass,
+          'pg_class'
+        ) AS definition_marker
       FROM timescaledb_information.continuous_aggregates
       WHERE view_schema = 'public'
       ORDER BY view_name
     `);
     expect(definitionFingerprints.rows).toEqual([
       {
-        view_name: 'capture-versioned-cagg-fingerprints',
-        definition_fingerprint: '00000000000000000000000000000000',
+        view_name: 'monitor_history_cagg_asin_day',
+        definition_fingerprint: '1c8a08404bfa40e880f68a1542dda236',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:1c8a08404bfa40e880f68a1542dda236',
+      },
+      {
+        view_name: 'monitor_history_cagg_asin_hour',
+        definition_fingerprint: 'a7dc38e04b7421d675be9fead5c6dca9',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:a7dc38e04b7421d675be9fead5c6dca9',
+      },
+      {
+        view_name: 'monitor_history_cagg_asin_month',
+        definition_fingerprint: '90916b03f62d7cff8d3643c021e109c5',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:90916b03f62d7cff8d3643c021e109c5',
+      },
+      {
+        view_name: 'monitor_history_cagg_dim_day',
+        definition_fingerprint: 'ea3412e4519ba38af7867a72401f1f75',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:ea3412e4519ba38af7867a72401f1f75',
+      },
+      {
+        view_name: 'monitor_history_cagg_dim_hour',
+        definition_fingerprint: '42e83ef4ee3809c76e2721376418ee93',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:42e83ef4ee3809c76e2721376418ee93',
+      },
+      {
+        view_name: 'monitor_history_cagg_dim_month',
+        definition_fingerprint: 'f24d7e1cbbc746c2741cf1289227b8a4',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:f24d7e1cbbc746c2741cf1289227b8a4',
+      },
+      {
+        view_name: 'monitor_history_cagg_variant_group_day',
+        definition_fingerprint: '712d829f483f475e4ab86f48dda245a8',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:712d829f483f475e4ab86f48dda245a8',
+      },
+      {
+        view_name: 'monitor_history_cagg_variant_group_hour',
+        definition_fingerprint: '14f1d858f60a5edac891b3694d964680',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:14f1d858f60a5edac891b3694d964680',
+      },
+      {
+        view_name: 'monitor_history_cagg_variant_group_month',
+        definition_fingerprint: '6372c4ddbf56a401c9cfef12ed279c30',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:6372c4ddbf56a401c9cfef12ed279c30',
       },
     ]);
 

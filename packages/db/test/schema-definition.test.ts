@@ -148,10 +148,15 @@ describe('PostgreSQL 双库 Schema 基线', () => {
       migration.match(/LEFT JOIN public\.variant_groups variant_group/g),
     ).toHaveLength(3);
     expect(migration).toContain(
-      'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:',
+      'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:',
     );
+    expect(migration).toContain('expected_definitions constant jsonb');
+    expect(migration).toContain('asin_monitor.cagg_expected_definitions');
     expect(migration).toContain(
       'continuous aggregate definition fingerprint mismatch',
+    );
+    expect(migration).toContain(
+      'continuous aggregate declared definition fingerprint mismatch',
     );
   });
 
