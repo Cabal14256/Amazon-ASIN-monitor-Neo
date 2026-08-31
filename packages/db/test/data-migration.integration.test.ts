@@ -2,11 +2,15 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { dataMigrationReportSchema } from '@asin-monitor/contracts';
+import {
+  dataMigrationReportSchema,
+  timescaleAggregateReportSchema,
+} from '@asin-monitor/contracts';
 import mysql, { type Connection } from 'mysql2/promise';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { runTimescaleAggregateGate } from '../src/aggregate-reconciliation/engine';
 import type { DataMigrationConfig } from '../src/migration/config';
 import { runDataMigration } from '../src/migration/engine';
 import {
@@ -306,6 +310,153 @@ function reportEvidence(report: Awaited<ReturnType<typeof runDataMigration>>) {
   }));
 }
 
+async function rebuildLegacyAggregateFixture(): Promise<void> {
+  const peakCase = `CASE
+    WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'US' THEN
+      (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
+        AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6)
+      OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 9
+        AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 12)
+    WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci = 'UK' THEN
+      EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 22
+      OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 0
+        AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 2)
+      OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 3
+        AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 6)
+    WHEN rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('DE', 'FR', 'ES', 'IT') THEN
+      EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 20
+      OR (EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') >= 2
+        AND EXTRACT(HOUR FROM history.check_time + INTERVAL '8 hours') < 5)
+    ELSE false
+  END`;
+  await primaryTarget.query(`
+    DELETE FROM public.monitor_history_agg;
+    DELETE FROM public.monitor_history_agg_dim;
+    DELETE FROM public.monitor_history_agg_variant_group;
+
+    INSERT INTO public.monitor_history_agg (
+      granularity, time_slot, country, asin_key, check_count, broken_count,
+      has_broken, has_peak, first_check_time, last_check_time
+    )
+    SELECT
+      bucket.granularity,
+      bucket.time_slot,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
+        COLLATE public.legacy_utf8mb4_unicode_ci,
+      COUNT(*)::integer,
+      (COUNT(*) FILTER (WHERE history.is_broken IS TRUE))::integer,
+      BOOL_OR(COALESCE(history.is_broken, false)),
+      BOOL_OR(${peakCase}),
+      MIN(history.check_time),
+      MAX(history.check_time)
+    FROM public.monitor_history history
+    CROSS JOIN LATERAL (
+      VALUES
+        ('hour'::varchar(5), history.hour_ts),
+        ('day'::varchar(5), history.day_ts),
+        ('month'::varchar(5), history.month_ts)
+    ) bucket(granularity, time_slot)
+    WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+      AND (
+        history.asin_id IS NOT NULL
+        OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
+      )
+    GROUP BY
+      bucket.granularity,
+      bucket.time_slot,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
+        COLLATE public.legacy_utf8mb4_unicode_ci;
+
+    INSERT INTO public.monitor_history_agg_dim (
+      granularity, time_slot, country, site, brand, asin_key, check_count,
+      broken_count, has_broken, has_peak, first_check_time, last_check_time
+    )
+    SELECT
+      bucket.granularity,
+      bucket.time_slot,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
+        COLLATE public.legacy_utf8mb4_unicode_ci,
+      COUNT(*)::integer,
+      (COUNT(*) FILTER (WHERE history.is_broken IS TRUE))::integer,
+      BOOL_OR(COALESCE(history.is_broken, false)),
+      BOOL_OR(${peakCase}),
+      MIN(history.check_time),
+      MAX(history.check_time)
+    FROM public.monitor_history history
+    CROSS JOIN LATERAL (
+      VALUES
+        ('hour'::varchar(5), history.hour_ts),
+        ('day'::varchar(5), history.day_ts),
+        ('month'::varchar(5), history.month_ts)
+    ) bucket(granularity, time_slot)
+    WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+      AND (
+        history.asin_id IS NOT NULL
+        OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
+      )
+    GROUP BY
+      bucket.granularity,
+      bucket.time_slot,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.site_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(COALESCE(history.brand_snapshot, '')) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
+        COLLATE public.legacy_utf8mb4_unicode_ci;
+
+    INSERT INTO public.monitor_history_agg_variant_group (
+      granularity, time_slot, country, variant_group_id, variant_group_name,
+      asin_key, check_count, broken_count, has_broken, has_peak,
+      first_check_time, last_check_time
+    )
+    SELECT
+      bucket.granularity,
+      bucket.time_slot,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(
+        MAX(NULLIF(rtrim(history.variant_group_name), '') COLLATE public.legacy_utf8mb4_unicode_ci),
+        MAX(rtrim(variant_group.name) COLLATE public.legacy_utf8mb4_unicode_ci),
+        ''
+      ),
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
+        COLLATE public.legacy_utf8mb4_unicode_ci,
+      COUNT(*)::integer,
+      (COUNT(*) FILTER (WHERE history.is_broken IS TRUE))::integer,
+      BOOL_OR(COALESCE(history.is_broken, false)),
+      BOOL_OR(${peakCase}),
+      MIN(history.check_time),
+      MAX(history.check_time)
+    FROM public.monitor_history history
+    LEFT JOIN public.variant_groups variant_group
+      ON rtrim(variant_group.id) COLLATE public.legacy_utf8mb4_unicode_ci =
+        rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci
+    CROSS JOIN LATERAL (
+      VALUES
+        ('hour'::varchar(5), history.hour_ts),
+        ('day'::varchar(5), history.day_ts),
+        ('month'::varchar(5), history.month_ts)
+    ) bucket(granularity, time_slot)
+    WHERE rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+      AND history.variant_group_id IS NOT NULL
+      AND (
+        history.asin_id IS NOT NULL
+        OR NULLIF(rtrim(history.asin_code), '') IS NOT NULL
+      )
+    GROUP BY
+      bucket.granularity,
+      bucket.time_slot,
+      rtrim(history.country) COLLATE public.legacy_utf8mb4_unicode_ci,
+      rtrim(history.variant_group_id) COLLATE public.legacy_utf8mb4_unicode_ci,
+      COALESCE(NULLIF(rtrim(history.asin_code), ''), 'ID#' || rtrim(history.asin_id))
+        COLLATE public.legacy_utf8mb4_unicode_ci;
+  `);
+}
+
 describe.skipIf(!integrationEnabled)(
   'P1-T3 MySQL to PostgreSQL data migration integration',
   () => {
@@ -377,6 +528,17 @@ describe.skipIf(!integrationEnabled)(
         INSERT INTO migration_shadow.roles VALUES
           ('shadow-role', 'preserve'),
           ('role-003', 'foreign-key-fixture');
+        CREATE PROCEDURE migration_shadow.refresh_continuous_aggregate(
+          regclass,
+          timestamp without time zone,
+          timestamp without time zone
+        )
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'aggregate gate resolved the shadow refresh procedure';
+        END
+        $$;
       `);
       await competitorTarget.query(`
         CREATE SCHEMA migration_shadow;
@@ -1235,7 +1397,7 @@ describe.skipIf(!integrationEnabled)(
       ]);
       expect(shadowPrimary.rows[0]?.marker).toBe('preserve');
       expect(shadowCompetitor.rows[0]?.marker).toBe('preserve');
-    }, 60_000);
+    }, 120_000);
 
     it('保留 bigint、D8 时间、生成列、JSONB 和布尔值并重置 identity', async () => {
       const migrated = await primaryTarget.query<{
@@ -1275,5 +1437,474 @@ describe.skipIf(!integrationEnabled)(
       `);
       expect(BigInt(nextIdentity.rows[0].id)).toBe(9007199254741999n);
     });
+
+    it('有界回填后九组对拍一致，月边界、fallback、峰时和迟到数据均可复算', async () => {
+      const aggregateConfig = {
+        databaseUrl: targetUrlWithShadowSearchPath(primaryTargetUrl),
+        windowStart: '2026-07-01 00:00:00',
+        windowEnd: '2026-10-01 00:00:00',
+        refresh: true,
+        pageSize: 100,
+        reportPath: resolve(
+          'artifacts/timescale-aggregate/integration-report.json',
+        ),
+      } as const;
+
+      await primaryTarget.query(`
+        DELETE FROM public.monitor_history;
+        DELETE FROM public.variant_groups
+        WHERE id IN (
+          'cagg-vg-us',
+          'cagg-vg-fallback',
+          'cagg-vg-collation',
+          'cagg-vg-pad'
+        );
+        INSERT INTO public.variant_groups (id, name, country, site, brand)
+        VALUES
+          ('cagg-vg-us', 'Current US Group', 'US', '12', 'Fixture'),
+          ('cagg-vg-fallback', 'Fallback Current', 'UK', '12', 'Fixture'),
+          ('cagg-vg-collation', 'Resume Current', 'US', '12', 'Fixture'),
+          ('cagg-vg-pad', 'Pad Current', 'US', 'Pad Site', 'Pad Brand');
+
+        INSERT INTO public.monitor_history (
+          variant_group_id, variant_group_name, asin_id, asin_code, asin_name,
+          site_snapshot, brand_snapshot, check_type, country, is_broken,
+          check_time, notification_sent
+        )
+        VALUES
+          ('cagg-vg-us', 'Snapshot US', 'asin-us', 'BPEAKUS', 'US Peak', NULL, NULL, 'ASIN', 'US', true, '2026-08-31 18:30:00', false),
+          ('cagg-vg-us', 'Snapshot US', 'asin-us', 'BPEAKUS', 'US Peak', NULL, NULL, 'ASIN', 'US', false, '2026-09-01 01:30:00', false),
+          ('cagg-vg-fallback', '', 'fallback-id', '', 'Fallback', '', NULL, 'ASIN', 'UK', false, '2026-08-15 14:30:00', false),
+          (NULL, NULL, 'de-id', 'BPEAKDE', 'DE Peak', '12', 'Brand DE', 'ASIN', 'DE', true, '2026-08-15 12:30:00', false),
+          (NULL, NULL, 'fr-id', 'BPEAKFR', 'FR Peak', '12', 'Brand FR', 'ASIN', 'FR', false, '2026-08-15 18:30:00', false),
+          (NULL, NULL, 'it-id', 'BLOWIT', 'IT Low', '12', 'Brand IT', 'ASIN', 'IT', false, '2026-08-15 22:00:00', false),
+          ('cagg-vg-collation', 'Résumé', 'collation-a', 'BCOLLATE', 'Collation A', 'Store', 'Café', 'ASIN', 'US', false, '2026-08-20 02:10:00', false),
+          ('cagg-vg-collation', 'resume', 'collation-b', 'bcollate', 'Collation B', 'store', 'CAFE', 'asin', 'us', true, '2026-08-20 02:20:00', false),
+          ('cagg-vg-pad', 'Pad Name', 'pad-a', 'BPAD', 'Pad A', 'Pad Site', 'Pad Brand', 'ASIN', 'US', false, '2026-08-21 02:10:00', false),
+          ('cagg-vg-pad   ', 'Pad Name   ', 'pad-b', 'BPAD   ', 'Pad B', 'Pad Site   ', 'Pad Brand   ', 'ASIN   ', 'US   ', true, '2026-08-21 02:20:00', false),
+          ('cagg-vg-pad', 'Pad Name', 'pad-fallback   ', '   ', 'Pad Fallback', 'Pad Site', 'Pad Brand', 'ASIN', 'US', false, '2026-08-21 03:10:00', false),
+          ('cagg-vg-us', 'Excluded Group Row', 'excluded-id', 'BEXCLUDED', 'Excluded', '12', 'Fixture', 'GROUP', 'US', true, '2026-08-31 18:30:00', false);
+      `);
+      await rebuildLegacyAggregateFixture();
+
+      const first = await runTimescaleAggregateGate(aggregateConfig, logger);
+      const second = await runTimescaleAggregateGate(aggregateConfig, logger);
+      expect(timescaleAggregateReportSchema.parse(first).status).toBe('passed');
+      expect(timescaleAggregateReportSchema.parse(second).status).toBe(
+        'passed',
+      );
+      expect(second.checks).toEqual(first.checks);
+
+      const definition = await primaryTarget.query<{
+        definition_marker: string | null;
+      }>(`
+        SELECT obj_description(
+          'public.monitor_history_cagg_asin_hour'::regclass,
+          'pg_class'
+        ) AS definition_marker
+      `);
+      const definitionMarker = definition.rows[0]?.definition_marker;
+      expect(definitionMarker).toMatch(
+        /^amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:[a-f0-9]{32}$/,
+      );
+      if (
+        !definitionMarker ||
+        !/^amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:[a-f0-9]{32}$/.test(
+          definitionMarker,
+        )
+      ) {
+        throw new Error('invalid integration CAGG definition marker');
+      }
+      try {
+        await primaryTarget.query(`
+          COMMENT ON VIEW public.monitor_history_cagg_asin_hour
+          IS 'gate-tampered-definition-marker'
+        `);
+        await expect(
+          runTimescaleAggregateGate(aggregateConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'AGGREGATE_TARGET_DEFINITION_MISMATCH',
+          scope: 'aggregate.target.cagg_definitions',
+        });
+      } finally {
+        await primaryTarget.query(`
+          COMMENT ON VIEW public.monitor_history_cagg_asin_hour
+          IS '${definitionMarker}'
+        `);
+      }
+
+      const refreshPolicy = await primaryTarget.query<{ job_id: number }>(`
+        SELECT jobs.job_id
+        FROM timescaledb_information.jobs jobs
+        JOIN timescaledb_information.continuous_aggregates aggregate_row
+          ON aggregate_row.view_schema = 'public'
+         AND aggregate_row.view_name = 'monitor_history_cagg_asin_hour'
+        JOIN _timescaledb_catalog.hypertable hypertable
+          ON hypertable.schema_name =
+            aggregate_row.materialization_hypertable_schema
+         AND hypertable.table_name =
+            aggregate_row.materialization_hypertable_name
+         AND (jobs.config ->> 'mat_hypertable_id')::integer = hypertable.id
+        WHERE jobs.proc_name = 'policy_refresh_continuous_aggregate'
+      `);
+      expect(refreshPolicy.rows).toHaveLength(1);
+      try {
+        await primaryTarget.query(`SELECT alter_job($1, scheduled => false)`, [
+          refreshPolicy.rows[0].job_id,
+        ]);
+        await expect(
+          runTimescaleAggregateGate(aggregateConfig, logger),
+        ).rejects.toMatchObject({
+          code: 'AGGREGATE_TARGET_POLICY_MISMATCH',
+          scope: 'aggregate.target.policies',
+        });
+      } finally {
+        await primaryTarget.query(`
+          SELECT remove_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            if_exists => true
+          );
+          SELECT add_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            start_offset => INTERVAL '49 hours',
+            end_offset => INTERVAL '0',
+            schedule_interval => INTERVAL '10 minutes',
+            initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
+            timezone => 'Asia/Shanghai'
+          );
+        `);
+      }
+
+      await primaryTarget.query(`
+        UPDATE public.variant_groups
+        SET name = 'Renamed Current'
+        WHERE id = 'cagg-vg-fallback'
+      `);
+      const diagnostic = await runTimescaleAggregateGate(
+        { ...aggregateConfig, refresh: false },
+        logger,
+      );
+      expect(diagnostic.status).toBe('failed');
+      expect(diagnostic.failure).toEqual({
+        code: 'AGGREGATE_REFRESH_REQUIRED',
+        scope: 'aggregate.refresh',
+      });
+      expect(diagnostic.checks.every(({ status }) => status === 'passed')).toBe(
+        true,
+      );
+
+      await primaryTarget.query(`
+        UPDATE public.variant_groups
+        SET name = 'Fallback Current'
+        WHERE id = 'cagg-vg-fallback'
+      `);
+
+      const partialCoverage = await runTimescaleAggregateGate(
+        {
+          ...aggregateConfig,
+          windowStart: '2026-08-01 00:00:00',
+          windowEnd: '2026-09-01 00:00:00',
+        },
+        logger,
+      );
+      expect(partialCoverage.status).toBe('failed');
+      expect(partialCoverage.failure).toEqual({
+        code: 'AGGREGATE_RECONCILIATION_INCOMPLETE_COVERAGE',
+        scope: 'aggregate.reconciliation',
+      });
+      expect(partialCoverage.coverage?.rowsOutsideWindow).not.toBe('0');
+      expect(
+        partialCoverage.checks.every(({ status }) => status === 'passed'),
+      ).toBe(true);
+
+      const emptyWindow = await runTimescaleAggregateGate(
+        {
+          ...aggregateConfig,
+          windowStart: '2025-01-01 00:00:00',
+          windowEnd: '2025-02-01 00:00:00',
+        },
+        logger,
+      );
+      expect(emptyWindow.status).toBe('failed');
+      expect(emptyWindow.failure).toEqual({
+        code: 'AGGREGATE_RECONCILIATION_EMPTY_WINDOW',
+        scope: 'aggregate.reconciliation',
+      });
+
+      const semantics = await primaryTarget.query<{
+        asin_key: string;
+        variant_group_name: string;
+        site: string;
+        brand: string;
+      }>(`
+        SELECT
+          variant_agg.asin_key,
+          variant_agg.variant_group_name,
+          dimension_agg.site,
+          dimension_agg.brand
+        FROM public.monitor_history_agg_variant_group_v2 variant_agg
+        JOIN public.monitor_history_agg_dim_v2 dimension_agg
+          ON dimension_agg.granularity = variant_agg.granularity
+         AND dimension_agg.time_slot = variant_agg.time_slot
+         AND dimension_agg.country = variant_agg.country
+         AND dimension_agg.asin_key = variant_agg.asin_key
+        WHERE variant_agg.granularity = 'hour'
+          AND variant_agg.asin_key = 'ID#fallback-id'
+      `);
+      expect(semantics.rows).toEqual([
+        {
+          asin_key: 'ID#fallback-id',
+          variant_group_name: 'Fallback Current',
+          site: '',
+          brand: '',
+        },
+      ]);
+      await primaryTarget.query(`
+        UPDATE public.variant_groups
+        SET name = 'Fallback Current'
+        WHERE id = 'cagg-vg-fallback'
+      `);
+
+      const collationSemantics = await primaryTarget.query<{
+        family: string;
+        check_count: string;
+        broken_count: string;
+        text_matches: boolean;
+      }>(`
+        SELECT
+          'asin' AS family,
+          check_count::text,
+          broken_count::text,
+          country COLLATE public.legacy_utf8mb4_unicode_ci = 'US'
+            AND asin_key COLLATE public.legacy_utf8mb4_unicode_ci = 'BCOLLATE'
+            AS text_matches
+        FROM public.monitor_history_cagg_asin_hour
+        WHERE time_slot = timestamp '2026-08-20 02:00:00'
+          AND asin_key COLLATE public.legacy_utf8mb4_unicode_ci = 'bcollate'
+        UNION ALL
+        SELECT
+          'dimension' AS family,
+          check_count::text,
+          broken_count::text,
+          site COLLATE public.legacy_utf8mb4_unicode_ci = 'STORE'
+            AND brand COLLATE public.legacy_utf8mb4_unicode_ci = 'Cafe'
+            AS text_matches
+        FROM public.monitor_history_cagg_dim_hour
+        WHERE time_slot = timestamp '2026-08-20 02:00:00'
+          AND asin_key COLLATE public.legacy_utf8mb4_unicode_ci = 'bcollate'
+        UNION ALL
+        SELECT
+          'variant_group' AS family,
+          check_count::text,
+          broken_count::text,
+          variant_group_name_snapshot COLLATE public.legacy_utf8mb4_unicode_ci = 'resume'
+            AS text_matches
+        FROM public.monitor_history_cagg_variant_group_hour
+        WHERE time_slot = timestamp '2026-08-20 02:00:00'
+          AND asin_key COLLATE public.legacy_utf8mb4_unicode_ci = 'bcollate'
+        ORDER BY family
+      `);
+      expect(collationSemantics.rows).toEqual([
+        {
+          family: 'asin',
+          check_count: '2',
+          broken_count: '1',
+          text_matches: true,
+        },
+        {
+          family: 'dimension',
+          check_count: '2',
+          broken_count: '1',
+          text_matches: true,
+        },
+        {
+          family: 'variant_group',
+          check_count: '2',
+          broken_count: '1',
+          text_matches: true,
+        },
+      ]);
+
+      const padSpaceSemantics = await primaryTarget.query<{
+        family: string;
+        country: string;
+        asin_key: string;
+        dimension_one: string;
+        dimension_two: string;
+        check_count: string;
+        broken_count: string;
+      }>(`
+        SELECT
+          'asin' AS family,
+          country,
+          asin_key,
+          ''::text AS dimension_one,
+          ''::text AS dimension_two,
+          check_count::text,
+          broken_count::text
+        FROM public.monitor_history_cagg_asin_hour
+        WHERE time_slot = timestamp '2026-08-21 02:00:00'
+          AND asin_key = 'BPAD'
+        UNION ALL
+        SELECT
+          'dimension' AS family,
+          country,
+          asin_key,
+          site AS dimension_one,
+          brand AS dimension_two,
+          check_count::text,
+          broken_count::text
+        FROM public.monitor_history_cagg_dim_hour
+        WHERE time_slot = timestamp '2026-08-21 02:00:00'
+          AND asin_key = 'BPAD'
+        UNION ALL
+        SELECT
+          'variant_group' AS family,
+          country,
+          asin_key,
+          variant_group_id AS dimension_one,
+          variant_group_name_snapshot AS dimension_two,
+          check_count::text,
+          broken_count::text
+        FROM public.monitor_history_cagg_variant_group_hour
+        WHERE time_slot = timestamp '2026-08-21 02:00:00'
+          AND asin_key = 'BPAD'
+        ORDER BY family
+      `);
+      expect(padSpaceSemantics.rows).toEqual([
+        {
+          family: 'asin',
+          country: 'US',
+          asin_key: 'BPAD',
+          dimension_one: '',
+          dimension_two: '',
+          check_count: '2',
+          broken_count: '1',
+        },
+        {
+          family: 'dimension',
+          country: 'US',
+          asin_key: 'BPAD',
+          dimension_one: 'Pad Site',
+          dimension_two: 'Pad Brand',
+          check_count: '2',
+          broken_count: '1',
+        },
+        {
+          family: 'variant_group',
+          country: 'US',
+          asin_key: 'BPAD',
+          dimension_one: 'cagg-vg-pad',
+          dimension_two: 'Pad Name',
+          check_count: '2',
+          broken_count: '1',
+        },
+      ]);
+      const padSpaceFallback = await primaryTarget.query<{
+        asin_key: string;
+      }>(`
+        SELECT asin_key
+        FROM public.monitor_history_cagg_asin_hour
+        WHERE time_slot = timestamp '2026-08-21 03:00:00'
+      `);
+      expect(padSpaceFallback.rows).toEqual([{ asin_key: 'ID#pad-fallback' }]);
+
+      const peakAndMonthBoundary = await primaryTarget.query<{
+        time_slot: string;
+        has_peak: boolean;
+      }>(`
+        SELECT
+          to_char(time_slot, 'YYYY-MM-DD HH24:MI:SS') AS time_slot,
+          has_peak
+        FROM public.monitor_history_agg_v2
+        WHERE granularity = 'month'
+          AND asin_key = 'BPEAKUS'
+        ORDER BY time_slot
+      `);
+      expect(peakAndMonthBoundary.rows).toEqual([
+        { time_slot: '2026-08-01 00:00:00', has_peak: true },
+        { time_slot: '2026-09-01 00:00:00', has_peak: true },
+      ]);
+      const lowHour = await primaryTarget.query<{ has_peak: boolean }>(`
+        SELECT has_peak
+        FROM public.monitor_history_agg_v2
+        WHERE granularity = 'hour'
+          AND country = 'IT'
+          AND asin_key = 'BLOWIT'
+      `);
+      expect(lowHour.rows).toEqual([{ has_peak: false }]);
+
+      await primaryTarget.query(`
+        INSERT INTO public.monitor_history (
+          variant_group_id, variant_group_name, asin_id, asin_code, asin_name,
+          site_snapshot, brand_snapshot, check_type, country, is_broken,
+          check_time, notification_sent
+        ) VALUES (
+          'cagg-vg-us', 'Snapshot US', 'asin-us', 'BPEAKUS', 'US Peak',
+          NULL, NULL, 'ASIN', 'US', false, '2026-08-31 18:45:00', false
+        )
+      `);
+      await rebuildLegacyAggregateFixture();
+      const late = await runTimescaleAggregateGate(aggregateConfig, logger);
+      expect(timescaleAggregateReportSchema.parse(late).status).toBe('passed');
+      expect(late.checks[0].caggValueDigest).not.toBe(
+        first.checks[0].caggValueDigest,
+      );
+      const lateBucket = await primaryTarget.query<{
+        check_count: string;
+        broken_count: string;
+        first_check_time: string;
+        last_check_time: string;
+      }>(`
+        SELECT
+          check_count::text,
+          broken_count::text,
+          to_char(first_check_time, 'YYYY-MM-DD HH24:MI:SS') AS first_check_time,
+          to_char(last_check_time, 'YYYY-MM-DD HH24:MI:SS') AS last_check_time
+        FROM public.monitor_history_cagg_asin_hour
+        WHERE time_slot = timestamp '2026-08-31 18:00:00'
+          AND country = 'US'
+          AND asin_key = 'BPEAKUS'
+      `);
+      expect(lateBucket.rows).toEqual([
+        {
+          check_count: '2',
+          broken_count: '1',
+          first_check_time: '2026-08-31 18:30:00',
+          last_check_time: '2026-08-31 18:45:00',
+        },
+      ]);
+
+      await primaryTarget.query(`
+        UPDATE public.monitor_history_agg
+        SET broken_count = broken_count + 1
+        WHERE granularity = 'hour'
+          AND time_slot = timestamp '2026-08-31 18:00:00'
+          AND country = 'US'
+          AND asin_key = 'BPEAKUS'
+      `);
+      const mismatch = await runTimescaleAggregateGate(
+        { ...aggregateConfig, refresh: false },
+        logger,
+      );
+      expect(mismatch.status).toBe('failed');
+      expect(mismatch.failure).toEqual({
+        code: 'AGGREGATE_RECONCILIATION_MISMATCH',
+        scope: 'aggregate.reconciliation',
+      });
+      expect(mismatch.checks[0].status).toBe('failed');
+
+      await runDataMigration(migrationConfig, logger);
+      const resetMaterializations = await primaryTarget.query<{
+        materialized_rows: string;
+      }>(`
+        SELECT (
+          (SELECT COUNT(*) FROM public.monitor_history_agg_v2) +
+          (SELECT COUNT(*) FROM public.monitor_history_agg_dim_v2) +
+          (SELECT COUNT(*) FROM public.monitor_history_agg_variant_group_v2)
+        )::text AS materialized_rows
+      `);
+      expect(resetMaterializations.rows).toEqual([{ materialized_rows: '0' }]);
+    }, 120_000);
   },
 );

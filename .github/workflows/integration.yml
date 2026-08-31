@@ -112,6 +112,13 @@ jobs:
           docker exec --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-baseline.sh /tmp/0000_baseline.sql
           docker exec --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-baseline.sh /tmp/0000_baseline.sql
 
+      - name: Apply Timescale aggregate upgrade twice
+        run: |
+          docker cp packages/db/docker/apply-timescale-aggregates.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-timescale-aggregates.sh"
+          docker cp packages/db/migrations/0001_timescale_aggregates.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0001_timescale_aggregates.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-timescale-aggregates.sh /tmp/0001_timescale_aggregates.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-timescale-aggregates.sh /tmp/0001_timescale_aggregates.sql
+
       - name: Run Redis and MySQL integration tests
         run: pnpm --filter amazon-asin-monitor-server run test:integration
 

@@ -4,6 +4,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  timescaleAggregateProjectionViewNames,
+  timescaleContinuousAggregateViewNames,
+} from '../src/timescale';
+import {
   competitorDrizzleTables,
   competitorTableNames,
   drizzleTableNames,
@@ -15,6 +19,8 @@ const workspaceRoot = resolve(__dirname, '../../..');
 const read = (relativePath: string) =>
   readFileSync(resolve(workspaceRoot, relativePath), 'utf8');
 const baselinePath = 'packages/db/migrations/0000_baseline.sql';
+const timescaleMigrationPath =
+  'packages/db/migrations/0001_timescale_aggregates.sql';
 
 describe('PostgreSQL 双库 Schema 基线', () => {
   it('Drizzle 事实源覆盖 Legacy 最终态 21 + 4 张表', () => {
@@ -91,5 +97,79 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(migrationFiles).toHaveLength(33);
     expect(migrationGuide).toContain('历史冻结');
     expect(migrationGuide).toContain(baselinePath);
+  });
+
+  it('有序升级将历史表转换为 7 天 hypertable 并保留 Legacy 聚合 Gate', () => {
+    const migration = read(timescaleMigrationPath);
+
+    expect(
+      migration.indexOf('SET search_path TO pg_catalog, public;'),
+    ).toBeLessThan(migration.indexOf('BEGIN;'));
+    expect(migration).toContain("by_range('check_time', INTERVAL '7 days')");
+    expect(migration).toContain('migrate_data => true');
+    expect(migration).toContain(
+      'ADD CONSTRAINT monitor_history_pkey PRIMARY KEY (check_time, id)',
+    );
+    expect(migration).not.toMatch(
+      /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.monitor_history_agg/i,
+    );
+    expect(migration).not.toMatch(
+      /DROP\s+TABLE[^;]*analytics_refresh_watermark/i,
+    );
+  });
+
+  it('九个 CAGG 显式 materialized-only、WITH NO DATA 并配置刷新策略', () => {
+    const migration = read(timescaleMigrationPath);
+    const createdCaggs = [
+      ...migration.matchAll(
+        /CREATE MATERIALIZED VIEW IF NOT EXISTS public\.([a-z0-9_]+)/g,
+      ),
+    ].map((match) => match[1]);
+
+    expect(createdCaggs).toEqual([...timescaleContinuousAggregateViewNames]);
+    expect(
+      migration.match(/timescaledb\.materialized_only = true/g),
+    ).toHaveLength(18);
+    expect(migration.match(/WITH NO DATA;/g)).toHaveLength(9);
+    expect(migration.match(/add_continuous_aggregate_policy\(/g)).toHaveLength(
+      9,
+    );
+    expect(migration.match(/if_not_exists => true/g)).toHaveLength(9);
+    expect(migration.match(/timezone => 'Asia\/Shanghai'/g)).toHaveLength(9);
+    expect(migration.match(/end_offset => INTERVAL '0'/g)).toHaveLength(9);
+    expect(migration).toContain(
+      'CREATE COLLATION IF NOT EXISTS public.legacy_utf8mb4_unicode_ci',
+    );
+    expect(migration).toContain("locale = 'und-u-ks-level1'");
+    expect(migration).toContain('deterministic = false');
+    expect(
+      migration.match(/COLLATE public\.legacy_utf8mb4_unicode_ci/g)?.length,
+    ).toBeGreaterThanOrEqual(60);
+    expect(migration.match(/rtrim\(/g)?.length).toBeGreaterThanOrEqual(80);
+    expect(
+      migration.match(/LEFT JOIN public\.variant_groups variant_group/g),
+    ).toHaveLength(3);
+    expect(migration).toContain(
+      'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:',
+    );
+    expect(migration).toContain('expected_definitions constant jsonb');
+    expect(migration).toContain('asin_monitor.cagg_expected_definitions');
+    expect(migration).toContain(
+      'continuous aggregate definition fingerprint mismatch',
+    );
+    expect(migration).toContain(
+      'continuous aggregate declared definition fingerprint mismatch',
+    );
+  });
+
+  it('CAGG 与兼容投影视图只暴露只读元数据，不伪装成 Drizzle 表', () => {
+    const migration = read(timescaleMigrationPath);
+    for (const viewName of timescaleAggregateProjectionViewNames) {
+      expect(migration).toContain(`VIEW public.${viewName} AS`);
+      expect(primaryTableNames).not.toContain(viewName);
+    }
+    for (const caggName of timescaleContinuousAggregateViewNames) {
+      expect(primaryTableNames).not.toContain(caggName);
+    }
   });
 });

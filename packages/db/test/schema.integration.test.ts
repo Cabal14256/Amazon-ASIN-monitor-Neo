@@ -1,8 +1,15 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { loadEnvironmentFiles } from '@asin-monitor/config';
 
 import { createPgPool } from '../src/client';
+import {
+  timescaleAggregateProjectionViewNames,
+  timescaleContinuousAggregateViewNames,
+} from '../src/timescale';
 import {
   competitorDrizzleTables,
   competitorTableNames,
@@ -149,6 +156,368 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       'competitor_feishu_config_country_unique',
       'uk_competitor_asins_asin_country',
     ]);
+  });
+
+  it('monitor_history 是 7 天单时间维 hypertable 且复合主键包含分区键', async () => {
+    const hypertable = await primaryPool.query<{
+      hypertable_name: string;
+      num_dimensions: number;
+    }>(`
+      SELECT hypertable_name, num_dimensions
+      FROM timescaledb_information.hypertables
+      WHERE hypertable_schema = 'public'
+        AND hypertable_name = 'monitor_history'
+    `);
+    expect(hypertable.rows).toEqual([
+      { hypertable_name: 'monitor_history', num_dimensions: 1 },
+    ]);
+
+    const dimension = await primaryPool.query<{
+      column_name: string;
+      dimension_type: string;
+      time_interval: string;
+    }>(`
+      SELECT column_name, dimension_type, time_interval::text
+      FROM timescaledb_information.dimensions
+      WHERE hypertable_schema = 'public'
+        AND hypertable_name = 'monitor_history'
+    `);
+    expect(dimension.rows).toEqual([
+      {
+        column_name: 'check_time',
+        dimension_type: 'Time',
+        time_interval: '7 days',
+      },
+    ]);
+
+    const primaryKey = await primaryPool.query<{ columns: string[] }>(`
+      SELECT ARRAY_AGG(attribute.attname::text ORDER BY key.position) AS columns
+      FROM pg_constraint constraint_row
+      CROSS JOIN LATERAL
+        unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, position)
+      JOIN pg_attribute attribute
+        ON attribute.attrelid = constraint_row.conrelid
+       AND attribute.attnum = key.attnum
+      WHERE constraint_row.conrelid = 'public.monitor_history'::regclass
+        AND constraint_row.contype = 'p'
+    `);
+    expect(primaryKey.rows).toEqual([{ columns: ['check_time', 'id'] }]);
+
+    const competitorHypertables = await competitorPool.query<{
+      count: string;
+    }>(`
+      SELECT COUNT(*)::text AS count
+      FROM timescaledb_information.hypertables
+      WHERE hypertable_schema = 'public'
+    `);
+    expect(competitorHypertables.rows[0].count).toBe('0');
+  });
+
+  it('九个 CAGG 均为 materialized-only，三类只读投影视图和九条策略唯一', async () => {
+    const aggregates = await primaryPool.query<{
+      view_name: string;
+      materialized_only: boolean;
+    }>(`
+      SELECT view_name, materialized_only
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+      ORDER BY view_name
+    `);
+    expect(aggregates.rows).toEqual(
+      [...timescaleContinuousAggregateViewNames].sort().map((view_name) => ({
+        view_name,
+        materialized_only: true,
+      })),
+    );
+
+    const definitionFingerprints = await primaryPool.query<{
+      view_name: string;
+      definition_fingerprint: string;
+      definition_marker: string | null;
+    }>(`
+      SELECT
+        view_name,
+        md5(regexp_replace(
+          view_definition,
+          '[[:space:]]+',
+          ' ',
+          'g'
+        )) AS definition_fingerprint,
+        obj_description(
+          format('%I.%I', view_schema, view_name)::regclass,
+          'pg_class'
+        ) AS definition_marker
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+      ORDER BY view_name
+    `);
+    expect(definitionFingerprints.rows).toEqual([
+      {
+        view_name: 'monitor_history_cagg_asin_day',
+        definition_fingerprint: '1b7e82e30be65a827df91d5aa5b040c9',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:1b7e82e30be65a827df91d5aa5b040c9',
+      },
+      {
+        view_name: 'monitor_history_cagg_asin_hour',
+        definition_fingerprint: 'c8fbca31141d9ff2fd87bb2bc27a23da',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:c8fbca31141d9ff2fd87bb2bc27a23da',
+      },
+      {
+        view_name: 'monitor_history_cagg_asin_month',
+        definition_fingerprint: 'b7e5ab6f505add599994843dafe1b1e2',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:b7e5ab6f505add599994843dafe1b1e2',
+      },
+      {
+        view_name: 'monitor_history_cagg_dim_day',
+        definition_fingerprint: 'f77caf1fe9c24ced94d2e3248847ef3f',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:f77caf1fe9c24ced94d2e3248847ef3f',
+      },
+      {
+        view_name: 'monitor_history_cagg_dim_hour',
+        definition_fingerprint: 'fd463ab0f4fd3ee1984f43864b8bd130',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:fd463ab0f4fd3ee1984f43864b8bd130',
+      },
+      {
+        view_name: 'monitor_history_cagg_dim_month',
+        definition_fingerprint: '37c470c8fe8198ada8aeb2b7f3fd6066',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:37c470c8fe8198ada8aeb2b7f3fd6066',
+      },
+      {
+        view_name: 'monitor_history_cagg_variant_group_day',
+        definition_fingerprint: '5ab32fcf37370bc31d3c5940d31c7b38',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:5ab32fcf37370bc31d3c5940d31c7b38',
+      },
+      {
+        view_name: 'monitor_history_cagg_variant_group_hour',
+        definition_fingerprint: '188e2199865d8f41489bdc08f02ee4b9',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:188e2199865d8f41489bdc08f02ee4b9',
+      },
+      {
+        view_name: 'monitor_history_cagg_variant_group_month',
+        definition_fingerprint: 'd23ff17c43d69097626a6232a37b725b',
+        definition_marker:
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v2:md5:d23ff17c43d69097626a6232a37b725b',
+      },
+    ]);
+
+    const variantFallbacks = await primaryPool.query<{
+      view_name: string;
+      fallback_materialized: boolean;
+    }>(`
+      SELECT
+        view_name,
+        POSITION('variant_groups' IN view_definition) > 0
+          AS fallback_materialized
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+        AND view_name LIKE 'monitor_history_cagg_variant_group_%'
+      ORDER BY view_name
+    `);
+    expect(variantFallbacks.rows).toEqual(
+      ['day', 'hour', 'month'].map((granularity) => ({
+        view_name: `monitor_history_cagg_variant_group_${granularity}`,
+        fallback_materialized: true,
+      })),
+    );
+
+    const projections = await primaryPool.query<{ table_name: string }>(
+      `
+      SELECT table_name
+      FROM information_schema.views
+      WHERE table_schema = 'public'
+        AND table_name = ANY($1::text[])
+      ORDER BY table_name
+    `,
+      [timescaleAggregateProjectionViewNames],
+    );
+    expect(projections.rows.map(({ table_name }) => table_name)).toEqual(
+      [...timescaleAggregateProjectionViewNames].sort(),
+    );
+
+    const policies = await primaryPool.query<{
+      view_name: string;
+      policy_matches: boolean;
+    }>(
+      `
+      WITH expected_policy (
+        view_name,
+        start_offset,
+        end_offset,
+        schedule_interval
+      ) AS (
+        VALUES
+          ('monitor_history_cagg_asin_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_dim_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_variant_group_hour', INTERVAL '49 hours', INTERVAL '0', INTERVAL '10 minutes'),
+          ('monitor_history_cagg_asin_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+          ('monitor_history_cagg_dim_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+          ('monitor_history_cagg_variant_group_day', INTERVAL '32 days', INTERVAL '0', INTERVAL '1 hour'),
+          ('monitor_history_cagg_asin_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+          ('monitor_history_cagg_dim_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day'),
+          ('monitor_history_cagg_variant_group_month', INTERVAL '25 months', INTERVAL '0', INTERVAL '1 day')
+      ), selected_materializations AS (
+        SELECT
+          expected_policy.*,
+          materialization_hypertable_schema AS schema_name,
+          materialization_hypertable_name AS table_name
+        FROM expected_policy
+        JOIN timescaledb_information.continuous_aggregates aggregate_row
+          ON aggregate_row.view_schema = 'public'
+         AND aggregate_row.view_name = expected_policy.view_name
+      ), selected_ids AS (
+        SELECT materialization.*, hypertable.id
+        FROM _timescaledb_catalog.hypertable hypertable
+        JOIN selected_materializations materialization
+          ON materialization.schema_name = hypertable.schema_name
+         AND materialization.table_name = hypertable.table_name
+      )
+      SELECT
+        selected_ids.view_name,
+        jobs.schedule_interval = selected_ids.schedule_interval
+          AND (jobs.config ->> 'start_offset')::interval = selected_ids.start_offset
+          AND (jobs.config ->> 'end_offset')::interval = selected_ids.end_offset
+          AND jobs.scheduled
+          AND jobs.fixed_schedule
+          AND jobs.initial_start = TIMESTAMPTZ '2026-01-01 00:00:00+08'
+          AND catalog_job.timezone = 'Asia/Shanghai' AS policy_matches
+      FROM selected_ids
+      JOIN timescaledb_information.jobs jobs
+        ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
+       AND (jobs.config ->> 'mat_hypertable_id')::integer = selected_ids.id
+      JOIN _timescaledb_catalog.bgw_job catalog_job
+        ON catalog_job.id = jobs.job_id
+      ORDER BY selected_ids.view_name
+    `,
+    );
+    expect(policies.rows).toEqual(
+      [...timescaleContinuousAggregateViewNames]
+        .sort()
+        .map((view_name) => ({ view_name, policy_matches: true })),
+    );
+  });
+
+  it('CAGG 文本分组显式采用 Legacy 大小写与重音不敏感排序规则', async () => {
+    const collation = await primaryPool.query<{
+      provider: string;
+      deterministic: boolean;
+      locale: string;
+    }>(`
+      SELECT
+        collprovider AS provider,
+        collisdeterministic AS deterministic,
+        colliculocale AS locale
+      FROM pg_collation
+      WHERE collname = 'legacy_utf8mb4_unicode_ci'
+        AND collnamespace = 'public'::regnamespace
+    `);
+    expect(collation.rows).toEqual([
+      { provider: 'i', deterministic: false, locale: 'und-u-ks-level1' },
+    ]);
+
+    const columns = await primaryPool.query<{ matching_columns: number }>(`
+      SELECT COUNT(*) FILTER (
+        WHERE attribute.attcollation =
+          'public.legacy_utf8mb4_unicode_ci'::regcollation::oid
+      )::integer AS matching_columns
+      FROM pg_attribute attribute
+      JOIN pg_class relation ON relation.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = 'public'
+        AND attribute.attnum > 0
+        AND NOT attribute.attisdropped
+        AND (
+          (relation.relname LIKE 'monitor_history_cagg_asin_%'
+            AND attribute.attname IN ('country', 'asin_key'))
+          OR (relation.relname LIKE 'monitor_history_cagg_dim_%'
+            AND attribute.attname IN ('country', 'site', 'brand', 'asin_key'))
+          OR (relation.relname LIKE 'monitor_history_cagg_variant_group_%'
+            AND attribute.attname IN (
+              'country', 'variant_group_id',
+              'variant_group_name_snapshot', 'asin_key'
+            ))
+        )
+    `);
+    expect(columns.rows).toEqual([{ matching_columns: 30 }]);
+  });
+
+  it('重复升级会拒绝已存在但参数错误的刷新策略', async () => {
+    const client = await primaryPool.connect();
+    let jobId: number | undefined;
+    try {
+      const job = await client.query<{ job_id: number }>(`
+        SELECT jobs.job_id
+        FROM timescaledb_information.continuous_aggregates aggregate_row
+        JOIN _timescaledb_catalog.hypertable hypertable
+          ON hypertable.schema_name = aggregate_row.materialization_hypertable_schema
+         AND hypertable.table_name = aggregate_row.materialization_hypertable_name
+        JOIN timescaledb_information.jobs jobs
+          ON jobs.proc_name = 'policy_refresh_continuous_aggregate'
+         AND (jobs.config ->> 'mat_hypertable_id')::integer = hypertable.id
+        WHERE aggregate_row.view_schema = 'public'
+          AND aggregate_row.view_name = 'monitor_history_cagg_asin_hour'
+      `);
+      expect(job.rows).toHaveLength(1);
+      jobId = job.rows[0].job_id;
+      await client.query(
+        `SELECT alter_job($1, schedule_interval => INTERVAL '11 minutes')`,
+        [jobId],
+      );
+      const migration = readFileSync(
+        resolve(__dirname, '../migrations/0001_timescale_aggregates.sql'),
+        'utf8',
+      );
+      await expect(client.query(migration)).rejects.toThrow(
+        /continuous aggregate refresh policy postflight mismatch/,
+      );
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (jobId !== undefined) {
+        await client.query(`
+          SELECT remove_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            if_exists => true
+          );
+          SELECT add_continuous_aggregate_policy(
+            'public.monitor_history_cagg_asin_hour'::regclass,
+            start_offset => INTERVAL '49 hours',
+            end_offset => INTERVAL '0',
+            schedule_interval => INTERVAL '10 minutes',
+            initial_start => TIMESTAMPTZ '2026-01-01 00:00:00+08',
+            timezone => 'Asia/Shanghai'
+          );
+        `);
+      }
+      client.release();
+    }
+  });
+
+  it('重复升级会拒绝缺少精确定义指纹的旧 CAGG', async () => {
+    const client = await primaryPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`
+        COMMENT ON VIEW public.monitor_history_cagg_asin_hour
+        IS 'unmanaged-definition'
+      `);
+      const migration = readFileSync(
+        resolve(__dirname, '../migrations/0001_timescale_aggregates.sql'),
+        'utf8',
+      );
+      await expect(client.query(migration)).rejects.toThrow(
+        /continuous aggregate definition fingerprint mismatch/,
+      );
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+    }
   });
 
   it('PG 类型映射、identity、生成列与五个 CHECK 均生效', async () => {

@@ -18,6 +18,7 @@
     "migrate:data": "node dist/migration/cli.js",
     "test": "corepack pnpm --filter @asin-monitor/config build && corepack pnpm --filter @asin-monitor/contracts build && vitest run --exclude test/environment.integration.test.ts --exclude test/schema.integration.test.ts --exclude test/data-migration.integration.test.ts",
     "test:integration": "corepack pnpm --filter @asin-monitor/config build && corepack pnpm --filter @asin-monitor/contracts build && vitest run test/environment.integration.test.ts test/schema.integration.test.ts && vitest run test/data-migration.integration.test.ts",
+    "timescale:aggregate:gate": "node dist/aggregate-reconciliation/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
