@@ -158,25 +158,25 @@ export const monitorHistory = pgTable(
     index('idx_monitor_history_id_lookup').on(table.id),
     index('idx_monitor_history_variant_group_time').on(
       table.variantGroupId,
-      table.checkTime.desc(),
-      table.id.desc(),
+      table.checkTime.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
     ),
     index('idx_monitor_history_country_time').on(
       table.country,
-      table.checkTime.desc(),
-      table.id.desc(),
+      table.checkTime.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
     ),
     index('idx_monitor_history_asin_code_country_time').on(
       table.asinCode,
       table.country,
-      table.checkTime.desc(),
-      table.id.desc(),
+      table.checkTime.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
     ),
     index('idx_monitor_history_asin_country_time').on(
       table.asinId,
       table.country,
-      table.checkTime.desc(),
-      table.id.desc(),
+      table.checkTime.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
     ),
     index('idx_monitor_history_status_interval_refresh').on(
       table.checkType,

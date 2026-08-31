@@ -166,16 +166,16 @@ CREATE INDEX IF NOT EXISTS idx_monitor_history_id_lookup
 CREATE INDEX IF NOT EXISTS idx_monitor_history_variant_group_time
   ON public.monitor_history (
     variant_group_id,
-    check_time DESC NULLS LAST,
-    id DESC NULLS LAST
+    check_time DESC,
+    id DESC
   )
   WITH (timescaledb.transaction_per_chunk);
 
 CREATE INDEX IF NOT EXISTS idx_monitor_history_country_time
   ON public.monitor_history (
     country,
-    check_time DESC NULLS LAST,
-    id DESC NULLS LAST
+    check_time DESC,
+    id DESC
   )
   WITH (timescaledb.transaction_per_chunk);
 
@@ -183,8 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_monitor_history_asin_code_country_time
   ON public.monitor_history (
     asin_code,
     country,
-    check_time DESC NULLS LAST,
-    id DESC NULLS LAST
+    check_time DESC,
+    id DESC
   )
   WITH (timescaledb.transaction_per_chunk);
 
@@ -192,8 +192,8 @@ CREATE INDEX IF NOT EXISTS idx_monitor_history_asin_country_time
   ON public.monitor_history (
     asin_id,
     country,
-    check_time DESC NULLS LAST,
-    id DESC NULLS LAST
+    check_time DESC,
+    id DESC
   )
   WITH (timescaledb.transaction_per_chunk);
 
@@ -521,10 +521,10 @@ BEGIN
   ) AS (
     VALUES
       ('idx_monitor_history_id_lookup', ARRAY['id']::text[], ARRAY[0]::smallint[], ''),
-      ('idx_monitor_history_variant_group_time', ARRAY['variant_group_id', 'check_time', 'id']::text[], ARRAY[0, 1, 1]::smallint[], ''),
-      ('idx_monitor_history_country_time', ARRAY['country', 'check_time', 'id']::text[], ARRAY[0, 1, 1]::smallint[], ''),
-      ('idx_monitor_history_asin_code_country_time', ARRAY['asin_code', 'country', 'check_time', 'id']::text[], ARRAY[0, 0, 1, 1]::smallint[], ''),
-      ('idx_monitor_history_asin_country_time', ARRAY['asin_id', 'country', 'check_time', 'id']::text[], ARRAY[0, 0, 1, 1]::smallint[], ''),
+      ('idx_monitor_history_variant_group_time', ARRAY['variant_group_id', 'check_time', 'id']::text[], ARRAY[0, 3, 3]::smallint[], ''),
+      ('idx_monitor_history_country_time', ARRAY['country', 'check_time', 'id']::text[], ARRAY[0, 3, 3]::smallint[], ''),
+      ('idx_monitor_history_asin_code_country_time', ARRAY['asin_code', 'country', 'check_time', 'id']::text[], ARRAY[0, 0, 3, 3]::smallint[], ''),
+      ('idx_monitor_history_asin_country_time', ARRAY['asin_id', 'country', 'check_time', 'id']::text[], ARRAY[0, 0, 3, 3]::smallint[], ''),
       ('idx_monitor_history_status_interval_refresh', ARRAY['check_type', 'check_time', 'id']::text[], ARRAY[0, 0, 0]::smallint[], ''),
       ('idx_monitor_history_notification_pending', ARRAY['country', 'check_time', 'id']::text[], ARRAY[0, 0, 0]::smallint[], 'is_broken=trueandnotification_sent=false')
   ), actual_index AS (
