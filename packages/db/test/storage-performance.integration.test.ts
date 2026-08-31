@@ -58,7 +58,9 @@ type BenchmarkEvidence = {
   raw: TimingStats;
   cagg: TimingStats;
   p95Speedup: number;
-  normalizedDigest: string;
+  correct: boolean;
+  rawDigest: string;
+  caggDigest: string;
 };
 
 type PerformanceReport = {
@@ -355,13 +357,13 @@ async function runBenchmarkCase(options: {
 
   const normalizedRaw = normalizedRows(rawRows);
   const normalizedCagg = normalizedRows(caggRows);
+  const correct = normalizedRaw === normalizedCagg;
   const caseName = `${options.window}-${options.granularity}-${
     options.filtered ? 'country-site-brand' : 'all'
   }`;
-  if (normalizedRaw !== normalizedCagg) {
+  if (!correct) {
     report.gate.failures.push(`${caseName}: normalized result mismatch`);
   }
-  expect(normalizedCagg).toBe(normalizedRaw);
 
   const raw = timingStats(rawSamples);
   const cagg = timingStats(caggSamples);
@@ -371,8 +373,6 @@ async function runBenchmarkCase(options: {
       `${caseName}: P95 speedup ${p95Speedup}x is below ${report.gate.requiredP95Speedup}x`,
     );
   }
-  expect(p95Speedup).toBeGreaterThanOrEqual(report.gate.requiredP95Speedup);
-
   return {
     case: caseName,
     window: options.window,
@@ -381,7 +381,9 @@ async function runBenchmarkCase(options: {
     raw,
     cagg,
     p95Speedup,
-    normalizedDigest: createHash('sha256').update(normalizedRaw).digest('hex'),
+    correct,
+    rawDigest: createHash('sha256').update(normalizedRaw).digest('hex'),
+    caggDigest: createHash('sha256').update(normalizedCagg).digest('hex'),
   };
 }
 
@@ -455,13 +457,16 @@ describe.skipIf(!integrationEnabled)(
             'perf-asin-' || ((series_id - 1) % 24),
             'P' || lpad((((series_id - 1) % 24) + 1)::text, 9, '0'),
             'Performance ASIN ' || ((series_id - 1) % 24),
-            'store-' || (((series_id - 1) / 6) % 3),
-            'brand-' || (((series_id - 1) / 18) % 4),
+            'store-' || (((series_id - 1) % 24) % 3),
+            'brand-' || (((series_id - 1) % 24) % 4),
             'ASIN',
             (ARRAY['US', 'UK', 'DE', 'FR', 'ES', 'IT'])[((series_id - 1) % 6) + 1],
             series_id % 11 = 0,
             $1::timestamp
-              + (mod(series_id * 7919::bigint, 5184000) * INTERVAL '1 second'),
+              + (
+                mod(((series_id - 1) / 24) * 345::bigint, 5184000)
+                * INTERVAL '1 second'
+              ),
             jsonb_build_object('fixture', 'P1-T4b', 'sequence', series_id),
             false,
             $1::timestamp
@@ -600,6 +605,7 @@ describe.skipIf(!integrationEnabled)(
         }
       }
       expect(report.benchmarks).toHaveLength(12);
+      expect(report.gate.failures).toEqual([]);
     }, 300_000);
 
     it('supports columnstore reads, late writes and analytical reads during an open high-frequency write transaction', async () => {
