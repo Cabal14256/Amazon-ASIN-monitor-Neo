@@ -15,18 +15,20 @@ The script generates this report automatically. Do not paste response bodies, to
 
 ## Gate summary
 
-| Gate                                            | Result |
-| ----------------------------------------------- | ------ |
-| Complete two-window, hour/day/month matrix      |        |
-| Every warmup and measured request succeeded     |        |
-| Every target produced the required sample count |        |
-| Every normalized old/new response matched       |        |
-| Every case achieved old/new P95 >= 3x           |        |
+| Gate                                             | Result |
+| ------------------------------------------------ | ------ |
+| Complete two-window, hour/day/month matrix       |        |
+| Every warmup and measured request succeeded      |        |
+| Every response used the expected matching status |        |
+| Every target produced the required sample count  |        |
+| Every case returned non-empty business data      |        |
+| Every normalized old/new response matched        |        |
+| Every case achieved old/new P95 >= 3x            |        |
 
 ## Case results
 
-| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Correct | Passed |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | Correct | Passed |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
 
 ## Reproduction
 

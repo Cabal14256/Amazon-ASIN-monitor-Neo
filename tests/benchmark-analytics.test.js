@@ -10,11 +10,13 @@ const {
   buildConfig,
   buildMatrix,
   calcStats,
+  comparePairResults,
   comparableResponse,
   digestValue,
   firstDifferencePath,
   joinApiUrl,
   normalizeBaseUrl,
+  responseCardinality,
 } = require('../scripts/benchmark-analytics');
 
 function completeArgs(overrides = {}) {
@@ -118,6 +120,92 @@ test('promotion matrix covers two windows, three granularities and filters', () 
     () => buildConfig(completeArgs({ runs: '4' })),
     /--runs must be an integer >= 5/,
   );
+  assert.throws(
+    () => buildConfig(completeArgs({ 'min-speedup': '2.99' })),
+    /--min-speedup must be a number >= 3/,
+  );
+  assert.equal(config.minSpeedup, 3);
+  assert.ok(
+    matrix.every(
+      (benchmarkCase) =>
+        benchmarkCase.expectedStatus === 200 &&
+        benchmarkCase.minimumCardinality === 1 &&
+        benchmarkCase.cardinalityPath.length > 0,
+    ),
+  );
+});
+
+test('cardinality gate rejects empty and missing business results', () => {
+  assert.equal(
+    responseCardinality(
+      comparableResponse({ success: true, data: { list: [{ id: 1 }] } }),
+      ['data', 'list'],
+    ),
+    1,
+  );
+  assert.equal(
+    responseCardinality(
+      comparableResponse({ success: true, data: { list: [] } }),
+      ['data', 'list'],
+    ),
+    0,
+  );
+  assert.equal(
+    responseCardinality(
+      comparableResponse({ success: true, data: { totalChecks: 42 } }),
+      ['data', 'totalChecks'],
+    ),
+    42,
+  );
+  assert.equal(
+    responseCardinality(comparableResponse({ success: true, data: {} }), [
+      'data',
+      'list',
+    ]),
+    null,
+  );
+});
+
+test('pair comparison rejects empty results and divergent success statuses', () => {
+  const benchmarkCase = {
+    expectedStatus: 200,
+    cardinalityPath: ['data', 'list'],
+    minimumCardinality: 1,
+  };
+  const result = (status, list) => ({
+    status,
+    comparable: comparableResponse({ success: true, data: { list } }),
+  });
+
+  const empty = comparePairResults(
+    result(200, []),
+    result(200, []),
+    benchmarkCase,
+    1,
+  );
+  assert.equal(empty.matches, false);
+  assert.equal(empty.cardinalityMatches, false);
+  assert.equal(empty.differencePath, '$.__cardinality');
+
+  const divergentStatus = comparePairResults(
+    result(200, [{ id: 1 }]),
+    result(201, [{ id: 1 }]),
+    benchmarkCase,
+    2,
+  );
+  assert.equal(divergentStatus.matches, false);
+  assert.equal(divergentStatus.statusesMatch, false);
+  assert.equal(divergentStatus.differencePath, '$.__httpStatus');
+
+  const matching = comparePairResults(
+    result(200, [{ id: 1 }]),
+    result(200, [{ id: 1 }]),
+    benchmarkCase,
+    3,
+  );
+  assert.equal(matching.matches, true);
+  assert.equal(matching.cardinalityMatches, true);
+  assert.equal(matching.statusesMatch, true);
 });
 
 test('statistics require successful samples and expose p50/p90/p95', () => {

@@ -34,7 +34,7 @@ CI 为了稳定证明索引可用，会在单个只读事务中设置 `enable_se
 
 ## CAGG 索引与 BRIN 决策
 
-P1-T4a 在创建 CAGG 时显式设置 `timescaledb.create_group_indexes=false`，避免 Timescale 隐式决定 group-key 索引集合。P1-T4b 按每个分组键建立 `(key, time_slot)`：ASIN 每个粒度 2 个，dimension 每个粒度 4 个，variant-group 每个粒度 4 个，共 `(2 + 4 + 4) × 3 = 30` 个。Timescale 2.29.2 仍会为每个背景 hypertable 创建 1 个 `time_slot` 索引用于时间裁剪，因此 postflight 精确要求 30 个复合索引、9 个单时间索引、总计 39 个，并拒绝缺失、多余、非 B-tree、invalid 或 not-ready 的集合。
+P1-T4a 在创建 CAGG 时显式设置 `timescaledb.create_group_indexes=false`，避免 Timescale 隐式决定 group-key 索引集合。P1-T4b 按每个分组键建立 `(key, time_slot)`：ASIN 每个粒度 2 个，dimension 每个粒度 4 个，variant-group 每个粒度 4 个，共 `(2 + 4 + 4) × 3 = 30` 个。Timescale 2.29.2 仍会为每个背景 hypertable 创建 1 个 `time_slot` B-tree 用于时间裁剪，因此 postflight 精确要求 30 个复合索引、9 个单时间索引、总计 39 个，并逐项校验受管名称、所属 CAGG、键顺序、ASC/DESC 与 NULL 排序、唯一性、谓词、key/include 数量、访问方法和 ready/valid 状态；总数相同也不能掩盖定义漂移。
 
 本阶段不增加 BRIN。理由是原始表已按 7 天 chunk 做时间裁剪，主键以 `check_time` 开头，核心过滤还需要国家/ASIN/变体组等高选择性前缀；在当前数据量下再加 BRIN 只会增加写入与维护成本，并不能替代这些复合 B-tree。以下条件同时成立时再开独立 Issue 复评：单 chunk 大到默认时间扫描出现显著 shared-read 增长、相关性仍接近 1、`EXPLAIN ANALYZE` 证明 BRIN 的 P95/空间收益，并且写吞吐回归通过。
 

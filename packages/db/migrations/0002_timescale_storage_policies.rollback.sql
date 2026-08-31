@@ -70,8 +70,60 @@ BEGIN
     SELECT namespace.nspname AS schema_name, relation.relname AS index_name
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    JOIN pg_index catalog_index ON catalog_index.indexrelid = relation.oid
     WHERE relation.relkind = 'i'
-      AND relation.relname LIKE 'idx_cagg_%'
+      AND relation.relname = ANY(ARRAY[
+        'idx_cagg_asin_hour_country_time',
+        'idx_cagg_asin_hour_asin_key_time',
+        'idx_cagg_asin_day_country_time',
+        'idx_cagg_asin_day_asin_key_time',
+        'idx_cagg_asin_month_country_time',
+        'idx_cagg_asin_month_asin_key_time',
+        'idx_cagg_dim_hour_country_time',
+        'idx_cagg_dim_hour_site_time',
+        'idx_cagg_dim_hour_brand_time',
+        'idx_cagg_dim_hour_asin_key_time',
+        'idx_cagg_dim_day_country_time',
+        'idx_cagg_dim_day_site_time',
+        'idx_cagg_dim_day_brand_time',
+        'idx_cagg_dim_day_asin_key_time',
+        'idx_cagg_dim_month_country_time',
+        'idx_cagg_dim_month_site_time',
+        'idx_cagg_dim_month_brand_time',
+        'idx_cagg_dim_month_asin_key_time',
+        'idx_cagg_variant_hour_country_time',
+        'idx_cagg_variant_hour_group_time',
+        'idx_cagg_variant_hour_name_time',
+        'idx_cagg_variant_hour_asin_key_time',
+        'idx_cagg_variant_day_country_time',
+        'idx_cagg_variant_day_group_time',
+        'idx_cagg_variant_day_name_time',
+        'idx_cagg_variant_day_asin_key_time',
+        'idx_cagg_variant_month_country_time',
+        'idx_cagg_variant_month_group_time',
+        'idx_cagg_variant_month_name_time',
+        'idx_cagg_variant_month_asin_key_time'
+      ])
+      AND catalog_index.indrelid IN (
+        SELECT format(
+          '%I.%I',
+          aggregate_row.materialization_hypertable_schema,
+          aggregate_row.materialization_hypertable_name
+        )::regclass
+        FROM timescaledb_information.continuous_aggregates aggregate_row
+        WHERE aggregate_row.view_schema = 'public'
+          AND aggregate_row.view_name = ANY(ARRAY[
+            'monitor_history_cagg_asin_hour',
+            'monitor_history_cagg_asin_day',
+            'monitor_history_cagg_asin_month',
+            'monitor_history_cagg_dim_hour',
+            'monitor_history_cagg_dim_day',
+            'monitor_history_cagg_dim_month',
+            'monitor_history_cagg_variant_group_hour',
+            'monitor_history_cagg_variant_group_day',
+            'monitor_history_cagg_variant_group_month'
+          ])
+      )
   LOOP
     EXECUTE format(
       'DROP INDEX %I.%I',

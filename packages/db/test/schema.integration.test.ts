@@ -461,12 +461,13 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     ]);
 
     const indexes = await primaryPool.query<{ indexname: string }>(`
-      SELECT indexname
-      FROM pg_indexes
-      WHERE schemaname = 'public'
-        AND tablename = 'monitor_history'
-        AND indexname LIKE 'idx_monitor_history_%'
-      ORDER BY indexname
+      SELECT index_relation.relname AS indexname
+      FROM pg_index index_row
+      JOIN pg_class index_relation
+        ON index_relation.oid = index_row.indexrelid
+      WHERE index_row.indrelid = 'public.monitor_history'::regclass
+        AND NOT index_row.indisprimary
+      ORDER BY index_relation.relname
     `);
     expect(indexes.rows.map(({ indexname }) => indexname)).toEqual(
       [...monitorHistoryOperationalIndexNames].sort(),
@@ -540,6 +541,8 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       index_count: number;
       all_ready: boolean;
       all_btree: boolean;
+      exact_managed_count: number;
+      exact_time_count: number;
     }>(
       `
       WITH selected_cagg AS (
@@ -551,23 +554,62 @@ describe('P1-T2 PostgreSQL schema integration', () => {
         FROM timescaledb_information.continuous_aggregates
         WHERE view_schema = 'public'
           AND view_name = ANY($1::text[])
+      ), actual_index AS (
+        SELECT
+          index_relation.relname AS index_name,
+          index_row.indisvalid AND index_row.indisready AS is_ready,
+          access_method.amname = 'btree' AS is_btree,
+          index_row.indisunique AS is_unique,
+          index_row.indpred IS NULL AS is_unfiltered,
+          index_row.indnkeyatts AS key_count,
+          index_row.indnatts AS attribute_count,
+          ARRAY(
+            SELECT option::smallint
+            FROM unnest(index_row.indoption) WITH ORDINALITY
+              AS sort_option(option, position)
+            WHERE position <= index_row.indnkeyatts
+            ORDER BY position
+          ) AS sort_options
+        FROM selected_cagg
+        JOIN pg_index index_row
+          ON index_row.indrelid = selected_cagg.materialization
+        JOIN pg_class index_relation
+          ON index_relation.oid = index_row.indexrelid
+        JOIN pg_am access_method
+          ON access_method.oid = index_relation.relam
       )
       SELECT
         COUNT(*)::integer AS index_count,
-        BOOL_AND(index_row.indisvalid AND index_row.indisready) AS all_ready,
-        BOOL_AND(access_method.amname = 'btree') AS all_btree
-      FROM selected_cagg
-      JOIN pg_index index_row
-        ON index_row.indrelid = selected_cagg.materialization
-      JOIN pg_class index_relation
-        ON index_relation.oid = index_row.indexrelid
-      JOIN pg_am access_method
-        ON access_method.oid = index_relation.relam
+        BOOL_AND(is_ready) AS all_ready,
+        BOOL_AND(is_btree) AS all_btree,
+        COUNT(*) FILTER (
+          WHERE index_name LIKE 'idx_cagg_%'
+            AND NOT is_unique
+            AND is_unfiltered
+            AND key_count = 2
+            AND attribute_count = 2
+            AND sort_options = ARRAY[0, 0]::smallint[]
+        )::integer AS exact_managed_count,
+        COUNT(*) FILTER (
+          WHERE index_name NOT LIKE 'idx_cagg_%'
+            AND NOT is_unique
+            AND is_unfiltered
+            AND key_count = 1
+            AND attribute_count = 1
+            AND sort_options = ARRAY[3]::smallint[]
+        )::integer AS exact_time_count
+      FROM actual_index
     `,
       [timescaleContinuousAggregateViewNames],
     );
     expect(caggIndexes.rows).toEqual([
-      { index_count: 39, all_ready: true, all_btree: true },
+      {
+        index_count: 39,
+        all_ready: true,
+        all_btree: true,
+        exact_managed_count: 30,
+        exact_time_count: 9,
+      },
     ]);
   });
 

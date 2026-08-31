@@ -169,6 +169,29 @@ function responseShape(value) {
   return { type: typeof value };
 }
 
+function responseCardinality(value, pathSegments) {
+  let selected = value;
+  for (const segment of pathSegments) {
+    if (
+      selected === null ||
+      typeof selected !== 'object' ||
+      !Object.prototype.hasOwnProperty.call(selected, segment)
+    ) {
+      return null;
+    }
+    selected = selected[segment];
+  }
+  if (Array.isArray(selected)) return selected.length;
+  if (typeof selected === 'number' && Number.isFinite(selected)) {
+    return selected;
+  }
+  if (typeof selected === 'string') return selected.trim().length;
+  if (selected && typeof selected === 'object') {
+    return Object.keys(selected).length;
+  }
+  return null;
+}
+
 function firstDifferencePath(left, right, currentPath = '$') {
   if (Object.is(left, right)) return null;
   if (typeof left !== typeof right || left === null || right === null) {
@@ -245,16 +268,19 @@ function buildMatrix(config) {
           suffix: 'all-countries',
           path: '/monitor-history/statistics/all-countries-summary',
           params: common,
+          cardinalityPath: ['data', 'totalChecks'],
         },
         {
           suffix: 'region',
           path: '/monitor-history/statistics/region-summary',
           params: common,
+          cardinalityPath: ['data'],
         },
         {
           suffix: 'period-unfiltered',
           path: '/monitor-history/statistics/period-summary',
           params: { ...common, current: 1, pageSize: config.pageSize },
+          cardinalityPath: ['data', 'list'],
         },
         {
           suffix: 'period-filtered',
@@ -267,6 +293,7 @@ function buildMatrix(config) {
             current: 1,
             pageSize: config.pageSize,
           },
+          cardinalityPath: ['data', 'list'],
         },
       ]) {
         const query = buildQuery(endpoint.params);
@@ -277,6 +304,9 @@ function buildMatrix(config) {
           path: endpoint.path,
           query,
           queryKeys: Object.keys(endpoint.params).sort(),
+          expectedStatus: 200,
+          cardinalityPath: endpoint.cardinalityPath,
+          minimumCardinality: 1,
         });
       }
     }
@@ -291,6 +321,7 @@ function buildMatrix(config) {
           endTime: window.endTime,
           limit: config.groupLimit,
         },
+        cardinalityPath: ['data'],
       },
       {
         suffix: 'variant-group-filtered-duration',
@@ -302,6 +333,7 @@ function buildMatrix(config) {
           endTime: window.endTime,
           includeSeries: 0,
         },
+        cardinalityPath: ['data', 'summary'],
       },
     ]) {
       const query = buildQuery(endpoint.params);
@@ -312,6 +344,9 @@ function buildMatrix(config) {
         path: endpoint.path,
         query,
         queryKeys: Object.keys(endpoint.params).sort(),
+        expectedStatus: 200,
+        cardinalityPath: endpoint.cardinalityPath,
+        minimumCardinality: 1,
       });
     }
   }
@@ -389,6 +424,56 @@ function safeRun(result, run) {
   };
 }
 
+function comparePairResults(oldResult, newResult, benchmarkCase, run) {
+  const statusesMatch =
+    oldResult.status === benchmarkCase.expectedStatus &&
+    newResult.status === benchmarkCase.expectedStatus &&
+    oldResult.status === newResult.status;
+  const oldCardinality = responseCardinality(
+    oldResult.comparable,
+    benchmarkCase.cardinalityPath,
+  );
+  const newCardinality = responseCardinality(
+    newResult.comparable,
+    benchmarkCase.cardinalityPath,
+  );
+  const cardinalityMatches =
+    oldCardinality !== null &&
+    newCardinality !== null &&
+    oldCardinality >= benchmarkCase.minimumCardinality &&
+    newCardinality >= benchmarkCase.minimumCardinality;
+  let differencePath = '$.__unavailable';
+  if (!statusesMatch) {
+    differencePath = '$.__httpStatus';
+  } else if (oldResult.comparable !== null && newResult.comparable !== null) {
+    differencePath = firstDifferencePath(
+      oldResult.comparable,
+      newResult.comparable,
+    );
+    if (differencePath === null && !cardinalityMatches) {
+      differencePath = '$.__cardinality';
+    }
+  }
+  return {
+    run,
+    matches: differencePath === null,
+    differencePath,
+    statusesMatch,
+    expectedStatus: benchmarkCase.expectedStatus,
+    oldStatus: oldResult.status,
+    newStatus: newResult.status,
+    cardinalityMatches,
+    cardinalityPath: `$.${benchmarkCase.cardinalityPath.join('.')}`,
+    minimumCardinality: benchmarkCase.minimumCardinality,
+    oldCardinality,
+    newCardinality,
+    oldDigest:
+      oldResult.comparable === null ? null : digestValue(oldResult.comparable),
+    newDigest:
+      newResult.comparable === null ? null : digestValue(newResult.comparable),
+  };
+}
+
 async function runCase(targets, benchmarkCase, options) {
   const warmups = [];
   const runs = { old: [], new: [] };
@@ -429,23 +514,9 @@ async function runCase(targets, benchmarkCase, options) {
     }
     const oldResult = pair.old;
     const newResult = pair.new;
-    const differencePath =
-      oldResult.comparable !== null && newResult.comparable !== null
-        ? firstDifferencePath(oldResult.comparable, newResult.comparable)
-        : '$.__unavailable';
-    comparisons.push({
-      run,
-      matches: differencePath === null,
-      differencePath,
-      oldDigest:
-        oldResult.comparable === null
-          ? null
-          : digestValue(oldResult.comparable),
-      newDigest:
-        newResult.comparable === null
-          ? null
-          : digestValue(newResult.comparable),
-    });
+    comparisons.push(
+      comparePairResults(oldResult, newResult, benchmarkCase, run),
+    );
   }
 
   const oldStats = calcStats(runs.old);
@@ -455,13 +526,21 @@ async function runCase(targets, benchmarkCase, options) {
       ? oldStats.p95 / newStats.p95
       : null;
   const requestGate =
-    warmups.every((item) => item.ok) &&
-    runs.old.every((item) => item.ok) &&
-    runs.new.every((item) => item.ok);
+    warmups.every(
+      (item) => item.ok && item.status === benchmarkCase.expectedStatus,
+    ) &&
+    runs.old.every(
+      (item) => item.ok && item.status === benchmarkCase.expectedStatus,
+    ) &&
+    runs.new.every(
+      (item) => item.ok && item.status === benchmarkCase.expectedStatus,
+    );
   const sampleGate =
     oldStats.successCount === options.runs &&
     newStats.successCount === options.runs;
   const correctnessGate = comparisons.every((item) => item.matches);
+  const statusGate = comparisons.every((item) => item.statusesMatch);
+  const cardinalityGate = comparisons.every((item) => item.cardinalityMatches);
   const performanceGate = speedup !== null && speedup >= options.minSpeedup;
 
   return {
@@ -477,9 +556,17 @@ async function runCase(targets, benchmarkCase, options) {
     gates: {
       requests: requestGate,
       samples: sampleGate,
+      statuses: statusGate,
+      cardinality: cardinalityGate,
       correctness: correctnessGate,
       performance: performanceGate,
-      passed: requestGate && sampleGate && correctnessGate && performanceGate,
+      passed:
+        requestGate &&
+        sampleGate &&
+        statusGate &&
+        cardinalityGate &&
+        correctnessGate &&
+        performanceGate,
     },
   };
 }
@@ -512,8 +599,8 @@ function buildMarkdown(report) {
     `- Required P95 Speedup: ${report.meta.minSpeedup}x`,
     `- Matrix Cases: ${report.cases.length}`,
     '',
-    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Correct | Passed |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | Correct | Passed |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   ];
   for (const benchmarkCase of report.cases) {
     lines.push(
@@ -527,9 +614,9 @@ function buildMarkdown(report) {
         benchmarkCase.stats.speedup === null
           ? 'N/A'
           : `${benchmarkCase.stats.speedup.toFixed(2)}x`
-      } | ${benchmarkCase.gates.correctness ? 'yes' : 'no'} | ${
-        benchmarkCase.gates.passed ? 'yes' : 'no'
-      } |`,
+      } | ${benchmarkCase.gates.cardinality ? 'yes' : 'no'} | ${
+        benchmarkCase.gates.correctness ? 'yes' : 'no'
+      } | ${benchmarkCase.gates.passed ? 'yes' : 'no'} |`,
     );
   }
   lines.push(
@@ -566,7 +653,7 @@ Options:
   --runs                        Measured pairs per case, minimum 5 (default: 7)
   --warmup                      Warmups per target/case, minimum 1 (default: 2)
   --timeout-ms                  Request timeout (default: 120000)
-  --min-speedup                 Required old/new P95 ratio (default: 3)
+  --min-speedup                 Required old/new P95 ratio, minimum 3 (default: 3)
   --page-size                   period-summary page size (default: 100)
   --group-limit                 group summary limit (default: 100)
   --token                       Bearer token; never logged or persisted
@@ -627,7 +714,7 @@ function buildConfig(args) {
     runs: integerArg(args.runs, 'runs', 7, 5),
     warmup: integerArg(args.warmup, 'warmup', 2, 1),
     timeoutMs: integerArg(args['timeout-ms'], 'timeout-ms', 120000, 1000),
-    minSpeedup: numberArg(args['min-speedup'], 'min-speedup', 3, 1),
+    minSpeedup: numberArg(args['min-speedup'], 'min-speedup', 3, 3),
     pageSize: integerArg(args['page-size'], 'page-size', 100, 1),
     groupLimit: integerArg(args['group-limit'], 'group-limit', 100, 1),
     outputDir: path.resolve(
@@ -729,6 +816,8 @@ async function main() {
     gates: {
       requests: cases.every((item) => item.gates.requests),
       samples: cases.every((item) => item.gates.samples),
+      statuses: cases.every((item) => item.gates.statuses),
+      cardinality: cases.every((item) => item.gates.cardinality),
       correctness: cases.every((item) => item.gates.correctness),
       performance: cases.every((item) => item.gates.performance),
       passed,
@@ -765,6 +854,7 @@ module.exports = {
   buildMatrix,
   calcStats,
   canonicalJson,
+  comparePairResults,
   comparableResponse,
   digestValue,
   firstDifferencePath,
@@ -772,5 +862,6 @@ module.exports = {
   normalizeBaseUrl,
   normalizeComparableValue,
   percentile,
+  responseCardinality,
   responseShape,
 };

@@ -83,8 +83,12 @@ type PerformanceReport = {
   storageRegression: {
     chunk: string | null;
     convertedToColumnstore: boolean;
+    columnstoredCaggRelations: number;
+    columnstoredCaggChunks: number;
     lateWriteVisible: boolean;
+    sustainedWriteRows: number;
     analyticalReadDuringWriteMs: number | null;
+    analyticalReadsDuringWrites: TimingStats | null;
   };
 };
 
@@ -109,8 +113,12 @@ const report: PerformanceReport = {
   storageRegression: {
     chunk: null,
     convertedToColumnstore: false,
+    columnstoredCaggRelations: 0,
+    columnstoredCaggChunks: 0,
     lateWriteVisible: false,
+    sustainedWriteRows: 0,
     analyticalReadDuringWriteMs: null,
+    analyticalReadsDuringWrites: null,
   },
 };
 
@@ -388,6 +396,110 @@ async function runBenchmarkCase(options: {
   };
 }
 
+async function convertFixtureCaggChunksToColumnstore(): Promise<void> {
+  const chunks = await pool.query<{
+    view_name: string;
+    chunk: string;
+    is_compressed: boolean;
+  }>(
+    `
+      WITH selected_cagg AS (
+        SELECT
+          aggregate_row.view_name,
+          aggregate_row.materialization_hypertable_schema AS hypertable_schema,
+          aggregate_row.materialization_hypertable_name AS hypertable_name
+        FROM timescaledb_information.continuous_aggregates aggregate_row
+        WHERE aggregate_row.view_schema = 'public'
+          AND aggregate_row.view_name = ANY($1::text[])
+      )
+      SELECT
+        selected_cagg.view_name,
+        format('%I.%I', chunk_row.chunk_schema, chunk_row.chunk_name) AS chunk,
+        chunk_row.is_compressed
+      FROM selected_cagg
+      JOIN timescaledb_information.chunks chunk_row
+        ON chunk_row.hypertable_schema = selected_cagg.hypertable_schema
+       AND chunk_row.hypertable_name = selected_cagg.hypertable_name
+      WHERE chunk_row.range_start < $2::timestamp
+        AND chunk_row.range_end > $3::timestamp
+      ORDER BY selected_cagg.view_name, chunk_row.range_start
+    `,
+    [
+      [
+        'monitor_history_cagg_asin_hour',
+        'monitor_history_cagg_asin_day',
+        'monitor_history_cagg_asin_month',
+        'monitor_history_cagg_dim_hour',
+        'monitor_history_cagg_dim_day',
+        'monitor_history_cagg_dim_month',
+        'monitor_history_cagg_variant_group_hour',
+        'monitor_history_cagg_variant_group_day',
+        'monitor_history_cagg_variant_group_month',
+      ],
+      fixtureEnd,
+      fixtureStart,
+    ],
+  );
+  expect(new Set(chunks.rows.map(({ view_name }) => view_name)).size).toBe(9);
+  for (const { chunk, is_compressed } of chunks.rows) {
+    if (!is_compressed) {
+      await pool.query('CALL convert_to_columnstore($1::regclass)', [chunk]);
+    }
+  }
+
+  const verified = await pool.query<{
+    relation_count: number;
+    chunk_count: number;
+    all_columnstored: boolean;
+  }>(
+    `
+      WITH selected_cagg AS (
+        SELECT
+          aggregate_row.view_name,
+          aggregate_row.materialization_hypertable_schema AS hypertable_schema,
+          aggregate_row.materialization_hypertable_name AS hypertable_name
+        FROM timescaledb_information.continuous_aggregates aggregate_row
+        WHERE aggregate_row.view_schema = 'public'
+          AND aggregate_row.view_name = ANY($1::text[])
+      )
+      SELECT
+        COUNT(DISTINCT selected_cagg.view_name)::integer AS relation_count,
+        COUNT(*)::integer AS chunk_count,
+        BOOL_AND(chunk_row.is_compressed) AS all_columnstored
+      FROM selected_cagg
+      JOIN timescaledb_information.chunks chunk_row
+        ON chunk_row.hypertable_schema = selected_cagg.hypertable_schema
+       AND chunk_row.hypertable_name = selected_cagg.hypertable_name
+      WHERE chunk_row.range_start < $2::timestamp
+        AND chunk_row.range_end > $3::timestamp
+    `,
+    [
+      [
+        'monitor_history_cagg_asin_hour',
+        'monitor_history_cagg_asin_day',
+        'monitor_history_cagg_asin_month',
+        'monitor_history_cagg_dim_hour',
+        'monitor_history_cagg_dim_day',
+        'monitor_history_cagg_dim_month',
+        'monitor_history_cagg_variant_group_hour',
+        'monitor_history_cagg_variant_group_day',
+        'monitor_history_cagg_variant_group_month',
+      ],
+      fixtureEnd,
+      fixtureStart,
+    ],
+  );
+  report.storageRegression.columnstoredCaggRelations =
+    verified.rows[0]?.relation_count ?? 0;
+  report.storageRegression.columnstoredCaggChunks =
+    verified.rows[0]?.chunk_count ?? 0;
+  expect(report.storageRegression.columnstoredCaggRelations).toBe(9);
+  expect(
+    report.storageRegression.columnstoredCaggChunks,
+  ).toBeGreaterThanOrEqual(9);
+  expect(verified.rows[0]?.all_columnstored).toBe(true);
+}
+
 async function writeReportAtomically(): Promise<void> {
   report.generatedAt = new Date().toISOString();
   report.gate.passed =
@@ -396,7 +508,11 @@ async function writeReportAtomically(): Promise<void> {
       monitorHistoryOperationalIndexNames.length &&
     report.benchmarks.length === 12 &&
     report.storageRegression.convertedToColumnstore &&
+    report.storageRegression.columnstoredCaggRelations === 9 &&
+    report.storageRegression.columnstoredCaggChunks >= 9 &&
     report.storageRegression.lateWriteVisible &&
+    report.storageRegression.sustainedWriteRows >= 2_500 &&
+    report.storageRegression.analyticalReadsDuringWrites !== null &&
     report.storageRegression.analyticalReadDuringWriteMs !== null;
   await mkdir(resolve(reportPath, '..'), { recursive: true });
   const temporaryPath = `${reportPath}.${process.pid}.tmp`;
@@ -489,6 +605,7 @@ describe.skipIf(!integrationEnabled)(
           );
         }
       }
+      await convertFixtureCaggChunksToColumnstore();
     }, 300_000);
 
     afterAll(async () => {
@@ -609,7 +726,7 @@ describe.skipIf(!integrationEnabled)(
       expect(report.gate.failures).toEqual([]);
     }, 300_000);
 
-    it('supports columnstore reads, late writes and analytical reads during an open high-frequency write transaction', async () => {
+    it('supports columnstore reads, late writes and analytical reads during sustained high-frequency writes', async () => {
       const chunkResult = await pool.query<{ chunk: string }>(
         `
           SELECT format('%I.%I', chunk_schema, chunk_name) AS chunk
@@ -681,34 +798,52 @@ describe.skipIf(!integrationEnabled)(
 
       const writer = await pool.connect();
       try {
-        await writer.query('BEGIN');
-        await writer.query(
-          `
-            INSERT INTO public.monitor_history (
-              variant_group_id, asin_id, asin_code, check_type, country,
-              is_broken, check_time, notification_sent
-            ) VALUES (
-              'perf-group-concurrent', 'perf-asin-concurrent', 'PCONCUR001',
-              'ASIN', 'US', false, $1::timestamp - INTERVAL '1 minute', false
-            )
-          `,
-          [fixtureEnd],
-        );
-        const analyticalRead = await timedQuery(
-          `
-            SELECT SUM(check_count)::text
-            FROM public.monitor_history_cagg_dim_day
-            WHERE time_slot >= $1::timestamp AND time_slot < $2::timestamp
-          `,
-          [fixtureMiddle, fixtureEnd],
-        );
+        const analyticalSamples: number[] = [];
+        for (let batch = 0; batch < 10; batch += 1) {
+          const [writeResult, analyticalRead] = await Promise.all([
+            writer.query(
+              `
+                INSERT INTO public.monitor_history (
+                  variant_group_id, asin_id, asin_code, check_type, country,
+                  is_broken, check_time, notification_sent
+                )
+                SELECT
+                  'perf-group-concurrent',
+                  'perf-asin-concurrent',
+                  'PCONCUR001',
+                  'ASIN',
+                  'US',
+                  series_id % 11 = 0,
+                  $1::timestamp - INTERVAL '5 minutes'
+                    + (($2::integer * 250 + series_id) * INTERVAL '1 microsecond'),
+                  false
+                FROM generate_series(1, 250) AS write_fixture(series_id)
+              `,
+              [fixtureEnd, batch],
+            ),
+            timedQuery(
+              `
+                SELECT SUM(check_count)::text
+                FROM public.monitor_history_cagg_dim_day
+                WHERE time_slot >= $1::timestamp AND time_slot < $2::timestamp
+              `,
+              [fixtureMiddle, fixtureEnd],
+            ),
+          ]);
+          report.storageRegression.sustainedWriteRows +=
+            writeResult.rowCount ?? 0;
+          analyticalSamples.push(analyticalRead.durationMs);
+          expect(analyticalRead.rows[0]?.sum).toBeTruthy();
+        }
+        const concurrentReadStats = timingStats(analyticalSamples);
+        report.storageRegression.analyticalReadsDuringWrites =
+          concurrentReadStats;
         report.storageRegression.analyticalReadDuringWriteMs =
-          roundMilliseconds(analyticalRead.durationMs);
-        expect(analyticalRead.rows[0]?.sum).toBeTruthy();
-        expect(analyticalRead.durationMs).toBeLessThan(2_000);
-        await writer.query('ROLLBACK');
+          concurrentReadStats.p95Ms;
+        expect(report.storageRegression.sustainedWriteRows).toBe(2_500);
+        expect(concurrentReadStats.samples).toBe(10);
+        expect(concurrentReadStats.p95Ms).toBeLessThan(2_000);
       } catch (error) {
-        await writer.query('ROLLBACK').catch(() => undefined);
         throw error;
       } finally {
         writer.release();

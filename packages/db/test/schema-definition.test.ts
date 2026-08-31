@@ -25,6 +25,8 @@ const timescaleMigrationPath =
   'packages/db/migrations/0001_timescale_aggregates.sql';
 const storagePolicyMigrationPath =
   'packages/db/migrations/0002_timescale_storage_policies.sql';
+const storagePolicyRollbackPath =
+  'packages/db/migrations/0002_timescale_storage_policies.rollback.sql';
 
 describe('PostgreSQL 双库 Schema 基线', () => {
   it('Drizzle 事实源覆盖 Legacy 最终态 21 + 4 张表', () => {
@@ -199,6 +201,12 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     );
     expect(migration).not.toContain('DESC NULLS LAST');
     expect(migration).toContain('ARRAY[0, 3, 3]::smallint[]');
+    expect(migration).toContain('WHERE NOT indisprimary');
+    expect(migration).toContain('index_row.indisunique');
+    expect(migration).toContain('index_row.indnkeyatts');
+    expect(migration).toContain('index_row.indnatts');
+    expect(migration).toContain('index_row.indpred');
+    expect(migration).toContain('unnest(index_row.indoption)');
     expect(migration).toContain(
       'continuous aggregate index inventory mismatch',
     );
@@ -227,6 +235,17 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(migration).toContain("jobs.proc_name = 'policy_retention'");
     expect(migration).toContain(
       'retention must remain disabled when no explicit retention days are configured',
+    );
+
+    const rollback = read(storagePolicyRollbackPath);
+    expect(rollback).not.toContain("relation.relname LIKE 'idx_cagg_%'");
+    expect(rollback.match(/'idx_cagg_[a-z0-9_]+'/g)).toHaveLength(30);
+
+    const rootPackage = JSON.parse(read('package.json')) as {
+      scripts: Record<string, string>;
+    };
+    expect(rootPackage.scripts['db:upgrade:timescale-storage']).toContain(
+      'exec -e TIMESCALE_RETENTION_DAYS -T timescaledb',
     );
   });
 });

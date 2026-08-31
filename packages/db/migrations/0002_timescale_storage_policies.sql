@@ -145,7 +145,60 @@ BEGIN
             'idx_monitor_history_notification_pending'
           ])
         )
-        OR relation.relname LIKE 'idx_cagg_%'
+        OR (
+          relation.relname = ANY(ARRAY[
+            'idx_cagg_asin_hour_country_time',
+            'idx_cagg_asin_hour_asin_key_time',
+            'idx_cagg_asin_day_country_time',
+            'idx_cagg_asin_day_asin_key_time',
+            'idx_cagg_asin_month_country_time',
+            'idx_cagg_asin_month_asin_key_time',
+            'idx_cagg_dim_hour_country_time',
+            'idx_cagg_dim_hour_site_time',
+            'idx_cagg_dim_hour_brand_time',
+            'idx_cagg_dim_hour_asin_key_time',
+            'idx_cagg_dim_day_country_time',
+            'idx_cagg_dim_day_site_time',
+            'idx_cagg_dim_day_brand_time',
+            'idx_cagg_dim_day_asin_key_time',
+            'idx_cagg_dim_month_country_time',
+            'idx_cagg_dim_month_site_time',
+            'idx_cagg_dim_month_brand_time',
+            'idx_cagg_dim_month_asin_key_time',
+            'idx_cagg_variant_hour_country_time',
+            'idx_cagg_variant_hour_group_time',
+            'idx_cagg_variant_hour_name_time',
+            'idx_cagg_variant_hour_asin_key_time',
+            'idx_cagg_variant_day_country_time',
+            'idx_cagg_variant_day_group_time',
+            'idx_cagg_variant_day_name_time',
+            'idx_cagg_variant_day_asin_key_time',
+            'idx_cagg_variant_month_country_time',
+            'idx_cagg_variant_month_group_time',
+            'idx_cagg_variant_month_name_time',
+            'idx_cagg_variant_month_asin_key_time'
+          ])
+          AND catalog_index.indrelid IN (
+            SELECT format(
+              '%I.%I',
+              aggregate_row.materialization_hypertable_schema,
+              aggregate_row.materialization_hypertable_name
+            )::regclass
+            FROM timescaledb_information.continuous_aggregates aggregate_row
+            WHERE aggregate_row.view_schema = 'public'
+              AND aggregate_row.view_name = ANY(ARRAY[
+                'monitor_history_cagg_asin_hour',
+                'monitor_history_cagg_asin_day',
+                'monitor_history_cagg_asin_month',
+                'monitor_history_cagg_dim_hour',
+                'monitor_history_cagg_dim_day',
+                'monitor_history_cagg_dim_month',
+                'monitor_history_cagg_variant_group_hour',
+                'monitor_history_cagg_variant_group_day',
+                'monitor_history_cagg_variant_group_month'
+              ])
+          )
+        )
       )
   LOOP
     EXECUTE format(
@@ -549,6 +602,10 @@ BEGIN
       ) AS sort_options,
       index_row.indisvalid,
       index_row.indisready,
+      index_row.indisprimary,
+      index_row.indisunique,
+      index_row.indnkeyatts,
+      index_row.indnatts,
       access_method.amname,
       lower(
         regexp_replace(
@@ -581,7 +638,7 @@ BEGIN
     (
       SELECT COUNT(*)::integer
       FROM actual_index
-      WHERE index_name LIKE 'idx_monitor_history_%'
+      WHERE NOT indisprimary
     ),
     (
       SELECT COUNT(*)::integer
@@ -594,6 +651,12 @@ BEGIN
       )
       WHERE actual_index.indisvalid
         AND actual_index.indisready
+        AND NOT actual_index.indisprimary
+        AND NOT actual_index.indisunique
+        AND actual_index.indnkeyatts =
+          cardinality(expected_index.key_columns)
+        AND actual_index.indnatts =
+          cardinality(expected_index.key_columns)
         AND actual_index.amname = 'btree'
     )
   INTO total_operational_index_count, matching_operational_index_count;
@@ -638,18 +701,22 @@ BEGIN
       legacy_index_count;
   END IF;
 
-  WITH expected_first_key(family, first_key) AS (
+  WITH expected_first_key(
+    family,
+    first_key,
+    index_key_suffix
+  ) AS (
     VALUES
-      ('asin', 'country'),
-      ('asin', 'asin_key'),
-      ('dim', 'country'),
-      ('dim', 'site'),
-      ('dim', 'brand'),
-      ('dim', 'asin_key'),
-      ('variant_group', 'country'),
-      ('variant_group', 'variant_group_id'),
-      ('variant_group', 'variant_group_name_snapshot'),
-      ('variant_group', 'asin_key')
+      ('asin', 'country', 'country'),
+      ('asin', 'asin_key', 'asin_key'),
+      ('dim', 'country', 'country'),
+      ('dim', 'site', 'site'),
+      ('dim', 'brand', 'brand'),
+      ('dim', 'asin_key', 'asin_key'),
+      ('variant_group', 'country', 'country'),
+      ('variant_group', 'variant_group_id', 'group'),
+      ('variant_group', 'variant_group_name_snapshot', 'name'),
+      ('variant_group', 'asin_key', 'asin_key')
   ), selected_cagg AS (
     SELECT
       aggregate_row.view_name,
@@ -660,6 +727,18 @@ BEGIN
           THEN 'dim'
         ELSE 'variant_group'
       END AS family,
+      CASE
+        WHEN aggregate_row.view_name LIKE 'monitor_history_cagg_asin_%'
+          THEN 'asin'
+        WHEN aggregate_row.view_name LIKE 'monitor_history_cagg_dim_%'
+          THEN 'dim'
+        ELSE 'variant'
+      END AS index_family,
+      CASE
+        WHEN aggregate_row.view_name LIKE '%_hour' THEN 'hour'
+        WHEN aggregate_row.view_name LIKE '%_day' THEN 'day'
+        ELSE 'month'
+      END AS granularity,
       format(
         '%I.%I',
         aggregate_row.materialization_hypertable_schema,
@@ -668,17 +747,60 @@ BEGIN
     FROM timescaledb_information.continuous_aggregates aggregate_row
     WHERE aggregate_row.view_schema = 'public'
       AND aggregate_row.view_name LIKE 'monitor_history_cagg_%'
+  ), expected_index AS (
+    SELECT
+      selected_cagg.view_name,
+      format(
+        'idx_cagg_%s_%s_%s_time',
+        selected_cagg.index_family,
+        selected_cagg.granularity,
+        expected_first_key.index_key_suffix
+      ) AS index_name,
+      ARRAY[
+        expected_first_key.first_key,
+        'time_slot'
+      ]::text[] AS key_columns,
+      ARRAY[0, 0]::smallint[] AS sort_options,
+      ''::text AS predicate
+    FROM selected_cagg
+    JOIN expected_first_key USING (family)
   ), actual_index AS (
     SELECT
       selected_cagg.view_name,
-      selected_cagg.family,
-      index_row.indexrelid,
-      ARRAY_AGG(attribute.attname::text ORDER BY key_position.position)
-        FILTER (
-          WHERE key_position.position <= index_row.indnkeyatts
-        ) AS key_columns,
-      BOOL_AND(index_row.indisvalid AND index_row.indisready) AS is_ready,
-      BOOL_AND(access_method.amname = 'btree') AS is_btree
+      index_relation.relname AS index_name,
+      ARRAY(
+        SELECT attribute.attname::text
+        FROM unnest(index_row.indkey) WITH ORDINALITY
+          AS key_position(attnum, position)
+        JOIN pg_attribute attribute
+          ON attribute.attrelid = selected_cagg.materialization
+         AND attribute.attnum = key_position.attnum
+        WHERE key_position.position <= index_row.indnkeyatts
+        ORDER BY key_position.position
+      ) AS key_columns,
+      ARRAY(
+        SELECT sort_option.option::smallint
+        FROM unnest(index_row.indoption) WITH ORDINALITY
+          AS sort_option(option, position)
+        WHERE sort_option.position <= index_row.indnkeyatts
+        ORDER BY sort_option.position
+      ) AS sort_options,
+      lower(
+        regexp_replace(
+          COALESCE(
+            pg_get_expr(index_row.indpred, index_row.indrelid, true),
+            ''
+          ),
+          '[()[:space:]]',
+          '',
+          'g'
+        )
+      ) AS predicate,
+      index_row.indisvalid AND index_row.indisready AS is_ready,
+      access_method.amname = 'btree' AS is_btree,
+      index_row.indisunique AS is_unique,
+      index_row.indnkeyatts AS key_count,
+      index_row.indnatts AS attribute_count
     FROM selected_cagg
     JOIN pg_index index_row
       ON index_row.indrelid = selected_cagg.materialization
@@ -686,37 +808,36 @@ BEGIN
       ON index_relation.oid = index_row.indexrelid
     JOIN pg_am access_method
       ON access_method.oid = index_relation.relam
-    CROSS JOIN LATERAL
-      unnest(index_row.indkey) WITH ORDINALITY
-        AS key_position(attnum, position)
-    JOIN pg_attribute attribute
-      ON attribute.attrelid = selected_cagg.materialization
-     AND attribute.attnum = key_position.attnum
-    GROUP BY
-      selected_cagg.view_name,
-      selected_cagg.family,
-      index_row.indexrelid
-  ), expected_index AS (
-    SELECT
-      selected_cagg.view_name,
-      ARRAY[expected_first_key.first_key, 'time_slot']::text[] AS key_columns
-    FROM selected_cagg
-    JOIN expected_first_key USING (family)
   )
   SELECT
     (SELECT COUNT(*)::integer FROM actual_index),
     (
       SELECT COUNT(*)::integer
       FROM actual_index
-      JOIN expected_index USING (view_name, key_columns)
-      WHERE actual_index.is_ready AND actual_index.is_btree
+      JOIN expected_index USING (
+        view_name,
+        index_name,
+        key_columns,
+        sort_options,
+        predicate
+      )
+      WHERE actual_index.is_ready
+        AND actual_index.is_btree
+        AND NOT actual_index.is_unique
+        AND actual_index.key_count = 2
+        AND actual_index.attribute_count = 2
     ),
     (
       SELECT COUNT(*)::integer
       FROM actual_index
       WHERE actual_index.key_columns = ARRAY['time_slot']::text[]
+        AND actual_index.sort_options = ARRAY[3]::smallint[]
+        AND actual_index.predicate = ''
         AND actual_index.is_ready
         AND actual_index.is_btree
+        AND NOT actual_index.is_unique
+        AND actual_index.key_count = 1
+        AND actual_index.attribute_count = 1
     )
   INTO
     total_cagg_index_count,
