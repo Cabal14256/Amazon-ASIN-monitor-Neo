@@ -98,6 +98,15 @@ describe('TimescaleDB 环境配置', () => {
     expect(dbPackage.scripts['test:integration']).toContain(
       'data-migration.integration.test.ts',
     );
+    expect(
+      dbPackage.scripts['test:integration'].indexOf(
+        'data-migration.integration.test.ts',
+      ),
+    ).toBeLessThan(
+      dbPackage.scripts['test:integration'].indexOf(
+        'storage-performance.integration.test.ts',
+      ),
+    );
     expect(rootPackage.scripts['db:migrate:data']).toContain(
       '@asin-monitor/db migrate:data',
     );
