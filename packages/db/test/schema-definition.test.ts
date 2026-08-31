@@ -242,6 +242,16 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(rollback.match(/'idx_cagg_[a-z0-9_]+'/g)).toHaveLength(30);
     expect(rollback).toContain('if_columnstore => true');
     expect(rollback).not.toContain('if_compressed => true');
+    expect(rollback).toContain('$drop_interrupted_legacy_indexes$');
+    expect(rollback).toContain(
+      '(NOT catalog_index.indisvalid OR NOT catalog_index.indisready)',
+    );
+    expect(rollback).toContain('$rollback_index_postflight$');
+    expect(rollback).toContain(
+      'monitor_history Legacy rollback index postflight mismatch',
+    );
+    expect(rollback).toContain('total_legacy_index_count <> 19');
+    expect(rollback).toContain('matching_legacy_index_count <> 19');
 
     const dataMigrationGuide = read('packages/db/DATA_MIGRATION.md');
     const aggregateUpgradeOffset = dataMigrationGuide.indexOf(
@@ -303,5 +313,10 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(read('.github/workflows/integration.yml')).toContain(
       'TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE: amazon_asin_monitor_ci',
     );
+
+    const rollbackRunbook = read('docs/runbooks/phase-1-database-rollback.md');
+    expect(
+      rollbackRunbook.indexOf('corepack pnpm db:upgrade:timescale-storage'),
+    ).toBeLessThan(rollbackRunbook.indexOf('corepack pnpm db:migrate:data'));
   });
 });

@@ -300,12 +300,15 @@ async function getBusyFallbackAnalyticsResult(
   latestKey,
   includeMeta = false,
   busyContext = {},
+  bypassCache = false,
 ) {
   if (!busyContext?.busy || !latestKey) {
     return null;
   }
 
-  const cached = await analyticsCacheService.getLatest(latestKey);
+  const cached = await analyticsCacheService.getLatest(latestKey, {
+    bypass: bypassCache,
+  });
   if (cached === null) {
     return null;
   }
@@ -316,11 +319,24 @@ async function getBusyFallbackAnalyticsResult(
   });
 }
 
-async function storeAnalyticsResult(cacheKey, latestKey, data, meta, ttlMs) {
+async function storeAnalyticsResult(
+  cacheKey,
+  latestKey,
+  data,
+  meta,
+  ttlMs,
+  bypassCache = false,
+) {
   const envelope = buildAnalyticsEnvelope(data, meta);
-  await analyticsCacheService.set(cacheKey, envelope, ttlMs);
+  const options = { bypass: bypassCache };
+  await analyticsCacheService.set(cacheKey, envelope, ttlMs, options);
   if (latestKey) {
-    await analyticsCacheService.rememberLatest(latestKey, envelope, ttlMs);
+    await analyticsCacheService.rememberLatest(
+      latestKey,
+      envelope,
+      ttlMs,
+      options,
+    );
   }
 }
 
@@ -3993,6 +4009,7 @@ class MonitorHistory {
       endTime = '',
       timeSlotGranularity = 'day',
       includeMeta = false,
+      bypassCache = false,
     } = params;
 
     // 生成缓存键
@@ -4000,7 +4017,9 @@ class MonitorHistory {
     const latestCacheKey = `allCountriesSummary:${startTime}:${endTime}:${timeSlotGranularity}`;
     const ttlMs =
       Number(process.env.ANALYTICS_ALL_COUNTRIES_SUMMARY_TTL_MS) || 300000;
-    const cached = await analyticsCacheService.get(cacheKey);
+    const cached = await analyticsCacheService.get(cacheKey, {
+      bypass: bypassCache,
+    });
     if (cached !== null) {
       return resolveCachedAnalyticsResult(cached, includeMeta);
     }
@@ -4008,6 +4027,7 @@ class MonitorHistory {
       latestCacheKey,
       includeMeta,
       getAnalyticsBusyContext(),
+      bypassCache,
     );
     if (busyFallbackResult) {
       logger.warn(
@@ -4083,6 +4103,7 @@ class MonitorHistory {
         generatedAt,
       },
       ttlMs,
+      bypassCache,
     );
     return finalizeAnalyticsResult(result, {
       includeMeta,
@@ -4200,13 +4221,16 @@ class MonitorHistory {
       endTime = '',
       timeSlotGranularity = 'day',
       includeMeta = false,
+      bypassCache = false,
     } = params;
 
     // 生成缓存键
     const cacheKey = `regionSummary:${ANALYTICS_CACHE_VERSION}:${startTime}:${endTime}:${timeSlotGranularity}`;
     const latestCacheKey = `regionSummary:${startTime}:${endTime}:${timeSlotGranularity}`;
     const ttlMs = Number(process.env.ANALYTICS_REGION_SUMMARY_TTL_MS) || 300000;
-    const cached = await analyticsCacheService.get(cacheKey);
+    const cached = await analyticsCacheService.get(cacheKey, {
+      bypass: bypassCache,
+    });
     if (cached !== null) {
       return resolveCachedAnalyticsResult(cached, includeMeta);
     }
@@ -4214,6 +4238,7 @@ class MonitorHistory {
       latestCacheKey,
       includeMeta,
       getAnalyticsBusyContext(),
+      bypassCache,
     );
     if (busyFallbackResult) {
       logger.warn(
@@ -4376,6 +4401,7 @@ class MonitorHistory {
         generatedAt,
       },
       ttlMs,
+      bypassCache,
     );
     return finalizeAnalyticsResult(normalizedResult, {
       includeMeta,
@@ -4582,13 +4608,16 @@ class MonitorHistory {
       current = 1,
       pageSize = 10,
       includeMeta = false,
+      bypassCache = false,
     } = params;
 
     const cacheKey = `periodSummary:${ANALYTICS_CACHE_VERSION}:overview:${country}:${site}:${brand}:${startTime}:${endTime}:${timeSlotGranularity}:${current}:${pageSize}`;
     const latestCacheKey = `periodSummary:overview:${country}:${site}:${brand}:${startTime}:${endTime}:${timeSlotGranularity}:${current}:${pageSize}`;
     const periodSummaryCacheTtl =
       Number(process.env.ANALYTICS_PERIOD_SUMMARY_TTL_MS) || 300000;
-    const cached = await analyticsCacheService.get(cacheKey);
+    const cached = await analyticsCacheService.get(cacheKey, {
+      bypass: bypassCache,
+    });
     if (cached !== null) {
       logger.info(`[缓存命中] getPeriodSummary 缓存键: ${cacheKey}`);
       return resolveCachedAnalyticsResult(cached, includeMeta);
@@ -4597,6 +4626,7 @@ class MonitorHistory {
       latestCacheKey,
       includeMeta,
       getAnalyticsBusyContext(),
+      bypassCache,
     );
     if (busyFallbackResult) {
       logger.warn(
@@ -4747,10 +4777,13 @@ class MonitorHistory {
         generatedAt,
       },
       periodSummaryCacheTtl,
+      bypassCache,
     );
-    logger.info(
-      `[缓存存储] getPeriodSummary 结果已缓存，键: ${cacheKey}，TTL: ${periodSummaryCacheTtl}ms`,
-    );
+    if (!bypassCache) {
+      logger.info(
+        `[缓存存储] getPeriodSummary 结果已缓存，键: ${cacheKey}，TTL: ${periodSummaryCacheTtl}ms`,
+      );
+    }
 
     return finalizeAnalyticsResult(finalResult, {
       includeMeta,

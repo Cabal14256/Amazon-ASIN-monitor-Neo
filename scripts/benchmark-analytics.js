@@ -14,6 +14,7 @@ const path = require('path');
 
 const REQUIRED_TIME_SLOTS = ['hour', 'day', 'month'];
 const REQUIRED_WINDOWS = ['hot', 'cold'];
+const ANALYTICS_CACHE_BYPASS_HEADER = 'X-Analytics-Cache-Bypass';
 
 function parseArgs(argv) {
   const parsed = {};
@@ -121,6 +122,15 @@ function buildQuery(params) {
     if (text) query.set(key, text);
   }
   return query.toString();
+}
+
+function buildRequestHeaders(token = '') {
+  const headers = {
+    Accept: 'application/json',
+    [ANALYTICS_CACHE_BYPASS_HEADER]: '1',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
 }
 
 function normalizeComparableValue(value) {
@@ -375,6 +385,7 @@ function buildMatrix(config) {
           expectedNewSource: endpoint.requiresDatabaseExecution
             ? config.expectedNewSource
             : undefined,
+          performanceRequired: true,
           minimumCardinality: 1,
         });
       }
@@ -417,11 +428,19 @@ function buildMatrix(config) {
         expectedStatus: 200,
         cardinalityPath: endpoint.cardinalityPath,
         cardinalityItemField: endpoint.cardinalityItemField,
+        performanceRequired: false,
         minimumCardinality: 1,
       });
     }
   }
   return cases;
+}
+
+function passesPerformanceGate(required, speedup, minimumSpeedup) {
+  return (
+    !required ||
+    (speedup !== null && Number.isFinite(speedup) && speedup >= minimumSpeedup)
+  );
 }
 
 async function requestWithTiming(url, options) {
@@ -665,7 +684,11 @@ async function runCase(targets, benchmarkCase, options) {
   const databaseSourceGate = comparisons.every(
     (item) => item.databaseSourceMatches,
   );
-  const performanceGate = speedup !== null && speedup >= options.minSpeedup;
+  const performanceGate = passesPerformanceGate(
+    benchmarkCase.performanceRequired,
+    speedup,
+    options.minSpeedup,
+  );
 
   return {
     name: benchmarkCase.name,
@@ -673,6 +696,7 @@ async function runCase(targets, benchmarkCase, options) {
     granularity: benchmarkCase.granularity,
     path: benchmarkCase.path,
     queryKeys: benchmarkCase.queryKeys,
+    performanceRequired: benchmarkCase.performanceRequired,
     warmups,
     runs,
     comparisons,
@@ -725,10 +749,16 @@ function buildMarkdown(report) {
     `- Dataset Profile: ${report.meta.datasetProfile}`,
     `- Warmup / Runs: ${report.meta.warmup} / ${report.meta.runs}`,
     `- Required P95 Speedup: ${report.meta.minSpeedup}x`,
+    `- P95-gated Cases: ${
+      report.cases.filter((item) => item.performanceRequired).length
+    }`,
+    `- Cache Bypass Requested: ${
+      report.meta.cacheBypassRequested ? 'yes' : 'no'
+    }`,
     `- Matrix Cases: ${report.cases.length}`,
     '',
-    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | DB executed | DB source | Correct | Passed |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | DB executed | DB source | P95 required | Correct | Passed |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   ];
   for (const benchmarkCase of report.cases) {
     lines.push(
@@ -741,12 +771,16 @@ function buildMarkdown(report) {
       )} | ${formatMs(benchmarkCase.stats.new.p95)} | ${
         benchmarkCase.stats.speedup === null
           ? 'N/A'
-          : `${benchmarkCase.stats.speedup.toFixed(2)}x`
+          : `${benchmarkCase.stats.speedup.toFixed(2)}x${
+              benchmarkCase.performanceRequired ? '' : ' (informational)'
+            }`
       } | ${benchmarkCase.gates.cardinality ? 'yes' : 'no'} | ${
         benchmarkCase.gates.databaseExecution ? 'yes' : 'no'
       } | ${benchmarkCase.gates.databaseSource ? 'yes' : 'no'} | ${
-        benchmarkCase.gates.correctness ? 'yes' : 'no'
-      } | ${benchmarkCase.gates.passed ? 'yes' : 'no'} |`,
+        benchmarkCase.performanceRequired ? 'yes' : 'no'
+      } | ${benchmarkCase.gates.correctness ? 'yes' : 'no'} | ${
+        benchmarkCase.gates.passed ? 'yes' : 'no'
+      } |`,
     );
   }
   lines.push(
@@ -784,6 +818,17 @@ Database execution evidence:
   target by default. Run both targets with isolated caches and their supported
   cache bypass/disable mode; cached, raw-fallback, or missing execution metadata
   fails the gate.
+
+  Start both benchmark targets with ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED=1.
+  The script sends X-Analytics-Cache-Bypass: 1; the server then skips both
+  analytics cache reads and writes for that request. The opt-in is disabled by
+  default and should be enabled only on isolated benchmark targets.
+
+Performance scope:
+  The 24 database-backed hour/day/month cases require the configured P95
+  speedup. The four adaptive raw-only cases remain correctness and non-empty
+  gates; their timing is reported as informational and cannot satisfy or fail
+  the storage promotion speedup gate.
 
 Options:
   --time-slots                  Must be hour,day,month (default: all three)
@@ -922,8 +967,7 @@ async function main() {
   }
   const config = buildConfig(args);
   const matrix = buildMatrix(config);
-  const headers = { Accept: 'application/json' };
-  if (config.token) headers.Authorization = `Bearer ${config.token}`;
+  const headers = buildRequestHeaders(config.token);
   const targets = [
     { key: 'old', label: config.oldLabel, base: config.oldBase, headers },
     { key: 'new', label: config.newLabel, base: config.newBase, headers },
@@ -958,7 +1002,7 @@ async function main() {
 
   const passed = cases.every((benchmarkCase) => benchmarkCase.gates.passed);
   const report = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: passed ? 'passed' : 'failed',
     meta: {
       createdAt: new Date().toISOString(),
@@ -969,6 +1013,8 @@ async function main() {
       newLabel: config.newLabel,
       expectedOldSource: config.expectedOldSource,
       expectedNewSource: config.expectedNewSource,
+      cacheBypassRequested: true,
+      cacheBypassHeader: ANALYTICS_CACHE_BYPASS_HEADER,
       oldBase: config.oldBase,
       newBase: config.newBase,
       windows: REQUIRED_WINDOWS,
@@ -1022,6 +1068,7 @@ module.exports = {
   atomicWrite,
   buildConfig,
   buildMatrix,
+  buildRequestHeaders,
   calcStats,
   canonicalJson,
   comparePairResults,
@@ -1032,6 +1079,7 @@ module.exports = {
   normalizeBaseUrl,
   normalizeComparableValue,
   percentile,
+  passesPerformanceGate,
   responseCardinality,
   responseShape,
   validateWindows,

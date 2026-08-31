@@ -87,7 +87,10 @@ async function deleteByPrefix(prefix) {
   }
 }
 
-async function get(key) {
+async function get(key, { bypass = false } = {}) {
+  if (bypass) {
+    return null;
+  }
   const memoryCached = cacheService.get(key);
   if (memoryCached !== null) {
     return memoryCached;
@@ -106,7 +109,10 @@ async function get(key) {
   return null;
 }
 
-async function set(key, value, ttlMs) {
+async function set(key, value, ttlMs, { bypass = false } = {}) {
+  if (bypass) {
+    return;
+  }
   if (typeof ttlMs === 'number' && ttlMs > 0) {
     cacheService.set(key, value, ttlMs);
   } else {
@@ -115,12 +121,12 @@ async function set(key, value, ttlMs) {
   await setToRedis(key, value, ttlMs);
 }
 
-async function getLatest(key) {
-  return get(`latest:${key}`);
+async function getLatest(key, options) {
+  return get(`latest:${key}`, options);
 }
 
-async function rememberLatest(key, value, ttlMs) {
-  await set(`latest:${key}`, value, ttlMs);
+async function rememberLatest(key, value, ttlMs, options) {
+  await set(`latest:${key}`, value, ttlMs, options);
 }
 
 module.exports = {

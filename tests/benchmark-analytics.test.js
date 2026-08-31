@@ -9,6 +9,7 @@ const {
   atomicWrite,
   buildConfig,
   buildMatrix,
+  buildRequestHeaders,
   calcStats,
   comparePairResults,
   comparableResponse,
@@ -16,6 +17,7 @@ const {
   firstDifferencePath,
   joinApiUrl,
   normalizeBaseUrl,
+  passesPerformanceGate,
   responseCardinality,
 } = require('../scripts/benchmark-analytics');
 
@@ -86,6 +88,18 @@ test('normalization compares business data and excludes volatile meta', () => {
   );
 });
 
+test('benchmark requests opt into the isolated cache bypass without persisting credentials', () => {
+  assert.deepEqual(buildRequestHeaders(''), {
+    Accept: 'application/json',
+    'X-Analytics-Cache-Bypass': '1',
+  });
+  assert.deepEqual(buildRequestHeaders('runtime-secret'), {
+    Accept: 'application/json',
+    'X-Analytics-Cache-Bypass': '1',
+    Authorization: 'Bearer runtime-secret',
+  });
+});
+
 test('promotion matrix covers two windows, three granularities and filters', () => {
   const config = buildConfig(completeArgs());
   const matrix = buildMatrix(config);
@@ -127,6 +141,14 @@ test('promotion matrix covers two windows, three granularities and filters', () 
         ({ expectedOldSource, expectedNewSource }) =>
           expectedOldSource === 'raw' && expectedNewSource === 'agg',
       ),
+  );
+  assert.equal(
+    matrix.filter(({ performanceRequired }) => performanceRequired).length,
+    24,
+  );
+  assert.equal(
+    matrix.filter(({ performanceRequired }) => !performanceRequired).length,
+    4,
   );
   assert.throws(
     () => buildConfig(completeArgs({ brand: '' })),
@@ -185,6 +207,13 @@ test('promotion matrix covers two windows, three granularities and filters', () 
         benchmarkCase.cardinalityPath.length > 0,
     ),
   );
+});
+
+test('raw-only adaptive cases are correctness-only for performance', () => {
+  assert.equal(passesPerformanceGate(false, 0.75, 3), true);
+  assert.equal(passesPerformanceGate(false, null, 3), true);
+  assert.equal(passesPerformanceGate(true, 2.99, 3), false);
+  assert.equal(passesPerformanceGate(true, 3, 3), true);
 });
 
 test('cardinality gate rejects empty and missing business results', () => {

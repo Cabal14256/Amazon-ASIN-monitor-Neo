@@ -29,8 +29,11 @@
 
 按顺序执行，任一步非零立即进入下面的判定矩阵：
 
+`db:migrate:data` 会校验 P1-T4b 收敛后的 7 个运维索引，因此即使 retention 保持默认关闭，也必须先完成 `0002` 存储策略升级。
+
 ```bash
 corepack pnpm db:upgrade:timescale
+corepack pnpm db:upgrade:timescale-storage
 corepack pnpm db:migrate:data
 corepack pnpm db:timescale:aggregate:gate
 ```
