@@ -11,6 +11,7 @@ import { healthSchema, type Health } from '@asin-monitor/contracts';
 import { ApiExceptionFilter } from '../src/common/api-exception.filter';
 import { HealthController } from '../src/health/health.controller';
 import {
+  ApplicationDatabasePools,
   HealthErrorStatsService,
   HealthRuntimeDependencies,
   HealthService,
@@ -108,6 +109,67 @@ describe('HealthService', () => {
       'amazon_asin_monitor_health_dependency_up{dependency="redis"} 1',
     );
     metrics.onModuleDestroy();
+  });
+
+  it('共享应用数据库池消费空闲连接错误且不记录原始异常', async () => {
+    const warn = vi.fn();
+    const logger = { warn: warn } as unknown as AppLogger;
+    const pools = new ApplicationDatabasePools(loadEnv(validEnv), logger);
+
+    (
+      pools.primaryPool as unknown as {
+        emit(event: string, error: Error): boolean;
+      }
+    ).emit(
+      'error',
+      new Error('postgresql://operator:raw-secret@db.internal/primary'),
+    );
+    (
+      pools.competitorPool as unknown as {
+        emit(event: string, error: Error): boolean;
+      }
+    ).emit(
+      'error',
+      new Error('postgresql://operator:raw-secret@db.internal/competitor'),
+    );
+
+    expect(warn).toHaveBeenNthCalledWith(
+      1,
+      'PostgreSQL 空闲连接异常',
+      'ApplicationDatabasePools',
+      { dependency: 'database', reason: 'idle_client_error' },
+    );
+    expect(warn).toHaveBeenNthCalledWith(
+      2,
+      'PostgreSQL 空闲连接异常',
+      'ApplicationDatabasePools',
+      { dependency: 'competitor_database', reason: 'idle_client_error' },
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('raw-secret');
+    await pools.onModuleDestroy();
+  });
+
+  it('健康运行依赖委托给共享应用数据库池而不创建独立 PG 池', async () => {
+    const databasePools = {
+      queryPrimary: vi.fn().mockResolvedValue(undefined),
+      queryCompetitor: vi.fn().mockResolvedValue(undefined),
+      primaryPoolSnapshot: vi.fn(() => poolSnapshot),
+      competitorPoolSnapshot: vi.fn(() => poolSnapshot),
+    } as unknown as ApplicationDatabasePools;
+    const dependencies = new HealthRuntimeDependencies(
+      loadEnv(validEnv),
+      { debug: vi.fn() } as unknown as AppLogger,
+      databasePools,
+    );
+
+    await dependencies.queryPrimary();
+    await dependencies.queryCompetitor();
+
+    expect(databasePools.queryPrimary).toHaveBeenCalledOnce();
+    expect(databasePools.queryCompetitor).toHaveBeenCalledOnce();
+    expect(dependencies.primaryPoolSnapshot()).toBe(poolSnapshot);
+    expect(dependencies.competitorPoolSnapshot()).toBe(poolSnapshot);
+    dependencies.onModuleDestroy();
   });
 
   it('依赖失败返回通用错误与 degraded，日志不包含连接串或凭据', async () => {
@@ -219,7 +281,12 @@ describe.skipIf(!integrationEnabled)(
     it('对 CI 的双 PostgreSQL 与 Redis 执行真实有界探针', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
-      const dependencies = new HealthRuntimeDependencies(env, logger);
+      const databasePools = new ApplicationDatabasePools(env, logger);
+      const dependencies = new HealthRuntimeDependencies(
+        env,
+        logger,
+        databasePools,
+      );
       const metrics = new MetricsService();
       const service = new HealthService(
         env,
@@ -235,7 +302,8 @@ describe.skipIf(!integrationEnabled)(
         expect(health.competitorDatabase?.connected).toBe(true);
         expect(health.cache).toMatchObject({ connected: true });
       } finally {
-        await dependencies.onModuleDestroy();
+        dependencies.onModuleDestroy();
+        await databasePools.onModuleDestroy();
         metrics.onModuleDestroy();
       }
     }, 30_000);
