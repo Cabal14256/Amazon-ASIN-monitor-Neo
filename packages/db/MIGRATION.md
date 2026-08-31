@@ -5,7 +5,7 @@
 - [`migrations/0000_baseline.sql`](./migrations/0000_baseline.sql) 是空 PostgreSQL/TimescaleDB 双库的唯一建库基线；它通过 `psql` 的 `\connect` 依次初始化主营与竞品两个独立 database。
 - [`src/schema`](./src/schema) 与 [`src/schema-competitor`](./src/schema-competitor) 是 Neo 查询代码使用的 Drizzle 事实源，已经按真实数据库反向结构人工校对。
 - `server/database/init.sql`、`competitor-init.sql` 与 `server/database/migrations/*.sql` 只保留为 Legacy MySQL 历史参考。既有历史文件已冻结，不得改写或在 PG 上执行。
-- 本基线保留三张普通聚合表和普通 `monitor_history`；随后由有序升级 [`migrations/0001_timescale_aggregates.sql`](./migrations/0001_timescale_aggregates.sql) 转为 hypertable 并创建持续聚合。索引删改、columnstore/压缩和 retention 属于 P1-T4b，不在 `0001` 提前实现。
+- 本基线保留三张普通聚合表和普通 `monitor_history`；随后由有序升级 [`migrations/0001_timescale_aggregates.sql`](./migrations/0001_timescale_aggregates.sql) 转为 hypertable 并创建持续聚合，再由 [`migrations/0002_timescale_storage_policies.sql`](./migrations/0002_timescale_storage_policies.sql) 完成索引终审、columnstore 和可选 retention。三个文件均是已部署的有序事实源，不得回写旧迁移。
 
 ## 执行方式
 
@@ -14,7 +14,8 @@
 1. TimescaleDB 镜像自带初始化和调优；
 2. `010-bootstrap-databases.sh` 创建竞品 database，并为两库安装扩展；
 3. `020-apply-baseline.sh` 执行单一 PG baseline；
-4. `030-apply-timescale-aggregates.sh` 在主营库执行 `0001` Timescale 升级。
+4. `030-apply-timescale-aggregates.sh` 在主营库执行 `0001` Timescale 升级；
+5. `040-apply-timescale-storage-policies.sh` 在主营库执行 `0002` 索引与存储策略升级；retention 未配置时保持关闭。
 
 ```bash
 cp .env.neo.example .env.neo
@@ -27,10 +28,11 @@ corepack pnpm db:status
 ```bash
 corepack pnpm db:baseline
 corepack pnpm db:upgrade:timescale
+corepack pnpm db:upgrade:timescale-storage
 corepack pnpm --filter db test:integration
 ```
 
-不得对含业务数据的库重新执行 `db:baseline`；这类环境只执行经预演的 `db:upgrade:timescale`。外部实例可用 `psql -X -v ON_ERROR_STOP=1 --file packages/db/migrations/0001_timescale_aggregates.sql` 连接主营 database 执行同一升级。
+不得对含业务数据的库重新执行 `db:baseline`；这类环境只依序执行经预演的两次 Timescale 升级。外部实例可用 `psql -X -v ON_ERROR_STOP=1 --file ...` 连接主营 database 执行同一组迁移。`0002` 精确要求 TimescaleDB 2.29.2，retention 默认关闭；明确审批后才把 `asin_monitor.monitor_history_retention_days` 会话 GUC 设为不小于 800 的整数。
 
 对外部 PostgreSQL 16 + TimescaleDB 实例，先创建两个 database 并在两库启用扩展，再从可访问两库的管理连接执行：
 
@@ -61,6 +63,16 @@ database 名仅允许字母、数字和下划线；本地 bootstrap 会拒绝其
 - 三张 Legacy agg 表、`analytics_refresh_watermark` 和 `monitor_history_status_interval` 均保留。状态区间不是聚合语义，不转为 CAGG。
 
 自动刷新策略为：hour `[now-49h, now)` 每 10 分钟、day `[now-32d, now)` 每小时、month `[now-25mo, now)` 每天；`end_offset=0` 让 Timescale 在每次运行中纳入最新已完成 bucket，当前未完成 bucket 仍不会进入 materialized-only CAGG。调度 timezone 固定 `Asia/Shanghai`。边界之外的历史数据和已经物化 bucket 内的迟到数据必须通过显式窗口重刷。
+
+### P1-T4b 索引、columnstore 与 retention
+
+`0002` 使用 `timescaledb.transaction_per_chunk` 把 19 个 Legacy 原始历史索引收敛为 7 个经过真实查询验证的运维索引，并为 9 个 CAGG 显式创建 30 个 `(group_key, time_slot)` B-tree。逐项取舍、BRIN 暂不采用的依据以及重评阈值见 [`INDEX_REVIEW.md`](./INDEX_REVIEW.md)。
+
+原始历史按 `country,asin_id` 分段、`check_time DESC,id DESC` 排序，30 天后进入 columnstore；hour/day/month CAGG 分别在 3/40/800 天后进入 columnstore。全部使用 TimescaleDB 2.29.2 的 `enable_columnstore`、`add_columnstore_policy` 和 `convert_to_*store` API，不使用旧 compression API。固定调度起点与 timezone 使重复部署可精确校验 catalog。
+
+Retention 是显式 opt-in：未设置 `TIMESCALE_RETENTION_DAYS` 时，迁移要求 catalog 中不存在 raw retention job；设置后必须为整数且不小于 800 天，并且重复执行必须与现有 job 完全一致。它不能早于 month CAGG 的 25 个月刷新/回填边界。部署、观测、暂停、晚到写入、恢复与不可逆删除后的 MySQL 回切见 [`../../docs/runbooks/phase-1-timescale-storage.md`](../../docs/runbooks/phase-1-timescale-storage.md)。受控逆迁移为 [`migrations/0002_timescale_storage_policies.rollback.sql`](./migrations/0002_timescale_storage_policies.rollback.sql)，但无法恢复已被 retention 删除的 chunk。
+
+Integration 使用 36 万行确定性 fixture：7 个真实 `EXPLAIN (ANALYZE, BUFFERS)` 计划必须命中目标索引，12 组冷热 × hour/day/month × 有无筛选的 raw/CAGG 结果摘要必须一致且每组 P95 至少 3 倍，另验证 columnstore 查询、晚到写入、重整和开放写事务期间的 CAGG 读取。脱敏报告作为 CI artifact 输出到 `artifacts/timescale-performance/integration-report.json`。
 
 ### 有界历史回填与正确性 Gate
 
@@ -102,7 +114,7 @@ Gate 使用 `DATABASE_URL`，并从根目录依次读取 `.env.migration`、`.en
 | 历史表外键 | 不创建 | 保留 030 迁移后的快照数据与批量删除语义 |
 | 反引号、`USE`、`ENGINE` | 移除 | database 切换只使用 psql `\connect` |
 
-MySQL 索引名只需在单表内唯一，PG 索引名在同一 schema 内必须唯一，因此通用的 `idx_country` 等名称统一加表名前缀；索引列序与排序方向保持不变。Legacy 中已经存在的重复索引仍在 P1-T2 原样表达，P1-T4 的索引策略评审再决定是否删除。
+MySQL 索引名只需在单表内唯一，PG 索引名在同一 schema 内必须唯一，因此通用的 `idx_country` 等名称统一加表名前缀；索引列序与排序方向保持不变。Legacy 中的重复索引在 P1-T2 原样表达，再由 P1-T4b 的有序迁移按 [`INDEX_REVIEW.md`](./INDEX_REVIEW.md) 和性能 Gate 收敛。
 
 ### 排序规则
 

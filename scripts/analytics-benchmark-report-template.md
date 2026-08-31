@@ -1,78 +1,33 @@
-# Analytics API Benchmark Report Template
+# Analytics Correctness and Performance Gate
 
-## 1. Metadata
+The script generates this report automatically. Do not paste response bodies, tokens, cookies, connection strings, or real account data into a report.
 
-- Date:
-- Owner:
-- Old environment:
-- New environment:
-- Data window:
-- Notes:
+## Metadata
 
-## 2. Benchmark Configuration
+- Status:
+- Created at:
+- Environment label:
+- Synthetic/representative dataset rows:
+- Non-sensitive dataset profile:
+- Hot and cold windows:
+- Warmup / measured runs:
+- Required P95 speedup: `3x`
 
-- Endpoints:
-  - `/api/v1/monitor-history/statistics/all-countries-summary`
-  - `/api/v1/monitor-history/statistics/region-summary`
-  - `/api/v1/monitor-history/statistics/period-summary`
-- Query params:
-  - `startTime=`
-  - `endTime=`
-  - `timeSlotGranularity=`
-  - `country=`
-  - `site=`
-  - `brand=`
-  - `current=`
-  - `pageSize=`
-- Sampling:
-  - warmup:
-  - runs:
-  - timeoutMs:
+## Gate summary
 
-## 3. Summary
+| Gate                                            | Result |
+| ----------------------------------------------- | ------ |
+| Complete two-window, hour/day/month matrix      |        |
+| Every warmup and measured request succeeded     |        |
+| Every target produced the required sample count |        |
+| Every normalized old/new response matched       |        |
+| Every case achieved old/new P95 >= 3x           |        |
 
-| Endpoint | Old Avg | New Avg | Avg Delta | Old P95 | New P95 | P95 Delta | Old Pass | New Pass |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: |
-| all-countries-summary |  |  |  |  |  |  |  |  |
-| region-summary |  |  |  |  |  |  |  |  |
-| period-summary |  |  |  |  |  |  |  |  |
+## Case results
 
-Notes:
+| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Correct | Passed |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
 
-- Delta formula: `(old - new) / old * 100%`
-- Positive delta means the new project is faster.
+## Reproduction
 
-## 4. Endpoint Details
-
-### 4.1 all-countries-summary
-
-- Old: min / p50 / p90 / p95 / avg / max
-- New: min / p50 / p90 / p95 / avg / max
-- Failure samples:
-
-### 4.2 region-summary
-
-- Old: min / p50 / p90 / p95 / avg / max
-- New: min / p50 / p90 / p95 / avg / max
-- Failure samples:
-
-### 4.3 period-summary
-
-- Old: min / p50 / p90 / p95 / avg / max
-- New: min / p50 / p90 / p95 / avg / max
-- Failure samples:
-
-## 5. Conclusion and Action Items
-
-- Conclusion:
-- Current bottlenecks:
-- Next actions (sorted by impact):
-  1.
-  2.
-  3.
-
-## 6. Attachments
-
-- Script JSON output:
-- Script Markdown output:
-- Related logs:
+Use the redacted command emitted in the machine report. Supply secrets only at runtime; the generated JSON and Markdown never include authorization headers or raw response bodies.

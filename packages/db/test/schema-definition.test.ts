@@ -4,8 +4,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  monitorHistoryOperationalIndexNames,
   timescaleAggregateProjectionViewNames,
   timescaleContinuousAggregateViewNames,
+  timescaleStoragePolicy,
 } from '../src/timescale';
 import {
   competitorDrizzleTables,
@@ -21,6 +23,8 @@ const read = (relativePath: string) =>
 const baselinePath = 'packages/db/migrations/0000_baseline.sql';
 const timescaleMigrationPath =
   'packages/db/migrations/0001_timescale_aggregates.sql';
+const storagePolicyMigrationPath =
+  'packages/db/migrations/0002_timescale_storage_policies.sql';
 
 describe('PostgreSQL 双库 Schema 基线', () => {
   it('Drizzle 事实源覆盖 Legacy 最终态 21 + 4 张表', () => {
@@ -171,5 +175,56 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     for (const caggName of timescaleContinuousAggregateViewNames) {
       expect(primaryTableNames).not.toContain(caggName);
     }
+  });
+
+  it('P1-T4b 以分 chunk 事务把 19 个 Legacy 索引收敛为 7 个运维索引', () => {
+    const migration = read(storagePolicyMigrationPath);
+
+    for (const indexName of monitorHistoryOperationalIndexNames) {
+      expect(migration).toContain(indexName);
+    }
+    expect(migration.match(/timescaledb\.transaction_per_chunk/g)).toHaveLength(
+      36,
+    );
+    expect(
+      migration.match(/CREATE INDEX IF NOT EXISTS idx_cagg_[a-z0-9_]+/g),
+    ).toHaveLength(30);
+    expect(
+      migration.match(
+        /DROP INDEX IF EXISTS public\.idx_monitor_history_[a-z0-9_]+;/g,
+      ),
+    ).toHaveLength(18);
+    expect(migration).toContain(
+      'WHERE is_broken = true AND notification_sent = false',
+    );
+    expect(migration).toContain(
+      'continuous aggregate index inventory mismatch',
+    );
+    expect(migration).not.toMatch(/USING\s+brin/i);
+  });
+
+  it('P1-T4b 使用 2.29.2 columnstore API、精确 job Gate 与默认关闭 retention', () => {
+    const migration = read(storagePolicyMigrationPath);
+
+    expect(migration).toContain(
+      `extension_version IS DISTINCT FROM '${timescaleStoragePolicy.extensionVersion}'`,
+    );
+    expect(migration.match(/timescaledb\.enable_columnstore,/g)).toHaveLength(
+      10,
+    );
+    expect(migration.match(/CALL add_columnstore_policy\(/g)).toHaveLength(10);
+    expect(migration).not.toContain('add_compression_policy(');
+    expect(migration).toContain("jobs.proc_name = 'policy_compression'");
+    expect(migration).toContain(
+      'timescaledb_information.hypertable_columnstore_settings',
+    );
+    expect(migration).toContain('asin_monitor.monitor_history_retention_days');
+    expect(migration).toContain(
+      `retention_days < ${timescaleStoragePolicy.rawRetentionMinimumDays}`,
+    );
+    expect(migration).toContain("jobs.proc_name = 'policy_retention'");
+    expect(migration).toContain(
+      'retention must remain disabled when no explicit retention days are configured',
+    );
   });
 });

@@ -155,91 +155,39 @@ export const monitorHistory = pgTable(
       name: 'monitor_history_pkey',
       columns: [table.checkTime, table.id],
     }),
-    index('idx_monitor_history_variant_group_id').on(table.variantGroupId),
-    index('idx_monitor_history_asin_id').on(table.asinId),
-    index('idx_monitor_history_asin_code').on(table.asinCode),
-    index('idx_monitor_history_check_time').on(table.checkTime),
-    index('idx_monitor_history_country').on(table.country),
-    index('idx_monitor_history_country_check_time').on(
-      table.country,
-      table.checkTime,
-    ),
-    index('idx_monitor_history_variant_group_check_time_broken').on(
+    index('idx_monitor_history_id_lookup').on(table.id),
+    index('idx_monitor_history_variant_group_time').on(
       table.variantGroupId,
-      table.checkTime,
-      table.isBroken,
+      table.checkTime.desc(),
+      table.id.desc(),
     ),
-    index('idx_monitor_history_country_check_time_broken').on(
+    index('idx_monitor_history_country_time').on(
       table.country,
-      table.checkTime,
-      table.isBroken,
+      table.checkTime.desc(),
+      table.id.desc(),
     ),
-    index('idx_monitor_history_check_time_country_broken').on(
-      table.checkTime,
-      table.country,
-      table.isBroken,
-    ),
-    index('idx_monitor_history_asin_code_country_check_time').on(
+    index('idx_monitor_history_asin_code_country_time').on(
       table.asinCode,
       table.country,
-      table.checkTime,
+      table.checkTime.desc(),
+      table.id.desc(),
     ),
-    index('idx_monitor_history_country_time_broken_asin').on(
-      table.country,
-      table.checkTime,
-      table.isBroken,
-      table.asinId,
-    ),
-    index('idx_monitor_history_asin_country_check_time_broken').on(
+    index('idx_monitor_history_asin_country_time').on(
       table.asinId,
       table.country,
-      table.checkTime,
-      table.isBroken,
-    ),
-    index('idx_monitor_history_country_hour_site_brand').on(
-      table.country,
-      table.hourTs,
-      table.siteSnapshot,
-      table.brandSnapshot,
-    ),
-    index('idx_monitor_history_country_day_site_brand').on(
-      table.country,
-      table.dayTs,
-      table.siteSnapshot,
-      table.brandSnapshot,
-    ),
-    index('idx_monitor_history_country_month_site_brand').on(
-      table.country,
-      table.monthTs,
-      table.siteSnapshot,
-      table.brandSnapshot,
-    ),
-    index('idx_monitor_history_hour_country_asin').on(
-      table.hourTs,
-      table.country,
-      table.asinId,
-      table.asinCode,
-      table.isBroken,
-    ),
-    index('idx_monitor_history_day_country_asin').on(
-      table.dayTs,
-      table.country,
-      table.asinId,
-      table.asinCode,
-      table.isBroken,
-    ),
-    index('idx_monitor_history_month_country_asin').on(
-      table.monthTs,
-      table.country,
-      table.asinId,
-      table.asinCode,
-      table.isBroken,
+      table.checkTime.desc(),
+      table.id.desc(),
     ),
     index('idx_monitor_history_status_interval_refresh').on(
       table.checkType,
       table.checkTime,
       table.id,
     ),
+    index('idx_monitor_history_notification_pending')
+      .on(table.country, table.checkTime, table.id)
+      .where(
+        sql`${table.isBroken} = true AND ${table.notificationSent} = false`,
+      ),
   ],
 );
 

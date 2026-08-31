@@ -9,6 +9,7 @@ services:
       POSTGRES_PASSWORD: ${NEO_POSTGRES_PASSWORD:-neo_dev_only}
       POSTGRES_DB: ${NEO_POSTGRES_DATABASE:-amazon_asin_monitor}
       COMPETITOR_DATABASE: ${NEO_COMPETITOR_DATABASE:-amazon_competitor_monitor}
+      TIMESCALE_RETENTION_DAYS: ${TIMESCALE_RETENTION_DAYS:-}
     ports:
       - '127.0.0.1:${NEO_POSTGRES_PORT:-5432}:5432'
     volumes:
@@ -18,6 +19,8 @@ services:
       - ./packages/db/migrations/0000_baseline.sql:/opt/asin-monitor/0000_baseline.sql:ro
       - ./packages/db/docker/apply-timescale-aggregates.sh:/docker-entrypoint-initdb.d/030-apply-timescale-aggregates.sh:ro
       - ./packages/db/migrations/0001_timescale_aggregates.sql:/opt/asin-monitor/0001_timescale_aggregates.sql:ro
+      - ./packages/db/docker/apply-timescale-storage-policies.sh:/docker-entrypoint-initdb.d/040-apply-timescale-storage-policies.sh:ro
+      - ./packages/db/migrations/0002_timescale_storage_policies.sql:/opt/asin-monitor/0002_timescale_storage_policies.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
