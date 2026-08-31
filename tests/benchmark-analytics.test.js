@@ -118,6 +118,16 @@ test('promotion matrix covers two windows, three granularities and filters', () 
     ).length,
     24,
   );
+  assert.equal(config.expectedOldSource, 'raw');
+  assert.equal(config.expectedNewSource, 'agg');
+  assert.ok(
+    matrix
+      .filter(({ requiresDatabaseExecution }) => requiresDatabaseExecution)
+      .every(
+        ({ expectedOldSource, expectedNewSource }) =>
+          expectedOldSource === 'raw' && expectedNewSource === 'agg',
+      ),
+  );
   assert.throws(
     () => buildConfig(completeArgs({ brand: '' })),
     /Missing required --brand/,
@@ -144,6 +154,18 @@ test('promotion matrix covers two windows, three granularities and filters', () 
   assert.throws(
     () => buildConfig(completeArgs({ 'hot-start-time': 'not-a-time' })),
     /--hot-start-time must be a valid timestamp/,
+  );
+  assert.throws(
+    () => buildConfig(completeArgs({ 'expected-new-source': 'raw' })),
+    /must identify an aggregate-backed, non-cache source/,
+  );
+  assert.throws(
+    () => buildConfig(completeArgs({ 'expected-new-source': 'cache+agg' })),
+    /must identify an aggregate-backed, non-cache source/,
+  );
+  assert.throws(
+    () => buildConfig(completeArgs({ 'expected-new-source': 'agg payload' })),
+    /must contain only lowercase letters/,
   );
   assert.throws(
     () =>
@@ -245,6 +267,42 @@ test('region summaries gate on summed checks instead of fixed region count', () 
   assert.equal(emptyRegions.differencePath, '$.__cardinality');
 });
 
+test('abnormal duration gate sums positive business checks instead of fixed placeholders', () => {
+  const abnormalCase = buildMatrix(buildConfig(completeArgs())).find(
+    ({ name }) => name.endsWith('-variant-group-filtered-duration'),
+  );
+  assert.deepEqual(abnormalCase.cardinalityPath, ['data', 'data']);
+  assert.equal(abnormalCase.cardinalityItemField, 'totalChecks');
+  assert.match(abnormalCase.query, /includeSeries=1/);
+
+  const result = (totalChecks) => ({
+    status: 200,
+    comparable: comparableResponse({
+      success: true,
+      data: {
+        data: Array.from({ length: 3 }, (_, index) => ({
+          timePeriod: `slot-${index}`,
+          totalChecks,
+        })),
+        summary: [{ totalChecks: 0 }],
+      },
+    }),
+  });
+  const placeholders = comparePairResults(
+    result(0),
+    result(0),
+    abnormalCase,
+    1,
+  );
+  assert.equal(placeholders.oldCardinality, 0);
+  assert.equal(placeholders.matches, false);
+  assert.equal(placeholders.differencePath, '$.__cardinality');
+
+  const populated = comparePairResults(result(2), result(2), abnormalCase, 2);
+  assert.equal(populated.oldCardinality, 6);
+  assert.equal(populated.matches, true);
+});
+
 test('pair comparison rejects empty results and divergent success statuses', () => {
   const benchmarkCase = {
     expectedStatus: 200,
@@ -293,11 +351,13 @@ test('database promotion cases reject cached measured responses', () => {
     cardinalityPath: ['data', 'list'],
     minimumCardinality: 1,
     requiresDatabaseExecution: true,
+    expectedOldSource: 'raw',
+    expectedNewSource: 'agg',
   };
-  const result = (cacheHit) => ({
+  const result = (cacheHit, source) => ({
     status: 200,
     cacheHit,
-    source: cacheHit ? 'cache+agg' : 'agg',
+    source,
     comparable: comparableResponse({
       success: true,
       data: { list: [{ id: 1 }] },
@@ -305,8 +365,8 @@ test('database promotion cases reject cached measured responses', () => {
   });
 
   const cached = comparePairResults(
-    result(true),
-    result(true),
+    result(true, 'cache+raw'),
+    result(true, 'cache+agg'),
     benchmarkCase,
     1,
   );
@@ -315,13 +375,25 @@ test('database promotion cases reject cached measured responses', () => {
   assert.equal(cached.differencePath, '$.__databaseExecution');
 
   const fresh = comparePairResults(
-    result(false),
-    result(false),
+    result(false, 'raw'),
+    result(false, 'agg'),
     benchmarkCase,
     2,
   );
   assert.equal(fresh.databaseExecutionMatches, true);
+  assert.equal(fresh.databaseSourceMatches, true);
   assert.equal(fresh.matches, true);
+
+  const rawFallback = comparePairResults(
+    result(false, 'raw'),
+    result(false, 'raw'),
+    benchmarkCase,
+    3,
+  );
+  assert.equal(rawFallback.databaseExecutionMatches, true);
+  assert.equal(rawFallback.databaseSourceMatches, false);
+  assert.equal(rawFallback.matches, false);
+  assert.equal(rawFallback.differencePath, '$.__databaseSource');
 });
 
 test('statistics require successful samples and expose p50/p90/p95', () => {

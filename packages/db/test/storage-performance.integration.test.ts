@@ -26,6 +26,7 @@ const benchmarkRuns = Math.max(
 const fixtureStart = '2040-01-01 00:00:00';
 const fixtureMiddle = '2040-02-01 00:00:00';
 const fixtureEnd = '2040-03-01 00:00:00';
+const caggDimensionIndexEvidenceCount = 9;
 const reportPath = resolve(
   fileURLToPath(new URL('../../../', import.meta.url)),
   'artifacts',
@@ -339,7 +340,7 @@ function caggAggregateQuery(
   return `
     SELECT
       to_char(time_slot, 'YYYY-MM-DD HH24:MI:SS') AS time_slot,
-      rtrim(country) AS country,
+      country AS country,
       SUM(check_count)::text AS check_count,
       SUM(broken_count)::text AS broken_count
     FROM public.monitor_history_cagg_dim_${granularity}
@@ -347,12 +348,37 @@ function caggAggregateQuery(
       AND time_slot < $2::timestamp
       ${
         filtered
-          ? "AND rtrim(country) = 'US' AND rtrim(site) = 'store-0' AND rtrim(brand) = 'brand-0'"
+          ? "AND country = 'US' AND site = 'store-0' AND brand = 'brand-0'"
           : ''
       }
     GROUP BY 1, 2
     ORDER BY 1, 2
   `;
+}
+
+async function assertManagedCaggDimensionIndexPlans(): Promise<void> {
+  const dimensions = [
+    { column: 'country', value: 'US' },
+    { column: 'site', value: 'store-0' },
+    { column: 'brand', value: 'brand-0' },
+  ] as const;
+  for (const granularity of ['hour', 'day', 'month'] as const) {
+    for (const dimension of dimensions) {
+      const expectedIndex = `idx_cagg_dim_${granularity}_${dimension.column}_time`;
+      report.indexEvidence.push(
+        await explainWithIndexGate(
+          `cagg-dim-${granularity}-${dimension.column}`,
+          expectedIndex,
+          `SELECT SUM(check_count)::text
+           FROM public.monitor_history_cagg_dim_${granularity}
+           WHERE ${dimension.column} = $1
+             AND time_slot >= $2::timestamp
+             AND time_slot < $3::timestamp`,
+          [dimension.value, fixtureStart, fixtureEnd],
+        ),
+      );
+    }
+  }
 }
 
 async function runBenchmarkCase(options: {
@@ -547,7 +573,8 @@ async function writeReportAtomically(): Promise<void> {
   report.gate.passed =
     report.gate.failures.length === 0 &&
     report.indexEvidence.length ===
-      monitorHistoryOperationalIndexNames.length &&
+      monitorHistoryOperationalIndexNames.length +
+        caggDimensionIndexEvidenceCount &&
     report.benchmarks.length === 12 &&
     report.storageRegression.convertedToColumnstore &&
     report.storageRegression.columnstoredCaggRelations === 9 &&
@@ -649,6 +676,7 @@ describe.skipIf(!integrationEnabled)(
           );
         }
       }
+      await assertManagedCaggDimensionIndexPlans();
       await convertFixtureCaggChunksToColumnstore();
     }, 300_000);
 

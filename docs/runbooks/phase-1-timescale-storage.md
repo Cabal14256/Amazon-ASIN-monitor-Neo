@@ -11,7 +11,7 @@ Retention 默认关闭，Compose 新卷初始化也不会把 `TIMESCALE_RETENTIO
 1. 使用与生产相同的 PostgreSQL 16、精确 TimescaleDB `2.29.2` 和同量级脱敏快照预演。
 2. 先完成 `0000` baseline、`0001` CAGG 升级、完整历史刷新与九组聚合正确性 Gate。
 3. 记录 `timescaledb_information.jobs`、`timescaledb_information.chunks`、数据库总大小、最大 chunk、写入 P95 和分析 P95 基线。
-4. 执行完整 Integration；下载 `timescale-performance-<run_id>` artifact，确认 7 份执行计划、9 个 CAGG 的 fixture chunk 均已转入 columnstore、12 组摘要一致、每组 CAGG P95 至少快 3 倍、列存晚到写入与 10 批共 2500 行持续写入期间的分析读取通过。
+4. 执行完整 Integration；下载 `timescale-performance-<run_id>` artifact，确认 7 份原始表运维索引和 9 份 CAGG country/site/brand 维度索引执行计划全部命中目标、9 个 CAGG 的 fixture chunk 均已转入 columnstore、12 组摘要一致、每组 CAGG P95 至少快 3 倍、列存晚到写入与 10 批共 2500 行持续写入期间的分析读取通过。
 5. 检查没有长事务或 DDL，确认 30 秒锁等待失败会被监控捕获。`transaction_per_chunk` 降低索引构建的长事务风险，但每个 chunk 仍会短时持锁。CAGG catalog 必须是 30 个受管复合索引加 9 个 Timescale 单时间索引，不能以总数相同掩盖集合漂移。
 
 ```bash

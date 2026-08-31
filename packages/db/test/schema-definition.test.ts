@@ -273,6 +273,23 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(performanceGate).toContain(
       "'concurrent-write-read: missing analytical P95 evidence'",
     );
+    expect(performanceGate).toContain(
+      "AND country = 'US' AND site = 'store-0' AND brand = 'brand-0'",
+    );
+    expect(performanceGate).not.toContain(
+      "AND rtrim(country) = 'US' AND rtrim(site) = 'store-0' AND rtrim(brand) = 'brand-0'",
+    );
+    expect(performanceGate).toContain(
+      'idx_cagg_dim_${granularity}_${dimension.column}_time',
+    );
+    expect(performanceGate).toContain(
+      'monitorHistoryOperationalIndexNames.length +\n        caggDimensionIndexEvidenceCount',
+    );
+    expect(
+      performanceGate.indexOf('await assertManagedCaggDimensionIndexPlans()'),
+    ).toBeLessThan(
+      performanceGate.indexOf('await convertFixtureCaggChunksToColumnstore()'),
+    );
 
     const rootPackage = JSON.parse(read('package.json')) as {
       scripts: Record<string, string>;

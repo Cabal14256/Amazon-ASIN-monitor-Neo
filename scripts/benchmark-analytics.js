@@ -252,6 +252,18 @@ function requireText(value, name) {
   return text;
 }
 
+function expectedSourceArg(value, name, fallback) {
+  const source = String(value === undefined ? fallback : value)
+    .trim()
+    .toLowerCase();
+  if (!/^[a-z0-9][a-z0-9:+._-]{0,63}$/.test(source)) {
+    throw new Error(
+      `--${name} must contain only lowercase letters, numbers, colon, plus, dot, underscore, or hyphen`,
+    );
+  }
+  return source;
+}
+
 function validateWindows(windows) {
   const parsed = {};
   for (const windowName of REQUIRED_WINDOWS) {
@@ -357,6 +369,12 @@ function buildMatrix(config) {
           cardinalityPath: endpoint.cardinalityPath,
           cardinalityItemField: endpoint.cardinalityItemField,
           requiresDatabaseExecution: endpoint.requiresDatabaseExecution,
+          expectedOldSource: endpoint.requiresDatabaseExecution
+            ? config.expectedOldSource
+            : undefined,
+          expectedNewSource: endpoint.requiresDatabaseExecution
+            ? config.expectedNewSource
+            : undefined,
           minimumCardinality: 1,
         });
       }
@@ -382,9 +400,10 @@ function buildMatrix(config) {
           country: config.filters.country,
           startTime: window.startTime,
           endTime: window.endTime,
-          includeSeries: 0,
+          includeSeries: 1,
         },
-        cardinalityPath: ['data', 'summary'],
+        cardinalityPath: ['data', 'data'],
+        cardinalityItemField: 'totalChecks',
       },
     ]) {
       const query = buildQuery(endpoint.params);
@@ -397,6 +416,7 @@ function buildMatrix(config) {
         queryKeys: Object.keys(endpoint.params).sort(),
         expectedStatus: 200,
         cardinalityPath: endpoint.cardinalityPath,
+        cardinalityItemField: endpoint.cardinalityItemField,
         minimumCardinality: 1,
       });
     }
@@ -517,6 +537,10 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
   const databaseExecutionMatches =
     !benchmarkCase.requiresDatabaseExecution ||
     (oldResult.cacheHit === false && newResult.cacheHit === false);
+  const databaseSourceMatches =
+    !benchmarkCase.requiresDatabaseExecution ||
+    (oldResult.source === benchmarkCase.expectedOldSource &&
+      newResult.source === benchmarkCase.expectedNewSource);
   let differencePath = '$.__unavailable';
   if (!statusesMatch) {
     differencePath = '$.__httpStatus';
@@ -531,6 +555,9 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     if (differencePath === null && !databaseExecutionMatches) {
       differencePath = '$.__databaseExecution';
     }
+    if (differencePath === null && !databaseSourceMatches) {
+      differencePath = '$.__databaseSource';
+    }
   }
   return {
     run,
@@ -542,7 +569,10 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     newStatus: newResult.status,
     cardinalityMatches,
     databaseExecutionMatches,
+    databaseSourceMatches,
     requiresDatabaseExecution: Boolean(benchmarkCase.requiresDatabaseExecution),
+    expectedOldSource: benchmarkCase.expectedOldSource || null,
+    expectedNewSource: benchmarkCase.expectedNewSource || null,
     oldCacheHit: oldResult.cacheHit,
     newCacheHit: newResult.cacheHit,
     oldSource: oldResult.source,
@@ -632,6 +662,9 @@ async function runCase(targets, benchmarkCase, options) {
   const databaseExecutionGate = comparisons.every(
     (item) => item.databaseExecutionMatches,
   );
+  const databaseSourceGate = comparisons.every(
+    (item) => item.databaseSourceMatches,
+  );
   const performanceGate = speedup !== null && speedup >= options.minSpeedup;
 
   return {
@@ -650,6 +683,7 @@ async function runCase(targets, benchmarkCase, options) {
       statuses: statusGate,
       cardinality: cardinalityGate,
       databaseExecution: databaseExecutionGate,
+      databaseSource: databaseSourceGate,
       correctness: correctnessGate,
       performance: performanceGate,
       passed:
@@ -658,6 +692,7 @@ async function runCase(targets, benchmarkCase, options) {
         statusGate &&
         cardinalityGate &&
         databaseExecutionGate &&
+        databaseSourceGate &&
         correctnessGate &&
         performanceGate,
     },
@@ -692,8 +727,8 @@ function buildMarkdown(report) {
     `- Required P95 Speedup: ${report.meta.minSpeedup}x`,
     `- Matrix Cases: ${report.cases.length}`,
     '',
-    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | DB executed | Correct | Passed |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | DB executed | DB source | Correct | Passed |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   ];
   for (const benchmarkCase of report.cases) {
     lines.push(
@@ -709,9 +744,9 @@ function buildMarkdown(report) {
           : `${benchmarkCase.stats.speedup.toFixed(2)}x`
       } | ${benchmarkCase.gates.cardinality ? 'yes' : 'no'} | ${
         benchmarkCase.gates.databaseExecution ? 'yes' : 'no'
-      } | ${benchmarkCase.gates.correctness ? 'yes' : 'no'} | ${
-        benchmarkCase.gates.passed ? 'yes' : 'no'
-      } |`,
+      } | ${benchmarkCase.gates.databaseSource ? 'yes' : 'no'} | ${
+        benchmarkCase.gates.correctness ? 'yes' : 'no'
+      } | ${benchmarkCase.gates.passed ? 'yes' : 'no'} |`,
     );
   }
   lines.push(
@@ -745,8 +780,10 @@ Required promotion evidence:
 
 Database execution evidence:
   The 24 database-backed cases require meta.cacheHit=false on every measured
-  response. Run both targets with isolated caches and their supported cache
-  bypass/disable mode; cached or missing execution metadata fails the gate.
+  response, meta.source=raw on the old target, and meta.source=agg on the new
+  target by default. Run both targets with isolated caches and their supported
+  cache bypass/disable mode; cached, raw-fallback, or missing execution metadata
+  fails the gate.
 
 Options:
   --time-slots                  Must be hour,day,month (default: all three)
@@ -758,6 +795,8 @@ Options:
   --group-limit                 group summary limit (default: 100)
   --token                       Bearer token; never logged or persisted
   --label-old / --label-new     Report labels (default: old/new)
+  --expected-old-source         Required old DB source (default: raw)
+  --expected-new-source         Required new DB source (default: agg; raw/cache forbidden)
   --output-dir                  Default: artifacts/analytics-benchmark
   --dry-run                     Validate and print URLs only
   --help
@@ -792,11 +831,34 @@ function buildConfig(args) {
       endTime: requireText(args['cold-end-time'], 'cold-end-time'),
     },
   });
+  const expectedOldSource = expectedSourceArg(
+    args['expected-old-source'],
+    'expected-old-source',
+    'raw',
+  );
+  const expectedNewSource = expectedSourceArg(
+    args['expected-new-source'],
+    'expected-new-source',
+    'agg',
+  );
+  if (
+    expectedNewSource === 'raw' ||
+    expectedNewSource.startsWith('raw:') ||
+    expectedNewSource === 'cache' ||
+    expectedNewSource.startsWith('cache+') ||
+    expectedNewSource.startsWith('cache:')
+  ) {
+    throw new Error(
+      '--expected-new-source must identify an aggregate-backed, non-cache source',
+    );
+  }
   return {
     oldBase,
     newBase,
     oldLabel: String(args['label-old'] || 'old'),
     newLabel: String(args['label-new'] || 'new'),
+    expectedOldSource,
+    expectedNewSource,
     token: String(args.token || process.env.BENCH_TOKEN || ''),
     windows,
     filters: {
@@ -830,6 +892,8 @@ function reproductionCommand(config) {
     'node scripts/benchmark-analytics.js',
     `--old-base ${config.oldBase}`,
     `--new-base ${config.newBase}`,
+    `--expected-old-source ${config.expectedOldSource}`,
+    `--expected-new-source ${config.expectedNewSource}`,
     '--hot-start-time <redacted>',
     '--hot-end-time <redacted>',
     '--cold-start-time <redacted>',
@@ -894,7 +958,7 @@ async function main() {
 
   const passed = cases.every((benchmarkCase) => benchmarkCase.gates.passed);
   const report = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: passed ? 'passed' : 'failed',
     meta: {
       createdAt: new Date().toISOString(),
@@ -903,6 +967,8 @@ async function main() {
       datasetProfile: config.datasetProfile,
       oldLabel: config.oldLabel,
       newLabel: config.newLabel,
+      expectedOldSource: config.expectedOldSource,
+      expectedNewSource: config.expectedNewSource,
       oldBase: config.oldBase,
       newBase: config.newBase,
       windows: REQUIRED_WINDOWS,
@@ -921,6 +987,7 @@ async function main() {
       statuses: cases.every((item) => item.gates.statuses),
       cardinality: cases.every((item) => item.gates.cardinality),
       databaseExecution: cases.every((item) => item.gates.databaseExecution),
+      databaseSource: cases.every((item) => item.gates.databaseSource),
       correctness: cases.every((item) => item.gates.correctness),
       performance: cases.every((item) => item.gates.performance),
       passed,
