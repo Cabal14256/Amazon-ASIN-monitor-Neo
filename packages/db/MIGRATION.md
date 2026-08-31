@@ -70,9 +70,9 @@ database 名仅允许字母、数字和下划线；本地 bootstrap 会拒绝其
 
 原始历史按 `country,asin_id` 分段、`check_time DESC,id DESC` 排序，30 天后进入 columnstore；hour/day/month CAGG 分别在 3/40/800 天后进入 columnstore。全部使用 TimescaleDB 2.29.2 的 `enable_columnstore`、`add_columnstore_policy` 和 `convert_to_*store` API，不使用旧 compression API。固定调度起点与 timezone 使重复部署可精确校验 catalog。
 
-Retention 是显式 opt-in：未设置 `TIMESCALE_RETENTION_DAYS` 时，迁移要求 catalog 中不存在 raw retention job；设置后必须为整数且不小于 800 天，并且重复执行必须与现有 job 完全一致。它不能早于 month CAGG 的 25 个月刷新/回填边界。部署、观测、暂停、晚到写入、恢复与不可逆删除后的 MySQL 回切见 [`../../docs/runbooks/phase-1-timescale-storage.md`](../../docs/runbooks/phase-1-timescale-storage.md)。受控逆迁移为 [`migrations/0002_timescale_storage_policies.rollback.sql`](./migrations/0002_timescale_storage_policies.rollback.sql)，但无法恢复已被 retention 删除的 chunk。
+Retention 是显式 opt-in：Compose 不把该变量传入新卷自动初始化；未设置 `TIMESCALE_RETENTION_DAYS` 时，迁移要求 catalog 中不存在 raw retention job。只有历史回填和正确性 Gate 完成后，才以显式 `db:upgrade:timescale-storage` 命令传入整数且不小于 800 天的值，并且重复执行必须与现有 job 完全一致。它不能早于 month CAGG 的 25 个月刷新/回填边界。部署、观测、暂停、晚到写入、恢复与不可逆删除后的 MySQL 回切见 [`../../docs/runbooks/phase-1-timescale-storage.md`](../../docs/runbooks/phase-1-timescale-storage.md)。受控逆迁移为 [`migrations/0002_timescale_storage_policies.rollback.sql`](./migrations/0002_timescale_storage_policies.rollback.sql)，但无法恢复已被 retention 删除的 chunk。
 
-Integration 使用 72 万行、60 天且同一 ASIN 周期性重复检查的确定性 fixture：7 个真实 `EXPLAIN (ANALYZE, BUFFERS)` 计划必须命中目标索引，12 组冷热 × hour/day/month × 有无筛选的 raw/CAGG 结果摘要必须一致且每组 P95 至少 3 倍，另验证 columnstore 查询、晚到写入、重整和开放写事务期间的 CAGG 读取。脱敏报告作为 CI artifact 输出到 `artifacts/timescale-performance/integration-report.json`。
+Integration 使用 72 万行、60 天且同一 ASIN 周期性重复检查的确定性 fixture：7 个真实 `EXPLAIN (ANALYZE, BUFFERS)` 计划必须命中目标索引，12 组冷热 × hour/day/month × 有无筛选的 raw/CAGG 结果摘要必须一致且每组 P95 至少 3 倍，另验证 columnstore 查询、晚到写入、重整和开放写事务期间的 CAGG 读取。性能套件会拒绝普通本地库，运行者必须以 `TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE` 精确声明名称含 `_ci` 的一次性目标库；脱敏报告作为 CI artifact 输出到 `artifacts/timescale-performance/integration-report.json`。
 
 ### 有界历史回填与正确性 Gate
 

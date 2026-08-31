@@ -9,7 +9,6 @@ services:
       POSTGRES_PASSWORD: ${NEO_POSTGRES_PASSWORD:-neo_dev_only}
       POSTGRES_DB: ${NEO_POSTGRES_DATABASE:-amazon_asin_monitor}
       COMPETITOR_DATABASE: ${NEO_COMPETITOR_DATABASE:-amazon_competitor_monitor}
-      TIMESCALE_RETENTION_DAYS: ${TIMESCALE_RETENTION_DAYS:-}
     ports:
       - '127.0.0.1:${NEO_POSTGRES_PORT:-5432}:5432'
     volumes:

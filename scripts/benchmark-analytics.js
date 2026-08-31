@@ -313,6 +313,7 @@ function buildMatrix(config) {
           path: '/monitor-history/statistics/all-countries-summary',
           params: common,
           cardinalityPath: ['data', 'totalChecks'],
+          requiresDatabaseExecution: true,
         },
         {
           suffix: 'region',
@@ -320,12 +321,14 @@ function buildMatrix(config) {
           params: common,
           cardinalityPath: ['data'],
           cardinalityItemField: 'totalChecks',
+          requiresDatabaseExecution: true,
         },
         {
           suffix: 'period-unfiltered',
           path: '/monitor-history/statistics/period-summary',
           params: { ...common, current: 1, pageSize: config.pageSize },
           cardinalityPath: ['data', 'list'],
+          requiresDatabaseExecution: true,
         },
         {
           suffix: 'period-filtered',
@@ -339,6 +342,7 @@ function buildMatrix(config) {
             pageSize: config.pageSize,
           },
           cardinalityPath: ['data', 'list'],
+          requiresDatabaseExecution: true,
         },
       ]) {
         const query = buildQuery(endpoint.params);
@@ -352,6 +356,7 @@ function buildMatrix(config) {
           expectedStatus: 200,
           cardinalityPath: endpoint.cardinalityPath,
           cardinalityItemField: endpoint.cardinalityItemField,
+          requiresDatabaseExecution: endpoint.requiresDatabaseExecution,
           minimumCardinality: 1,
         });
       }
@@ -429,6 +434,13 @@ async function requestWithTiming(url, options) {
       !Object.prototype.hasOwnProperty.call(parsed, 'success') ||
       parsed.success !== false;
     const ok = response.ok && applicationSucceeded;
+    const responseMeta =
+      parsed &&
+      typeof parsed === 'object' &&
+      parsed.meta &&
+      typeof parsed.meta === 'object'
+        ? parsed.meta
+        : null;
     return {
       ok,
       status: response.status,
@@ -438,6 +450,14 @@ async function requestWithTiming(url, options) {
         : response.ok
         ? 'APPLICATION_FAILURE'
         : 'HTTP_FAILURE',
+      cacheHit:
+        typeof responseMeta?.cacheHit === 'boolean'
+          ? responseMeta.cacheHit
+          : null,
+      source:
+        typeof responseMeta?.source === 'string'
+          ? responseMeta.source.slice(0, 64)
+          : null,
       comparable: comparableResponse(parsed),
     };
   } catch (error) {
@@ -450,6 +470,8 @@ async function requestWithTiming(url, options) {
       status: 0,
       durationMs,
       errorCode: timedOut ? 'TIMEOUT' : 'NETWORK_FAILURE',
+      cacheHit: null,
+      source: null,
       comparable: null,
     };
   } finally {
@@ -464,6 +486,8 @@ function safeRun(result, run) {
     status: result.status,
     durationMs: result.durationMs,
     errorCode: result.errorCode,
+    cacheHit: result.cacheHit,
+    source: result.source,
     responseDigest:
       result.comparable !== null ? digestValue(result.comparable) : null,
     responseShape: responseShape(result.comparable),
@@ -490,6 +514,9 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     newCardinality !== null &&
     oldCardinality >= benchmarkCase.minimumCardinality &&
     newCardinality >= benchmarkCase.minimumCardinality;
+  const databaseExecutionMatches =
+    !benchmarkCase.requiresDatabaseExecution ||
+    (oldResult.cacheHit === false && newResult.cacheHit === false);
   let differencePath = '$.__unavailable';
   if (!statusesMatch) {
     differencePath = '$.__httpStatus';
@@ -501,6 +528,9 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     if (differencePath === null && !cardinalityMatches) {
       differencePath = '$.__cardinality';
     }
+    if (differencePath === null && !databaseExecutionMatches) {
+      differencePath = '$.__databaseExecution';
+    }
   }
   return {
     run,
@@ -511,6 +541,12 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     oldStatus: oldResult.status,
     newStatus: newResult.status,
     cardinalityMatches,
+    databaseExecutionMatches,
+    requiresDatabaseExecution: Boolean(benchmarkCase.requiresDatabaseExecution),
+    oldCacheHit: oldResult.cacheHit,
+    newCacheHit: newResult.cacheHit,
+    oldSource: oldResult.source,
+    newSource: newResult.source,
     cardinalityPath: `$.${benchmarkCase.cardinalityPath.join('.')}${
       benchmarkCase.cardinalityItemField
         ? `[*].${benchmarkCase.cardinalityItemField} (sum)`
@@ -593,6 +629,9 @@ async function runCase(targets, benchmarkCase, options) {
   const correctnessGate = comparisons.every((item) => item.matches);
   const statusGate = comparisons.every((item) => item.statusesMatch);
   const cardinalityGate = comparisons.every((item) => item.cardinalityMatches);
+  const databaseExecutionGate = comparisons.every(
+    (item) => item.databaseExecutionMatches,
+  );
   const performanceGate = speedup !== null && speedup >= options.minSpeedup;
 
   return {
@@ -610,6 +649,7 @@ async function runCase(targets, benchmarkCase, options) {
       samples: sampleGate,
       statuses: statusGate,
       cardinality: cardinalityGate,
+      databaseExecution: databaseExecutionGate,
       correctness: correctnessGate,
       performance: performanceGate,
       passed:
@@ -617,6 +657,7 @@ async function runCase(targets, benchmarkCase, options) {
         sampleGate &&
         statusGate &&
         cardinalityGate &&
+        databaseExecutionGate &&
         correctnessGate &&
         performanceGate,
     },
@@ -651,8 +692,8 @@ function buildMarkdown(report) {
     `- Required P95 Speedup: ${report.meta.minSpeedup}x`,
     `- Matrix Cases: ${report.cases.length}`,
     '',
-    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | Correct | Passed |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+    '| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | DB executed | Correct | Passed |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
   ];
   for (const benchmarkCase of report.cases) {
     lines.push(
@@ -667,8 +708,10 @@ function buildMarkdown(report) {
           ? 'N/A'
           : `${benchmarkCase.stats.speedup.toFixed(2)}x`
       } | ${benchmarkCase.gates.cardinality ? 'yes' : 'no'} | ${
-        benchmarkCase.gates.correctness ? 'yes' : 'no'
-      } | ${benchmarkCase.gates.passed ? 'yes' : 'no'} |`,
+        benchmarkCase.gates.databaseExecution ? 'yes' : 'no'
+      } | ${benchmarkCase.gates.correctness ? 'yes' : 'no'} | ${
+        benchmarkCase.gates.passed ? 'yes' : 'no'
+      } |`,
     );
   }
   lines.push(
@@ -699,6 +742,11 @@ Required promotion evidence:
   --environment-label
   --dataset-rows                Positive integer
   --dataset-profile             Non-sensitive fixture/data description
+
+Database execution evidence:
+  The 24 database-backed cases require meta.cacheHit=false on every measured
+  response. Run both targets with isolated caches and their supported cache
+  bypass/disable mode; cached or missing execution metadata fails the gate.
 
 Options:
   --time-slots                  Must be hour,day,month (default: all three)
@@ -872,6 +920,7 @@ async function main() {
       samples: cases.every((item) => item.gates.samples),
       statuses: cases.every((item) => item.gates.statuses),
       cardinality: cases.every((item) => item.gates.cardinality),
+      databaseExecution: cases.every((item) => item.gates.databaseExecution),
       correctness: cases.every((item) => item.gates.correctness),
       performance: cases.every((item) => item.gates.performance),
       passed,

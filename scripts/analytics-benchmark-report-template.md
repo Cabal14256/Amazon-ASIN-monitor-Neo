@@ -2,6 +2,8 @@
 
 The script generates this report automatically. Do not paste response bodies, tokens, cookies, connection strings, or real account data into a report.
 
+Run both targets with isolated caches and their supported cache bypass/disable mode. The 24 database-backed matrix cases must report `meta.cacheHit: false` for every measured response; cached or missing execution evidence fails promotion.
+
 ## Metadata
 
 - Status:
@@ -22,13 +24,14 @@ The script generates this report automatically. Do not paste response bodies, to
 | Every response used the expected matching status |        |
 | Every target produced the required sample count  |        |
 | Every case returned non-empty business data      |        |
+| Every database case reported `cacheHit: false`   |        |
 | Every normalized old/new response matched        |        |
 | Every case achieved old/new P95 >= 3x            |        |
 
 ## Case results
 
-| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | Correct | Passed |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| Case | Old P50 | Old P90 | Old P95 | New P50 | New P90 | New P95 | Speedup | Non-empty | DB executed | Correct | Passed |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
 
 ## Reproduction
 

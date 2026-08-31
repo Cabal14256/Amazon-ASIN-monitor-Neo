@@ -260,6 +260,12 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     const performanceGate = read(
       'packages/db/test/storage-performance.integration.test.ts',
     );
+    expect(performanceGate).toContain(
+      'TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE must explicitly name a disposable *_ci database',
+    );
+    expect(performanceGate).toContain(
+      'SELECT current_database() AS database_name',
+    );
     expect(performanceGate).toContain('maximumConcurrentReadP95Ms: 2_000');
     expect(performanceGate).toContain(
       'concurrentReadP95Ms < report.gate.maximumConcurrentReadP95Ms',
@@ -273,6 +279,12 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     };
     expect(rootPackage.scripts['db:upgrade:timescale-storage']).toContain(
       'exec -e TIMESCALE_RETENTION_DAYS -T timescaledb',
+    );
+
+    const compose = read('compose.neo.yml');
+    expect(compose).not.toContain('TIMESCALE_RETENTION_DAYS:');
+    expect(read('.github/workflows/integration.yml')).toContain(
+      'TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE: amazon_asin_monitor_ci',
     );
   });
 });

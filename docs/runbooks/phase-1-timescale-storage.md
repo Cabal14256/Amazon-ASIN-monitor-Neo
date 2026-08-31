@@ -4,7 +4,7 @@
 
 本手册只处理 P1-T4b：`monitor_history` 索引收敛、9 个 CAGG 的索引、TimescaleDB 2.29.2 Hypercore columnstore policy，以及可选的原始历史 retention。它不授权删除 Legacy MySQL；Phase 1 全程保留冻结的 MySQL 只读库作为回切和已删除历史恢复来源。
 
-Retention 默认关闭。只有业务已经给出保留上限、完整备份已验证可恢复、CAGG 历史 Gate 已通过时，才允许设置 `TIMESCALE_RETENTION_DAYS`；值不得小于 800 天，因此始终晚于 25 个月 month CAGG 刷新/回填窗口。Retention 一旦实际删除 chunk，PG 内回滚脚本无法恢复数据，只能从备份或只读 MySQL 重建。
+Retention 默认关闭，Compose 新卷初始化也不会把 `TIMESCALE_RETENTION_DAYS` 转发给 `040` 脚本。只有业务已经给出保留上限、完整备份已验证可恢复、CAGG 历史 Gate 已通过时，才允许通过显式升级命令设置该变量；值不得小于 800 天，因此始终晚于 25 个月 month CAGG 刷新/回填窗口。Retention 一旦实际删除 chunk，PG 内回滚脚本无法恢复数据，只能从备份或只读 MySQL 重建。
 
 ## 上线前 Gate
 

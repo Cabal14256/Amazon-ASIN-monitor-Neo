@@ -19,6 +19,7 @@ describe('TimescaleDB 环境配置', () => {
     expect(workflow).toContain(`image: ${timescaleImage}`);
     expect(compose).not.toContain('latest-pg16');
     expect(workflow).not.toContain('latest-pg16');
+    expect(compose).not.toContain('TIMESCALE_RETENTION_DAYS:');
   });
 
   it('Compose 只向回环地址发布端口且不遮蔽镜像初始化目录', () => {

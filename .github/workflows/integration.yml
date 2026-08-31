@@ -56,6 +56,7 @@ jobs:
 
     env:
       RUN_INTEGRATION_TESTS: 'true'
+      TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE: amazon_asin_monitor_ci
       DATABASE_URL: postgresql://postgres@127.0.0.1:5432/amazon_asin_monitor_ci
       COMPETITOR_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/amazon_competitor_monitor_ci
       LOG_LEVEL: ERROR

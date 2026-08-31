@@ -112,6 +112,12 @@ test('promotion matrix covers two windows, three granularities and filters', () 
     matrix.filter(({ name }) => name.includes('variant-group')).length,
     4,
   );
+  assert.equal(
+    matrix.filter(({ requiresDatabaseExecution }) =>
+      Boolean(requiresDatabaseExecution),
+    ).length,
+    24,
+  );
   assert.throws(
     () => buildConfig(completeArgs({ brand: '' })),
     /Missing required --brand/,
@@ -279,6 +285,43 @@ test('pair comparison rejects empty results and divergent success statuses', () 
   assert.equal(matching.matches, true);
   assert.equal(matching.cardinalityMatches, true);
   assert.equal(matching.statusesMatch, true);
+});
+
+test('database promotion cases reject cached measured responses', () => {
+  const benchmarkCase = {
+    expectedStatus: 200,
+    cardinalityPath: ['data', 'list'],
+    minimumCardinality: 1,
+    requiresDatabaseExecution: true,
+  };
+  const result = (cacheHit) => ({
+    status: 200,
+    cacheHit,
+    source: cacheHit ? 'cache+agg' : 'agg',
+    comparable: comparableResponse({
+      success: true,
+      data: { list: [{ id: 1 }] },
+    }),
+  });
+
+  const cached = comparePairResults(
+    result(true),
+    result(true),
+    benchmarkCase,
+    1,
+  );
+  assert.equal(cached.databaseExecutionMatches, false);
+  assert.equal(cached.matches, false);
+  assert.equal(cached.differencePath, '$.__databaseExecution');
+
+  const fresh = comparePairResults(
+    result(false),
+    result(false),
+    benchmarkCase,
+    2,
+  );
+  assert.equal(fresh.databaseExecutionMatches, true);
+  assert.equal(fresh.matches, true);
 });
 
 test('statistics require successful samples and expose p50/p90/p95', () => {

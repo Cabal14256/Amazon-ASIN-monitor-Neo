@@ -184,6 +184,25 @@ async function timedQuery(
   };
 }
 
+async function assertDisposablePerformanceDatabase(): Promise<void> {
+  const expectedDatabase = String(
+    process.env.TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE ?? '',
+  ).trim();
+  if (!expectedDatabase || !/(?:^|_)ci(?:_|$)/i.test(expectedDatabase)) {
+    throw new Error(
+      'TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE must explicitly name a disposable *_ci database',
+    );
+  }
+  const current = await pool.query<{ database_name: string }>(
+    'SELECT current_database() AS database_name',
+  );
+  if (current.rows[0]?.database_name !== expectedDatabase) {
+    throw new Error(
+      `refusing destructive performance fixture: connected database does not match ${expectedDatabase}`,
+    );
+  }
+}
+
 function collectExplainDetails(
   value: unknown,
   details: {
@@ -557,6 +576,7 @@ describe.skipIf(!integrationEnabled)(
         connectionTimeoutMillis: 10_000,
         idleTimeoutMillis: 1_000,
       });
+      await assertDisposablePerformanceDatabase();
       const extension = await pool.query<{ extversion: string }>(`
         SELECT extversion
         FROM pg_extension
