@@ -99,6 +99,29 @@ function poolSnapshot(pool: Pool): PoolSnapshot {
   };
 }
 
+function poolUsage(snapshot: PoolSnapshot): number {
+  return snapshot.config.connectionLimit > 0
+    ? snapshot.activeConnections / snapshot.config.connectionLimit
+    : 0;
+}
+
+async function runPostgresProbe(pool: Pool, timeoutMs: number): Promise<void> {
+  const query = { text: 'SELECT 1', query_timeout: timeoutMs };
+  try {
+    await pool.query(query);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      /query read timeout|timeout exceeded when trying to connect|connection terminated due to connection timeout/i.test(
+        error.message,
+      )
+    ) {
+      throw new HealthProbeTimeoutError();
+    }
+    throw error;
+  }
+}
+
 export function memoryHealth(
   env: Pick<
     Env,
@@ -189,6 +212,7 @@ export class ApplicationDatabasePools implements OnModuleDestroy {
   constructor(@Inject(ENV) env: Env, @Inject(AppLogger) logger: AppLogger) {
     const poolOptions = {
       max: 10,
+      connectionTimeoutMillis: env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
       idleTimeoutMillis: 30_000,
       application_name: 'amazon-asin-monitor-neo-api',
     };
@@ -222,13 +246,11 @@ export class ApplicationDatabasePools implements OnModuleDestroy {
   }
 
   async probePrimary(timeoutMs: number): Promise<void> {
-    const query = { text: 'SELECT 1', query_timeout: timeoutMs };
-    await this.primaryPool.query(query);
+    await runPostgresProbe(this.primaryPool, timeoutMs);
   }
 
   async probeCompetitor(timeoutMs: number): Promise<void> {
-    const query = { text: 'SELECT 1', query_timeout: timeoutMs };
-    await this.competitorPool.query(query);
+    await runPostgresProbe(this.competitorPool, timeoutMs);
   }
 
   primaryPoolSnapshot(): PoolSnapshot {
@@ -358,10 +380,7 @@ export class HealthService {
     try {
       await withTimeout(query(), this.env.HEALTH_PROBE_TIMEOUT_MS);
       const pool = snapshot();
-      const usage =
-        pool.config.connectionLimit > 0
-          ? pool.activeConnections / pool.config.connectionLimit
-          : 0;
+      const usage = poolUsage(pool);
       const status =
         usage >= this.env.HEALTH_DB_POOL_DEGRADED_THRESHOLD ? 'degraded' : 'ok';
       const latencyMs = roundMilliseconds(performance.now() - startedAt);
@@ -376,12 +395,13 @@ export class HealthService {
     } catch (error) {
       const latencyMs = roundMilliseconds(performance.now() - startedAt);
       const reason = probeFailureReason(error);
+      const pool = snapshot();
       this.recordProbeState(dependency, false, latencyMs, reason);
       return {
         status: 'error',
         connected: false,
-        pool: snapshot(),
-        usagePercent: '0.00',
+        pool,
+        usagePercent: (poolUsage(pool) * 100).toFixed(2),
         latencyMs,
         error: reason,
       };

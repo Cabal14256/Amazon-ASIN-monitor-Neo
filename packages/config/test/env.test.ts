@@ -28,6 +28,7 @@ describe('loadEnv', () => {
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
     expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(2_000);
+    expect(env.DATABASE_POOL_CONNECTION_TIMEOUT_MS).toBe(2_000);
     expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
     expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.9);
     expect(env.HEALTH_MEMORY_RSS_DEGRADED_MB).toBe(0);
@@ -80,17 +81,26 @@ describe('loadEnv', () => {
     const env = loadEnv({
       ...validEnv,
       HEALTH_PROBE_TIMEOUT_MS: '750',
+      DATABASE_POOL_CONNECTION_TIMEOUT_MS: '750',
       HEALTH_DB_POOL_DEGRADED_THRESHOLD: '85',
       HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: '0.8',
       HEALTH_MEMORY_RSS_DEGRADED_MB: '1024',
     });
     expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(750);
+    expect(env.DATABASE_POOL_CONNECTION_TIMEOUT_MS).toBe(750);
     expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.85);
     expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.8);
     expect(env.HEALTH_MEMORY_RSS_DEGRADED_MB).toBe(1024);
     expect(() =>
       loadEnv({ ...validEnv, HEALTH_PROBE_TIMEOUT_MS: '0' }),
     ).toThrow(EnvValidationError);
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        HEALTH_PROBE_TIMEOUT_MS: '750',
+        DATABASE_POOL_CONNECTION_TIMEOUT_MS: '751',
+      }),
+    ).toThrow('共享数据库池连接超时不得大于健康探针总超时');
   });
 
   it('拒绝凭据、协议别名和默认端口不同但目标相同的双 PostgreSQL URL', () => {

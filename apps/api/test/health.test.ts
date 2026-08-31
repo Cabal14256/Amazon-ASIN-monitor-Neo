@@ -36,6 +36,11 @@ const poolSnapshot = {
   queueLength: 0,
   config: { connectionLimit: 10, queueLimit: 0 },
 };
+const saturatedPoolSnapshot = {
+  ...poolSnapshot,
+  freeConnections: 0,
+  activeConnections: 10,
+};
 
 function buildService(
   options: {
@@ -44,6 +49,7 @@ function buildService(
     queryPrimary?: () => Promise<void>;
     queryCompetitor?: () => Promise<void>;
     pingRedis?: () => Promise<void>;
+    primaryPoolSnapshot?: () => typeof poolSnapshot;
   } = {},
 ) {
   const env = options.env ?? loadEnv(validEnv);
@@ -52,7 +58,8 @@ function buildService(
     queryCompetitor:
       options.queryCompetitor ?? vi.fn().mockResolvedValue(undefined),
     pingRedis: options.pingRedis ?? vi.fn().mockResolvedValue(undefined),
-    primaryPoolSnapshot: vi.fn(() => poolSnapshot),
+    primaryPoolSnapshot:
+      options.primaryPoolSnapshot ?? vi.fn(() => poolSnapshot),
     competitorPoolSnapshot: vi.fn(() => poolSnapshot),
   } as unknown as HealthRuntimeDependencies;
   const metrics = new MetricsService();
@@ -121,14 +128,18 @@ describe('HealthService', () => {
 
     await pools.probePrimary(750);
 
-    expect(pools.primaryPool.options).not.toHaveProperty(
-      'connectionTimeoutMillis',
-    );
+    expect(pools.primaryPool.options.connectionTimeoutMillis).toBe(2_000);
     expect(pools.primaryPool.options).not.toHaveProperty('query_timeout');
     expect(pools.primaryPool.options).not.toHaveProperty('statement_timeout');
     expect(query).toHaveBeenCalledWith({
       text: 'SELECT 1',
       query_timeout: 750,
+    });
+    query.mockRejectedValueOnce(
+      new Error('timeout exceeded when trying to connect'),
+    );
+    await expect(pools.probePrimary(750)).rejects.toMatchObject({
+      name: 'HealthProbeTimeoutError',
     });
 
     (
@@ -218,11 +229,16 @@ describe('HealthService', () => {
   it('超时探针有界失败并报告 probe_timeout', async () => {
     const warn = vi.fn();
     const logger = { warn, info: vi.fn() } as unknown as AppLogger;
-    const env = loadEnv({ ...validEnv, HEALTH_PROBE_TIMEOUT_MS: '50' });
+    const env = loadEnv({
+      ...validEnv,
+      HEALTH_PROBE_TIMEOUT_MS: '50',
+      DATABASE_POOL_CONNECTION_TIMEOUT_MS: '50',
+    });
     const { service, metrics } = buildService({
       env,
       logger,
       queryPrimary: () => new Promise(() => undefined),
+      primaryPoolSnapshot: () => saturatedPoolSnapshot,
     });
 
     const health = await service.getHealth();
@@ -230,6 +246,8 @@ describe('HealthService', () => {
     expect(health.database).toMatchObject({
       connected: false,
       error: 'probe_timeout',
+      usagePercent: '100.00',
+      pool: saturatedPoolSnapshot,
     });
     expect(warn).toHaveBeenCalledOnce();
     metrics.onModuleDestroy();

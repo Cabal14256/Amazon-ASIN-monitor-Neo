@@ -80,6 +80,12 @@ const envObjectSchema = z.object({
     .min(50)
     .max(30_000)
     .default(2_000),
+  DATABASE_POOL_CONNECTION_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(30_000)
+    .default(2_000),
   HEALTH_DB_POOL_DEGRADED_THRESHOLD: healthRatioSchema,
   HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: healthRatioSchema,
   HEALTH_MEMORY_RSS_DEGRADED_MB: z.coerce.number().nonnegative().default(0),
@@ -116,6 +122,13 @@ export const envSchema = envObjectSchema.superRefine((env, context) => {
       code: 'custom',
       path: ['COMPETITOR_DATABASE_URL'],
       message: '主库与竞品库必须指向不同的 PostgreSQL database',
+    });
+  }
+  if (env.DATABASE_POOL_CONNECTION_TIMEOUT_MS > env.HEALTH_PROBE_TIMEOUT_MS) {
+    context.addIssue({
+      code: 'custom',
+      path: ['DATABASE_POOL_CONNECTION_TIMEOUT_MS'],
+      message: '共享数据库池连接超时不得大于健康探针总超时',
     });
   }
 });
