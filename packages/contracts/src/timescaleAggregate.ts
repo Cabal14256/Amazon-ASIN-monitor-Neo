@@ -105,6 +105,13 @@ export const timescaleAggregateReportSchema = z
       })
       .strict(),
     refreshRequested: z.boolean(),
+    coverage: z
+      .object({
+        scope: z.literal('all-migrated-aggregate-history'),
+        rowsOutsideWindow: decimalCountSchema,
+      })
+      .strict()
+      .optional(),
     checks: z.array(aggregateCheckSchema).max(9),
     status: statusSchema,
     failure: aggregateFailureSchema.optional(),
@@ -134,6 +141,14 @@ export const timescaleAggregateReportSchema = z
         code: z.ZodIssueCode.custom,
         message: 'passed aggregate report requires an in-run refresh',
         path: ['refreshRequested'],
+      });
+    }
+    if (!report.coverage || report.coverage.rowsOutsideWindow !== '0') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'passed aggregate report requires complete migrated-history coverage',
+        path: ['coverage'],
       });
     }
     if (report.checks.length !== timescaleAggregateEvidenceManifest.length) {

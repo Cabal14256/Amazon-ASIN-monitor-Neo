@@ -34,6 +34,12 @@ describe('TimescaleDB 环境配置', () => {
     expect(compose).toContain(
       '- ./packages/db/migrations/0000_baseline.sql:/opt/asin-monitor/0000_baseline.sql:ro',
     );
+    expect(compose).toContain(
+      '- ./packages/db/docker/apply-timescale-aggregates.sh:/docker-entrypoint-initdb.d/030-apply-timescale-aggregates.sh:ro',
+    );
+    expect(compose).toContain(
+      '- ./packages/db/migrations/0001_timescale_aggregates.sql:/opt/asin-monitor/0001_timescale_aggregates.sql:ro',
+    );
     expect(compose).not.toContain(
       '- ./packages/db/docker/init:/docker-entrypoint-initdb.d:ro',
     );

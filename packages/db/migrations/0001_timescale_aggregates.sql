@@ -3,6 +3,7 @@
 -- analytics_refresh_watermark intentionally remain writable until cutover.
 
 SET TIME ZONE 'Asia/Shanghai';
+SET search_path TO pg_catalog, public;
 SET lock_timeout = '30s';
 SET statement_timeout = 0;
 
@@ -138,6 +139,66 @@ BEGIN
   END IF;
 END
 $postflight$;
+
+DO $cagg_definition_preflight$
+DECLARE
+  existing_count integer;
+  expected_count integer;
+  matching_fingerprint_count integer;
+BEGIN
+  SELECT
+    COUNT(*)::integer,
+    COUNT(*) FILTER (
+      WHERE view_name IN (
+        'monitor_history_cagg_asin_hour',
+        'monitor_history_cagg_asin_day',
+        'monitor_history_cagg_asin_month',
+        'monitor_history_cagg_dim_hour',
+        'monitor_history_cagg_dim_day',
+        'monitor_history_cagg_dim_month',
+        'monitor_history_cagg_variant_group_hour',
+        'monitor_history_cagg_variant_group_day',
+        'monitor_history_cagg_variant_group_month'
+      )
+    )::integer
+  INTO existing_count, expected_count
+  FROM timescaledb_information.continuous_aggregates
+  WHERE view_schema = 'public';
+
+  IF existing_count NOT IN (0, 9) OR expected_count <> existing_count THEN
+    RAISE EXCEPTION
+      'continuous aggregate definition preflight requires either zero or the exact nine managed CAGGs (found %, managed %)',
+      existing_count,
+      expected_count;
+  END IF;
+
+  IF existing_count = 9 THEN
+    SELECT COUNT(*) FILTER (
+      WHERE obj_description(
+        format('%I.%I', view_schema, view_name)::regclass,
+        'pg_class'
+      ) =
+        'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
+        md5(regexp_replace(view_definition, '[[:space:]]+', ' ', 'g'))
+    )::integer
+    INTO matching_fingerprint_count
+    FROM timescaledb_information.continuous_aggregates
+    WHERE view_schema = 'public';
+
+    IF matching_fingerprint_count <> 9 THEN
+      RAISE EXCEPTION
+        'continuous aggregate definition fingerprint mismatch (matching %); controlled rebuild required',
+        matching_fingerprint_count;
+    END IF;
+  END IF;
+
+  PERFORM set_config(
+    'asin_monitor.cagg_existing_count',
+    existing_count::text,
+    true
+  );
+END
+$cagg_definition_preflight$;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS public.monitor_history_cagg_asin_hour
 WITH (
@@ -571,6 +632,33 @@ GROUP BY
     COLLATE public.legacy_utf8mb4_unicode_ci
 WITH NO DATA;
 
+DO $cagg_definition_fingerprint$
+DECLARE
+  aggregate_row record;
+BEGIN
+  IF current_setting('asin_monitor.cagg_existing_count')::integer = 0 THEN
+    FOR aggregate_row IN
+      SELECT view_name, view_definition
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+      ORDER BY view_name
+    LOOP
+      EXECUTE format(
+        'COMMENT ON MATERIALIZED VIEW public.%I IS %L',
+        aggregate_row.view_name,
+        'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
+          md5(regexp_replace(
+            aggregate_row.view_definition,
+            '[[:space:]]+',
+            ' ',
+            'g'
+          ))
+      );
+    END LOOP;
+  END IF;
+END
+$cagg_definition_fingerprint$;
+
 ALTER MATERIALIZED VIEW public.monitor_history_cagg_asin_hour
   SET (timescaledb.materialized_only = true);
 ALTER MATERIALIZED VIEW public.monitor_history_cagg_asin_day
@@ -746,6 +834,7 @@ DECLARE
   materialized_only_count integer;
   legacy_collation_column_count integer;
   variant_fallback_materialized_count integer;
+  matching_definition_fingerprint_count integer;
   refresh_policy_count integer;
   matching_refresh_policy_count integer;
 BEGIN
@@ -772,6 +861,35 @@ BEGIN
       'continuous aggregate postflight mismatch (found %, materialized_only %)',
       continuous_aggregate_count,
       materialized_only_count;
+  END IF;
+
+  SELECT COUNT(*) FILTER (
+    WHERE obj_description(
+      format('%I.%I', view_schema, view_name)::regclass,
+      'pg_class'
+    ) =
+      'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
+      md5(regexp_replace(view_definition, '[[:space:]]+', ' ', 'g'))
+  )::integer
+  INTO matching_definition_fingerprint_count
+  FROM timescaledb_information.continuous_aggregates
+  WHERE view_schema = 'public'
+    AND view_name IN (
+      'monitor_history_cagg_asin_hour',
+      'monitor_history_cagg_asin_day',
+      'monitor_history_cagg_asin_month',
+      'monitor_history_cagg_dim_hour',
+      'monitor_history_cagg_dim_day',
+      'monitor_history_cagg_dim_month',
+      'monitor_history_cagg_variant_group_hour',
+      'monitor_history_cagg_variant_group_day',
+      'monitor_history_cagg_variant_group_month'
+    );
+
+  IF matching_definition_fingerprint_count <> 9 THEN
+    RAISE EXCEPTION
+      'continuous aggregate definition fingerprint postflight mismatch (matching %)',
+      matching_definition_fingerprint_count;
   END IF;
 
   SELECT COUNT(*) FILTER (

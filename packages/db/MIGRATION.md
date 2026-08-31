@@ -54,6 +54,7 @@ database 名仅允许字母、数字和下划线；本地 bootstrap 会拒绝其
 - 目标主键从 `id` 改为 `(check_time, id)`，满足 Timescale 唯一约束必须包含分区键；MySQL 源迁移仍以 `id` 做 keyset，不改变源端主键语义；
 - `check_time` 是唯一时间维，chunk interval 为 7 天。它覆盖 hour policy 的 49 小时迟到刷新窗且不会让 32 天 day policy 落入过多小 chunk；最终大小与内存/查询指标仍由 P1-T4b 压测复核；
 - 新增 asin、dimension、variant-group × hour/day/month 共 9 个 `materialized_only=true` CAGG。全部以 `WITH NO DATA` 创建，不依赖 real-time aggregate；
+- 升级脚本在任何 Timescale 函数解析前把 `search_path` 固定为 `pg_catalog, public`；新建 CAGG 会写入带版本的精确定义指纹，重复升级会拒绝部分集合、无指纹旧定义或指纹与 catalog 定义不一致的 CAGG，并要求按 Runbook 受控重建；
 - CAGG 的文本筛选、分组和变体名 `MAX` 显式使用 ICU `und-u-ks-level1` 非确定性 collation，以复现 Legacy `utf8mb4_unicode_ci` 的大小写/重音不敏感语义；升级会拒绝同名但定义不符的 collation；
 - 变体组历史行没有名称快照时，刷新过程会把当时的 `variant_groups.name` fallback 一并物化；兼容视图不再实时关联当前名称，因此后续重命名或删除不会改写已经物化的历史标签；
 - `monitor_history_agg_v2`、`monitor_history_agg_dim_v2`、`monitor_history_agg_variant_group_v2` 只是只读兼容投影，应用不得向它们或 CAGG 写入；
@@ -63,7 +64,7 @@ database 名仅允许字母、数字和下划线；本地 bootstrap 会拒绝其
 
 ### 有界历史回填与正确性 Gate
 
-先把同一冻结 MySQL 快照迁入 PG，让三张 Legacy agg 表成为对照源；再配置完整月边界的半开区间并运行：
+先把同一冻结 MySQL 快照迁入 PG，让三张 Legacy agg 表成为对照源；数据迁移会在同一目标事务内清空 21 张业务表以及九个 CAGG 的内部物化 hypertable，因此复用预演库不会保留上一次回填。再配置覆盖本次全部迁移历史的完整月边界半开区间并运行：
 
 ```bash
 corepack pnpm db:migrate:data
@@ -74,13 +75,13 @@ Gate 使用 `DATABASE_URL`，并从根目录依次读取 `.env.migration`、`.en
 
 | 变量 | 说明 |
 | --- | --- |
-| `TIMESCALE_AGG_WINDOW_START` | 必填，本地业务时间月初，如 `2026-01-01 00:00:00` |
+| `TIMESCALE_AGG_WINDOW_START` | 必填，本地业务时间月初；必须不晚于合格原始历史及三张 Legacy agg 表的最早 bucket |
 | `TIMESCALE_AGG_WINDOW_END` | 必填，排他月初边界；必须晚于 start，跨度不超过 120 个月 |
 | `TIMESCALE_AGG_REFRESH` | 是否先手工刷新全部 9 个 CAGG，默认 `true`；设为 `false` 仅生成诊断报告，始终非零退出且不能成为放量证据 |
 | `TIMESCALE_AGG_PAGE_SIZE` | 服务端游标每批读取行数，100–5000，默认 1000 |
 | `TIMESCALE_AGG_REPORT_PATH` | JSON 报告，默认 `artifacts/timescale-aggregate/report.json` |
 
-月初边界确保 hour/day/month bucket 均完整。刷新使用 `[start,end)` 同一窗口；Timescale 只刷新完整落在窗口内的 bucket。Gate 固定会话 `search_path`，再在一个 `REPEATABLE READ READ ONLY` 快照中通过服务端游标单次顺序扫描 9 组 Legacy/CAGG，按 Legacy collation 配对并比较分组集合和全部业务值摘要，覆盖 ASIN fallback、空 site/brand、变体名 fallback、broken/peak 及 first/last check time。成功报告必须由本次运行刷新、包含九组完全一致证据且窗口至少有一组 Legacy 数据；未刷新、全空窗口、任一差异或运行错误均返回非零。报告只含行数和 SHA-256 摘要，不含原始业务行或连接串。
+月初边界确保 hour/day/month bucket 均完整。刷新使用 `[start,end)` 同一窗口并传入 `force=true`，使已物化 bucket 和只由变体表变化影响的 fallback 也会重算。Gate 固定会话 `search_path`，再在一个 `REPEATABLE READ READ ONLY` 快照中通过服务端游标单次顺序扫描 9 组 Legacy/CAGG，按 Legacy collation 配对并比较分组集合和全部业务值摘要，覆盖 ASIN fallback、空 site/brand、变体名 fallback、broken/peak 及 first/last check time。成功报告必须由本次运行刷新、包含九组完全一致证据且窗口至少有一组 Legacy 数据；同一快照中还会计数窗口外的所有合格原始历史和三张 Legacy agg 行，只有 `coverage.rowsOutsideWindow=0` 才可通过。未刷新、全空窗口、覆盖不全、任一差异或运行错误均返回非零。报告只含行数和 SHA-256 摘要，不含原始业务行或连接串。
 
 手工回填可重复运行。迟到数据落入已物化 bucket 后，必须以包含完整 bucket 的相同或更小月边界窗口重新运行 `TIMESCALE_AGG_REFRESH=true` 的 Gate，再以新报告作为放量证据。不得用 `refresh=false` 的旧结果通过切换审批。
 

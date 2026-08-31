@@ -38,7 +38,7 @@ corepack pnpm db:timescale:aggregate:gate
 审核证据：
 
 - `artifacts/data-migration/report.json`：21 + 4 表、样本和关键业务查询均为 `passed`；
-- `artifacts/timescale-aggregate/report.json`：`refreshRequested=true`，固定 `[start,end)` 月边界内 9 组检查均为 `passed`，且至少一组含非零 Legacy 证据；
+- `artifacts/timescale-aggregate/report.json`：`refreshRequested=true`，覆盖全部迁移历史的 `[start,end)` 月边界内 9 组检查均为 `passed`，至少一组含非零 Legacy 证据，且 `coverage.rowsOutsideWindow=0`；
 - `monitor_history` 在 Timescale catalog 中仅有 `check_time` 一个时间维，interval 为 7 天，主键为 `(check_time,id)`；
 - 9 个 CAGG 均为 `materialized_only`，文本列采用已核验的 Legacy 兼容 collation，9 个 refresh job 参数完全匹配且 3 个只读兼容视图存在；
 - API/Worker smoke test 通过，且维护窗口内仍无任何业务写入。
@@ -121,7 +121,7 @@ corepack pnpm db:upgrade:timescale
 corepack pnpm db:timescale:aggregate:gate
 ```
 
-`0001` 会识别已经存在且结构正确的 hypertable，重新创建 9 个 `WITH NO DATA` CAGG、3 个视图和 9 个 policy；Gate 负责显式历史回填和全量摘要对拍。新报告通过前不得恢复 Neo 聚合读路径。
+`0001` 会识别已经存在且结构正确的 hypertable，重新创建 9 个 `WITH NO DATA` CAGG、写入版本化定义指纹、创建 3 个视图和 9 个 policy；无指纹或指纹不符的旧 CAGG 不会被 `IF NOT EXISTS` 静默沿用，必须先完成本节的受控删除。Gate 负责以 `force=true` 显式回填全部迁移历史并做全量摘要对拍。新报告通过前不得恢复 Neo 聚合读路径。
 
 ## 恢复为普通 PostgreSQL 表
 

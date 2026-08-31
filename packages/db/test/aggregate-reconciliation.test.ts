@@ -35,6 +35,10 @@ function passedReport(): TimescaleAggregateReport {
       timezone: 'Asia/Shanghai',
     },
     refreshRequested: true,
+    coverage: {
+      scope: 'all-migrated-aggregate-history',
+      rowsOutsideWindow: '0',
+    },
     checks: timescaleAggregateEvidenceManifest.map((evidence) => ({
       ...evidence,
       legacyRows: '1',

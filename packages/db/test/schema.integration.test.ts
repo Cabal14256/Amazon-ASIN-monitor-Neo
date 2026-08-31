@@ -230,6 +230,22 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       })),
     );
 
+    const definitionFingerprints = await primaryPool.query<{
+      matching_fingerprints: number;
+    }>(`
+      SELECT COUNT(*) FILTER (
+        WHERE obj_description(
+          format('%I.%I', view_schema, view_name)::regclass,
+          'pg_class'
+        ) =
+          'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:' ||
+          md5(regexp_replace(view_definition, '[[:space:]]+', ' ', 'g'))
+      )::integer AS matching_fingerprints
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+    `);
+    expect(definitionFingerprints.rows).toEqual([{ matching_fingerprints: 9 }]);
+
     const variantFallbacks = await primaryPool.query<{
       view_name: string;
       fallback_materialized: boolean;
@@ -407,6 +423,27 @@ describe('P1-T2 PostgreSQL schema integration', () => {
           [jobId],
         );
       }
+      client.release();
+    }
+  });
+
+  it('重复升级会拒绝缺少精确定义指纹的旧 CAGG', async () => {
+    const client = await primaryPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`
+        COMMENT ON MATERIALIZED VIEW public.monitor_history_cagg_asin_hour
+        IS 'unmanaged-definition'
+      `);
+      const migration = readFileSync(
+        resolve(__dirname, '../migrations/0001_timescale_aggregates.sql'),
+        'utf8',
+      );
+      await expect(client.query(migration)).rejects.toThrow(
+        /continuous aggregate definition fingerprint mismatch/,
+      );
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
       client.release();
     }
   });

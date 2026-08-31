@@ -102,6 +102,9 @@ describe('PostgreSQL 双库 Schema 基线', () => {
   it('有序升级将历史表转换为 7 天 hypertable 并保留 Legacy 聚合 Gate', () => {
     const migration = read(timescaleMigrationPath);
 
+    expect(
+      migration.indexOf('SET search_path TO pg_catalog, public;'),
+    ).toBeLessThan(migration.indexOf('BEGIN;'));
     expect(migration).toContain("by_range('check_time', INTERVAL '7 days')");
     expect(migration).toContain('migrate_data => true');
     expect(migration).toContain(
@@ -144,6 +147,12 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(
       migration.match(/LEFT JOIN public\.variant_groups variant_group/g),
     ).toHaveLength(3);
+    expect(migration).toContain(
+      'amazon-asin-monitor:cagg-definition:p1-t4a-v1:md5:',
+    );
+    expect(migration).toContain(
+      'continuous aggregate definition fingerprint mismatch',
+    );
   });
 
   it('CAGG 与兼容投影视图只暴露只读元数据，不伪装成 Drizzle 表', () => {

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   dataMigrationReportSchema,
   dataMigrationRunIdSchema,
+  timescaleAggregateEvidenceManifest,
   type DataMigrationDatabaseReport,
   type DataMigrationQueryReport,
   type DataMigrationReport,
@@ -1073,6 +1074,43 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
 async function resetTarget(context: DatabaseContext): Promise<void> {
   await context.target.query(
     `TRUNCATE TABLE ${targetTableList(context, true)} RESTART IDENTITY`,
+  );
+  if (context.spec.logicalName !== 'primary') return;
+
+  const expectedNames = timescaleAggregateEvidenceManifest
+    .map(({ caggRelation }) => caggRelation)
+    .sort();
+  const materializations = await context.target.query<{
+    view_name: string;
+    materialization_relation: string;
+  }>(
+    `
+      SELECT
+        view_name,
+        pg_catalog.format(
+          '%I.%I',
+          materialization_hypertable_schema,
+          materialization_hypertable_name
+        ) AS materialization_relation
+      FROM timescaledb_information.continuous_aggregates
+      WHERE view_schema = 'public'
+      ORDER BY view_name
+    `,
+  );
+  const actualNames = materializations.rows
+    .map(({ view_name }) => view_name)
+    .sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+    throw new DataMigrationError(
+      'TARGET_SCHEMA_MISMATCH',
+      'primary.target.continuous_aggregates',
+      'primary target must contain the exact nine continuous aggregates before reset',
+    );
+  }
+  await context.target.query(
+    `TRUNCATE TABLE ${materializations.rows
+      .map(({ materialization_relation }) => materialization_relation)
+      .join(', ')}`,
   );
 }
 

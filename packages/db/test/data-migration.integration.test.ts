@@ -1503,6 +1503,24 @@ describe.skipIf(!integrationEnabled)(
         true,
       );
 
+      const partialCoverage = await runTimescaleAggregateGate(
+        {
+          ...aggregateConfig,
+          windowStart: '2026-08-01 00:00:00',
+          windowEnd: '2026-09-01 00:00:00',
+        },
+        logger,
+      );
+      expect(partialCoverage.status).toBe('failed');
+      expect(partialCoverage.failure).toEqual({
+        code: 'AGGREGATE_RECONCILIATION_INCOMPLETE_COVERAGE',
+        scope: 'aggregate.reconciliation',
+      });
+      expect(partialCoverage.coverage?.rowsOutsideWindow).not.toBe('0');
+      expect(
+        partialCoverage.checks.every(({ status }) => status === 'passed'),
+      ).toBe(true);
+
       const emptyWindow = await runTimescaleAggregateGate(
         {
           ...aggregateConfig,
@@ -1695,6 +1713,18 @@ describe.skipIf(!integrationEnabled)(
         scope: 'aggregate.reconciliation',
       });
       expect(mismatch.checks[0].status).toBe('failed');
+
+      await runDataMigration(migrationConfig, logger);
+      const resetMaterializations = await primaryTarget.query<{
+        materialized_rows: string;
+      }>(`
+        SELECT (
+          (SELECT COUNT(*) FROM public.monitor_history_agg_v2) +
+          (SELECT COUNT(*) FROM public.monitor_history_agg_dim_v2) +
+          (SELECT COUNT(*) FROM public.monitor_history_agg_variant_group_v2)
+        )::text AS materialized_rows
+      `);
+      expect(resetMaterializations.rows).toEqual([{ materialized_rows: '0' }]);
     }, 120_000);
   },
 );

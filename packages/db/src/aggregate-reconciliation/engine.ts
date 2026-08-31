@@ -350,7 +350,12 @@ async function refreshAggregates(
 ): Promise<void> {
   for (const { caggRelation } of timescaleAggregateEvidenceManifest) {
     await client.query(
-      `CALL public.refresh_continuous_aggregate($1::regclass, $2::timestamp, $3::timestamp)`,
+      `CALL public.refresh_continuous_aggregate(
+        $1::regclass,
+        $2::timestamp,
+        $3::timestamp,
+        force => TRUE
+      )`,
       [`public.${caggRelation}`, config.windowStart, config.windowEnd],
     );
     logger.info('timescale_aggregate.refreshed', {
@@ -359,6 +364,56 @@ async function refreshAggregates(
       windowEnd: config.windowEnd,
     });
   }
+}
+
+async function countRowsOutsideWindow(
+  client: PoolClient,
+  config: TimescaleAggregateConfig,
+): Promise<string> {
+  const result = await client.query<{ rows_outside_window: string }>(
+    `
+      SELECT (
+        (
+          SELECT COUNT(*)
+          FROM public.monitor_history history
+          WHERE history.check_type COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+            AND (
+              history.asin_id IS NOT NULL
+              OR NULLIF(history.asin_code, '') IS NOT NULL
+            )
+            AND (
+              history.check_time < $1::timestamp
+              OR history.check_time >= $2::timestamp
+            )
+        ) + (
+          SELECT COUNT(*)
+          FROM public.monitor_history_agg aggregate_row
+          WHERE aggregate_row.time_slot < $1::timestamp
+             OR aggregate_row.time_slot >= $2::timestamp
+        ) + (
+          SELECT COUNT(*)
+          FROM public.monitor_history_agg_dim aggregate_row
+          WHERE aggregate_row.time_slot < $1::timestamp
+             OR aggregate_row.time_slot >= $2::timestamp
+        ) + (
+          SELECT COUNT(*)
+          FROM public.monitor_history_agg_variant_group aggregate_row
+          WHERE aggregate_row.time_slot < $1::timestamp
+             OR aggregate_row.time_slot >= $2::timestamp
+        )
+      )::text AS rows_outside_window
+    `,
+    [config.windowStart, config.windowEnd],
+  );
+  const rowsOutsideWindow = result.rows[0]?.rows_outside_window;
+  if (!rowsOutsideWindow || !/^(0|[1-9]\d*)$/.test(rowsOutsideWindow)) {
+    throw new DataMigrationError(
+      'AGGREGATE_COVERAGE_INVALID',
+      'aggregate.coverage',
+      'aggregate coverage query returned an invalid row count',
+    );
+  }
+  return rowsOutsideWindow;
 }
 
 export async function runTimescaleAggregateGate(
@@ -396,7 +451,9 @@ export async function runTimescaleAggregateGate(
 
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     const checks: TimescaleAggregateCheck[] = [];
+    let rowsOutsideWindow = '0';
     try {
+      rowsOutsideWindow = await countRowsOutsideWindow(client, config);
       for (const evidence of timescaleAggregateEvidenceManifest) {
         const { legacy, cagg } = await scanAggregatePair(
           client,
@@ -451,6 +508,11 @@ export async function runTimescaleAggregateGate(
           code: 'AGGREGATE_RECONCILIATION_EMPTY_WINDOW',
           scope: 'aggregate.reconciliation',
         }
+      : rowsOutsideWindow !== '0'
+      ? {
+          code: 'AGGREGATE_RECONCILIATION_INCOMPLETE_COVERAGE',
+          scope: 'aggregate.reconciliation',
+        }
       : !config.refresh
       ? {
           code: 'AGGREGATE_REFRESH_REQUIRED',
@@ -471,6 +533,10 @@ export async function runTimescaleAggregateGate(
         timezone: 'Asia/Shanghai',
       },
       refreshRequested: config.refresh,
+      coverage: {
+        scope: 'all-migrated-aggregate-history',
+        rowsOutsideWindow,
+      },
       checks,
       status: passed ? 'passed' : 'failed',
       ...(failure ? { failure } : {}),

@@ -19,7 +19,7 @@ pgloader 适合快速验证 MySQL→PG 的基础类型兼容性，但不作为�
 
 ## 安全边界
 
-迁移会对两个 PG 目标库的全部 21 + 4 张业务表执行一次显式的 `TRUNCATE ... RESTART IDENTITY`，不会使用 `CASCADE` 清空注册表之外的跨 schema 引用表。若存在这类外部引用，重置会安全失败，必须先确认归属并解除引用，不能临时扩大清空范围。以下条件缺一不可：
+迁移会对两个 PG 目标库的全部 21 + 4 张业务表执行一次显式的 `TRUNCATE ... RESTART IDENTITY`，并在同一主营库事务中清空精确注册的 9 个 CAGG 内部物化 hypertable；不会使用 `CASCADE` 清空注册表之外的跨 schema 引用表。若存在这类外部引用，重置会安全失败，必须先确认归属并解除引用，不能临时扩大清空范围。以下条件缺一不可：
 
 1. 两个目标库已应用 [`migrations/0000_baseline.sql`](./migrations/0000_baseline.sql)，主营库已应用 [`migrations/0001_timescale_aggregates.sql`](./migrations/0001_timescale_aggregates.sql)，且都不是当前生产写库；
 2. 已完成可恢复备份，并记录恢复命令和负责人；
@@ -110,7 +110,7 @@ corepack pnpm db:migrate:data
 corepack pnpm db:timescale:aggregate:gate
 ```
 
-两条命令都必须返回 0，且 `artifacts/data-migration/report.json` 和 `artifacts/timescale-aggregate/report.json` 均通过各自 contracts schema。聚合 Gate 的窗口必须覆盖本次审批的完整月边界并包含实际 Legacy 证据；它会先刷新全部 9 个 materialized-only CAGG，再在只读一致性快照中按 Legacy collation 比较三张 Legacy agg 表。`refresh=false` 仅用于诊断且必定非零；差异或全空报告也不可被人工豁免为“近似一致”，而应修复语义或刷新边界后整体重跑。
+两条命令都必须返回 0，且 `artifacts/data-migration/report.json` 和 `artifacts/timescale-aggregate/report.json` 均通过各自 contracts schema。聚合 Gate 的完整月边界窗口必须覆盖全部已迁移的合格原始历史和三张 Legacy agg 表；它会以 `force=true` 刷新全部 9 个 materialized-only CAGG，再在只读一致性快照中按 Legacy collation 比较三张 Legacy agg 表并要求 `coverage.rowsOutsideWindow=0`。`refresh=false` 仅用于诊断且必定非零；差异、全空或覆盖不全的报告也不可被人工豁免为“近似一致”，而应修复语义或刷新边界后整体重跑。
 
 最终同步按以下顺序执行：公告维护窗口 → 停止调度器和写入 Worker → drain 旧 Bull 队列 → 冻结 Legacy 写流量 → 确认 MySQL 无新增写入 → 备份 PG → 运行数据迁移 → 刷新并对拍 9 个 CAGG → 审核两份报告 → 执行应用 smoke test。两份报告通过前不切流；切流后 MySQL 按阶段 1 回滚 runbook 保持只读、可回切且至少保留一个观察周期，不得归档下线。
 

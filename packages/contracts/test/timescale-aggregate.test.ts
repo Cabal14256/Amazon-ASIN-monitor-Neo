@@ -21,6 +21,10 @@ function report() {
       timezone: 'Asia/Shanghai' as const,
     },
     refreshRequested: true,
+    coverage: {
+      scope: 'all-migrated-aggregate-history' as const,
+      rowsOutsideWindow: '0',
+    },
     checks: timescaleAggregateEvidenceManifest.map((check) => ({
       ...check,
       legacyRows: '2',
@@ -82,6 +86,16 @@ describe('timescaleAggregateReportSchema', () => {
       caggGroups: '0',
     }));
     expect(timescaleAggregateReportSchema.safeParse(empty).success).toBe(false);
+
+    expect(
+      timescaleAggregateReportSchema.safeParse({
+        ...report(),
+        coverage: {
+          scope: 'all-migrated-aggregate-history',
+          rowsOutsideWindow: '1',
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it('失败报告只暴露机器错误码和作用域', () => {
