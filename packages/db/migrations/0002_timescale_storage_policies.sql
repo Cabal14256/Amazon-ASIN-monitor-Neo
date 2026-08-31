@@ -513,30 +513,40 @@ BEGIN
     retention_days := retention_days_text::integer;
   END IF;
 
-  WITH expected_index(index_name, key_expressions, predicate) AS (
+  WITH expected_index(
+    index_name,
+    key_columns,
+    sort_options,
+    predicate
+  ) AS (
     VALUES
-      ('idx_monitor_history_id_lookup', ARRAY['id']::text[], ''),
-      ('idx_monitor_history_variant_group_time', ARRAY['variant_group_id', 'check_time DESC NULLS LAST', 'id DESC NULLS LAST']::text[], ''),
-      ('idx_monitor_history_country_time', ARRAY['country', 'check_time DESC NULLS LAST', 'id DESC NULLS LAST']::text[], ''),
-      ('idx_monitor_history_asin_code_country_time', ARRAY['asin_code', 'country', 'check_time DESC NULLS LAST', 'id DESC NULLS LAST']::text[], ''),
-      ('idx_monitor_history_asin_country_time', ARRAY['asin_id', 'country', 'check_time DESC NULLS LAST', 'id DESC NULLS LAST']::text[], ''),
-      ('idx_monitor_history_status_interval_refresh', ARRAY['check_type', 'check_time', 'id']::text[], ''),
-      ('idx_monitor_history_notification_pending', ARRAY['country', 'check_time', 'id']::text[], 'is_broken=trueandnotification_sent=false')
+      ('idx_monitor_history_id_lookup', ARRAY['id']::text[], ARRAY[0]::smallint[], ''),
+      ('idx_monitor_history_variant_group_time', ARRAY['variant_group_id', 'check_time', 'id']::text[], ARRAY[0, 1, 1]::smallint[], ''),
+      ('idx_monitor_history_country_time', ARRAY['country', 'check_time', 'id']::text[], ARRAY[0, 1, 1]::smallint[], ''),
+      ('idx_monitor_history_asin_code_country_time', ARRAY['asin_code', 'country', 'check_time', 'id']::text[], ARRAY[0, 0, 1, 1]::smallint[], ''),
+      ('idx_monitor_history_asin_country_time', ARRAY['asin_id', 'country', 'check_time', 'id']::text[], ARRAY[0, 0, 1, 1]::smallint[], ''),
+      ('idx_monitor_history_status_interval_refresh', ARRAY['check_type', 'check_time', 'id']::text[], ARRAY[0, 0, 0]::smallint[], ''),
+      ('idx_monitor_history_notification_pending', ARRAY['country', 'check_time', 'id']::text[], ARRAY[0, 0, 0]::smallint[], 'is_broken=trueandnotification_sent=false')
   ), actual_index AS (
     SELECT
       index_relation.relname AS index_name,
       ARRAY(
-        SELECT pg_get_indexdef(
-          index_row.indexrelid,
-          key_position,
-          true
-        )
-        FROM generate_series(
-          1,
-          index_row.indnkeyatts
-        ) AS key_position
-        ORDER BY key_position
-      ) AS key_expressions,
+        SELECT attribute.attname::text
+        FROM unnest(index_row.indkey) WITH ORDINALITY
+          AS key_position(attnum, position)
+        JOIN pg_attribute attribute
+          ON attribute.attrelid = table_relation.oid
+         AND attribute.attnum = key_position.attnum
+        WHERE key_position.position <= index_row.indnkeyatts
+        ORDER BY key_position.position
+      ) AS key_columns,
+      ARRAY(
+        SELECT sort_option.option::smallint
+        FROM unnest(index_row.indoption) WITH ORDINALITY
+          AS sort_option(option, position)
+        WHERE sort_option.position <= index_row.indnkeyatts
+        ORDER BY sort_option.position
+      ) AS sort_options,
       index_row.indisvalid,
       index_row.indisready,
       access_method.amname,
@@ -576,7 +586,12 @@ BEGIN
     (
       SELECT COUNT(*)::integer
       FROM expected_index
-      JOIN actual_index USING (index_name, key_expressions, predicate)
+      JOIN actual_index USING (
+        index_name,
+        key_columns,
+        sort_options,
+        predicate
+      )
       WHERE actual_index.indisvalid
         AND actual_index.indisready
         AND actual_index.amname = 'btree'
