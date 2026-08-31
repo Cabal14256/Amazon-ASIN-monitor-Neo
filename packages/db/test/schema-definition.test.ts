@@ -197,6 +197,7 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     expect(migration).toContain(
       'WHERE is_broken = true AND notification_sent = false',
     );
+    expect(migration.match(/DESC NULLS LAST/g)).toHaveLength(16);
     expect(migration).toContain(
       'continuous aggregate index inventory mismatch',
     );
