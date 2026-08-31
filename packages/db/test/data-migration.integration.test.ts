@@ -1503,6 +1503,12 @@ describe.skipIf(!integrationEnabled)(
         true,
       );
 
+      await primaryTarget.query(`
+        UPDATE public.variant_groups
+        SET name = 'Fallback Current'
+        WHERE id = 'cagg-vg-fallback'
+      `);
+
       const partialCoverage = await runTimescaleAggregateGate(
         {
           ...aggregateConfig,

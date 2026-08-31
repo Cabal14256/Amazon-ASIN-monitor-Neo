@@ -1080,26 +1080,17 @@ async function resetTarget(context: DatabaseContext): Promise<void> {
   const expectedNames = timescaleAggregateEvidenceManifest
     .map(({ caggRelation }) => caggRelation)
     .sort();
-  const materializations = await context.target.query<{
+  const aggregates = await context.target.query<{
     view_name: string;
-    materialization_relation: string;
   }>(
     `
-      SELECT
-        view_name,
-        pg_catalog.format(
-          '%I.%I',
-          materialization_hypertable_schema,
-          materialization_hypertable_name
-        ) AS materialization_relation
+      SELECT view_name
       FROM timescaledb_information.continuous_aggregates
       WHERE view_schema = 'public'
       ORDER BY view_name
     `,
   );
-  const actualNames = materializations.rows
-    .map(({ view_name }) => view_name)
-    .sort();
+  const actualNames = aggregates.rows.map(({ view_name }) => view_name).sort();
   if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
     throw new DataMigrationError(
       'TARGET_SCHEMA_MISMATCH',
@@ -1107,11 +1098,11 @@ async function resetTarget(context: DatabaseContext): Promise<void> {
       'primary target must contain the exact nine continuous aggregates before reset',
     );
   }
-  await context.target.query(
-    `TRUNCATE TABLE ${materializations.rows
-      .map(({ materialization_relation }) => materialization_relation)
-      .join(', ')}`,
-  );
+  for (const { view_name } of aggregates.rows) {
+    await context.target.query(
+      `TRUNCATE TABLE public.${quotePgIdentifier(view_name)}`,
+    );
+  }
 }
 
 function targetTableList(context: DatabaseContext, only = false): string {
