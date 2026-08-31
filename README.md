@@ -196,7 +196,7 @@ corepack pnpm db:migrate:data
 
 迁移采用主键 keyset 批次，自动对拍 25 张表的行数、确定性字段样本和 7 组关键业务查询，报告默认写入被 Git 忽略的 `artifacts/data-migration/report.json`。完整的写冻结、预演、失败恢复和回切步骤见 [`packages/db/DATA_MIGRATION.md`](./packages/db/DATA_MIGRATION.md)。
 
-Timescale 索引与存储 Gate 会进一步生成脱敏的 `artifacts/timescale-performance/integration-report.json`：验证 7 个原始历史索引的真实执行计划、冷热窗口/筛选/hour-day-month 的 raw/CAGG 正确性和 P95 至少 3 倍，以及 columnstore 晚到写入和并发读写。索引取舍见 [`packages/db/INDEX_REVIEW.md`](./packages/db/INDEX_REVIEW.md)，上线与回滚见 [`docs/runbooks/phase-1-timescale-storage.md`](./docs/runbooks/phase-1-timescale-storage.md)。
+Timescale 索引与存储 Gate 会在 72 万次确定性高频监控 fixture 上生成脱敏的 `artifacts/timescale-performance/integration-report.json`：验证 7 个原始历史索引的真实执行计划、冷热窗口/筛选/hour-day-month 的 raw/CAGG 正确性和 P95 至少 3 倍，以及 columnstore 晚到写入和并发读写。索引取舍见 [`packages/db/INDEX_REVIEW.md`](./packages/db/INDEX_REVIEW.md)，上线与回滚见 [`docs/runbooks/phase-1-timescale-storage.md`](./docs/runbooks/phase-1-timescale-storage.md)。
 
 再打开三个终端，从仓库根分别运行：
 

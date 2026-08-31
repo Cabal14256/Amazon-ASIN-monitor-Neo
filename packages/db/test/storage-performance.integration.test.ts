@@ -15,9 +15,9 @@ const databaseUrl =
   process.env.DATABASE_URL ??
   'postgresql://postgres:neo_dev_only@127.0.0.1:5432/amazon_asin_monitor';
 const fixtureRows = Math.max(
-  360_000,
+  720_000,
   Number.parseInt(process.env.TIMESCALE_PERFORMANCE_FIXTURE_ROWS ?? '', 10) ||
-    360_000,
+    720_000,
 );
 const benchmarkRuns = Math.max(
   5,
@@ -93,7 +93,8 @@ const report: PerformanceReport = {
   generatedAt: new Date().toISOString(),
   database: { timescaleVersion: null },
   dataset: {
-    profile: 'deterministic-60-day-operational-and-analytics-fixture',
+    profile:
+      'deterministic-60-day-repeated-monitoring-operational-and-analytics-fixture',
     rows: fixtureRows,
     start: fixtureStart,
     end: fixtureEnd,
