@@ -7,8 +7,10 @@ import { loadEnvironmentFiles } from '@asin-monitor/config';
 
 import { createPgPool } from '../src/client';
 import {
+  monitorHistoryOperationalIndexNames,
   timescaleAggregateProjectionViewNames,
   timescaleContinuousAggregateViewNames,
+  timescaleStoragePolicy,
 } from '../src/timescale';
 import {
   competitorDrizzleTables,
@@ -446,6 +448,169 @@ describe('P1-T2 PostgreSQL schema integration', () => {
         )
     `);
     expect(columns.rows).toEqual([{ matching_columns: 30 }]);
+  });
+
+  it('P1-T4b 索引、columnstore 与默认关闭的 retention catalog 精确匹配', async () => {
+    const version = await primaryPool.query<{ extversion: string }>(`
+      SELECT extversion
+      FROM pg_extension
+      WHERE extname = 'timescaledb'
+    `);
+    expect(version.rows).toEqual([
+      { extversion: timescaleStoragePolicy.extensionVersion },
+    ]);
+
+    const indexes = await primaryPool.query<{ indexname: string }>(`
+      SELECT index_relation.relname AS indexname
+      FROM pg_index index_row
+      JOIN pg_class index_relation
+        ON index_relation.oid = index_row.indexrelid
+      WHERE index_row.indrelid = 'public.monitor_history'::regclass
+        AND NOT index_row.indisprimary
+      ORDER BY index_relation.relname
+    `);
+    expect(indexes.rows.map(({ indexname }) => indexname)).toEqual(
+      [...monitorHistoryOperationalIndexNames].sort(),
+    );
+
+    const settings = await primaryPool.query<{
+      view_name: string;
+      segmentby: string;
+      orderby: string;
+    }>(
+      `
+      WITH selected_relation AS (
+        SELECT
+          'monitor_history'::text AS view_name,
+          'public.monitor_history'::regclass AS hypertable
+        UNION ALL
+        SELECT
+          aggregate_row.view_name,
+          format(
+            '%I.%I',
+            aggregate_row.materialization_hypertable_schema,
+            aggregate_row.materialization_hypertable_name
+          )::regclass AS hypertable
+        FROM timescaledb_information.continuous_aggregates aggregate_row
+        WHERE aggregate_row.view_schema = 'public'
+          AND aggregate_row.view_name = ANY($1::text[])
+      )
+      SELECT
+        selected_relation.view_name,
+        settings.segmentby,
+        settings.orderby
+      FROM selected_relation
+      JOIN timescaledb_information.hypertable_columnstore_settings settings
+        ON settings.hypertable = selected_relation.hypertable
+      ORDER BY selected_relation.view_name
+    `,
+      [timescaleContinuousAggregateViewNames],
+    );
+    expect(settings.rows).toEqual([
+      {
+        view_name: 'monitor_history',
+        segmentby: 'country,asin_id',
+        orderby: 'check_time DESC,id DESC',
+      },
+      ...[...timescaleContinuousAggregateViewNames].sort().map((view_name) => ({
+        view_name,
+        segmentby: view_name.includes('_variant_group_')
+          ? 'country,variant_group_id,asin_key'
+          : view_name.includes('_dim_')
+          ? 'country,site,brand,asin_key'
+          : 'country,asin_key',
+        orderby: 'time_slot DESC',
+      })),
+    ]);
+
+    const policies = await primaryPool.query<{
+      proc_name: string;
+      policy_count: number;
+    }>(`
+      SELECT proc_name, COUNT(*)::integer AS policy_count
+      FROM timescaledb_information.jobs
+      WHERE proc_name IN ('policy_compression', 'policy_retention')
+      GROUP BY proc_name
+      ORDER BY proc_name
+    `);
+    expect(policies.rows).toEqual([
+      { proc_name: 'policy_compression', policy_count: 10 },
+    ]);
+
+    const caggIndexes = await primaryPool.query<{
+      index_count: number;
+      all_ready: boolean;
+      all_btree: boolean;
+      exact_managed_count: number;
+      exact_time_count: number;
+    }>(
+      `
+      WITH selected_cagg AS (
+        SELECT format(
+          '%I.%I',
+          materialization_hypertable_schema,
+          materialization_hypertable_name
+        )::regclass AS materialization
+        FROM timescaledb_information.continuous_aggregates
+        WHERE view_schema = 'public'
+          AND view_name = ANY($1::text[])
+      ), actual_index AS (
+        SELECT
+          index_relation.relname AS index_name,
+          index_row.indisvalid AND index_row.indisready AS is_ready,
+          access_method.amname = 'btree' AS is_btree,
+          index_row.indisunique AS is_unique,
+          index_row.indpred IS NULL AS is_unfiltered,
+          index_row.indnkeyatts AS key_count,
+          index_row.indnatts AS attribute_count,
+          ARRAY(
+            SELECT option::smallint
+            FROM unnest(index_row.indoption) WITH ORDINALITY
+              AS sort_option(option, position)
+            WHERE position <= index_row.indnkeyatts
+            ORDER BY position
+          ) AS sort_options
+        FROM selected_cagg
+        JOIN pg_index index_row
+          ON index_row.indrelid = selected_cagg.materialization
+        JOIN pg_class index_relation
+          ON index_relation.oid = index_row.indexrelid
+        JOIN pg_am access_method
+          ON access_method.oid = index_relation.relam
+      )
+      SELECT
+        COUNT(*)::integer AS index_count,
+        BOOL_AND(is_ready) AS all_ready,
+        BOOL_AND(is_btree) AS all_btree,
+        COUNT(*) FILTER (
+          WHERE index_name LIKE 'idx_cagg_%'
+            AND NOT is_unique
+            AND is_unfiltered
+            AND key_count = 2
+            AND attribute_count = 2
+            AND sort_options = ARRAY[0, 0]::smallint[]
+        )::integer AS exact_managed_count,
+        COUNT(*) FILTER (
+          WHERE index_name NOT LIKE 'idx_cagg_%'
+            AND NOT is_unique
+            AND is_unfiltered
+            AND key_count = 1
+            AND attribute_count = 1
+            AND sort_options = ARRAY[3]::smallint[]
+        )::integer AS exact_time_count
+      FROM actual_index
+    `,
+      [timescaleContinuousAggregateViewNames],
+    );
+    expect(caggIndexes.rows).toEqual([
+      {
+        index_count: 39,
+        all_ready: true,
+        all_btree: true,
+        exact_managed_count: 30,
+        exact_time_count: 9,
+      },
+    ]);
   });
 
   it('重复升级会拒绝已存在但参数错误的刷新策略', async () => {

@@ -820,9 +820,29 @@ async function validateTargetSchema(context: DatabaseContext): Promise<void> {
       index_row.indisunique AS is_unique,
       access_method.amname AS access_method,
       ARRAY(
-        SELECT pg_get_indexdef(index_row.indexrelid, position, true)
-        FROM generate_series(1, index_row.indnkeyatts) AS position
-        ORDER BY position
+        SELECT
+          pg_get_indexdef(
+            index_row.indexrelid,
+            sort_option.position::integer,
+            true
+          )
+          || CASE
+            WHEN (sort_option.option::integer & 1) = 1 THEN ' DESC'
+            ELSE ''
+          END
+          || CASE
+            WHEN (sort_option.option::integer & 1) = 1
+              AND (sort_option.option::integer & 2) = 0
+              THEN ' NULLS LAST'
+            WHEN (sort_option.option::integer & 1) = 0
+              AND (sort_option.option::integer & 2) = 2
+              THEN ' NULLS FIRST'
+            ELSE ''
+          END
+        FROM unnest(index_row.indoption) WITH ORDINALITY
+          AS sort_option(option, position)
+        WHERE sort_option.position <= index_row.indnkeyatts
+        ORDER BY sort_option.position
       ) AS expressions,
       COALESCE(pg_get_expr(index_row.indpred, index_row.indrelid, true), '') AS predicate,
       index_row.indisvalid AS is_valid,

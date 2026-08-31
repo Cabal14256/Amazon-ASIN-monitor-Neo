@@ -19,6 +19,7 @@ describe('TimescaleDB 环境配置', () => {
     expect(workflow).toContain(`image: ${timescaleImage}`);
     expect(compose).not.toContain('latest-pg16');
     expect(workflow).not.toContain('latest-pg16');
+    expect(compose).not.toContain('TIMESCALE_RETENTION_DAYS:');
   });
 
   it('Compose 只向回环地址发布端口且不遮蔽镜像初始化目录', () => {
@@ -96,6 +97,15 @@ describe('TimescaleDB 环境配置', () => {
     );
     expect(dbPackage.scripts['test:integration']).toContain(
       'data-migration.integration.test.ts',
+    );
+    expect(
+      dbPackage.scripts['test:integration'].indexOf(
+        'data-migration.integration.test.ts',
+      ),
+    ).toBeLessThan(
+      dbPackage.scripts['test:integration'].indexOf(
+        'storage-performance.integration.test.ts',
+      ),
     );
     expect(rootPackage.scripts['db:migrate:data']).toContain(
       '@asin-monitor/db migrate:data',

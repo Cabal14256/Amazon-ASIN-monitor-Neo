@@ -170,7 +170,7 @@ Umi 开发服务器会把 `/api` 代理到 `http://localhost:3001`，WebSocket �
 
 #### Neo 并行骨架
 
-先按 `.env.neo.example` 创建 `.env.neo`。仓库用固定的 `timescale/timescaledb:2.29.2-pg16` 镜像初始化主营/竞品两个 database，在两库启用 TimescaleDB，并为空数据卷自动执行 PG 21 + 4 表 baseline；数据库端口默认只绑定 `127.0.0.1`，Redis 仍需单独准备。
+先按 `.env.neo.example` 创建 `.env.neo`。仓库用固定的 `timescale/timescaledb:2.29.2-pg16` 镜像初始化主营/竞品两个 database，在两库启用 TimescaleDB，并为空数据卷依次执行 PG 21 + 4 表 baseline、持续聚合升级、索引/columnstore 策略升级；raw retention 默认关闭。数据库端口默认只绑定 `127.0.0.1`，Redis 仍需单独准备。
 
 ```bash
 corepack pnpm db:up
@@ -181,6 +181,8 @@ corepack pnpm db:status
 
 ```bash
 corepack pnpm db:baseline
+corepack pnpm db:upgrade:timescale
+corepack pnpm db:upgrade:timescale-storage
 corepack pnpm --filter db test:integration
 ```
 
@@ -193,6 +195,8 @@ corepack pnpm db:migrate:data
 ```
 
 迁移采用主键 keyset 批次，自动对拍 25 张表的行数、确定性字段样本和 7 组关键业务查询，报告默认写入被 Git 忽略的 `artifacts/data-migration/report.json`。完整的写冻结、预演、失败恢复和回切步骤见 [`packages/db/DATA_MIGRATION.md`](./packages/db/DATA_MIGRATION.md)。
+
+Timescale 索引与存储 Gate 会在显式声明的 `_ci` 一次性数据库中写入 72 万次确定性高频监控 fixture，并生成脱敏的 `artifacts/timescale-performance/integration-report.json`：验证 7 个原始历史索引的真实执行计划、先转入 columnstore 的 9 个 CAGG 在 asin/dim/variant_group 三个家族、不重叠且可审计的冷热窗口/筛选/hour-day-month 共 36 组查询下与 raw 结果一致且 P95 至少快 3 倍，以及 columnstore 晚到写入和 10 批共 2500 行持续写入期间的分析读取 P95 低于 2 秒。索引取舍见 [`packages/db/INDEX_REVIEW.md`](./packages/db/INDEX_REVIEW.md)，上线与回滚见 [`docs/runbooks/phase-1-timescale-storage.md`](./docs/runbooks/phase-1-timescale-storage.md)。
 
 再打开三个终端，从仓库根分别运行：
 
@@ -386,6 +390,8 @@ npm --prefix server run rebuild:agg
 | `corepack pnpm dev:web` | 启动 Vite Web（5173） |
 | `corepack pnpm db:up` | 启动本地 PG16/TimescaleDB |
 | `corepack pnpm db:baseline` | 为已有空双库幂等应用 PG baseline |
+| `corepack pnpm db:upgrade:timescale` | 创建/复核 hypertable、9 个 CAGG 与刷新策略 |
+| `corepack pnpm db:upgrade:timescale-storage` | 收敛索引并配置 columnstore；retention 默认关闭 |
 | `corepack pnpm db:migrate:data` | 重置 PG 目标后迁移 MySQL 双库并生成对拍报告 |
 | `corepack pnpm db:status` | 查看本地数据库健康状态 |
 | `corepack pnpm db:logs` | 跟踪本地数据库日志 |

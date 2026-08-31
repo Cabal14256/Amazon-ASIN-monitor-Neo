@@ -18,6 +18,8 @@ services:
       - ./packages/db/migrations/0000_baseline.sql:/opt/asin-monitor/0000_baseline.sql:ro
       - ./packages/db/docker/apply-timescale-aggregates.sh:/docker-entrypoint-initdb.d/030-apply-timescale-aggregates.sh:ro
       - ./packages/db/migrations/0001_timescale_aggregates.sql:/opt/asin-monitor/0001_timescale_aggregates.sql:ro
+      - ./packages/db/docker/apply-timescale-storage-policies.sh:/docker-entrypoint-initdb.d/040-apply-timescale-storage-policies.sh:ro
+      - ./packages/db/migrations/0002_timescale_storage_policies.sql:/opt/asin-monitor/0002_timescale_storage_policies.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

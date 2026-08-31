@@ -4,8 +4,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  monitorHistoryOperationalIndexNames,
   timescaleAggregateProjectionViewNames,
   timescaleContinuousAggregateViewNames,
+  timescaleStoragePolicy,
 } from '../src/timescale';
 import {
   competitorDrizzleTables,
@@ -21,6 +23,10 @@ const read = (relativePath: string) =>
 const baselinePath = 'packages/db/migrations/0000_baseline.sql';
 const timescaleMigrationPath =
   'packages/db/migrations/0001_timescale_aggregates.sql';
+const storagePolicyMigrationPath =
+  'packages/db/migrations/0002_timescale_storage_policies.sql';
+const storagePolicyRollbackPath =
+  'packages/db/migrations/0002_timescale_storage_policies.rollback.sql';
 
 describe('PostgreSQL 双库 Schema 基线', () => {
   it('Drizzle 事实源覆盖 Legacy 最终态 21 + 4 张表', () => {
@@ -171,5 +177,155 @@ describe('PostgreSQL 双库 Schema 基线', () => {
     for (const caggName of timescaleContinuousAggregateViewNames) {
       expect(primaryTableNames).not.toContain(caggName);
     }
+  });
+
+  it('P1-T4b 以分 chunk 事务把 19 个 Legacy 索引收敛为 7 个运维索引', () => {
+    const migration = read(storagePolicyMigrationPath);
+
+    for (const indexName of monitorHistoryOperationalIndexNames) {
+      expect(migration).toContain(indexName);
+    }
+    expect(migration.match(/timescaledb\.transaction_per_chunk/g)).toHaveLength(
+      36,
+    );
+    expect(
+      migration.match(/CREATE INDEX IF NOT EXISTS idx_cagg_[a-z0-9_]+/g),
+    ).toHaveLength(30);
+    expect(
+      migration.match(
+        /DROP INDEX IF EXISTS public\.idx_monitor_history_[a-z0-9_]+;/g,
+      ),
+    ).toHaveLength(18);
+    expect(migration).toContain(
+      'WHERE is_broken = true AND notification_sent = false',
+    );
+    expect(migration).not.toContain('DESC NULLS LAST');
+    expect(migration).toContain('ARRAY[0, 3, 3]::smallint[]');
+    expect(migration).toContain('WHERE NOT indisprimary');
+    expect(migration).toContain('index_row.indisunique');
+    expect(migration).toContain('index_row.indnkeyatts');
+    expect(migration).toContain('index_row.indnatts');
+    expect(migration).toContain('index_row.indpred');
+    expect(migration).toContain('unnest(index_row.indoption)');
+    expect(migration).toContain(
+      'continuous aggregate index inventory mismatch',
+    );
+    expect(migration).not.toMatch(/USING\s+brin/i);
+  });
+
+  it('P1-T4b 使用 2.29.2 columnstore API、精确 job Gate 与默认关闭 retention', () => {
+    const migration = read(storagePolicyMigrationPath);
+
+    expect(migration).toContain(
+      `extension_version IS DISTINCT FROM '${timescaleStoragePolicy.extensionVersion}'`,
+    );
+    expect(migration.match(/timescaledb\.enable_columnstore,/g)).toHaveLength(
+      10,
+    );
+    expect(migration.match(/CALL add_columnstore_policy\(/g)).toHaveLength(10);
+    expect(migration).not.toContain('add_compression_policy(');
+    expect(migration).toContain("jobs.proc_name = 'policy_compression'");
+    expect(migration).toContain(
+      'timescaledb_information.hypertable_columnstore_settings',
+    );
+    expect(migration).toContain('asin_monitor.monitor_history_retention_days');
+    expect(migration).toContain(
+      `retention_days < ${timescaleStoragePolicy.rawRetentionMinimumDays}`,
+    );
+    expect(migration).toContain("jobs.proc_name = 'policy_retention'");
+    expect(migration).toContain(
+      'retention must remain disabled when no explicit retention days are configured',
+    );
+
+    const rollback = read(storagePolicyRollbackPath);
+    expect(rollback).not.toContain("relation.relname LIKE 'idx_cagg_%'");
+    expect(rollback.match(/'idx_cagg_[a-z0-9_]+'/g)).toHaveLength(30);
+    expect(rollback).toContain('if_columnstore => true');
+    expect(rollback).not.toContain('if_compressed => true');
+    expect(rollback).toContain('$drop_interrupted_legacy_indexes$');
+    expect(rollback).toContain(
+      '(NOT catalog_index.indisvalid OR NOT catalog_index.indisready)',
+    );
+    expect(rollback).toContain('$rollback_index_postflight$');
+    expect(rollback).toContain(
+      'monitor_history Legacy rollback index postflight mismatch',
+    );
+    expect(rollback).toContain('total_legacy_index_count <> 19');
+    expect(rollback).toContain('matching_legacy_index_count <> 19');
+
+    const dataMigrationGuide = read('packages/db/DATA_MIGRATION.md');
+    const aggregateUpgradeOffset = dataMigrationGuide.indexOf(
+      'corepack pnpm db:upgrade:timescale\n',
+    );
+    const storageUpgradeOffset = dataMigrationGuide.indexOf(
+      'corepack pnpm db:upgrade:timescale-storage\n',
+    );
+    const dataMigrationOffset = dataMigrationGuide.indexOf(
+      'corepack pnpm db:migrate:data\n',
+    );
+    expect(aggregateUpgradeOffset).toBeGreaterThanOrEqual(0);
+    expect(storageUpgradeOffset).toBeGreaterThan(aggregateUpgradeOffset);
+    expect(dataMigrationOffset).toBeGreaterThan(storageUpgradeOffset);
+
+    const performanceGate = read(
+      'packages/db/test/storage-performance.integration.test.ts',
+    );
+    expect(performanceGate).toContain(
+      'TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE must explicitly name a disposable *_ci database',
+    );
+    expect(performanceGate).toContain(
+      'SELECT current_database() AS database_name',
+    );
+    expect(performanceGate).toContain('maximumConcurrentReadP95Ms: 2_000');
+    expect(performanceGate).toContain(
+      'concurrentReadP95Ms < report.gate.maximumConcurrentReadP95Ms',
+    );
+    expect(performanceGate).toContain(
+      "'concurrent-write-read: missing analytical P95 evidence'",
+    );
+    expect(performanceGate).toContain(
+      "AND country = 'US' AND site = 'store-0' AND brand = 'brand-0'",
+    );
+    expect(performanceGate).not.toContain(
+      "AND rtrim(country) = 'US' AND rtrim(site) = 'store-0' AND rtrim(brand) = 'brand-0'",
+    );
+    expect(performanceGate).toContain(
+      'idx_cagg_dim_${granularity}_${dimension.column}_time',
+    );
+    expect(performanceGate).toContain(
+      "const benchmarkFamilies = ['asin', 'dim', 'variant_group'] as const",
+    );
+    expect(performanceGate).toContain(
+      'monitor_history_cagg_${family}_${granularity}',
+    );
+    expect(performanceGate).toContain(
+      'report.benchmarks.length === benchmarkCaseCount',
+    );
+    expect(performanceGate).toContain(
+      'monitorHistoryOperationalIndexNames.length +\n        caggDimensionIndexEvidenceCount',
+    );
+    expect(
+      performanceGate.indexOf('await assertManagedCaggDimensionIndexPlans()'),
+    ).toBeLessThan(
+      performanceGate.indexOf('await convertFixtureCaggChunksToColumnstore()'),
+    );
+
+    const rootPackage = JSON.parse(read('package.json')) as {
+      scripts: Record<string, string>;
+    };
+    expect(rootPackage.scripts['db:upgrade:timescale-storage']).toContain(
+      'exec -e TIMESCALE_RETENTION_DAYS -T timescaledb',
+    );
+
+    const compose = read('compose.neo.yml');
+    expect(compose).not.toContain('TIMESCALE_RETENTION_DAYS:');
+    expect(read('.github/workflows/integration.yml')).toContain(
+      'TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE: amazon_asin_monitor_ci',
+    );
+
+    const rollbackRunbook = read('docs/runbooks/phase-1-database-rollback.md');
+    expect(
+      rollbackRunbook.indexOf('corepack pnpm db:upgrade:timescale-storage'),
+    ).toBeLessThan(rollbackRunbook.indexOf('corepack pnpm db:migrate:data'));
   });
 });

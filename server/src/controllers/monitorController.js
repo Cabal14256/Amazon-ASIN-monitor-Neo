@@ -1,5 +1,10 @@
 const MonitorHistory = require('../models/MonitorHistory');
 const logger = require('../utils/logger');
+const {
+  ANALYTICS_CACHE_BYPASS_HEADER,
+  isAnalyticsCacheBypassEnabled,
+  isAnalyticsCacheBypassRequested,
+} = require('../utils/analyticsBenchmark');
 const analyticsViewService = require('../services/analyticsViewService');
 
 /**
@@ -67,6 +72,21 @@ function sendAnalyticsResult(res, result) {
     meta: result?.meta,
     errorCode: 0,
   });
+}
+
+function shouldBypassAnalyticsCache(req) {
+  const headerValue = req.get(ANALYTICS_CACHE_BYPASS_HEADER);
+  if (!isAnalyticsCacheBypassRequested(headerValue)) {
+    return false;
+  }
+  if (!isAnalyticsCacheBypassEnabled(headerValue)) {
+    logger.warn(
+      '[统计查询] benchmark cache bypass header rejected because ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED is not 1',
+    );
+    return false;
+  }
+  logger.debug('[统计查询] benchmark cache bypass enabled for request');
+  return true;
 }
 
 // 查询监控历史列表
@@ -530,6 +550,7 @@ exports.triggerManualCheck = async (req, res) => {
 exports.getAllCountriesSummary = async (req, res) => {
   const startTime = Date.now();
   try {
+    const bypassCache = shouldBypassAnalyticsCache(req);
     const {
       startTime: startTimeParam,
       endTime,
@@ -543,6 +564,7 @@ exports.getAllCountriesSummary = async (req, res) => {
           endTime,
           timeSlotGranularity,
           includeMeta: true,
+          bypassCache,
         });
       },
       3,
@@ -571,6 +593,7 @@ exports.getAllCountriesSummary = async (req, res) => {
 exports.getRegionSummary = async (req, res) => {
   const startTime = Date.now();
   try {
+    const bypassCache = shouldBypassAnalyticsCache(req);
     const {
       startTime: startTimeParam,
       endTime,
@@ -588,6 +611,7 @@ exports.getRegionSummary = async (req, res) => {
           endTime,
           timeSlotGranularity,
           includeMeta: true,
+          bypassCache,
         });
       },
       3,
@@ -640,6 +664,7 @@ exports.getRegionSummary = async (req, res) => {
 exports.getPeriodSummary = async (req, res) => {
   const startTime = Date.now();
   try {
+    const bypassCache = shouldBypassAnalyticsCache(req);
     const {
       country,
       site,
@@ -667,6 +692,7 @@ exports.getPeriodSummary = async (req, res) => {
           current,
           pageSize,
           includeMeta: true,
+          bypassCache,
         });
       },
       3,

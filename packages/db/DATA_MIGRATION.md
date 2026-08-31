@@ -69,8 +69,11 @@ Copy-Item .env.migration.example .env.migration
 ```bash
 corepack pnpm install --frozen-lockfile
 corepack pnpm db:upgrade:timescale
+corepack pnpm db:upgrade:timescale-storage
 corepack pnpm db:migrate:data
 ```
+
+`db:migrate:data` 的目标 Schema 校验以 `0002` 收敛后的 7 个 `monitor_history` 运维索引为准，因此导入前必须依序完成两次 Timescale 升级；retention 仍默认关闭，除非本次变更已单独审批并显式传入不少于 800 天。
 
 命令会构建 `config`、`contracts` 与 `db`，随后执行迁移。即使 pnpm lifecycle 把进程工作目录切到 `packages/db`，CLI 也会向上解析含 `pnpm-workspace.yaml` 的仓库根目录，并从根目录读取环境文件和写入默认报告。每张表使用主键 keyset 分页，不使用随数据量退化的 `OFFSET`；三张聚合表的 `granularity` keyset 与对拍查询显式使用 MySQL ENUM 声明顺序 `hour → day → month`，避免字符串排序在跨粒度批次漏行。源数据转换规则包括：
 
