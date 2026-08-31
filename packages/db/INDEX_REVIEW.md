@@ -2,7 +2,7 @@
 
 ## 结论与证据边界
 
-`0000_baseline.sql` 先忠实平移 Legacy 的 19 个索引，`0002_timescale_storage_policies.sql` 再把它们收敛为 7 个运维索引，并为 9 个持续聚合建立 30 个受管 B-tree 复合索引；每个 CAGG 的背景 hypertable 还保留 Timescale 创建的 1 个 `time_slot` B-tree，最终精确 catalog 为 39 个。此处的“保留/删除”不是仅凭列前缀判断：Integration CI 会在 72 万行、60 天、7 天 chunk 的确定性高频监控数据上执行真实的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，要求 7 个原始表目标索引分别服务主键回查、游标分页、状态刷新和待通知扫描，并要求 hour/day/month 下 country/site/brand 共 9 个 CAGG 维度索引分别服务直接维度过滤；同时对 12 组冷热窗口、筛选条件以及 hour/day/month 查询做原始表与 CAGG 正确性对拍和 P95 Gate。
+`0000_baseline.sql` 先忠实平移 Legacy 的 19 个索引，`0002_timescale_storage_policies.sql` 再把它们收敛为 7 个运维索引，并为 9 个持续聚合建立 30 个受管 B-tree 复合索引；每个 CAGG 的背景 hypertable 还保留 Timescale 创建的 1 个 `time_slot` B-tree，最终精确 catalog 为 39 个。此处的“保留/删除”不是仅凭列前缀判断：Integration CI 会在 72 万行、60 天、7 天 chunk 的确定性高频监控数据上执行真实的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，要求 7 个原始表目标索引分别服务主键回查、游标分页、状态刷新和待通知扫描，并要求 hour/day/month 下 country/site/brand 共 9 个 CAGG 维度索引分别服务直接维度过滤；同时对 asin/dim/variant_group 三个家族各自执行冷热窗口、家族筛选以及 hour/day/month 共 36 组原始表与 CAGG 正确性对拍和 P95 Gate。
 
 CI 为了稳定证明索引可用，会在单个只读事务中设置 `enable_seqscan=off`。这不伪装成本评估结论：报告仍保存实际 plan 节点、命中的索引、执行时间和 shared buffers；生产上线前还必须在同量级快照上用默认 planner 参数复跑，并将报告作为审批证据。报告位于 CI artifact `timescale-performance-<run_id>/integration-report.json`，只含合成数据规模、摘要、plan 元数据和耗时，不含业务行、连接串或凭据。
 

@@ -293,6 +293,15 @@ describe('PostgreSQL 双库 Schema 基线', () => {
       'idx_cagg_dim_${granularity}_${dimension.column}_time',
     );
     expect(performanceGate).toContain(
+      "const benchmarkFamilies = ['asin', 'dim', 'variant_group'] as const",
+    );
+    expect(performanceGate).toContain(
+      'monitor_history_cagg_${family}_${granularity}',
+    );
+    expect(performanceGate).toContain(
+      'report.benchmarks.length === benchmarkCaseCount',
+    );
+    expect(performanceGate).toContain(
       'monitorHistoryOperationalIndexNames.length +\n        caggDimensionIndexEvidenceCount',
     );
     expect(

@@ -27,6 +27,9 @@ const fixtureStart = '2040-01-01 00:00:00';
 const fixtureMiddle = '2040-02-01 00:00:00';
 const fixtureEnd = '2040-03-01 00:00:00';
 const caggDimensionIndexEvidenceCount = 9;
+const benchmarkFamilies = ['asin', 'dim', 'variant_group'] as const;
+const benchmarkCaseCount = benchmarkFamilies.length * 2 * 3 * 2;
+type BenchmarkFamily = (typeof benchmarkFamilies)[number];
 const reportPath = resolve(
   fileURLToPath(new URL('../../../', import.meta.url)),
   'artifacts',
@@ -53,9 +56,14 @@ type TimingStats = {
 
 type BenchmarkEvidence = {
   case: string;
+  family: BenchmarkFamily;
   window: 'cold' | 'hot';
   granularity: 'hour' | 'day' | 'month';
-  filter: 'all' | 'country-site-brand';
+  filter:
+    | 'all'
+    | 'country-asin'
+    | 'country-site-brand'
+    | 'country-variant-group';
   raw: TimingStats;
   cagg: TimingStats;
   p95Speedup: number;
@@ -65,7 +73,7 @@ type BenchmarkEvidence = {
 };
 
 type PerformanceReport = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
   database: { timescaleVersion: string | null };
   dataset: {
@@ -99,7 +107,7 @@ type PerformanceReport = {
 };
 
 const report: PerformanceReport = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   generatedAt: new Date().toISOString(),
   database: { timescaleVersion: null },
   dataset: {
@@ -311,7 +319,49 @@ const aggregateIntervals = {
   month: '1 month',
 } as const;
 
-function rawAggregateQuery(filtered: boolean): string {
+function familyRawPredicate(family: BenchmarkFamily): string {
+  return family === 'variant_group' ? 'AND variant_group_id IS NOT NULL' : '';
+}
+
+function familyFilterPredicate(
+  family: BenchmarkFamily,
+  filtered: boolean,
+): string {
+  if (!filtered) return '';
+  if (family === 'asin') {
+    return "AND rtrim(country) = 'US' AND COALESCE(NULLIF(rtrim(asin_code), ''), 'ID#' || rtrim(asin_id)) = 'P000000001'";
+  }
+  if (family === 'variant_group') {
+    return "AND rtrim(country) = 'US' AND rtrim(variant_group_id) = 'perf-group-0'";
+  }
+  return "AND rtrim(country) = 'US' AND rtrim(site_snapshot) = 'store-0' AND rtrim(brand_snapshot) = 'brand-0'";
+}
+
+function caggFilterPredicate(
+  family: BenchmarkFamily,
+  filtered: boolean,
+): string {
+  if (!filtered) return '';
+  if (family === 'asin') {
+    return "AND country = 'US' AND asin_key = 'P000000001'";
+  }
+  if (family === 'variant_group') {
+    return "AND country = 'US' AND variant_group_id = 'perf-group-0'";
+  }
+  return "AND country = 'US' AND site = 'store-0' AND brand = 'brand-0'";
+}
+
+function benchmarkFilterName(
+  family: BenchmarkFamily,
+  filtered: boolean,
+): BenchmarkEvidence['filter'] {
+  if (!filtered) return 'all';
+  if (family === 'asin') return 'country-asin';
+  if (family === 'variant_group') return 'country-variant-group';
+  return 'country-site-brand';
+}
+
+function rawAggregateQuery(family: BenchmarkFamily, filtered: boolean): string {
   return `
     SELECT
       to_char(time_bucket($1::interval, check_time), 'YYYY-MM-DD HH24:MI:SS') AS time_slot,
@@ -323,17 +373,15 @@ function rawAggregateQuery(filtered: boolean): string {
       AND check_time < $3::timestamp
       AND rtrim(check_type) = 'ASIN'
       AND (asin_id IS NOT NULL OR NULLIF(rtrim(asin_code), '') IS NOT NULL)
-      ${
-        filtered
-          ? "AND rtrim(country) = 'US' AND rtrim(site_snapshot) = 'store-0' AND rtrim(brand_snapshot) = 'brand-0'"
-          : ''
-      }
+      ${familyRawPredicate(family)}
+      ${familyFilterPredicate(family, filtered)}
     GROUP BY 1, 2
     ORDER BY 1, 2
   `;
 }
 
 function caggAggregateQuery(
+  family: BenchmarkFamily,
   granularity: keyof typeof aggregateIntervals,
   filtered: boolean,
 ): string {
@@ -343,14 +391,10 @@ function caggAggregateQuery(
       country AS country,
       SUM(check_count)::text AS check_count,
       SUM(broken_count)::text AS broken_count
-    FROM public.monitor_history_cagg_dim_${granularity}
+    FROM public.monitor_history_cagg_${family}_${granularity}
     WHERE time_slot >= $1::timestamp
       AND time_slot < $2::timestamp
-      ${
-        filtered
-          ? "AND country = 'US' AND site = 'store-0' AND brand = 'brand-0'"
-          : ''
-      }
+      ${caggFilterPredicate(family, filtered)}
     GROUP BY 1, 2
     ORDER BY 1, 2
   `;
@@ -382,14 +426,19 @@ async function assertManagedCaggDimensionIndexPlans(): Promise<void> {
 }
 
 async function runBenchmarkCase(options: {
+  family: BenchmarkFamily;
   window: 'cold' | 'hot';
   start: string;
   end: string;
   granularity: keyof typeof aggregateIntervals;
   filtered: boolean;
 }): Promise<BenchmarkEvidence> {
-  const rawSql = rawAggregateQuery(options.filtered);
-  const caggSql = caggAggregateQuery(options.granularity, options.filtered);
+  const rawSql = rawAggregateQuery(options.family, options.filtered);
+  const caggSql = caggAggregateQuery(
+    options.family,
+    options.granularity,
+    options.filtered,
+  );
   const rawValues = [
     aggregateIntervals[options.granularity],
     options.start,
@@ -422,9 +471,8 @@ async function runBenchmarkCase(options: {
   const normalizedRaw = normalizedRows(rawRows);
   const normalizedCagg = normalizedRows(caggRows);
   const correct = normalizedRaw === normalizedCagg;
-  const caseName = `${options.window}-${options.granularity}-${
-    options.filtered ? 'country-site-brand' : 'all'
-  }`;
+  const filter = benchmarkFilterName(options.family, options.filtered);
+  const caseName = `${options.window}-${options.family}-${options.granularity}-${filter}`;
   if (!correct) {
     report.gate.failures.push(`${caseName}: normalized result mismatch`);
   }
@@ -439,9 +487,10 @@ async function runBenchmarkCase(options: {
   }
   return {
     case: caseName,
+    family: options.family,
     window: options.window,
     granularity: options.granularity,
-    filter: options.filtered ? 'country-site-brand' : 'all',
+    filter,
     raw,
     cagg,
     p95Speedup,
@@ -575,7 +624,7 @@ async function writeReportAtomically(): Promise<void> {
     report.indexEvidence.length ===
       monitorHistoryOperationalIndexNames.length +
         caggDimensionIndexEvidenceCount &&
-    report.benchmarks.length === 12 &&
+    report.benchmarks.length === benchmarkCaseCount &&
     report.storageRegression.convertedToColumnstore &&
     report.storageRegression.columnstoredCaggRelations === 9 &&
     report.storageRegression.columnstoredCaggChunks >= 9 &&
@@ -775,26 +824,32 @@ describe.skipIf(!integrationEnabled)(
       }
     }, 120_000);
 
-    it('keeps cold/hot filtered and unfiltered hour/day/month results equal and at least 3x faster at P95', async () => {
+    it('benchmarks every columnstored CAGG family across cold/hot filtered and unfiltered hour/day/month cases', async () => {
       for (const window of [
         { name: 'cold' as const, start: fixtureStart, end: fixtureMiddle },
         { name: 'hot' as const, start: fixtureMiddle, end: fixtureEnd },
       ]) {
-        for (const granularity of ['hour', 'day', 'month'] as const) {
-          for (const filtered of [false, true]) {
-            report.benchmarks.push(
-              await runBenchmarkCase({
-                window: window.name,
-                start: window.start,
-                end: window.end,
-                granularity,
-                filtered,
-              }),
-            );
+        for (const family of benchmarkFamilies) {
+          for (const granularity of ['hour', 'day', 'month'] as const) {
+            for (const filtered of [false, true]) {
+              report.benchmarks.push(
+                await runBenchmarkCase({
+                  family,
+                  window: window.name,
+                  start: window.start,
+                  end: window.end,
+                  granularity,
+                  filtered,
+                }),
+              );
+            }
           }
         }
       }
-      expect(report.benchmarks).toHaveLength(12);
+      expect(report.benchmarks).toHaveLength(benchmarkCaseCount);
+      expect(new Set(report.benchmarks.map(({ family }) => family))).toEqual(
+        new Set(benchmarkFamilies),
+      );
       expect(report.gate.failures).toEqual([]);
     }, 300_000);
 
