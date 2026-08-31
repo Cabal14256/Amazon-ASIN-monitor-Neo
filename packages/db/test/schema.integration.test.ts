@@ -567,7 +567,7 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       [timescaleContinuousAggregateViewNames],
     );
     expect(caggIndexes.rows).toEqual([
-      { index_count: 30, all_ready: true, all_btree: true },
+      { index_count: 39, all_ready: true, all_btree: true },
     ]);
   });
 

@@ -2,7 +2,7 @@
 
 ## 结论与证据边界
 
-`0000_baseline.sql` 先忠实平移 Legacy 的 19 个索引，`0002_timescale_storage_policies.sql` 再把它们收敛为 7 个运维索引，并为 9 个持续聚合建立 30 个受管 B-tree 索引。此处的“保留/删除”不是仅凭列前缀判断：Integration CI 会在 36 万行、60 天、7 天 chunk 的确定性数据上执行真实的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，要求 7 个目标索引分别服务主键回查、游标分页、状态刷新和待通知扫描；同时对 12 组冷热窗口、筛选条件以及 hour/day/month 查询做原始表与 CAGG 正确性对拍和 P95 Gate。
+`0000_baseline.sql` 先忠实平移 Legacy 的 19 个索引，`0002_timescale_storage_policies.sql` 再把它们收敛为 7 个运维索引，并为 9 个持续聚合建立 30 个受管 B-tree 复合索引；每个 CAGG 的背景 hypertable 还保留 Timescale 创建的 1 个 `time_slot` B-tree，最终精确 catalog 为 39 个。此处的“保留/删除”不是仅凭列前缀判断：Integration CI 会在 36 万行、60 天、7 天 chunk 的确定性数据上执行真实的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，要求 7 个目标索引分别服务主键回查、游标分页、状态刷新和待通知扫描；同时对 12 组冷热窗口、筛选条件以及 hour/day/month 查询做原始表与 CAGG 正确性对拍和 P95 Gate。
 
 CI 为了稳定证明索引可用，会在单个只读事务中设置 `enable_seqscan=off`。这不伪装成本评估结论：报告仍保存实际 plan 节点、命中的索引、执行时间和 shared buffers；生产上线前还必须在同量级快照上用默认 planner 参数复跑，并将报告作为审批证据。报告位于 CI artifact `timescale-performance-<run_id>/integration-report.json`，只含合成数据规模、摘要、plan 元数据和耗时，不含业务行、连接串或凭据。
 
@@ -34,7 +34,7 @@ CI 为了稳定证明索引可用，会在单个只读事务中设置 `enable_se
 
 ## CAGG 索引与 BRIN 决策
 
-P1-T4a 在创建 CAGG 时显式设置 `timescaledb.create_group_indexes=false`，避免 Timescale 隐式决定索引集合。P1-T4b 按每个分组键建立 `(key, time_slot)`：ASIN 每个粒度 2 个，dimension 每个粒度 4 个，variant-group 每个粒度 4 个，共 `(2 + 4 + 4) × 3 = 30` 个。迁移 postflight 同时拒绝缺失、多余、非 B-tree、invalid 或 not-ready 的集合。
+P1-T4a 在创建 CAGG 时显式设置 `timescaledb.create_group_indexes=false`，避免 Timescale 隐式决定 group-key 索引集合。P1-T4b 按每个分组键建立 `(key, time_slot)`：ASIN 每个粒度 2 个，dimension 每个粒度 4 个，variant-group 每个粒度 4 个，共 `(2 + 4 + 4) × 3 = 30` 个。Timescale 2.29.2 仍会为每个背景 hypertable 创建 1 个 `time_slot` 索引用于时间裁剪，因此 postflight 精确要求 30 个复合索引、9 个单时间索引、总计 39 个，并拒绝缺失、多余、非 B-tree、invalid 或 not-ready 的集合。
 
 本阶段不增加 BRIN。理由是原始表已按 7 天 chunk 做时间裁剪，主键以 `check_time` 开头，核心过滤还需要国家/ASIN/变体组等高选择性前缀；在当前数据量下再加 BRIN 只会增加写入与维护成本，并不能替代这些复合 B-tree。以下条件同时成立时再开独立 Issue 复评：单 chunk 大到默认时间扫描出现显著 shared-read 增长、相关性仍接近 1、`EXPLAIN ANALYZE` 证明 BRIN 的 P95/空间收益，并且写吞吐回归通过。
 

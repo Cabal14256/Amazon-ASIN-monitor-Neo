@@ -66,7 +66,7 @@ database 名仅允许字母、数字和下划线；本地 bootstrap 会拒绝其
 
 ### P1-T4b 索引、columnstore 与 retention
 
-`0002` 使用 `timescaledb.transaction_per_chunk` 把 19 个 Legacy 原始历史索引收敛为 7 个经过真实查询验证的运维索引，并为 9 个 CAGG 显式创建 30 个 `(group_key, time_slot)` B-tree。逐项取舍、BRIN 暂不采用的依据以及重评阈值见 [`INDEX_REVIEW.md`](./INDEX_REVIEW.md)。
+`0002` 使用 `timescaledb.transaction_per_chunk` 把 19 个 Legacy 原始历史索引收敛为 7 个经过真实查询验证的运维索引，并为 9 个 CAGG 显式创建 30 个 `(group_key, time_slot)` B-tree；加上每个背景 hypertable 的 Timescale 单 `time_slot` 索引，catalog 精确总数为 39。逐项取舍、BRIN 暂不采用的依据以及重评阈值见 [`INDEX_REVIEW.md`](./INDEX_REVIEW.md)。
 
 原始历史按 `country,asin_id` 分段、`check_time DESC,id DESC` 排序，30 天后进入 columnstore；hour/day/month CAGG 分别在 3/40/800 天后进入 columnstore。全部使用 TimescaleDB 2.29.2 的 `enable_columnstore`、`add_columnstore_policy` 和 `convert_to_*store` API，不使用旧 compression API。固定调度起点与 timezone 使重复部署可精确校验 catalog。
 

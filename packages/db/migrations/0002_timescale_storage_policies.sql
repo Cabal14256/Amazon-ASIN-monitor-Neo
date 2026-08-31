@@ -483,6 +483,7 @@ DECLARE
   matching_operational_index_count integer;
   legacy_index_count integer;
   matching_cagg_index_count integer;
+  matching_cagg_time_index_count integer;
   total_cagg_index_count integer;
   matching_columnstore_setting_count integer;
   columnstore_policy_count integer;
@@ -669,15 +670,28 @@ BEGIN
       FROM actual_index
       JOIN expected_index USING (view_name, key_columns)
       WHERE actual_index.is_ready AND actual_index.is_btree
+    ),
+    (
+      SELECT COUNT(*)::integer
+      FROM actual_index
+      WHERE actual_index.key_columns = ARRAY['time_slot']::text[]
+        AND actual_index.is_ready
+        AND actual_index.is_btree
     )
-  INTO total_cagg_index_count, matching_cagg_index_count
+  INTO
+    total_cagg_index_count,
+    matching_cagg_index_count,
+    matching_cagg_time_index_count
   ;
 
-  IF total_cagg_index_count <> 30 OR matching_cagg_index_count <> 30 THEN
+  IF total_cagg_index_count <> 39
+    OR matching_cagg_index_count <> 30
+    OR matching_cagg_time_index_count <> 9 THEN
     RAISE EXCEPTION
-      'continuous aggregate index inventory mismatch (found %, matching %)',
+      'continuous aggregate index inventory mismatch (found %, matching group %, matching time %)',
       total_cagg_index_count,
-      matching_cagg_index_count;
+      matching_cagg_index_count,
+      matching_cagg_time_index_count;
   END IF;
 
   WITH expected_setting(
