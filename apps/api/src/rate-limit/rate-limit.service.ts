@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { Inject, Injectable } from '@nestjs/common';
 
@@ -40,6 +40,7 @@ export interface RateLimitDecision {
   remaining: number;
   resetAfterMs: number;
   role: RateLimitRole;
+  storageKey: string;
 }
 
 const REDIS_RETRY_DELAY_MS = 5_000;
@@ -68,7 +69,16 @@ if current == 1 then
 end
 return redis.call('DECR', KEYS[1])
 `;
-const RECOVERY_PROBE_SCRIPT = `return 1`;
+const CAPABILITY_PROBE_SCRIPT = `
+redis.call('SET', KEYS[1], 1, 'PX', ARGV[1])
+redis.call('INCR', KEYS[1])
+redis.call('PTTL', KEYS[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[1])
+redis.call('GET', KEYS[1])
+redis.call('DECR', KEYS[1])
+redis.call('DEL', KEYS[1])
+return 1
+`;
 
 function freshRoleStats(): Record<RateLimitRole, RoleStats> {
   return {
@@ -118,6 +128,8 @@ export function buildRateLimitKey(
 @Injectable()
 export class RateLimitService {
   private readonly memoryWindows = new Map<string, MemoryWindow>();
+  private readonly memoryOverflowWindows = new Map<string, MemoryWindow>();
+  private readonly capabilityProbeKey: string;
   private byRole = freshRoleStats();
   private totalRequests = 0;
   private blockedRequests = 0;
@@ -126,6 +138,7 @@ export class RateLimitService {
   private redisRetryAfter = 0;
   private nextMemoryCleanupAt = 0;
   private recoveryProbeInFlight = false;
+  private capabilityProbe: Promise<void> | undefined;
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -134,6 +147,9 @@ export class RateLimitService {
     @Inject(AppLogger) private readonly logger: AppLogger,
     @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {
+    this.capabilityProbeKey = `${
+      env.RATE_LIMITER_KEY_PREFIX
+    }:http:neo:capability:${randomUUID()}`;
     if (!env.API_RATE_LIMIT_ENABLED) {
       logger.info('HTTP API 限流已禁用', 'RateLimitService', {
         reason: 'configuration',
@@ -186,12 +202,16 @@ export class RateLimitService {
     for (const [key, window] of this.memoryWindows) {
       if (window.expiresAt <= now) this.memoryWindows.delete(key);
     }
+    for (const [key, window] of this.memoryOverflowWindows) {
+      if (window.expiresAt <= now) this.memoryOverflowWindows.delete(key);
+    }
   }
 
   private consumeMemory(
     key: string,
+    overflowKey: string,
     now: number,
-  ): { count: number; ttlMs: number } {
+  ): { count: number; storageKey: string; ttlMs: number } {
     let window = this.memoryWindows.get(key);
     if (!window || window.expiresAt <= now) {
       if (!window && this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
@@ -200,24 +220,41 @@ export class RateLimitService {
           this.nextMemoryCleanupAt = now + 60_000;
         }
         if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
-          const oldest = this.memoryWindows.keys().next().value as
-            | string
-            | undefined;
-          if (oldest) this.memoryWindows.delete(oldest);
+          let overflow = this.memoryOverflowWindows.get(overflowKey);
+          if (!overflow || overflow.expiresAt <= now) {
+            overflow = {
+              count: 0,
+              expiresAt: now + RATE_LIMIT_WINDOW_MS,
+            };
+            this.memoryOverflowWindows.set(overflowKey, overflow);
+          }
+          overflow.count += 1;
+          return {
+            count: overflow.count,
+            storageKey: overflowKey,
+            ttlMs: Math.max(1, overflow.expiresAt - now),
+          };
         }
       }
       window = { count: 0, expiresAt: now + RATE_LIMIT_WINDOW_MS };
       this.memoryWindows.set(key, window);
     }
     window.count += 1;
-    return { count: window.count, ttlMs: Math.max(1, window.expiresAt - now) };
+    return {
+      count: window.count,
+      storageKey: key,
+      ttlMs: Math.max(1, window.expiresAt - now),
+    };
   }
 
-  private releaseMemory(key: string, now: number): void {
-    const window = this.memoryWindows.get(key);
+  private releaseMemory(storageKey: string, now: number): void {
+    const windows = this.memoryWindows.has(storageKey)
+      ? this.memoryWindows
+      : this.memoryOverflowWindows;
+    const window = windows.get(storageKey);
     if (!window) return;
     if (window.expiresAt <= now || window.count <= 1) {
-      this.memoryWindows.delete(key);
+      windows.delete(storageKey);
       return;
     }
     window.count -= 1;
@@ -237,11 +274,20 @@ export class RateLimitService {
 
   private async consumeWindow(
     key: string,
+    overflowKey: string,
     now: number,
-  ): Promise<{ backend: RateLimitBackend; count: number; ttlMs: number }> {
+  ): Promise<{
+    backend: RateLimitBackend;
+    count: number;
+    storageKey: string;
+    ttlMs: number;
+  }> {
     const recovering = this.backend === 'memory';
     if (recovering && !this.beginRecoveryProbe(now)) {
-      return { backend: 'memory', ...this.consumeMemory(key, now) };
+      return {
+        backend: 'memory',
+        ...this.consumeMemory(key, overflowKey, now),
+      };
     }
     try {
       const window = parseRedisWindow(
@@ -252,10 +298,13 @@ export class RateLimitService {
         ),
       );
       this.setBackend('redis', now);
-      return { backend: 'redis', ...window };
+      return { backend: 'redis', storageKey: key, ...window };
     } catch {
       this.setBackend('memory', now);
-      return { backend: 'memory', ...this.consumeMemory(key, now) };
+      return {
+        backend: 'memory',
+        ...this.consumeMemory(key, overflowKey, now),
+      };
     } finally {
       if (recovering) this.recoveryProbeInFlight = false;
     }
@@ -272,6 +321,15 @@ export class RateLimitService {
       input.role,
       input.clientIdentifier,
     );
+  }
+
+  private overflowKey(input: {
+    policy: RateLimitPolicy;
+    role: RateLimitRole;
+  }): string {
+    const bucket =
+      input.policy === 'strict' ? 'strict' : input.role.toLowerCase();
+    return `${this.env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:${bucket}`;
   }
 
   recordDecision(decision: RateLimitDecision): void {
@@ -301,7 +359,7 @@ export class RateLimitService {
     const limit =
       input.policy === 'strict' ? STRICT_RATE_LIMIT : ROLE_LIMITS[input.role];
     const key = this.key(input);
-    const window = await this.consumeWindow(key, now);
+    const window = await this.consumeWindow(key, this.overflowKey(input), now);
     const allowed = window.count <= limit;
     const decision = {
       allowed,
@@ -312,43 +370,57 @@ export class RateLimitService {
       remaining: Math.max(0, limit - window.count),
       resetAfterMs: window.ttlMs,
       role: input.role,
+      storageKey: window.storageKey,
     };
     if (options.record !== false) this.recordDecision(decision);
     return decision;
   }
 
-  async release(
-    input: {
-      clientIdentifier: string;
-      policy: RateLimitPolicy;
-      role: RateLimitRole;
-    },
-    backend: RateLimitBackend,
-  ): Promise<void> {
+  async release(decision: RateLimitDecision): Promise<void> {
     const now = Date.now();
-    const key = this.key(input);
-    if (backend === 'memory') {
-      this.releaseMemory(key, now);
+    if (decision.backend === 'memory') {
+      this.releaseMemory(decision.storageKey, now);
       return;
     }
     try {
-      await this.redis.eval(RELEASE_WINDOW_SCRIPT, [key], []);
+      await this.redis.eval(RELEASE_WINDOW_SCRIPT, [decision.storageKey], []);
     } catch {
       this.setBackend('memory', now);
     }
   }
 
   async recover(redisAvailable: boolean): Promise<void> {
-    if (!this.enabled || !redisAvailable || this.backend !== 'memory') return;
+    if (!this.enabled || !redisAvailable) return;
+    if (this.capabilityProbe) {
+      await this.capabilityProbe;
+      return;
+    }
     const now = Date.now();
-    if (!this.beginRecoveryProbe(now)) return;
+    if (this.backend === 'memory') {
+      if (!this.beginRecoveryProbe(now)) return;
+    } else {
+      if (this.recoveryProbeInFlight) return;
+      this.recoveryProbeInFlight = true;
+    }
+    const probe = (async () => {
+      try {
+        await this.redis.eval(
+          CAPABILITY_PROBE_SCRIPT,
+          [this.capabilityProbeKey],
+          [1_000],
+        );
+        this.setBackend('redis', now);
+      } catch {
+        this.setBackend('memory', now);
+      } finally {
+        this.recoveryProbeInFlight = false;
+      }
+    })();
+    this.capabilityProbe = probe;
     try {
-      await this.redis.eval(RECOVERY_PROBE_SCRIPT, [], []);
-      this.setBackend('redis', now);
-    } catch {
-      this.setBackend('memory', now);
+      await probe;
     } finally {
-      this.recoveryProbeInFlight = false;
+      if (this.capabilityProbe === probe) this.capabilityProbe = undefined;
     }
   }
 

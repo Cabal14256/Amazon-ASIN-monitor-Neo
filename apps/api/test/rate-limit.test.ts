@@ -260,7 +260,33 @@ describe('RateLimitService', () => {
 
     expect(service.snapshot(true).status).toBe('ok');
     expect(redis.eval).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(redis.eval).mock.calls[1]).toEqual(['return 1', [], []]);
+    const [script, keys, arguments_] = vi.mocked(redis.eval).mock.calls[1]!;
+    for (const command of [
+      'SET',
+      'INCR',
+      'PTTL',
+      'PEXPIRE',
+      'GET',
+      'DECR',
+      'DEL',
+    ]) {
+      expect(script).toContain(`redis.call('${command}'`);
+    }
+    expect(keys[0]).toMatch(
+      /^spapi:ratelimiter:http:neo:capability:[0-9a-f-]+$/,
+    );
+    expect(arguments_).toEqual([1_000]);
+  });
+
+  it('实例启动时 readiness 即验证完整限流命令，ACL 不足保持 degraded', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval).mockRejectedValueOnce(new Error('INCR denied'));
+    const { service } = createService({ redis });
+
+    await service.recover(true);
+
+    expect(redis.eval).toHaveBeenCalledOnce();
+    expect(service.snapshot(true).status).toBe('degraded');
   });
 
   it('Redis key 只包含客户端摘要，白名单兼容 IPv4-mapped 地址', () => {
@@ -286,13 +312,14 @@ describe('RateLimitService', () => {
     expect(service.isWhitelisted('192.0.2.1')).toBe(false);
   });
 
-  it('内存窗口达到上限后按分钟摊销清理，后续新客户端只做 O(1) 淘汰', async () => {
+  it('内存窗口满载后按分钟摊销清理，并用有界 overflow 保留活跃计数', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
     const { service } = createService();
     const internal = service as unknown as {
       backend: 'memory';
       cleanMemory(now: number): void;
+      memoryOverflowWindows: Map<string, { count: number; expiresAt: number }>;
       memoryWindows: Map<string, { count: number; expiresAt: number }>;
       redisRetryAfter: number;
     };
@@ -304,16 +331,27 @@ describe('RateLimitService', () => {
     internal.redisRetryAfter = expiresAt;
     const clean = vi.spyOn(internal, 'cleanMemory');
 
-    for (let index = 0; index < 3; index += 1) {
-      await service.consume({
-        clientIdentifier: `new-client-${index}`,
-        policy: 'role',
-        role: 'DEFAULT',
-      });
-    }
+    const decisions = await Promise.all(
+      Array.from({ length: 3 }, (_, index) =>
+        service.consume({
+          clientIdentifier: `new-client-${index}`,
+          policy: 'role',
+          role: 'DEFAULT',
+        }),
+      ),
+    );
+    const revisited = await service.consume({
+      clientIdentifier: 'new-client-0',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
 
     expect(clean).toHaveBeenCalledOnce();
     expect(internal.memoryWindows).toHaveLength(10_000);
+    expect(internal.memoryWindows.has('existing-0')).toBe(true);
+    expect(internal.memoryOverflowWindows).toHaveLength(1);
+    expect(decisions.map(({ count }) => count)).toEqual([1, 2, 3]);
+    expect(revisited.count).toBe(4);
   });
 
   it('关闭开关时健康快照明确标记 disabled', () => {
@@ -541,6 +579,38 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     );
   });
 
+  it('角色查询未完成前持续持有 DEFAULT 预占，阻止并发绕过权限存储保护', async () => {
+    const key = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
+    counters.set(key, ROLE_LIMITS.DEFAULT - 1);
+    let finishRoleLookup!: (roles: string[]) => void;
+    permissionCache.getRoles.mockImplementationOnce(
+      () => new Promise((resolve) => (finishRoleLookup = resolve)),
+    );
+    const fastify = app.getHttpAdapter().getInstance();
+
+    const first = fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated',
+    });
+    await vi.waitFor(() => expect(permissionCache.getRoles).toHaveBeenCalled());
+    const concurrent = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated',
+    });
+
+    expect(concurrent.statusCode).toBe(429);
+    finishRoleLookup(['ADMIN']);
+    const completed = await first;
+    expect(completed.statusCode).toBe(200);
+    expect(completed.headers['ratelimit-limit']).toBe('1000');
+    expect(counters.get(key)).toBe(ROLE_LIMITS.DEFAULT);
+  });
+
   it('撤销会话的 Guard 拒绝与未匹配 API 均保留 DEFAULT 预占，并在下一请求提前 429', async () => {
     const clientIdentifier = '127.0.0.1';
     const key = buildRateLimitKey(
@@ -676,6 +746,8 @@ describe.skipIf(!integrationEnabled)(
         clientIdentifier,
       );
       try {
+        await serviceA.recover(true);
+        expect(serviceA.snapshot(true).status).toBe('ok');
         await redis.del(key);
         const first = await serviceA.consume({
           clientIdentifier,
@@ -696,23 +768,9 @@ describe.skipIf(!integrationEnabled)(
         expect(secondTtl).toBeGreaterThan(0);
         expect(secondTtl).toBeLessThanOrEqual(firstTtl);
 
-        await serviceA.release(
-          {
-            clientIdentifier,
-            policy: 'strict',
-            role: 'DEFAULT',
-          },
-          'redis',
-        );
+        await serviceA.release(first);
         expect(await redis.client.get(key)).toBe('1');
-        await serviceB.release(
-          {
-            clientIdentifier,
-            policy: 'strict',
-            role: 'DEFAULT',
-          },
-          'redis',
-        );
+        await serviceB.release(second);
         expect(await redis.client.get(key)).toBeNull();
       } finally {
         if (redis.client.status !== 'end') await redis.del(key);

@@ -122,11 +122,6 @@ function throwBlocked(
 
 interface ProvisionalLimit {
   decision: RateLimitDecision;
-  input: {
-    clientIdentifier: string;
-    policy: 'role';
-    role: 'DEFAULT';
-  };
 }
 
 /** Fastify onRequest 调用点：先按 DEFAULT 预占，覆盖 Guard 拒绝和未匹配 API。 */
@@ -155,7 +150,7 @@ export class RateLimitRequestHook {
       sendBlocked(reply, decision, this.logger, 'RateLimitRequestHook');
       return true;
     }
-    this.provisional.set(request, { decision, input });
+    this.provisional.set(request, { decision });
     applyHeaders(reply, decision);
     return false;
   }
@@ -164,17 +159,19 @@ export class RateLimitRequestHook {
     const provisional = this.provisional.get(request);
     if (!provisional) return;
     this.provisional.delete(request);
-    await this.rateLimiter.release(
-      provisional.input,
-      provisional.decision.backend,
-    );
+    await this.rateLimiter.release(provisional.decision);
+  }
+
+  commit(request: FastifyRequest): RateLimitDecision | undefined {
+    const provisional = this.provisional.get(request);
+    if (!provisional) return undefined;
+    this.provisional.delete(request);
+    this.rateLimiter.recordDecision(provisional.decision);
+    return provisional.decision;
   }
 
   complete(request: FastifyRequest): void {
-    const provisional = this.provisional.get(request);
-    if (!provisional) return;
-    this.provisional.delete(request);
-    this.rateLimiter.recordDecision(provisional.decision);
+    this.commit(request);
   }
 }
 
@@ -198,7 +195,6 @@ export class RateLimitInterceptor implements NestInterceptor {
     const request = http.getRequest<FastifyRequest>();
     const reply = http.getResponse<FastifyReply>();
     if (shouldBypass(request, this.rateLimiter)) return next.handle();
-    await this.requestHook.release(request);
 
     const role = await resolveRole(
       request.auth?.userId,
@@ -206,11 +202,16 @@ export class RateLimitInterceptor implements NestInterceptor {
       this.logger,
       'RateLimitInterceptor',
     );
-    const roleDecision = await this.rateLimiter.consume({
-      clientIdentifier: request.ip,
-      policy: 'role',
-      role,
-    });
+    let roleDecision =
+      role === 'DEFAULT' ? this.requestHook.commit(request) : undefined;
+    if (!roleDecision) {
+      roleDecision = await this.rateLimiter.consume({
+        clientIdentifier: request.ip,
+        policy: 'role',
+        role,
+      });
+      await this.requestHook.release(request);
+    }
     applyHeaders(reply, roleDecision);
     if (!roleDecision.allowed) {
       throwBlocked(reply, roleDecision, this.logger, 'RateLimitInterceptor');
