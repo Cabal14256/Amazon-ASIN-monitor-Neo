@@ -119,7 +119,7 @@ describe('loadEnv', () => {
       loadEnv({
         ...validEnv,
         DATABASE_URL:
-          'postgres://primary:one@localhost/amazon_asin_monitor?sslmode=require',
+          'postgres://primary:one@localhost/amazon_asin_monitor?sslmode=verify-full',
         COMPETITOR_DATABASE_URL:
           'postgresql://competitor:two@LOCALHOST:5432/amazon_asin_monitor',
       }),
@@ -136,6 +136,19 @@ describe('loadEnv', () => {
           'postgres://db.internal:5433/amazon_asin_monitor',
       }),
     ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+  });
+
+  it('按 node-postgres 实际解析结果使用 pathname database', () => {
+    const env = loadEnv({
+      ...validEnv,
+      DATABASE_URL:
+        'postgres://db.internal/amazon_asin_monitor?database=shared',
+      COMPETITOR_DATABASE_URL:
+        'postgres://db.internal/amazon_competitor_monitor?database=shared',
+    });
+
+    expect(env.DATABASE_URL).toContain('/amazon_asin_monitor');
+    expect(env.COMPETITOR_DATABASE_URL).toContain('/amazon_competitor_monitor');
   });
 
   it('BULL_PREFIX 保留 legacy 命名空间并将空白回退 bull', () => {

@@ -233,6 +233,9 @@ importers:
       dotenv:
         specifier: ^16.6.1
         version: 16.6.1
+      pg-connection-string:
+        specifier: 2.14.0
+        version: 2.14.0
       zod:
         specifier: ^3.25.76
         version: 3.25.76

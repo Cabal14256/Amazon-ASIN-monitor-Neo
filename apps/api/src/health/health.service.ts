@@ -63,7 +63,12 @@ function roundMilliseconds(value: number): number {
 }
 
 function probeFailureReason(error: unknown): DependencyProbe['error'] {
-  return error instanceof HealthProbeTimeoutError
+  if (error instanceof HealthProbeTimeoutError) return 'probe_timeout';
+  if (!(error instanceof Error)) return 'probe_failed';
+
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ETIMEDOUT' ||
+    /^(?:Command timed out|connect ETIMEDOUT)$/i.test(error.message)
     ? 'probe_timeout'
     : 'probe_failed';
 }

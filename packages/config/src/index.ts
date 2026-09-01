@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { config as loadDotenv } from 'dotenv';
+import { parse as parsePostgresConnectionString } from 'pg-connection-string';
 import { z } from 'zod';
 
 /**
@@ -20,20 +21,21 @@ const healthRatioSchema = z
 
 function postgresTargetIdentity(value: string): string | undefined {
   try {
-    const parsed = new URL(value.trim());
-    if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
+    const connectionString = value.trim();
+    const parsedUrl = new URL(connectionString);
+    if (!['postgres:', 'postgresql:'].includes(parsedUrl.protocol)) {
       return undefined;
     }
-    const databaseName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+    const parsed = parsePostgresConnectionString(connectionString);
+    const databaseName = parsed.database;
     if (!databaseName) return undefined;
-    const queryHost = parsed.searchParams.get('host');
-    const effectiveHost = queryHost || parsed.hostname;
+    const effectiveHost = parsed.host;
     const host = effectiveHost
       ? effectiveHost.startsWith('/')
         ? `socket:${effectiveHost}`
         : effectiveHost.toLowerCase()
       : '<default>';
-    const port = parsed.searchParams.get('port') || parsed.port || '5432';
+    const port = parsed.port || '5432';
     if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
       return undefined;
     }

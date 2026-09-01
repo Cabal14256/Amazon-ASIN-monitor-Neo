@@ -207,5 +207,21 @@ describe('dashboard / ops / system / health 域', () => {
     });
     expect(health.status).toBe('degraded');
     expect(health.memory?.status).toBe('degraded');
+
+    const legacyHealth = healthSchema.parse({
+      status: 'ok',
+      timestamp: '2026-08-24T18:00:00+08:00',
+      memory: {
+        heapUsed: 40,
+        heapTotal: 80,
+        heapLimit: 100,
+        external: 1,
+        rss: 90,
+        usagePercent: '50.00',
+        heapLimitUsagePercent: '40.00',
+        thresholdPercent: '90.00',
+      },
+    });
+    expect(legacyHealth.memory?.status).toBeUndefined();
   });
 });

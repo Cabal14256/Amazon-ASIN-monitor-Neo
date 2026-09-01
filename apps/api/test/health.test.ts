@@ -253,6 +253,24 @@ describe('HealthService', () => {
     metrics.onModuleDestroy();
   });
 
+  it.each([
+    new Error('Command timed out'),
+    Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+  ])('ioredis 原生超时统一报告 probe_timeout', async (failure) => {
+    const { service, metrics } = buildService({
+      pingRedis: vi.fn().mockRejectedValue(failure),
+    });
+
+    const health = await service.getHealth();
+    expect(health.status).toBe('degraded');
+    expect(health.cache).toMatchObject({
+      status: 'error',
+      connected: false,
+      error: 'probe_timeout',
+    });
+    metrics.onModuleDestroy();
+  });
+
   it('内存阈值按 heap limit 和可选 RSS 绝对值判定', () => {
     const env = loadEnv({
       ...validEnv,

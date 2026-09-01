@@ -13,7 +13,7 @@ export const databaseHealthSchema = z
   .passthrough();
 
 export const memoryHealthSchema = z.object({
-  status: componentStatusSchema,
+  status: componentStatusSchema.optional(),
   heapUsed: z.number(),
   heapTotal: z.number(),
   heapLimit: z.number(),
