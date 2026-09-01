@@ -15,6 +15,7 @@ const validEnv = {
   COMPETITOR_DATABASE_URL: 'postgres://localhost/amazon_competitor_monitor',
   REDIS_URL: 'redis://localhost:6379',
   JWT_SECRET: 'test-secret',
+  AUTH_DATA_AUTHORITY: 'postgresql',
 };
 
 describe('loadEnv', () => {
@@ -27,6 +28,11 @@ describe('loadEnv', () => {
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
+    expect(env.JWT_EXPIRES_IN).toBe('7d');
+    expect(env.JWT_REMEMBER_EXPIRES_IN).toBe('30d');
+    expect(env.AUTH_COOKIE_NAME).toBe('amazon_asin_monitor_auth');
+    expect(env.AUTH_HINT_COOKIE_NAME).toBe('amazon_asin_monitor_session');
+    expect(env.AUTH_PERMISSION_CACHE_TTL_SECONDS).toBe(900);
     expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(2_000);
     expect(env.DATABASE_POOL_CONNECTION_TIMEOUT_MS).toBe(2_000);
     expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
@@ -45,6 +51,7 @@ describe('loadEnv', () => {
       expect(paths).toContain('COMPETITOR_DATABASE_URL');
       expect(paths).toContain('REDIS_URL');
       expect(paths).toContain('JWT_SECRET');
+      expect(paths).toContain('AUTH_DATA_AUTHORITY');
     }
   });
 
@@ -75,6 +82,82 @@ describe('loadEnv', () => {
 
   it('PORT 支持字符串数字', () => {
     expect(loadEnv({ ...validEnv, PORT: '3100' }).PORT).toBe(3100);
+  });
+
+  it('鉴权配置拒绝非法 Cookie 名称、JWT 有效期与生产弱密钥', () => {
+    expect(() =>
+      loadEnv({ ...validEnv, AUTH_COOKIE_NAME: 'bad cookie' }),
+    ).toThrow(EnvValidationError);
+    expect(() => loadEnv({ ...validEnv, JWT_EXPIRES_IN: 'next-week' })).toThrow(
+      EnvValidationError,
+    );
+    expect(() => loadEnv({ ...validEnv, NODE_ENV: 'production' })).toThrow(
+      '生产环境 JWT_SECRET 至少需要 32 个字符',
+    );
+    expect(
+      loadEnv({
+        ...validEnv,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'a-secure-production-secret-with-32-chars',
+      }).NODE_ENV,
+    ).toBe('production');
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'replace_with_a_long_random_secret',
+      }),
+    ).toThrow('生产环境 JWT_SECRET 不得使用公开模板值');
+  });
+
+  it('JWT_SECRET 校验不改变与 legacy 共享的密钥字节', () => {
+    const secret = '  legacy-shared-secret\n';
+    expect(loadEnv({ ...validEnv, JWT_SECRET: secret }).JWT_SECRET).toBe(
+      secret,
+    );
+    expect(() => loadEnv({ ...validEnv, JWT_SECRET: ' \t\n ' })).toThrow(
+      '缺少 JWT_SECRET',
+    );
+  });
+
+  it('无单位 legacy JWT 有效期按秒规范化', () => {
+    const normalized = loadEnv({
+      ...validEnv,
+      JWT_EXPIRES_IN: '3600',
+      JWT_REMEMBER_EXPIRES_IN: '2592000',
+    });
+    expect(normalized.JWT_EXPIRES_IN).toBe('3600s');
+    expect(normalized.JWT_REMEMBER_EXPIRES_IN).toBe('2592000s');
+  });
+
+  it('双跑期 Session 权威源要求完整 Legacy MySQL 连接配置', () => {
+    expect(() =>
+      loadEnv({ ...validEnv, AUTH_DATA_AUTHORITY: 'legacy-mysql' }),
+    ).toThrow('AUTH_DATA_AUTHORITY=legacy-mysql 时缺少 DB_HOST');
+
+    const legacy = loadEnv({
+      ...validEnv,
+      AUTH_DATA_AUTHORITY: 'legacy-mysql',
+      DB_HOST: '127.0.0.1',
+      DB_PORT: '3306',
+      DB_USER: 'root',
+      DB_PASSWORD: '',
+      DB_NAME: 'amazon_asin_monitor',
+    });
+    expect(legacy.AUTH_DATA_AUTHORITY).toBe('legacy-mysql');
+    expect(legacy.DB_PASSWORD).toBe('');
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'a-secure-production-secret-with-32-chars',
+        AUTH_DATA_AUTHORITY: 'legacy-mysql',
+        DB_HOST: '127.0.0.1',
+        DB_USER: 'root',
+        DB_PASSWORD: '',
+        DB_NAME: 'amazon_asin_monitor',
+      }),
+    ).toThrow('AUTH_DATA_AUTHORITY=legacy-mysql 时缺少 DB_PASSWORD');
   });
 
   it('健康阈值兼容比例和百分数写法，并约束探针超时', () => {

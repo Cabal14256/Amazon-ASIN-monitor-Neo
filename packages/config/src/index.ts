@@ -25,6 +25,22 @@ const optionalNonEmptyStringSchema = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+const cookieNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, 'Cookie 名称包含非法字符');
+
+const jwtDurationSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(?:ms|s|m|h|d|w|y)?$/i, 'JWT 有效期格式无效')
+  .transform((value) =>
+    /^\d+$/.test(value) ? `${value}s` : value.toLowerCase(),
+  );
+
+const templateJwtSecret = 'replace_with_a_long_random_secret';
+
 interface PostgresTargetDefaults {
   database?: string;
   host?: string;
@@ -101,7 +117,42 @@ const envObjectSchema = z.object({
     .transform((value) => value || 'bull')
     .default('bull'),
 
-  JWT_SECRET: z.string().min(1, '缺少 JWT_SECRET'),
+  JWT_SECRET: z
+    .string()
+    .refine((value) => value.trim().length > 0, '缺少 JWT_SECRET'),
+  JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
+  JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
+  AUTH_COOKIE_NAME: cookieNameSchema.default('amazon_asin_monitor_auth'),
+  AUTH_HINT_COOKIE_NAME: cookieNameSchema.default(
+    'amazon_asin_monitor_session',
+  ),
+  AUTH_PERMISSION_CACHE_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(900),
+  AUTH_DATA_AUTHORITY: z.enum(['legacy-mysql', 'postgresql']),
+
+  // 双跑期鉴权数据实时权威源使用 Legacy MySQL；最终同步/写冻结后才切 PostgreSQL。
+  DB_HOST: optionalNonEmptyStringSchema,
+  DB_PORT: z.coerce.number().int().min(1).max(65_535).default(3306),
+  DB_USER: optionalNonEmptyStringSchema,
+  DB_PASSWORD: z.string().optional(),
+  DB_NAME: optionalNonEmptyStringSchema,
+  DB_CONNECTION_LIMIT: z.coerce.number().int().min(1).max(200).default(50),
+  DB_CONNECT_TIMEOUT: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(120_000)
+    .default(10_000),
+  DB_QUERY_TIMEOUT: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(3_600_000)
+    .default(600_000),
 
   // Neo 健康探针：比例同时接受 0.9 或 90 两种 Legacy 配置写法。
   HEALTH_PROBE_TIMEOUT_MS: z.coerce
@@ -145,6 +196,45 @@ const envObjectSchema = z.object({
 });
 
 export const envSchema = envObjectSchema.superRefine((env, context) => {
+  if (env.NODE_ENV === 'production' && env.JWT_SECRET.trim().length < 32) {
+    context.addIssue({
+      code: 'custom',
+      path: ['JWT_SECRET'],
+      message: '生产环境 JWT_SECRET 至少需要 32 个字符',
+    });
+  }
+  if (
+    env.NODE_ENV === 'production' &&
+    env.JWT_SECRET.trim() === templateJwtSecret
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['JWT_SECRET'],
+      message: '生产环境 JWT_SECRET 不得使用公开模板值',
+    });
+  }
+  if (env.AUTH_DATA_AUTHORITY === 'legacy-mysql') {
+    const requiredLegacyDatabaseFields = [
+      ['DB_HOST', env.DB_HOST],
+      ['DB_USER', env.DB_USER],
+      ['DB_PASSWORD', env.DB_PASSWORD],
+      ['DB_NAME', env.DB_NAME],
+    ] as const;
+    for (const [path, value] of requiredLegacyDatabaseFields) {
+      const missing =
+        value === undefined ||
+        (path === 'DB_PASSWORD' &&
+          env.NODE_ENV === 'production' &&
+          value.length === 0);
+      if (missing) {
+        context.addIssue({
+          code: 'custom',
+          path: [path],
+          message: `AUTH_DATA_AUTHORITY=legacy-mysql 时缺少 ${path}`,
+        });
+      }
+    }
+  }
   const postgresDefaults = {
     host: env.PGHOST,
     port: env.PGPORT,

@@ -9,9 +9,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadEnv, type Env } from '@asin-monitor/config';
 import { healthSchema, type Health } from '@asin-monitor/contracts';
 import { ApiExceptionFilter } from '../src/common/api-exception.filter';
+import { ApplicationDatabasePools } from '../src/database/database.service';
 import { HealthController } from '../src/health/health.controller';
 import {
-  ApplicationDatabasePools,
   HealthErrorStatsService,
   HealthRuntimeDependencies,
   HealthService,
@@ -20,12 +20,14 @@ import {
 import { configureHttpApp } from '../src/http-app';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
+import { ApplicationRedisClient } from '../src/redis/redis.service';
 
 const validEnv = {
   DATABASE_URL: 'postgresql://localhost/amazon_asin_monitor',
   COMPETITOR_DATABASE_URL: 'postgresql://localhost/amazon_competitor_monitor',
   REDIS_URL: 'redis://localhost:6379',
   JWT_SECRET: 'test-secret',
+  AUTH_DATA_AUTHORITY: 'postgresql',
 };
 const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
 
@@ -125,20 +127,33 @@ describe('HealthService', () => {
     const query = vi
       .spyOn(pools.primaryPool, 'query')
       .mockResolvedValue({} as never);
+    const dependencies = new HealthRuntimeDependencies(
+      loadEnv(validEnv),
+      pools,
+      { ping: vi.fn() } as unknown as ApplicationRedisClient,
+    );
 
-    await pools.probePrimary(750);
+    await dependencies.queryPrimary();
 
     expect(pools.primaryPool.options.connectionTimeoutMillis).toBe(2_000);
+    expect(
+      pools.primaryPool.options.types
+        ?.getTypeParser(
+          1114,
+          'text',
+        )('2026-09-01 16:00:00')
+        .toISOString(),
+    ).toBe('2026-09-01T08:00:00.000Z');
     expect(pools.primaryPool.options).not.toHaveProperty('query_timeout');
     expect(pools.primaryPool.options).not.toHaveProperty('statement_timeout');
     expect(query).toHaveBeenCalledWith({
       text: 'SELECT 1',
-      query_timeout: 750,
+      query_timeout: 2_000,
     });
     query.mockRejectedValueOnce(
       new Error('timeout exceeded when trying to connect'),
     );
-    await expect(pools.probePrimary(750)).rejects.toMatchObject({
+    await expect(dependencies.queryPrimary()).rejects.toMatchObject({
       name: 'HealthProbeTimeoutError',
     });
 
@@ -176,26 +191,72 @@ describe('HealthService', () => {
   });
 
   it('健康运行依赖委托给共享应用数据库池而不创建独立 PG 池', async () => {
+    const primaryPool = {
+      query: vi.fn().mockResolvedValue(undefined),
+      options: { max: 10 },
+      totalCount: 2,
+      idleCount: 1,
+      waitingCount: 0,
+    };
+    const competitorPool = {
+      ...primaryPool,
+      query: vi.fn().mockResolvedValue(undefined),
+    };
     const databasePools = {
-      probePrimary: vi.fn().mockResolvedValue(undefined),
-      probeCompetitor: vi.fn().mockResolvedValue(undefined),
-      primaryPoolSnapshot: vi.fn(() => poolSnapshot),
-      competitorPoolSnapshot: vi.fn(() => poolSnapshot),
+      primaryPool,
+      competitorPool,
     } as unknown as ApplicationDatabasePools;
+    const redis = {
+      ping: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ApplicationRedisClient;
     const dependencies = new HealthRuntimeDependencies(
       loadEnv(validEnv),
-      { debug: vi.fn() } as unknown as AppLogger,
       databasePools,
+      redis,
     );
 
     await dependencies.queryPrimary();
     await dependencies.queryCompetitor();
+    await dependencies.pingRedis();
 
-    expect(databasePools.probePrimary).toHaveBeenCalledWith(2_000);
-    expect(databasePools.probeCompetitor).toHaveBeenCalledWith(2_000);
-    expect(dependencies.primaryPoolSnapshot()).toBe(poolSnapshot);
-    expect(dependencies.competitorPoolSnapshot()).toBe(poolSnapshot);
-    dependencies.onModuleDestroy();
+    expect(primaryPool.query).toHaveBeenCalledWith({
+      text: 'SELECT 1',
+      query_timeout: 2_000,
+    });
+    expect(competitorPool.query).toHaveBeenCalledWith({
+      text: 'SELECT 1',
+      query_timeout: 2_000,
+    });
+    expect(redis.ping).toHaveBeenCalledOnce();
+    expect(dependencies.primaryPoolSnapshot()).toEqual(poolSnapshot);
+    expect(dependencies.competitorPoolSnapshot()).toEqual(poolSnapshot);
+  });
+
+  it('共享 Redis 客户端复用单次连接并安全消费底层错误事件', async () => {
+    const debug = vi.fn();
+    const client = new ApplicationRedisClient(loadEnv(validEnv), {
+      debug,
+    } as unknown as AppLogger);
+    const connect = vi
+      .spyOn(client.client, 'connect')
+      .mockResolvedValue(undefined);
+    const ping = vi.spyOn(client.client, 'ping').mockResolvedValue('PONG');
+
+    await Promise.all([client.ping(), client.ping()]);
+    client.client.emit(
+      'error',
+      new Error('redis://operator:raw-secret@cache.internal/15'),
+    );
+
+    expect(connect).toHaveBeenCalledOnce();
+    expect(ping).toHaveBeenCalledTimes(2);
+    expect(debug).toHaveBeenCalledWith(
+      'Redis 底层连接事件',
+      'ApplicationRedisClient',
+      { dependency: 'redis', reason: 'connection_error' },
+    );
+    expect(JSON.stringify(debug.mock.calls)).not.toContain('raw-secret');
+    client.onModuleDestroy();
   });
 
   it('依赖失败返回通用错误与 degraded，日志不包含连接串或凭据', async () => {
@@ -333,10 +394,11 @@ describe.skipIf(!integrationEnabled)(
       const env = loadEnv(process.env);
       const logger = new AppLogger();
       const databasePools = new ApplicationDatabasePools(env, logger);
+      const redis = new ApplicationRedisClient(env, logger);
       const dependencies = new HealthRuntimeDependencies(
         env,
-        logger,
         databasePools,
+        redis,
       );
       const metrics = new MetricsService();
       const service = new HealthService(
@@ -353,7 +415,7 @@ describe.skipIf(!integrationEnabled)(
         expect(health.competitorDatabase?.connected).toBe(true);
         expect(health.cache).toMatchObject({ connected: true });
       } finally {
-        dependencies.onModuleDestroy();
+        redis.onModuleDestroy();
         await databasePools.onModuleDestroy();
         metrics.onModuleDestroy();
       }

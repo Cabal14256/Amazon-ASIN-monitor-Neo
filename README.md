@@ -111,7 +111,7 @@ Copy-Item .env.migration.example .env.migration
 
 完整配置和默认值见 [`server/.env.example`](./server/.env.example)。SP-API 凭据既可以写入环境变量，也可以在管理员登录后通过“系统设置”维护；数据库中的配置优先。
 
-新 Nest API 与 BullMQ Worker 读取根目录 `.env.neo`，不会继承旧 Express 的 `PORT=3001`；模板固定 Neo API 默认端口 3100，并包含目标 PostgreSQL 主库、竞品库、Redis 与 JWT 必需变量。旧系统继续读取 `server/.env`，因此两套 API 可以并行启动。
+新 Nest API 与 BullMQ Worker 读取根目录 `.env.neo`，不会继承旧 Express 的 `PORT=3001`；模板固定 Neo API 默认端口 3100，并包含目标 PostgreSQL 主库、竞品库、Redis 与 JWT 必需变量。Neo 鉴权继续使用 `JWT_SECRET`，并可通过 `JWT_EXPIRES_IN`、`JWT_REMEMBER_EXPIRES_IN`、`AUTH_COOKIE_NAME`、`AUTH_HINT_COOKIE_NAME` 和 `AUTH_PERMISSION_CACHE_TTL_SECONDS` 调整令牌、Cookie 与 RBAC 缓存；生产环境的 JWT 密钥至少需要 32 个字符且不得保留公开模板值。`AUTH_DATA_AUTHORITY` 必须明确选择全部鉴权数据的权威源：双跑期使用 `legacy-mysql` 并在 `.env.neo` 提供与 Legacy 相同的 `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`，使用户状态、Session、密码策略、权限和角色变更实时生效；只有完成最终同步并冻结 MySQL 写入后才改为 `postgresql`。旧系统继续读取 `server/.env`，因此两套 API 可以并行启动。
 
 ### 4. 初始化数据库
 

@@ -63,6 +63,12 @@ jobs:
       REDIS_URL: redis://127.0.0.1:6379/15
       RATE_LIMITER_KEY_PREFIX: spapi:integration:${{ github.run_id }}
       JWT_SECRET: integration_only_not_secret
+      AUTH_DATA_AUTHORITY: legacy-mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ''
+      DB_NAME: integration_control
       INTEGRATION_MYSQL_HOST: 127.0.0.1
       INTEGRATION_MYSQL_PORT: 3306
       INTEGRATION_MYSQL_USER: root
@@ -138,8 +144,10 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
-      - name: Run Neo API health dependency integration test
-        run: pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts
+      - name: Run Neo API health and auth dependency integration tests
+        run: |
+          pnpm --filter @asin-monitor/db build
+          pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts
 
       - name: Smoke test Timescale storage-policy rollback
         run: |

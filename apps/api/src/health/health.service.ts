@@ -1,15 +1,16 @@
 import { performance } from 'node:perf_hooks';
 import { getHeapStatistics } from 'node:v8';
 
-import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
-import { Redis } from 'ioredis';
-import { Pool } from 'pg';
+import { Inject, Injectable } from '@nestjs/common';
+import type { Pool } from 'pg';
 
 import type { Env } from '@asin-monitor/config';
 import type { Health } from '@asin-monitor/contracts';
 import { ENV } from '../config/config.module';
+import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger, utc8Iso } from '../logger/app-logger.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { ApplicationRedisClient } from '../redis/redis.service';
 
 type DependencyName = 'competitor_database' | 'database' | 'redis';
 type ComponentStatus = 'degraded' | 'error' | 'ok';
@@ -205,137 +206,40 @@ export class HealthErrorStatsService {
   }
 }
 
-/**
- * API 进程唯一的双 PostgreSQL 连接池。业务 repository 与健康探针必须共享此
- * provider，避免健康专用池掩盖真实连接池负载。
- */
 @Injectable()
-export class ApplicationDatabasePools implements OnModuleDestroy {
-  readonly primaryPool: Pool;
-  readonly competitorPool: Pool;
+export class HealthRuntimeDependencies {
+  constructor(
+    @Inject(ENV) private readonly env: Env,
+    @Inject(ApplicationDatabasePools)
+    private readonly databasePools: ApplicationDatabasePools,
+    @Inject(ApplicationRedisClient)
+    private readonly redis: ApplicationRedisClient,
+  ) {}
 
-  constructor(@Inject(ENV) env: Env, @Inject(AppLogger) logger: AppLogger) {
-    const poolOptions = {
-      max: 10,
-      connectionTimeoutMillis: env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
-      idleTimeoutMillis: 30_000,
-      application_name: 'amazon-asin-monitor-neo-api',
-    };
-    this.primaryPool = new Pool({
-      ...poolOptions,
-      connectionString: env.DATABASE_URL,
-    });
-    this.competitorPool = new Pool({
-      ...poolOptions,
-      connectionString: env.COMPETITOR_DATABASE_URL,
-    });
-    this.registerIdleErrorHandler(this.primaryPool, 'database', logger);
-    this.registerIdleErrorHandler(
-      this.competitorPool,
-      'competitor_database',
-      logger,
+  async queryPrimary(): Promise<void> {
+    await runPostgresProbe(
+      this.databasePools.primaryPool,
+      this.env.HEALTH_PROBE_TIMEOUT_MS,
     );
   }
 
-  private registerIdleErrorHandler(
-    pool: Pool,
-    dependency: Exclude<DependencyName, 'redis'>,
-    logger: AppLogger,
-  ): void {
-    pool.on('error', () => {
-      logger.warn('PostgreSQL 空闲连接异常', 'ApplicationDatabasePools', {
-        dependency,
-        reason: 'idle_client_error',
-      });
-    });
-  }
-
-  async probePrimary(timeoutMs: number): Promise<void> {
-    await runPostgresProbe(this.primaryPool, timeoutMs);
-  }
-
-  async probeCompetitor(timeoutMs: number): Promise<void> {
-    await runPostgresProbe(this.competitorPool, timeoutMs);
-  }
-
-  primaryPoolSnapshot(): PoolSnapshot {
-    return poolSnapshot(this.primaryPool);
-  }
-
-  competitorPoolSnapshot(): PoolSnapshot {
-    return poolSnapshot(this.competitorPool);
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await Promise.allSettled([
-      this.primaryPool.end(),
-      this.competitorPool.end(),
-    ]);
-  }
-}
-
-@Injectable()
-export class HealthRuntimeDependencies implements OnModuleDestroy {
-  readonly redis: Redis;
-  private redisConnectPromise: Promise<void> | undefined;
-
-  constructor(
-    @Inject(ENV) private readonly env: Env,
-    @Inject(AppLogger) logger: AppLogger,
-    @Inject(ApplicationDatabasePools)
-    private readonly databasePools: ApplicationDatabasePools,
-  ) {
-    this.redis = new Redis(env.REDIS_URL, {
-      lazyConnect: true,
-      connectTimeout: env.HEALTH_PROBE_TIMEOUT_MS,
-      commandTimeout: env.HEALTH_PROBE_TIMEOUT_MS,
-      enableOfflineQueue: false,
-      maxRetriesPerRequest: 1,
-      retryStrategy: () => null,
-    });
-    this.redis.on('error', () => {
-      logger.debug('Redis 健康探针底层连接事件', 'HealthDependencies', {
-        dependency: 'redis',
-        reason: 'connection_error',
-      });
-    });
-  }
-
-  async queryPrimary(): Promise<void> {
-    await this.databasePools.probePrimary(this.env.HEALTH_PROBE_TIMEOUT_MS);
-  }
-
   async queryCompetitor(): Promise<void> {
-    await this.databasePools.probeCompetitor(this.env.HEALTH_PROBE_TIMEOUT_MS);
+    await runPostgresProbe(
+      this.databasePools.competitorPool,
+      this.env.HEALTH_PROBE_TIMEOUT_MS,
+    );
   }
 
   async pingRedis(): Promise<void> {
-    if (this.redisConnectPromise) {
-      await this.redisConnectPromise;
-    } else if (this.redis.status === 'wait' || this.redis.status === 'end') {
-      const connectPromise = this.redis.connect().then(() => undefined);
-      this.redisConnectPromise = connectPromise;
-      try {
-        await connectPromise;
-      } finally {
-        if (this.redisConnectPromise === connectPromise) {
-          this.redisConnectPromise = undefined;
-        }
-      }
-    }
     await this.redis.ping();
   }
 
   primaryPoolSnapshot(): PoolSnapshot {
-    return this.databasePools.primaryPoolSnapshot();
+    return poolSnapshot(this.databasePools.primaryPool);
   }
 
   competitorPoolSnapshot(): PoolSnapshot {
-    return this.databasePools.competitorPoolSnapshot();
-  }
-
-  onModuleDestroy(): void {
-    this.redis.disconnect(false);
+    return poolSnapshot(this.databasePools.competitorPool);
   }
 }
 
