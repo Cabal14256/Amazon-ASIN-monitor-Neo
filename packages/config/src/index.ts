@@ -25,6 +25,18 @@ const optionalNonEmptyStringSchema = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+const cookieNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, 'Cookie 名称包含非法字符');
+
+const jwtDurationSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(?:ms|s|m|h|d|w|y)$/i, 'JWT 有效期格式无效')
+  .transform((value) => value.toLowerCase());
+
 interface PostgresTargetDefaults {
   database?: string;
   host?: string;
@@ -101,7 +113,19 @@ const envObjectSchema = z.object({
     .transform((value) => value || 'bull')
     .default('bull'),
 
-  JWT_SECRET: z.string().min(1, '缺少 JWT_SECRET'),
+  JWT_SECRET: z.string().trim().min(1, '缺少 JWT_SECRET'),
+  JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
+  JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
+  AUTH_COOKIE_NAME: cookieNameSchema.default('amazon_asin_monitor_auth'),
+  AUTH_HINT_COOKIE_NAME: cookieNameSchema.default(
+    'amazon_asin_monitor_session',
+  ),
+  AUTH_PERMISSION_CACHE_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(900),
 
   // Neo 健康探针：比例同时接受 0.9 或 90 两种 Legacy 配置写法。
   HEALTH_PROBE_TIMEOUT_MS: z.coerce
@@ -145,6 +169,13 @@ const envObjectSchema = z.object({
 });
 
 export const envSchema = envObjectSchema.superRefine((env, context) => {
+  if (env.NODE_ENV === 'production' && env.JWT_SECRET.trim().length < 32) {
+    context.addIssue({
+      code: 'custom',
+      path: ['JWT_SECRET'],
+      message: '生产环境 JWT_SECRET 至少需要 32 个字符',
+    });
+  }
   const postgresDefaults = {
     host: env.PGHOST,
     port: env.PGPORT,

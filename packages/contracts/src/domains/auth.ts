@@ -151,6 +151,7 @@ export const currentUserDataSchema = z.object({
 });
 export type CurrentUserData = z.infer<typeof currentUserDataSchema>;
 export const currentUserResultSchema = resultSchema(currentUserDataSchema);
+export type CurrentUserResult = z.infer<typeof currentUserResultSchema>;
 
 export const sessionListResultSchema = resultSchema(z.array(sessionSchema));
 

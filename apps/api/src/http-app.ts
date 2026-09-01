@@ -1,3 +1,4 @@
+import fastifyCookie from '@fastify/cookie';
 import { RequestMethod } from '@nestjs/common';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 
@@ -21,6 +22,7 @@ export function configureHttpApp(
   options: HttpAppOptions = {},
 ): void {
   app.enableShutdownHooks();
+  app.register(fastifyCookie);
   app.setGlobalPrefix('api/v1', {
     exclude: [
       { path: 'health', method: RequestMethod.GET },

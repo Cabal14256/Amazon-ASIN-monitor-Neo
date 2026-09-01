@@ -138,8 +138,8 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
-      - name: Run Neo API health dependency integration test
-        run: pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts
+      - name: Run Neo API health and auth dependency integration tests
+        run: pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts
 
       - name: Smoke test Timescale storage-policy rollback
         run: |
