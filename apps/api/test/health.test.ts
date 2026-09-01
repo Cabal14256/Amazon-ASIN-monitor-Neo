@@ -49,6 +49,7 @@ function rateLimiterStub(
   forcedStatus?: 'degraded' | 'disabled' | 'ok',
 ): RateLimitService {
   return {
+    recover: vi.fn().mockResolvedValue(undefined),
     snapshot: vi.fn((redisAvailable: boolean) => {
       const status = forcedStatus ?? (redisAvailable ? 'ok' : 'degraded');
       return {
@@ -329,8 +330,9 @@ describe('HealthService', () => {
   });
 
   it('Redis PING 正常但 EVAL 降级时顶层 readiness 同步 degraded', async () => {
+    const rateLimiter = rateLimiterStub('degraded');
     const { service, metrics } = buildService({
-      rateLimiter: rateLimiterStub('degraded'),
+      rateLimiter,
     });
 
     const health = await service.getHealth();
@@ -341,6 +343,7 @@ describe('HealthService', () => {
       stats: { backend: 'memory', redisAvailable: true },
     });
     expect(health.status).toBe('degraded');
+    expect(rateLimiter.recover).toHaveBeenCalledWith(true);
     metrics.onModuleDestroy();
   });
 

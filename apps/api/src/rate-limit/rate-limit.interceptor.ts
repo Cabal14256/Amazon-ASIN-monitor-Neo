@@ -12,7 +12,6 @@ import { Reflector } from '@nestjs/core';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Observable } from 'rxjs';
 
-import { AuthenticationService } from '../auth/authentication.service';
 import { PermissionCacheService } from '../auth/permission-cache.service';
 import { AppLogger } from '../logger/app-logger.service';
 import {
@@ -99,44 +98,92 @@ function sendBlocked(
   });
 }
 
-/** Fastify onRequest 调用点：先于 Nest Guards，覆盖认证失败和未匹配 API。 */
+function throwBlocked(
+  reply: FastifyReply,
+  decision: RateLimitDecision,
+  logger: AppLogger,
+  context: string,
+): never {
+  reply.header('Retry-After', applyHeaders(reply, decision));
+  logger.warn('HTTP 限流触发', context, {
+    backend: decision.backend,
+    policy: decision.policy,
+    role: decision.role,
+  });
+  throw new HttpException(
+    {
+      success: false,
+      errorMessage: '请求过于频繁，请稍后再试',
+      errorCode: 429,
+    },
+    HttpStatus.TOO_MANY_REQUESTS,
+  );
+}
+
+interface ProvisionalLimit {
+  decision: RateLimitDecision;
+  input: {
+    clientIdentifier: string;
+    policy: 'role';
+    role: 'DEFAULT';
+  };
+}
+
+/** Fastify onRequest 调用点：先按 DEFAULT 预占，覆盖 Guard 拒绝和未匹配 API。 */
 @Injectable()
 export class RateLimitRequestHook {
+  private readonly provisional = new WeakMap<
+    FastifyRequest,
+    ProvisionalLimit
+  >();
+
   constructor(
-    @Inject(AuthenticationService)
-    private readonly authentication: AuthenticationService,
     @Inject(RateLimitService) private readonly rateLimiter: RateLimitService,
-    @Inject(PermissionCacheService)
-    private readonly permissionCache: PermissionCacheService,
     @Inject(AppLogger) private readonly logger: AppLogger,
   ) {}
 
   async handle(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
     if (shouldBypass(request, this.rateLimiter)) return false;
-    const role = await resolveRole(
-      this.authentication.identifyUserId(request),
-      this.permissionCache,
-      this.logger,
-      'RateLimitRequestHook',
-    );
-    const decision = await this.rateLimiter.consume({
+    const input = {
       clientIdentifier: request.ip,
-      policy: 'role',
-      role,
-    });
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    const decision = await this.rateLimiter.consume(input, { record: false });
     if (!decision.allowed) {
+      this.rateLimiter.recordDecision(decision);
       sendBlocked(reply, decision, this.logger, 'RateLimitRequestHook');
       return true;
     }
+    this.provisional.set(request, { decision, input });
     applyHeaders(reply, decision);
     return false;
+  }
+
+  async release(request: FastifyRequest): Promise<void> {
+    const provisional = this.provisional.get(request);
+    if (!provisional) return;
+    this.provisional.delete(request);
+    await this.rateLimiter.release(
+      provisional.input,
+      provisional.decision.backend,
+    );
+  }
+
+  complete(request: FastifyRequest): void {
+    const provisional = this.provisional.get(request);
+    if (!provisional) return;
+    this.provisional.delete(request);
+    this.rateLimiter.recordDecision(provisional.decision);
   }
 }
 
 @Injectable()
-export class StrictRateLimitInterceptor implements NestInterceptor {
+export class RateLimitInterceptor implements NestInterceptor {
   constructor(
     @Inject(Reflector) private readonly reflector: Reflector,
+    @Inject(RateLimitRequestHook)
+    private readonly requestHook: RateLimitRequestHook,
     @Inject(RateLimitService) private readonly rateLimiter: RateLimitService,
     @Inject(PermissionCacheService)
     private readonly permissionCache: PermissionCacheService,
@@ -150,20 +197,31 @@ export class StrictRateLimitInterceptor implements NestInterceptor {
     const http = context.switchToHttp();
     const request = http.getRequest<FastifyRequest>();
     const reply = http.getResponse<FastifyReply>();
+    if (shouldBypass(request, this.rateLimiter)) return next.handle();
+    await this.requestHook.release(request);
+
+    const role = await resolveRole(
+      request.auth?.userId,
+      this.permissionCache,
+      this.logger,
+      'RateLimitInterceptor',
+    );
+    const roleDecision = await this.rateLimiter.consume({
+      clientIdentifier: request.ip,
+      policy: 'role',
+      role,
+    });
+    applyHeaders(reply, roleDecision);
+    if (!roleDecision.allowed) {
+      throwBlocked(reply, roleDecision, this.logger, 'RateLimitInterceptor');
+    }
+
     const policy =
       this.reflector.getAllAndOverride<RateLimitPolicy>(RATE_LIMIT_POLICY, [
         context.getHandler(),
         context.getClass(),
       ]) ?? 'role';
-    if (policy !== 'strict' || shouldBypass(request, this.rateLimiter)) {
-      return next.handle();
-    }
-    const role = await resolveRole(
-      request.auth?.userId,
-      this.permissionCache,
-      this.logger,
-      'StrictRateLimitInterceptor',
-    );
+    if (policy !== 'strict') return next.handle();
     const decision = await this.rateLimiter.consume({
       clientIdentifier: request.ip,
       policy,
@@ -171,23 +229,7 @@ export class StrictRateLimitInterceptor implements NestInterceptor {
     });
     applyHeaders(reply, decision);
     if (!decision.allowed) {
-      reply.header(
-        'Retry-After',
-        Math.max(1, Math.ceil(decision.resetAfterMs / 1_000)),
-      );
-      this.logger.warn('HTTP 限流触发', 'StrictRateLimitInterceptor', {
-        backend: decision.backend,
-        policy: decision.policy,
-        role: decision.role,
-      });
-      throw new HttpException(
-        {
-          success: false,
-          errorMessage: '请求过于频繁，请稍后再试',
-          errorCode: 429,
-        },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
+      throwBlocked(reply, decision, this.logger, 'RateLimitInterceptor');
     }
     return next.handle();
   }

@@ -29,6 +29,7 @@ describe('loadEnv', () => {
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
+    expect(env.RATE_LIMITER_KEY_PREFIX).toBe('spapi:ratelimiter');
     expect(env.JWT_EXPIRES_IN).toBe('7d');
     expect(env.JWT_REMEMBER_EXPIRES_IN).toBe('30d');
     expect(env.AUTH_COOKIE_NAME).toBe('amazon_asin_monitor_auth');
@@ -276,6 +277,17 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...validEnv, BULL_PREFIX: '  ' }).BULL_PREFIX).toBe(
       'bull',
     );
+  });
+
+  it('RATE_LIMITER_KEY_PREFIX 支持部署隔离并将空白回退 legacy 前缀', () => {
+    expect(
+      loadEnv({ ...validEnv, RATE_LIMITER_KEY_PREFIX: ' staging:limiter ' })
+        .RATE_LIMITER_KEY_PREFIX,
+    ).toBe('staging:limiter');
+    expect(
+      loadEnv({ ...validEnv, RATE_LIMITER_KEY_PREFIX: '  ' })
+        .RATE_LIMITER_KEY_PREFIX,
+    ).toBe('spapi:ratelimiter');
   });
 
   it('按 node-postgres 默认链归一省略的 host、port 与 database', () => {

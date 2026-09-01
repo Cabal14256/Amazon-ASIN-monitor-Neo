@@ -5,8 +5,8 @@ import { AuthModule } from '../auth/auth.module';
 import { MetricsModule } from '../metrics/metrics.module';
 import { RedisModule } from '../redis/redis.module';
 import {
+  RateLimitInterceptor,
   RateLimitRequestHook,
-  StrictRateLimitInterceptor,
 } from './rate-limit.interceptor';
 import { RateLimitService } from './rate-limit.service';
 
@@ -18,7 +18,7 @@ import { RateLimitService } from './rate-limit.service';
     RateLimitRequestHook,
     {
       provide: APP_INTERCEPTOR,
-      useClass: StrictRateLimitInterceptor,
+      useClass: RateLimitInterceptor,
     },
   ],
   exports: [RateLimitRequestHook, RateLimitService],

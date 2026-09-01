@@ -18,7 +18,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type Env, loadEnv } from '@asin-monitor/config';
 import { AppModule } from '../src/app.module';
-import { AuthenticationService } from '../src/auth/authentication.service';
 import { PermissionCacheService } from '../src/auth/permission-cache.service';
 import { ENV } from '../src/config/config.module';
 import {
@@ -29,9 +28,9 @@ import { configureHttpApp } from '../src/http-app';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 import {
+  RateLimitInterceptor,
   RateLimitRequestHook,
   StrictRateLimit,
-  StrictRateLimitInterceptor,
 } from '../src/rate-limit/rate-limit.interceptor';
 import {
   buildRateLimitKey,
@@ -51,6 +50,7 @@ const validEnv = {
   AUTH_DATA_AUTHORITY: 'postgresql',
 };
 const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
+const rateLimitPrefix = 'spapi:ratelimiter';
 
 function loggerMock(): AppLogger {
   return {
@@ -203,16 +203,84 @@ describe('RateLimitService', () => {
     );
   });
 
+  it('半开窗口只允许一个 Redis 恢复探测，并发请求继续使用内存', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const redis = redisMock();
+    vi.mocked(redis.eval).mockRejectedValueOnce(new Error('unavailable'));
+    const { service } = createService({ redis });
+    const input = {
+      clientIdentifier: '198.51.100.30',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    await expect(service.consume(input)).resolves.toMatchObject({
+      backend: 'memory',
+    });
+    vi.advanceTimersByTime(5_001);
+
+    let finishProbe!: (value: unknown) => void;
+    vi.mocked(redis.eval).mockImplementationOnce(
+      () => new Promise((resolve) => (finishProbe = resolve)),
+    );
+    const leader = service.consume({ ...input, clientIdentifier: 'leader' });
+    const followers = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        service.consume({
+          ...input,
+          clientIdentifier: `follower-${index}`,
+        }),
+      ),
+    );
+
+    expect(followers.every(({ backend }) => backend === 'memory')).toBe(true);
+    expect(redis.eval).toHaveBeenCalledTimes(2);
+    finishProbe([1, RATE_LIMIT_WINDOW_MS]);
+    await expect(leader).resolves.toMatchObject({ backend: 'redis', count: 1 });
+  });
+
+  it('readiness 可在冷却后主动验证 Lua 并恢复 Redis 后端', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const redis = redisMock();
+    vi.mocked(redis.eval)
+      .mockRejectedValueOnce(new Error('eval unavailable'))
+      .mockResolvedValueOnce(1);
+    const { service } = createService({ redis });
+
+    await service.consume({
+      clientIdentifier: '198.51.100.40',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
+    expect(service.snapshot(true).status).toBe('degraded');
+    vi.advanceTimersByTime(5_001);
+
+    await service.recover(true);
+
+    expect(service.snapshot(true).status).toBe('ok');
+    expect(redis.eval).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(redis.eval).mock.calls[1]).toEqual(['return 1', [], []]);
+  });
+
   it('Redis key 只包含客户端摘要，白名单兼容 IPv4-mapped 地址', () => {
     const env = loadEnv({
       ...validEnv,
       RATE_LIMIT_WHITELIST_IPS: '127.0.0.1,::1',
     });
     const { service } = createService({ env });
-    const key = buildRateLimitKey('role', 'DEFAULT', '127.0.0.1');
+    const key = buildRateLimitKey(
+      env.RATE_LIMITER_KEY_PREFIX,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
 
-    expect(key).toMatch(/^rate_limit:neo:default:[a-f0-9]{64}$/);
+    expect(key).toMatch(/^spapi:ratelimiter:http:neo:default:[a-f0-9]{64}$/);
     expect(key).not.toContain('127.0.0.1');
+    expect(
+      buildRateLimitKey('production:limiter', 'role', 'DEFAULT', '127.0.0.1'),
+    ).not.toBe(key);
     expect(service.isWhitelisted('127.0.0.1')).toBe(true);
     expect(service.isWhitelisted('::ffff:127.0.0.1')).toBe(true);
     expect(service.isWhitelisted('192.0.2.1')).toBe(false);
@@ -352,7 +420,6 @@ class ExcludedRateTestController {
 
 describe('RateLimitRequestHook HTTP 边界', () => {
   let app: NestFastifyApplication;
-  let authentication: { identifyUserId: ReturnType<typeof vi.fn> };
   let errorStats: HealthErrorStatsService;
   let logger: AppLogger;
   let metrics: MetricsService;
@@ -365,18 +432,21 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     logger = loggerMock();
     metrics = new MetricsService();
     metricsToClose.push(metrics);
-    authentication = {
-      identifyUserId: vi.fn((request: FastifyRequest) =>
-        request.headers.authorization === 'Bearer signed-test-token'
-          ? 'test-user'
-          : undefined,
-      ),
-    };
     permissionCache = { getRoles: vi.fn().mockResolvedValue(['ADMIN']) };
     redis = redisMock();
     vi.mocked(redis.eval).mockImplementation(
-      async (_script, keys: readonly string[]) => {
+      async (script, keys: readonly string[]) => {
+        if (keys.length === 0) return 1;
         const key = keys[0]!;
+        if (script.includes("redis.call('DECR'")) {
+          const current = counters.get(key) ?? 0;
+          if (current <= 1) {
+            counters.delete(key);
+            return 0;
+          }
+          counters.set(key, current - 1);
+          return current - 1;
+        }
         const count = (counters.get(key) ?? 0) + 1;
         counters.set(key, count);
         return [count, RATE_LIMIT_WINDOW_MS];
@@ -390,7 +460,6 @@ describe('RateLimitRequestHook HTTP 边界', () => {
         { provide: ApplicationRedisClient, useValue: redis },
         { provide: AppLogger, useValue: logger },
         { provide: MetricsService, useValue: metrics },
-        { provide: AuthenticationService, useValue: authentication },
         { provide: PermissionCacheService, useValue: permissionCache },
         Reflector,
         PrincipalGuard,
@@ -399,7 +468,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
         RateLimitRequestHook,
         {
           provide: APP_INTERCEPTOR,
-          useClass: StrictRateLimitInterceptor,
+          useClass: RateLimitInterceptor,
         },
       ],
     }).compile();
@@ -424,7 +493,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     await app.close();
   });
 
-  it('请求层先识别签名用户的角色，strict 元数据再附加独立 20 次策略', async () => {
+  it('Guard 成功后释放 DEFAULT 预占并改计认证角色，strict 再附加独立策略', async () => {
     const fastify = app.getHttpAdapter().getInstance();
     const authenticated = await fastify.inject({
       method: 'GET',
@@ -437,10 +506,16 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     });
 
     expect(authenticated.headers['ratelimit-limit']).toBe('1000');
-    expect(authentication.identifyUserId).toHaveBeenCalled();
     expect(permissionCache.getRoles).toHaveBeenCalledWith('test-user');
     expect(strict.headers['ratelimit-limit']).toBe('20');
     expect(strict.headers['ratelimit-policy']).toBe('20;w=900');
+    expect(app.get(RateLimitService).snapshot(true).stats).toMatchObject({
+      totalRequests: 3,
+      byRole: {
+        ADMIN: { requests: 1 },
+        DEFAULT: { requests: 2 },
+      },
+    });
   });
 
   it('角色查询失败安全回退 DEFAULT 且日志不包含身份信息', async () => {
@@ -458,7 +533,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(response.headers['ratelimit-limit']).toBe('100');
     expect(logger.warn).toHaveBeenCalledWith(
       'HTTP 限流角色读取失败，使用默认配额',
-      'RateLimitRequestHook',
+      'RateLimitInterceptor',
       { reason: 'role_lookup_failed' },
     );
     expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(
@@ -466,9 +541,14 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     );
   });
 
-  it('认证 Guard 拒绝与未匹配 API 都先计数，并在下一请求到达 Guard/路由前返回 429', async () => {
+  it('撤销会话的 Guard 拒绝与未匹配 API 均保留 DEFAULT 预占，并在下一请求提前 429', async () => {
     const clientIdentifier = '127.0.0.1';
-    const key = buildRateLimitKey('role', 'DEFAULT', clientIdentifier);
+    const key = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      clientIdentifier,
+    );
     counters.set(key, ROLE_LIMITS.DEFAULT - 1);
     const fastify = app.getHttpAdapter().getInstance();
     const rejectingGuard = app.get(RejectingGuard);
@@ -476,17 +556,18 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     const rejected = await fastify.inject({
       method: 'GET',
       url: '/api/v1/rate-test/rejected',
-      headers: { authorization: 'invalid-token' },
+      headers: { authorization: 'Bearer correctly-signed-revoked-token' },
     });
     const blockedBeforeGuard = await fastify.inject({
       method: 'GET',
       url: '/api/v1/rate-test/rejected',
-      headers: { authorization: 'invalid-token' },
+      headers: { authorization: 'Bearer correctly-signed-revoked-token' },
     });
 
     expect(rejected.statusCode).toBe(401);
     expect(blockedBeforeGuard.statusCode).toBe(429);
     expect(rejectingGuard.calls).toBe(1);
+    expect(permissionCache.getRoles).not.toHaveBeenCalled();
 
     counters.set(key, ROLE_LIMITS.DEFAULT - 1);
     const missing = await fastify.inject({
@@ -502,7 +583,12 @@ describe('RateLimitRequestHook HTTP 边界', () => {
   });
 
   it('第 101 个匿名请求返回 legacy 429 信封、标准 headers 与错误统计', async () => {
-    const key = buildRateLimitKey('role', 'DEFAULT', '127.0.0.1');
+    const key = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
     counters.set(key, ROLE_LIMITS.DEFAULT);
     const response = await app
       .getHttpAdapter()
@@ -574,7 +660,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
 describe.skipIf(!integrationEnabled)(
   'RateLimitService Redis integration',
   () => {
-    it('两个服务实例共享原子计数，后续请求不延长首个 fixed window', async () => {
+    it('两个服务实例共享原子计数、TTL 不续期且可原子释放预占', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
       const redis = new ApplicationRedisClient(env, logger);
@@ -583,7 +669,12 @@ describe.skipIf(!integrationEnabled)(
       const serviceA = new RateLimitService(env, redis, logger, metricsA);
       const serviceB = new RateLimitService(env, redis, logger, metricsB);
       const clientIdentifier = `integration-${process.pid}-${Date.now()}`;
-      const key = buildRateLimitKey('strict', 'DEFAULT', clientIdentifier);
+      const key = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'strict',
+        'DEFAULT',
+        clientIdentifier,
+      );
       try {
         await redis.del(key);
         const first = await serviceA.consume({
@@ -604,6 +695,25 @@ describe.skipIf(!integrationEnabled)(
         expect(firstTtl).toBeGreaterThan(RATE_LIMIT_WINDOW_MS - 2_000);
         expect(secondTtl).toBeGreaterThan(0);
         expect(secondTtl).toBeLessThanOrEqual(firstTtl);
+
+        await serviceA.release(
+          {
+            clientIdentifier,
+            policy: 'strict',
+            role: 'DEFAULT',
+          },
+          'redis',
+        );
+        expect(await redis.client.get(key)).toBe('1');
+        await serviceB.release(
+          {
+            clientIdentifier,
+            policy: 'strict',
+            role: 'DEFAULT',
+          },
+          'redis',
+        );
+        expect(await redis.client.get(key)).toBeNull();
       } finally {
         if (redis.client.status !== 'end') await redis.del(key);
         if (redis.client.status !== 'end') redis.onModuleDestroy();

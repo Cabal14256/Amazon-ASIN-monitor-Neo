@@ -47,12 +47,13 @@ export function configureHttpApp(
     registerHttpMetricsHook(app, options.metrics);
   }
   if (options.rateLimit) {
-    app
-      .getHttpAdapter()
-      .getInstance()
-      .addHook('onRequest', async (request, reply) => {
-        const blocked = await options.rateLimit!.handle(request, reply);
-        if (blocked) options.errorStats?.recordStatus(429);
-      });
+    const fastify = app.getHttpAdapter().getInstance();
+    fastify.addHook('onRequest', async (request, reply) => {
+      const blocked = await options.rateLimit!.handle(request, reply);
+      if (blocked) options.errorStats?.recordStatus(429);
+    });
+    fastify.addHook('onResponse', async (request) => {
+      options.rateLimit!.complete(request);
+    });
   }
 }

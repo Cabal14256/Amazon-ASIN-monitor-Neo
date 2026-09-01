@@ -57,6 +57,18 @@ elseif ttl <= 0 then
 end
 return { current, ttl }
 `;
+const RELEASE_WINDOW_SCRIPT = `
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current <= 0 then
+  return 0
+end
+if current == 1 then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
+return redis.call('DECR', KEYS[1])
+`;
+const RECOVERY_PROBE_SCRIPT = `return 1`;
 
 function freshRoleStats(): Record<RateLimitRole, RoleStats> {
   return {
@@ -93,13 +105,14 @@ export function selectRateLimitRole(codes: readonly string[]): RateLimitRole {
 }
 
 export function buildRateLimitKey(
+  prefix: string,
   policy: RateLimitPolicy,
   role: RateLimitRole,
   clientIdentifier: string,
 ): string {
   const digest = createHash('sha256').update(clientIdentifier).digest('hex');
   const bucket = policy === 'strict' ? 'strict' : role.toLowerCase();
-  return `rate_limit:neo:${bucket}:${digest}`;
+  return `${prefix}:http:neo:${bucket}:${digest}`;
 }
 
 @Injectable()
@@ -112,6 +125,7 @@ export class RateLimitService {
   private backend: RateLimitBackend = 'redis';
   private redisRetryAfter = 0;
   private nextMemoryCleanupAt = 0;
+  private recoveryProbeInFlight = false;
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -199,11 +213,34 @@ export class RateLimitService {
     return { count: window.count, ttlMs: Math.max(1, window.expiresAt - now) };
   }
 
+  private releaseMemory(key: string, now: number): void {
+    const window = this.memoryWindows.get(key);
+    if (!window) return;
+    if (window.expiresAt <= now || window.count <= 1) {
+      this.memoryWindows.delete(key);
+      return;
+    }
+    window.count -= 1;
+  }
+
+  private beginRecoveryProbe(now: number): boolean {
+    if (
+      this.backend !== 'memory' ||
+      now < this.redisRetryAfter ||
+      this.recoveryProbeInFlight
+    ) {
+      return false;
+    }
+    this.recoveryProbeInFlight = true;
+    return true;
+  }
+
   private async consumeWindow(
     key: string,
     now: number,
   ): Promise<{ backend: RateLimitBackend; count: number; ttlMs: number }> {
-    if (this.backend === 'memory' && now < this.redisRetryAfter) {
+    const recovering = this.backend === 'memory';
+    if (recovering && !this.beginRecoveryProbe(now)) {
       return { backend: 'memory', ...this.consumeMemory(key, now) };
     }
     try {
@@ -219,37 +256,54 @@ export class RateLimitService {
     } catch {
       this.setBackend('memory', now);
       return { backend: 'memory', ...this.consumeMemory(key, now) };
+    } finally {
+      if (recovering) this.recoveryProbeInFlight = false;
     }
   }
 
-  async consume(input: {
+  private key(input: {
     clientIdentifier: string;
     policy: RateLimitPolicy;
     role: RateLimitRole;
-  }): Promise<RateLimitDecision> {
-    const now = Date.now();
-    const limit =
-      input.policy === 'strict' ? STRICT_RATE_LIMIT : ROLE_LIMITS[input.role];
-    const key = buildRateLimitKey(
+  }): string {
+    return buildRateLimitKey(
+      this.env.RATE_LIMITER_KEY_PREFIX,
       input.policy,
       input.role,
       input.clientIdentifier,
     );
-    const window = await this.consumeWindow(key, now);
-    const allowed = window.count <= limit;
+  }
+
+  recordDecision(decision: RateLimitDecision): void {
     this.totalRequests += 1;
-    this.byRole[input.role].requests += 1;
-    if (!allowed) {
+    this.byRole[decision.role].requests += 1;
+    if (!decision.allowed) {
       this.blockedRequests += 1;
-      this.byRole[input.role].blocked += 1;
+      this.byRole[decision.role].blocked += 1;
     }
     this.metrics.recordRateLimitDecision({
-      role: input.role,
-      policy: input.policy,
-      outcome: allowed ? 'allowed' : 'blocked',
-      backend: window.backend,
+      role: decision.role,
+      policy: decision.policy,
+      outcome: decision.allowed ? 'allowed' : 'blocked',
+      backend: decision.backend,
     });
-    return {
+  }
+
+  async consume(
+    input: {
+      clientIdentifier: string;
+      policy: RateLimitPolicy;
+      role: RateLimitRole;
+    },
+    options: { record?: boolean } = {},
+  ): Promise<RateLimitDecision> {
+    const now = Date.now();
+    const limit =
+      input.policy === 'strict' ? STRICT_RATE_LIMIT : ROLE_LIMITS[input.role];
+    const key = this.key(input);
+    const window = await this.consumeWindow(key, now);
+    const allowed = window.count <= limit;
+    const decision = {
       allowed,
       backend: window.backend,
       count: window.count,
@@ -259,6 +313,43 @@ export class RateLimitService {
       resetAfterMs: window.ttlMs,
       role: input.role,
     };
+    if (options.record !== false) this.recordDecision(decision);
+    return decision;
+  }
+
+  async release(
+    input: {
+      clientIdentifier: string;
+      policy: RateLimitPolicy;
+      role: RateLimitRole;
+    },
+    backend: RateLimitBackend,
+  ): Promise<void> {
+    const now = Date.now();
+    const key = this.key(input);
+    if (backend === 'memory') {
+      this.releaseMemory(key, now);
+      return;
+    }
+    try {
+      await this.redis.eval(RELEASE_WINDOW_SCRIPT, [key], []);
+    } catch {
+      this.setBackend('memory', now);
+    }
+  }
+
+  async recover(redisAvailable: boolean): Promise<void> {
+    if (!this.enabled || !redisAvailable || this.backend !== 'memory') return;
+    const now = Date.now();
+    if (!this.beginRecoveryProbe(now)) return;
+    try {
+      await this.redis.eval(RECOVERY_PROBE_SCRIPT, [], []);
+      this.setBackend('redis', now);
+    } catch {
+      this.setBackend('memory', now);
+    } finally {
+      this.recoveryProbeInFlight = false;
+    }
   }
 
   resetStats(now = Date.now()): void {

@@ -153,6 +153,11 @@ const envObjectSchema = z.object({
     .trim()
     .transform((value) => value || 'bull')
     .default('bull'),
+  RATE_LIMITER_KEY_PREFIX: z
+    .string()
+    .trim()
+    .transform((value) => value || 'spapi:ratelimiter')
+    .default('spapi:ratelimiter'),
 
   JWT_SECRET: z
     .string()
