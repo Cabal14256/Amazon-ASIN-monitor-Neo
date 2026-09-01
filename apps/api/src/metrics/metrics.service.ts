@@ -106,6 +106,13 @@ export class MetricsService implements OnModuleDestroy {
     registers: [this.registry],
   });
 
+  readonly httpRateLimitDecisionsTotal = new Counter({
+    name: `${METRICS_PREFIX}http_rate_limit_decisions_total`,
+    help: 'HTTP 限流允许与阻断决策总数',
+    labelNames: ['role', 'policy', 'outcome', 'backend'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ prefix: METRICS_PREFIX, register: this.registry });
   }
@@ -126,6 +133,15 @@ export class MetricsService implements OnModuleDestroy {
     const labels = { dependency: input.dependency };
     this.healthDependencyUp.set(labels, input.up ? 1 : 0);
     this.healthProbeDurationSeconds.observe(labels, input.durationSeconds);
+  }
+
+  recordRateLimitDecision(input: {
+    role: 'ADMIN' | 'DEFAULT' | 'EDITOR' | 'READONLY';
+    policy: 'role' | 'strict';
+    outcome: 'allowed' | 'blocked';
+    backend: 'memory' | 'redis';
+  }): void {
+    this.httpRateLimitDecisionsTotal.inc(input);
   }
 
   onModuleDestroy(): void {

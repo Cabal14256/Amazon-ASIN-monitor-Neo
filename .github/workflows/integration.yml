@@ -144,10 +144,10 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
-      - name: Run Neo API health and auth dependency integration tests
+      - name: Run Neo API health, auth and rate-limit dependency integration tests
         run: |
           pnpm --filter @asin-monitor/db build
-          pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts
+          pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts test/rate-limit.test.ts
 
       - name: Smoke test Timescale storage-policy rollback
         run: |

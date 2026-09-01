@@ -20,6 +20,7 @@ import {
 import { configureHttpApp } from '../src/http-app';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
+import { RateLimitService } from '../src/rate-limit/rate-limit.service';
 import { ApplicationRedisClient } from '../src/redis/redis.service';
 
 const validEnv = {
@@ -43,6 +44,29 @@ const saturatedPoolSnapshot = {
   freeConnections: 0,
   activeConnections: 10,
 };
+
+function rateLimiterStub(): RateLimitService {
+  return {
+    snapshot: vi.fn((redisAvailable: boolean) => ({
+      status: redisAvailable ? 'ok' : 'degraded',
+      stats: {
+        enabled: true,
+        backend: redisAvailable ? 'redis' : 'memory',
+        redisAvailable,
+        totalRequests: 0,
+        blockedRequests: 0,
+        byRole: {
+          ADMIN: { requests: 0, blocked: 0 },
+          EDITOR: { requests: 0, blocked: 0 },
+          READONLY: { requests: 0, blocked: 0 },
+          DEFAULT: { requests: 0, blocked: 0 },
+        },
+        lastReset: 0,
+        blockRate: '0.00',
+      },
+    })),
+  } as unknown as RateLimitService;
+}
 
 function buildService(
   options: {
@@ -72,6 +96,7 @@ function buildService(
     options.logger ?? new AppLogger(),
     metrics,
     errorStats,
+    rateLimiterStub(),
   );
   return { service, metrics, errorStats };
 }
@@ -101,7 +126,12 @@ describe('HealthService', () => {
     });
     expect(health.rateLimiter).toMatchObject({
       status: 'ok',
-      stats: { mode: 'redis-backend-ready', redisAvailable: true },
+      stats: {
+        backend: 'redis',
+        redisAvailable: true,
+        totalRequests: 0,
+        blockedRequests: 0,
+      },
     });
     expect(health.errorStats).toMatchObject({
       recent: { count: 1, byType: { RATE_LIMIT: 1 } },
@@ -407,6 +437,7 @@ describe.skipIf(!integrationEnabled)(
         logger,
         metrics,
         new HealthErrorStatsService(),
+        rateLimiterStub(),
       );
       try {
         const health = await service.getHealth();

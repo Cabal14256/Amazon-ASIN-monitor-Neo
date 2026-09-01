@@ -31,6 +31,42 @@ const cookieNameSchema = z
   .min(1)
   .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, 'Cookie 名称包含非法字符');
 
+const booleanFlagSchema = (defaultValue: boolean) =>
+  z
+    .string()
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
+    .default(defaultValue ? 'true' : 'false')
+    .transform((value) => !['false', '0', 'no', 'off'].includes(value));
+
+const trustProxySchema = z
+  .preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().min(1).optional(),
+  )
+  .transform((value): boolean | number | string | undefined => {
+    if (value === undefined) return undefined;
+    const normalized = value.toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    if (/^\d+$/.test(normalized)) return Number(normalized);
+    return value;
+  });
+
+const rateLimitWhitelistSchema = z
+  .string()
+  .default('')
+  .transform((value) => [
+    ...new Set(
+      value
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ]);
+
 const jwtDurationSchema = z
   .string()
   .trim()
@@ -94,6 +130,7 @@ const envObjectSchema = z.object({
     .trim()
     .min(1, 'CORS_ORIGIN 不能为空')
     .default('http://localhost:8000'),
+  TRUST_PROXY: trustProxySchema,
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),
@@ -133,6 +170,10 @@ const envObjectSchema = z.object({
     .max(86_400)
     .default(900),
   AUTH_DATA_AUTHORITY: z.enum(['legacy-mysql', 'postgresql']),
+
+  // HTTP API 分布式限流：固定窗口与阈值保持 Legacy 语义。
+  API_RATE_LIMIT_ENABLED: booleanFlagSchema(true),
+  RATE_LIMIT_WHITELIST_IPS: rateLimitWhitelistSchema,
 
   // 双跑期鉴权数据实时权威源使用 Legacy MySQL；最终同步/写冻结后才切 PostgreSQL。
   DB_HOST: optionalNonEmptyStringSchema,
@@ -178,13 +219,7 @@ const envObjectSchema = z.object({
     .transform((value) => value.toLowerCase())
     .pipe(z.enum(['api', 'worker', 'all']))
     .default('api'),
-  SCHEDULER_ENABLED: z
-    .string()
-    .trim()
-    .transform((value) => value.toLowerCase())
-    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
-    .default('false')
-    .transform((value) => !['false', '0', 'no', 'off'].includes(value)),
+  SCHEDULER_ENABLED: booleanFlagSchema(false),
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),

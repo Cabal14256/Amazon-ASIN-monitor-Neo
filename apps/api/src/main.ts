@@ -6,7 +6,7 @@ import {
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 
-import { loadEnvironmentFiles, type Env } from '@asin-monitor/config';
+import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
 import { ENV } from './config/config.module';
 import { HealthErrorStatsService } from './health/health.service';
@@ -22,9 +22,15 @@ import { runApi } from './runner';
  * 路由结构与旧系统一致：/api/v1/* 业务端点 + 根级 /health、/metrics。
  */
 async function bootstrap(): Promise<void> {
+  const adapterEnv = loadEnv();
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ logger: false }),
+    new FastifyAdapter({
+      logger: false,
+      ...(adapterEnv.TRUST_PROXY === undefined
+        ? {}
+        : { trustProxy: adapterEnv.TRUST_PROXY }),
+    }),
     { bufferLogs: true },
   );
 
@@ -40,6 +46,11 @@ async function bootstrap(): Promise<void> {
     metrics,
     errorStats,
   });
+  if (env.TRUST_PROXY !== undefined) {
+    logger.info('API trust proxy 已配置', 'Bootstrap', {
+      mode: typeof env.TRUST_PROXY,
+    });
+  }
 
   const port = env.PORT;
   await app.listen(port, '0.0.0.0');

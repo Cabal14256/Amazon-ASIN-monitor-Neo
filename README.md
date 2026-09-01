@@ -113,6 +113,8 @@ Copy-Item .env.migration.example .env.migration
 
 新 Nest API 与 BullMQ Worker 读取根目录 `.env.neo`，不会继承旧 Express 的 `PORT=3001`；模板固定 Neo API 默认端口 3100，并包含目标 PostgreSQL 主库、竞品库、Redis 与 JWT 必需变量。Neo 鉴权继续使用 `JWT_SECRET`，并可通过 `JWT_EXPIRES_IN`、`JWT_REMEMBER_EXPIRES_IN`、`AUTH_COOKIE_NAME`、`AUTH_HINT_COOKIE_NAME` 和 `AUTH_PERMISSION_CACHE_TTL_SECONDS` 调整令牌、Cookie 与 RBAC 缓存；生产环境的 JWT 密钥至少需要 32 个字符且不得保留公开模板值。`AUTH_DATA_AUTHORITY` 必须明确选择全部鉴权数据的权威源：双跑期使用 `legacy-mysql` 并在 `.env.neo` 提供与 Legacy 相同的 `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`，使用户状态、Session、密码策略、权限和角色变更实时生效；只有完成最终同步并冻结 MySQL 写入后才改为 `postgresql`。旧系统继续读取 `server/.env`，因此两套 API 可以并行启动。
 
+Neo HTTP API 默认通过共享 Redis 执行 15 分钟 fixed-window 限流：ADMIN 1000、EDITOR 500、READONLY/匿名或未知角色 100 次；后续敏感端点可显式使用 strict 20 次策略。`API_RATE_LIMIT_ENABLED=false` 可在受控排障窗口关闭，`RATE_LIMIT_WHITELIST_IPS` 接受逗号分隔的精确 IP。Redis 不可用时会有界降级到进程内窗口，并在 `/health.rateLimiter` 与 Prometheus 指标中标记实际后端。反向代理部署只有在代理链可信且正确限制来源时才配置 `TRUST_PROXY`，否则不要信任客户端提供的转发地址。
+
 ### 4. 初始化数据库
 
 全新安装执行以下脚本：
