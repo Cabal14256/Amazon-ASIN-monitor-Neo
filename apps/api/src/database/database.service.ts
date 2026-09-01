@@ -2,7 +2,12 @@ import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { Pool } from 'pg';
 
 import type { Env } from '@asin-monitor/config';
-import { createDb, createPgPool, type Db } from '@asin-monitor/db';
+import {
+  createDb,
+  createPgPool,
+  createShanghaiTimestampTypeOverrides,
+  type Db,
+} from '@asin-monitor/db';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 
@@ -22,6 +27,7 @@ export class ApplicationDatabasePools implements OnModuleDestroy {
       connectionTimeoutMillis: env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
       idleTimeoutMillis: 30_000,
       application_name: 'amazon-asin-monitor-neo-api',
+      types: createShanghaiTimestampTypeOverrides(),
     };
     this.primaryPool = createPgPool(env.DATABASE_URL, poolOptions);
     this.competitorPool = createPgPool(

@@ -135,6 +135,14 @@ describe('HealthService', () => {
     await dependencies.queryPrimary();
 
     expect(pools.primaryPool.options.connectionTimeoutMillis).toBe(2_000);
+    expect(
+      pools.primaryPool.options.types
+        ?.getTypeParser(
+          1114,
+          'text',
+        )('2026-09-01 16:00:00')
+        .toISOString(),
+    ).toBe('2026-09-01T08:00:00.000Z');
     expect(pools.primaryPool.options).not.toHaveProperty('query_timeout');
     expect(pools.primaryPool.options).not.toHaveProperty('statement_timeout');
     expect(query).toHaveBeenCalledWith({

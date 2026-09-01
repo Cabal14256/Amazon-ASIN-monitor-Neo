@@ -12,6 +12,18 @@ export function parseShanghaiTimestamp(value: string): Date {
   return new Date(`${match[1]}T${match[2]}+08:00`);
 }
 
+export function createShanghaiTimestampTypeOverrides(
+  inherited?: PoolConfig['types'],
+): TypeOverrides {
+  const typeOverrides = new TypeOverrides(inherited);
+  typeOverrides.setTypeParser(
+    TIMESTAMP_WITHOUT_TIME_ZONE_OID,
+    'text',
+    parseShanghaiTimestamp,
+  );
+  return typeOverrides;
+}
+
 /**
  * 按连接串创建 PG 连接池 + Drizzle 实例。
  * 主库与竞品库（决策 D6 双 database）各用一个池，调用方负责池生命周期。
@@ -20,17 +32,10 @@ export function createPgPool(
   connectionString: string,
   config: PoolConfig = {},
 ): Pool {
-  const typeOverrides = new TypeOverrides(config.types);
-  typeOverrides.setTypeParser(
-    TIMESTAMP_WITHOUT_TIME_ZONE_OID,
-    'text',
-    parseShanghaiTimestamp,
-  );
   return new Pool({
     connectionString,
     max: 10,
     ...config,
-    types: typeOverrides,
   });
 }
 
