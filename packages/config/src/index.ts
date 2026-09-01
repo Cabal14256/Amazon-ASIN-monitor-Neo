@@ -115,7 +115,9 @@ const envObjectSchema = z.object({
     .transform((value) => value || 'bull')
     .default('bull'),
 
-  JWT_SECRET: z.string().trim().min(1, '缺少 JWT_SECRET'),
+  JWT_SECRET: z
+    .string()
+    .refine((value) => value.trim().length > 0, '缺少 JWT_SECRET'),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
   AUTH_COOKIE_NAME: cookieNameSchema.default('amazon_asin_monitor_auth'),

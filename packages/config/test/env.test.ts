@@ -101,6 +101,14 @@ describe('loadEnv', () => {
     ).toBe('production');
   });
 
+  it('JWT_SECRET 校验不改变与 legacy 共享的密钥字节', () => {
+    const secret = '  legacy-shared-secret\n';
+    expect(loadEnv({ ...validEnv, JWT_SECRET: secret }).JWT_SECRET).toBe(secret);
+    expect(() => loadEnv({ ...validEnv, JWT_SECRET: ' \t\n ' })).toThrow(
+      '缺少 JWT_SECRET',
+    );
+  });
+
   it('无单位 legacy JWT 有效期按秒规范化', () => {
     const normalized = loadEnv({
       ...validEnv,
