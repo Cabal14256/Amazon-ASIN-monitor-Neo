@@ -27,6 +27,11 @@ describe('loadEnv', () => {
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
+    expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(2_000);
+    expect(env.DATABASE_POOL_CONNECTION_TIMEOUT_MS).toBe(2_000);
+    expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
+    expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.9);
+    expect(env.HEALTH_MEMORY_RSS_DEGRADED_MB).toBe(0);
   });
 
   it('缺少必需变量时抛出 EnvValidationError 并列出全部缺失项', () => {
@@ -72,6 +77,80 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...validEnv, PORT: '3100' }).PORT).toBe(3100);
   });
 
+  it('健康阈值兼容比例和百分数写法，并约束探针超时', () => {
+    const env = loadEnv({
+      ...validEnv,
+      HEALTH_PROBE_TIMEOUT_MS: '750',
+      DATABASE_POOL_CONNECTION_TIMEOUT_MS: '750',
+      HEALTH_DB_POOL_DEGRADED_THRESHOLD: '85',
+      HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: '0.8',
+      HEALTH_MEMORY_RSS_DEGRADED_MB: '1024',
+    });
+    expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(750);
+    expect(env.DATABASE_POOL_CONNECTION_TIMEOUT_MS).toBe(750);
+    expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.85);
+    expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.8);
+    expect(env.HEALTH_MEMORY_RSS_DEGRADED_MB).toBe(1024);
+    expect(() =>
+      loadEnv({ ...validEnv, HEALTH_PROBE_TIMEOUT_MS: '0' }),
+    ).toThrow(EnvValidationError);
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        HEALTH_PROBE_TIMEOUT_MS: '750',
+        DATABASE_POOL_CONNECTION_TIMEOUT_MS: '751',
+      }),
+    ).toThrow('共享数据库池连接超时不得大于健康探针总超时');
+  });
+
+  it('空白健康阈值沿用默认值以兼容 legacy 可选环境变量', () => {
+    const env = loadEnv({
+      ...validEnv,
+      HEALTH_DB_POOL_DEGRADED_THRESHOLD: '',
+      HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: '   ',
+    });
+
+    expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
+    expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.9);
+  });
+
+  it('拒绝凭据、协议别名和默认端口不同但目标相同的双 PostgreSQL URL', () => {
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL:
+          'postgres://primary:one@localhost/amazon_asin_monitor?sslmode=verify-full',
+        COMPETITOR_DATABASE_URL:
+          'postgresql://competitor:two@LOCALHOST:5432/amazon_asin_monitor',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+  });
+
+  it('按 node-postgres 优先级比较 query-string 覆盖的 host 与 port', () => {
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL:
+          'postgres://primary-alias:6543/amazon_asin_monitor?host=db.internal&port=5433',
+        COMPETITOR_DATABASE_URL:
+          'postgres://db.internal:5433/amazon_asin_monitor',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+  });
+
+  it('按 node-postgres 实际解析结果使用 pathname database', () => {
+    const env = loadEnv({
+      ...validEnv,
+      DATABASE_URL:
+        'postgres://db.internal/amazon_asin_monitor?database=shared',
+      COMPETITOR_DATABASE_URL:
+        'postgres://db.internal/amazon_competitor_monitor?database=shared',
+    });
+
+    expect(env.DATABASE_URL).toContain('/amazon_asin_monitor');
+    expect(env.COMPETITOR_DATABASE_URL).toContain('/amazon_competitor_monitor');
+  });
+
   it('BULL_PREFIX 保留 legacy 命名空间并将空白回退 bull', () => {
     expect(loadEnv({ ...validEnv, BULL_PREFIX: ' staging ' }).BULL_PREFIX).toBe(
       'staging',
@@ -79,6 +158,35 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...validEnv, BULL_PREFIX: '  ' }).BULL_PREFIX).toBe(
       'bull',
     );
+  });
+
+  it('按 node-postgres 默认链归一省略的 host、port 与 database', () => {
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL: 'postgres:///shared',
+        COMPETITOR_DATABASE_URL: 'postgres://localhost:5432/shared',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        PGHOST: 'db.internal',
+        PGPORT: '6543',
+        PGDATABASE: 'shared',
+        DATABASE_URL: 'postgres:///',
+        COMPETITOR_DATABASE_URL: 'postgres://db.internal:6543/shared',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL: 'postgres://app_user@db.internal',
+        COMPETITOR_DATABASE_URL: 'postgres://db.internal/app_user',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
   });
 
   it('REDIS_URI 与 legacy 分项配置归一为 REDIS_URL', () => {

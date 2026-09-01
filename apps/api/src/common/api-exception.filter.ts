@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 
+import type { HealthErrorStatsService } from '../health/health.service';
 import type { AppLogger } from '../logger/app-logger.service';
 
 interface ErrorEnvelope {
@@ -39,6 +40,23 @@ function getExceptionResponse(exception: unknown): unknown {
   return exception instanceof HttpException
     ? exception.getResponse()
     : exception;
+}
+
+function sanitizedErrorContext(exception: unknown, status: number) {
+  if (!(exception instanceof Error)) return { status };
+  const withCode = exception as Error & { code?: unknown };
+  return {
+    status,
+    name: exception.name,
+    message: exception.message
+      .replace(/([a-z][a-z\d+.-]*:\/\/)[^@\s/]+@/gi, '$1***REDACTED***@')
+      .replace(/\b(Bearer|Basic)\s+\S+/gi, '$1 ***REDACTED***')
+      .replace(
+        /\b(password|token|secret|authorization)=([^&\s]+)/gi,
+        '$1=***REDACTED***',
+      ),
+    ...(withCode.code === undefined ? {} : { code: withCode.code }),
+  };
 }
 
 function getMessage(raw: unknown, status: number): string {
@@ -85,12 +103,20 @@ function toEnvelope(raw: unknown, status: number): ErrorEnvelope {
 /** 将 Nest、Fastify 与应用异常统一为 legacy Result 错误信封。 */
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
-  constructor(private readonly logger: AppLogger) {}
+  constructor(
+    private readonly logger: AppLogger,
+    private readonly errorStats?: Pick<HealthErrorStatsService, 'recordStatus'>,
+  ) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const status = getStatus(exception);
+    this.errorStats?.recordStatus(status);
     if (status >= 500) {
-      this.logger.error('API 请求处理失败', 'ApiExceptionFilter', exception);
+      this.logger.error(
+        'API 请求处理失败',
+        'ApiExceptionFilter',
+        sanitizedErrorContext(exception, status),
+      );
     }
     host
       .switchToHttp()

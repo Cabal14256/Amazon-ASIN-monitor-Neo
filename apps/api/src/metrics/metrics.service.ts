@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import {
   Counter,
+  Gauge,
   Histogram,
   Registry,
   collectDefaultMetrics,
@@ -90,6 +91,21 @@ export class MetricsService implements OnModuleDestroy {
     registers: [this.registry],
   });
 
+  readonly healthDependencyUp = new Gauge({
+    name: `${METRICS_PREFIX}health_dependency_up`,
+    help: '健康探针依赖是否可用（1=可用，0=不可用）',
+    labelNames: ['dependency'] as const,
+    registers: [this.registry],
+  });
+
+  readonly healthProbeDurationSeconds = new Histogram({
+    name: `${METRICS_PREFIX}health_probe_duration_seconds`,
+    help: '健康探针耗时（秒）',
+    labelNames: ['dependency'] as const,
+    buckets: [0.001, 0.01, 0.05, 0.1, 0.5, 1, 2, 5],
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ prefix: METRICS_PREFIX, register: this.registry });
   }
@@ -100,6 +116,16 @@ export class MetricsService implements OnModuleDestroy {
 
   async render(): Promise<string> {
     return this.registry.metrics();
+  }
+
+  recordHealthProbe(input: {
+    dependency: 'competitor_database' | 'database' | 'redis';
+    up: boolean;
+    durationSeconds: number;
+  }): void {
+    const labels = { dependency: input.dependency };
+    this.healthDependencyUp.set(labels, input.up ? 1 : 0);
+    this.healthProbeDurationSeconds.observe(labels, input.durationSeconds);
   }
 
   onModuleDestroy(): void {

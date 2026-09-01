@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { config as loadDotenv } from 'dotenv';
+import { parse as parsePostgresConnectionString } from 'pg-connection-string';
 import { z } from 'zod';
 
 /**
@@ -10,7 +11,58 @@ import { z } from 'zod';
  * 新增 PG / Redis / 调度相关变量按目标架构（总体计划 §2）定义。
  */
 
-export const envSchema = z.object({
+const healthRatioSchema = z
+  .preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.coerce.number().positive().max(100).default(0.9),
+  )
+  .transform((value) => (value >= 1 ? value / 100 : value));
+
+const optionalNonEmptyStringSchema = z.preprocess(
+  (value) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  z.string().trim().min(1).optional(),
+);
+
+interface PostgresTargetDefaults {
+  database?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+}
+
+function postgresTargetIdentity(
+  value: string,
+  defaults: PostgresTargetDefaults,
+): string | undefined {
+  try {
+    const connectionString = value.trim();
+    const parsedUrl = new URL(connectionString);
+    if (!['postgres:', 'postgresql:'].includes(parsedUrl.protocol)) {
+      return undefined;
+    }
+    const parsed = parsePostgresConnectionString(connectionString);
+    const databaseName =
+      parsed.database || defaults.database || parsed.user || defaults.user;
+    if (!databaseName) return undefined;
+    const effectiveHost = parsed.host || defaults.host || 'localhost';
+    const host = effectiveHost
+      ? effectiveHost.startsWith('/')
+        ? `socket:${effectiveHost}`
+        : effectiveHost.toLowerCase()
+      : '<default>';
+    const port = parsed.port || String(defaults.port ?? 5432);
+    if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
+      return undefined;
+    }
+    return `${host}\u0000${port}\u0000${databaseName}`;
+  } catch {
+    return undefined;
+  }
+}
+
+const envObjectSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
     .default('development'),
@@ -31,6 +83,15 @@ export const envSchema = z.object({
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),
   // PostgreSQL（竞品库，平移旧 MySQL amazon_competitor_monitor，决策 D6 独立 database）
   COMPETITOR_DATABASE_URL: z.string().min(1, '缺少 COMPETITOR_DATABASE_URL'),
+  // node-postgres 在 URL 省略连接参数时读取的标准 libpq 环境变量。
+  PGHOST: optionalNonEmptyStringSchema,
+  PGPORT: z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.coerce.number().int().min(1).max(65_535).optional(),
+  ),
+  PGDATABASE: optionalNonEmptyStringSchema,
+  PGUSER: optionalNonEmptyStringSchema,
 
   // Redis（队列 / 限流 / 缓存 / PubSub 四角色不变）
   REDIS_URL: z.string().min(1, '缺少 REDIS_URL'),
@@ -41,6 +102,23 @@ export const envSchema = z.object({
     .default('bull'),
 
   JWT_SECRET: z.string().min(1, '缺少 JWT_SECRET'),
+
+  // Neo 健康探针：比例同时接受 0.9 或 90 两种 Legacy 配置写法。
+  HEALTH_PROBE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(30_000)
+    .default(2_000),
+  DATABASE_POOL_CONNECTION_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(50)
+    .max(30_000)
+    .default(2_000),
+  HEALTH_DB_POOL_DEGRADED_THRESHOLD: healthRatioSchema,
+  HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: healthRatioSchema,
+  HEALTH_MEMORY_RSS_DEGRADED_MB: z.coerce.number().nonnegative().default(0),
 
   // 进程拓扑：api | worker | all；单调度器语义
   PROCESS_ROLE: z
@@ -64,6 +142,36 @@ export const envSchema = z.object({
     .int()
     .positive()
     .optional(),
+});
+
+export const envSchema = envObjectSchema.superRefine((env, context) => {
+  const postgresDefaults = {
+    host: env.PGHOST,
+    port: env.PGPORT,
+    database: env.PGDATABASE,
+    user:
+      env.PGUSER ??
+      (process.platform === 'win32' ? process.env.USERNAME : process.env.USER),
+  };
+  const primary = postgresTargetIdentity(env.DATABASE_URL, postgresDefaults);
+  const competitor = postgresTargetIdentity(
+    env.COMPETITOR_DATABASE_URL,
+    postgresDefaults,
+  );
+  if (primary && competitor && primary === competitor) {
+    context.addIssue({
+      code: 'custom',
+      path: ['COMPETITOR_DATABASE_URL'],
+      message: '主库与竞品库必须指向不同的 PostgreSQL database',
+    });
+  }
+  if (env.DATABASE_POOL_CONNECTION_TIMEOUT_MS > env.HEALTH_PROBE_TIMEOUT_MS) {
+    context.addIssue({
+      code: 'custom',
+      path: ['DATABASE_POOL_CONNECTION_TIMEOUT_MS'],
+      message: '共享数据库池连接超时不得大于健康探针总超时',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;
