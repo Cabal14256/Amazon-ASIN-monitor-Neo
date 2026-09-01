@@ -63,6 +63,12 @@ jobs:
       REDIS_URL: redis://127.0.0.1:6379/15
       RATE_LIMITER_KEY_PREFIX: spapi:integration:${{ github.run_id }}
       JWT_SECRET: integration_only_not_secret
+      AUTH_SESSION_AUTHORITY: legacy-mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ''
+      DB_NAME: integration_control
       INTEGRATION_MYSQL_HOST: 127.0.0.1
       INTEGRATION_MYSQL_PORT: 3306
       INTEGRATION_MYSQL_USER: root

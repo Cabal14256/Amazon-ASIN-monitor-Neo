@@ -27,6 +27,7 @@ const validEnv = {
   COMPETITOR_DATABASE_URL: 'postgresql://localhost/amazon_competitor_monitor',
   REDIS_URL: 'redis://localhost:6379',
   JWT_SECRET: 'test-secret',
+  AUTH_SESSION_AUTHORITY: 'postgresql',
 };
 const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
 

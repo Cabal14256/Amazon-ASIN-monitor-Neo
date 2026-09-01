@@ -2,10 +2,6 @@ import { Inject, Injectable } from '@nestjs/common';
 import { z } from 'zod';
 
 import type { Env } from '@asin-monitor/config';
-import {
-  permissionCodeSchema,
-  type PermissionCode,
-} from '@asin-monitor/contracts';
 import type { AuthRoleRecord } from '@asin-monitor/db';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
@@ -24,7 +20,7 @@ type RedisLookup<T> =
   | { state: 'hit'; value: T }
   | { state: 'miss' | 'unavailable' };
 
-const permissionsSchema = z.array(permissionCodeSchema);
+const permissionsSchema = z.array(z.string().trim().min(1));
 const rolesSchema = z.array(
   z.object({
     id: z.string().min(1),
@@ -35,10 +31,7 @@ const rolesSchema = z.array(
 
 @Injectable()
 export class PermissionCacheService {
-  private readonly permissions = new Map<
-    string,
-    MemoryEntry<PermissionCode[]>
-  >();
+  private readonly permissions = new Map<string, MemoryEntry<string[]>>();
   private readonly roles = new Map<string, MemoryEntry<AuthRoleRecord[]>>();
 
   constructor(
@@ -140,7 +133,7 @@ export class PermissionCacheService {
     }
   }
 
-  async getPermissions(userId: string): Promise<PermissionCode[]> {
+  async getPermissions(userId: string): Promise<string[]> {
     const redisValue = await this.getRedis(
       'permissions',
       userId,

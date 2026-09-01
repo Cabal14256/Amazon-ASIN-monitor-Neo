@@ -5,13 +5,18 @@ import {
 } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import jwt from 'jsonwebtoken';
+import mysql, { type RowDataPacket } from 'mysql2/promise';
 import { describe, expect, it } from 'vitest';
 
 import { loadEnv } from '@asin-monitor/config';
 import { currentUserResultSchema } from '@asin-monitor/contracts';
-import { AuthRepository } from '@asin-monitor/db';
-import { AUTH_DATA_REPOSITORY } from '../src/auth/auth.constants';
+import { AuthRepository, LegacyMysqlSessionRepository } from '@asin-monitor/db';
+import {
+  AUTH_DATA_REPOSITORY,
+  AUTH_SESSION_REPOSITORY,
+} from '../src/auth/auth.constants';
 import { AuthController } from '../src/auth/auth.controller';
+import { createAuthSessionRepository } from '../src/auth/auth.module';
 import { AuthenticationGuard } from '../src/auth/authentication.guard';
 import { AuthenticationService } from '../src/auth/authentication.service';
 import { PermissionCacheService } from '../src/auth/permission-cache.service';
@@ -40,17 +45,48 @@ class AuthIntegrationController {
 }
 
 describe.skipIf(!integrationEnabled)(
-  'Neo Auth PostgreSQL/Redis integration',
+  'Neo Auth PostgreSQL/Redis/Legacy MySQL integration',
   () => {
-    it('共享连接池、真实 Session/RBAC 表与 Redis 缓存贯通 HTTP 请求', async () => {
+    it('双跑期使用实时 MySQL Session 权威状态并复用 PG/Redis RBAC', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
       const pools = new ApplicationDatabasePools(env, logger);
       const redis = new ApplicationRedisClient(env, logger);
       const repository = new AuthRepository(pools.primaryDb);
+      const mysqlPool = mysql.createPool({
+        host: env.DB_HOST!,
+        port: env.DB_PORT,
+        user: env.DB_USER!,
+        password: env.DB_PASSWORD!,
+        database: env.DB_NAME!,
+        timezone: '+08:00',
+      });
+      const sessionRepository = createAuthSessionRepository(
+        env,
+        repository,
+        logger,
+      );
       let app: NestFastifyApplication | undefined;
 
       try {
+        expect(env.AUTH_SESSION_AUTHORITY).toBe('legacy-mysql');
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS sessions (
+          id CHAR(36) PRIMARY KEY,
+          user_id VARCHAR(50) NOT NULL,
+          user_agent VARCHAR(255) NULL,
+          ip_address VARCHAR(64) NULL,
+          status VARCHAR(7) NOT NULL DEFAULT 'ACTIVE',
+          remember_me TINYINT(1) NOT NULL DEFAULT 0,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_active_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at DATETIME NULL
+        )`);
+        await mysqlPool.query('DELETE FROM sessions WHERE id = ?', [sessionId]);
+        await mysqlPool.query(
+          `INSERT INTO sessions (id, user_id, expires_at)
+           VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR))`,
+          [sessionId, userId],
+        );
         await pools.primaryPool.query('DELETE FROM users WHERE id = $1', [
           userId,
         ]);
@@ -74,11 +110,6 @@ describe.skipIf(!integrationEnabled)(
           'INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)',
           [roleId, permissionId],
         );
-        await pools.primaryPool.query(
-          `INSERT INTO sessions (id, user_id, expires_at)
-         VALUES ($1, $2, LOCALTIMESTAMP + interval '1 hour')`,
-          [sessionId, userId],
-        );
         await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
 
         const moduleRef = await Test.createTestingModule({
@@ -86,6 +117,7 @@ describe.skipIf(!integrationEnabled)(
           providers: [
             { provide: ENV, useValue: env },
             { provide: AUTH_DATA_REPOSITORY, useValue: repository },
+            { provide: AUTH_SESSION_REPOSITORY, useValue: sessionRepository },
             { provide: ApplicationRedisClient, useValue: redis },
             { provide: AppLogger, useValue: logger },
             AuthenticationService,
@@ -132,16 +164,40 @@ describe.skipIf(!integrationEnabled)(
         await expect(redis.get(`user:permissions:${userId}`)).resolves.toBe(
           '["asin:read"]',
         );
-        const touched = await pools.primaryPool.query<{ active: boolean }>(
-          'SELECT last_active_at >= created_at AS active FROM sessions WHERE id = $1',
+        const pgSession = await pools.primaryPool.query<{ count: string }>(
+          'SELECT count(*)::text AS count FROM sessions WHERE id = $1',
           [sessionId],
         );
-        expect(touched.rows[0]?.active).toBe(true);
+        expect(pgSession.rows[0]?.count).toBe('0');
+        const [touchedRows] = await mysqlPool.query<
+          (RowDataPacket & { active: number })[]
+        >(
+          'SELECT last_active_at >= created_at AS active FROM sessions WHERE id = ?',
+          [sessionId],
+        );
+        expect(touchedRows[0]?.active).toBe(1);
+
+        await mysqlPool.query(
+          "UPDATE sessions SET status = 'REVOKED' WHERE id = ?",
+          [sessionId],
+        );
+        const revoked = await fastify.inject({
+          method: 'GET',
+          url: '/api/v1/auth/current-user',
+          headers: { authorization: `Bearer ${authToken}` },
+        });
+        expect(revoked.statusCode).toBe(403);
+        expect(revoked.json()).toMatchObject({ errorMessage: '会话已失效' });
       } finally {
         if (redis.client.status !== 'end') {
           await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
         }
         if (app) await app.close();
+        if (sessionRepository instanceof LegacyMysqlSessionRepository) {
+          await sessionRepository.onModuleDestroy();
+        }
+        await mysqlPool.query('DELETE FROM sessions WHERE id = ?', [sessionId]);
+        await mysqlPool.end();
         await pools.primaryPool.query('DELETE FROM users WHERE id = $1', [
           userId,
         ]);

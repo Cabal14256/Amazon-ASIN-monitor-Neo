@@ -34,10 +34,13 @@ export interface AuthRoleRecord {
   name: string;
 }
 
-export interface AuthDataRepository {
+export interface AuthSessionRepository {
   findSessionById(sessionId: string): Promise<AuthSessionRecord | undefined>;
   revokeSession(sessionId: string): Promise<void>;
   touchSession(sessionId: string): Promise<void>;
+}
+
+export interface AuthDataRepository extends AuthSessionRepository {
   findUserById(userId: string): Promise<AuthUserRecord | undefined>;
   markPasswordChangeRequired(userId: string): Promise<void>;
   getPermissionCodes(userId: string): Promise<string[]>;

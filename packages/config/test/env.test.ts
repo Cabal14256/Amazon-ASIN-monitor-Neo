@@ -15,6 +15,7 @@ const validEnv = {
   COMPETITOR_DATABASE_URL: 'postgres://localhost/amazon_competitor_monitor',
   REDIS_URL: 'redis://localhost:6379',
   JWT_SECRET: 'test-secret',
+  AUTH_SESSION_AUTHORITY: 'postgresql',
 };
 
 describe('loadEnv', () => {
@@ -50,6 +51,7 @@ describe('loadEnv', () => {
       expect(paths).toContain('COMPETITOR_DATABASE_URL');
       expect(paths).toContain('REDIS_URL');
       expect(paths).toContain('JWT_SECRET');
+      expect(paths).toContain('AUTH_SESSION_AUTHORITY');
     }
   });
 
@@ -99,6 +101,13 @@ describe('loadEnv', () => {
         JWT_SECRET: 'a-secure-production-secret-with-32-chars',
       }).NODE_ENV,
     ).toBe('production');
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'replace_with_a_long_random_secret',
+      }),
+    ).toThrow('生产环境 JWT_SECRET 不得使用公开模板值');
   });
 
   it('JWT_SECRET 校验不改变与 legacy 共享的密钥字节', () => {
@@ -119,6 +128,36 @@ describe('loadEnv', () => {
     });
     expect(normalized.JWT_EXPIRES_IN).toBe('3600s');
     expect(normalized.JWT_REMEMBER_EXPIRES_IN).toBe('2592000s');
+  });
+
+  it('双跑期 Session 权威源要求完整 Legacy MySQL 连接配置', () => {
+    expect(() =>
+      loadEnv({ ...validEnv, AUTH_SESSION_AUTHORITY: 'legacy-mysql' }),
+    ).toThrow('AUTH_SESSION_AUTHORITY=legacy-mysql 时缺少 DB_HOST');
+
+    const legacy = loadEnv({
+      ...validEnv,
+      AUTH_SESSION_AUTHORITY: 'legacy-mysql',
+      DB_HOST: '127.0.0.1',
+      DB_PORT: '3306',
+      DB_USER: 'root',
+      DB_PASSWORD: '',
+      DB_NAME: 'amazon_asin_monitor',
+    });
+    expect(legacy.AUTH_SESSION_AUTHORITY).toBe('legacy-mysql');
+    expect(legacy.DB_PASSWORD).toBe('');
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'a-secure-production-secret-with-32-chars',
+        AUTH_SESSION_AUTHORITY: 'legacy-mysql',
+        DB_HOST: '127.0.0.1',
+        DB_USER: 'root',
+        DB_PASSWORD: '',
+        DB_NAME: 'amazon_asin_monitor',
+      }),
+    ).toThrow('AUTH_SESSION_AUTHORITY=legacy-mysql 时缺少 DB_PASSWORD');
   });
 
   it('健康阈值兼容比例和百分数写法，并约束探针超时', () => {
