@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import type { Db } from '../client';
 import {
@@ -56,14 +56,14 @@ export class AuthRepository implements AuthDataRepository {
   async revokeSession(sessionId: string): Promise<void> {
     await this.db
       .update(sessions)
-      .set({ status: 'REVOKED', lastActiveAt: new Date() })
+      .set({ status: 'REVOKED', lastActiveAt: sql`LOCALTIMESTAMP` })
       .where(eq(sessions.id, sessionId));
   }
 
   async touchSession(sessionId: string): Promise<void> {
     await this.db
       .update(sessions)
-      .set({ lastActiveAt: new Date() })
+      .set({ lastActiveAt: sql`LOCALTIMESTAMP` })
       .where(eq(sessions.id, sessionId));
   }
 
