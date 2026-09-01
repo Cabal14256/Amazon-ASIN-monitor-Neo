@@ -6,6 +6,7 @@ import {
   permissionCodeSchema,
   type PermissionCode,
 } from '@asin-monitor/contracts';
+import type { AuthRoleRecord } from '@asin-monitor/db';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { ApplicationRedisClient } from '../redis/redis.service';
@@ -19,9 +20,18 @@ interface MemoryEntry<T> {
   expiresAt: number;
   value: T;
 }
+type RedisLookup<T> =
+  | { state: 'hit'; value: T }
+  | { state: 'miss' | 'unavailable' };
 
 const permissionsSchema = z.array(permissionCodeSchema);
-const rolesSchema = z.array(z.string().trim().min(1));
+const rolesSchema = z.array(
+  z.object({
+    id: z.string().min(1),
+    code: z.string().trim().min(1),
+    name: z.string().min(1),
+  }),
+);
 
 @Injectable()
 export class PermissionCacheService {
@@ -29,7 +39,7 @@ export class PermissionCacheService {
     string,
     MemoryEntry<PermissionCode[]>
   >();
-  private readonly roles = new Map<string, MemoryEntry<string[]>>();
+  private readonly roles = new Map<string, MemoryEntry<AuthRoleRecord[]>>();
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -41,9 +51,7 @@ export class PermissionCacheService {
   ) {}
 
   private key(type: CacheType, userId: string): string {
-    return type === 'roles'
-      ? `neo:user:roles:${userId}`
-      : `user:permissions:${userId}`;
+    return `user:${type}:${userId}`;
   }
 
   private getMemory<T>(
@@ -75,18 +83,10 @@ export class PermissionCacheService {
     type: CacheType,
     userId: string,
     schema: z.ZodType<T>,
-  ): Promise<T | undefined> {
+  ): Promise<RedisLookup<T>> {
+    let raw: string | null;
     try {
-      const raw = await this.redis.get(this.key(type, userId));
-      if (raw === null) return undefined;
-      const parsedJson: unknown = JSON.parse(raw);
-      const parsed = schema.safeParse(parsedJson);
-      if (parsed.success) return parsed.data;
-      this.logger.warn('忽略无效的权限缓存数据', 'PermissionCacheService', {
-        cacheType: type,
-        reason: 'invalid_payload',
-      });
-      return undefined;
+      raw = await this.redis.get(this.key(type, userId));
     } catch {
       this.logger.warn(
         'Redis 权限缓存读取失败，使用降级路径',
@@ -96,14 +96,31 @@ export class PermissionCacheService {
           reason: 'redis_unavailable',
         },
       );
-      return undefined;
+      return { state: 'unavailable' };
+    }
+    if (raw === null) return { state: 'miss' };
+    try {
+      const parsedJson: unknown = JSON.parse(raw);
+      const parsed = schema.safeParse(parsedJson);
+      if (parsed.success) return { state: 'hit', value: parsed.data };
+      this.logger.warn('忽略无效的权限缓存数据', 'PermissionCacheService', {
+        cacheType: type,
+        reason: 'invalid_payload',
+      });
+      return { state: 'miss' };
+    } catch {
+      this.logger.warn('忽略无效的权限缓存数据', 'PermissionCacheService', {
+        cacheType: type,
+        reason: 'invalid_json',
+      });
+      return { state: 'miss' };
     }
   }
 
   private async setRedis(
     type: CacheType,
     userId: string,
-    value: readonly string[],
+    value: readonly unknown[],
   ): Promise<void> {
     try {
       await this.redis.setex(
@@ -129,14 +146,13 @@ export class PermissionCacheService {
       userId,
       permissionsSchema,
     );
-    if (redisValue) {
-      this.setMemory(this.permissions, userId, redisValue);
-      return redisValue;
+    if (redisValue.state === 'hit') {
+      this.setMemory(this.permissions, userId, redisValue.value);
+      return redisValue.value;
     }
-    const memoryValue = this.getMemory(this.permissions, userId);
-    if (memoryValue) {
-      await this.setRedis('permissions', userId, memoryValue);
-      return memoryValue;
+    if (redisValue.state === 'unavailable') {
+      const memoryValue = this.getMemory(this.permissions, userId);
+      if (memoryValue) return memoryValue;
     }
 
     const databaseValue = permissionsSchema.parse(
@@ -149,22 +165,21 @@ export class PermissionCacheService {
 
   async getRoles(userId: string): Promise<string[]> {
     const redisValue = await this.getRedis('roles', userId, rolesSchema);
-    if (redisValue) {
-      this.setMemory(this.roles, userId, redisValue);
-      return redisValue;
+    if (redisValue.state === 'hit') {
+      this.setMemory(this.roles, userId, redisValue.value);
+      return redisValue.value.map(({ code }) => code);
     }
-    const memoryValue = this.getMemory(this.roles, userId);
-    if (memoryValue) {
-      await this.setRedis('roles', userId, memoryValue);
-      return memoryValue;
+    if (redisValue.state === 'unavailable') {
+      const memoryValue = this.getMemory(this.roles, userId);
+      if (memoryValue) return memoryValue.map(({ code }) => code);
     }
 
     const databaseValue = rolesSchema.parse(
-      await this.repository.getRoleCodes(userId),
+      await this.repository.getRoles(userId),
     );
     this.setMemory(this.roles, userId, databaseValue);
     await this.setRedis('roles', userId, databaseValue);
-    return databaseValue;
+    return databaseValue.map(({ code }) => code);
   }
 
   async clearUserCache(userId: string): Promise<void> {

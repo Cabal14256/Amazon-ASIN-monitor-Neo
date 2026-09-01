@@ -34,8 +34,10 @@ const cookieNameSchema = z
 const jwtDurationSchema = z
   .string()
   .trim()
-  .regex(/^\d+(?:ms|s|m|h|d|w|y)$/i, 'JWT 有效期格式无效')
-  .transform((value) => value.toLowerCase());
+  .regex(/^\d+(?:ms|s|m|h|d|w|y)?$/i, 'JWT 有效期格式无效')
+  .transform((value) =>
+    /^\d+$/.test(value) ? `${value}s` : value.toLowerCase(),
+  );
 
 interface PostgresTargetDefaults {
   database?: string;

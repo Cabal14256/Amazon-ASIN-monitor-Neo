@@ -28,6 +28,12 @@ export interface AuthUserRecord {
   updateTime: Date | null;
 }
 
+export interface AuthRoleRecord {
+  id: string;
+  code: string;
+  name: string;
+}
+
 export interface AuthDataRepository {
   findSessionById(sessionId: string): Promise<AuthSessionRecord | undefined>;
   revokeSession(sessionId: string): Promise<void>;
@@ -35,7 +41,7 @@ export interface AuthDataRepository {
   findUserById(userId: string): Promise<AuthUserRecord | undefined>;
   markPasswordChangeRequired(userId: string): Promise<void>;
   getPermissionCodes(userId: string): Promise<string[]>;
-  getRoleCodes(userId: string): Promise<string[]>;
+  getRoles(userId: string): Promise<AuthRoleRecord[]>;
 }
 
 /** 鉴权域的 Drizzle 数据访问层，不持有连接池生命周期。 */
@@ -108,13 +114,12 @@ export class AuthRepository implements AuthDataRepository {
     return rows.map(({ code }) => code);
   }
 
-  async getRoleCodes(userId: string): Promise<string[]> {
-    const rows = await this.db
-      .selectDistinct({ code: roles.code })
+  async getRoles(userId: string): Promise<AuthRoleRecord[]> {
+    return this.db
+      .selectDistinct({ id: roles.id, code: roles.code, name: roles.name })
       .from(userRoles)
       .innerJoin(roles, eq(userRoles.roleId, roles.id))
       .where(eq(userRoles.userId, userId))
       .orderBy(roles.code);
-    return rows.map(({ code }) => code);
   }
 }

@@ -101,6 +101,16 @@ describe('loadEnv', () => {
     ).toBe('production');
   });
 
+  it('无单位 legacy JWT 有效期按秒规范化', () => {
+    const normalized = loadEnv({
+      ...validEnv,
+      JWT_EXPIRES_IN: '3600',
+      JWT_REMEMBER_EXPIRES_IN: '2592000',
+    });
+    expect(normalized.JWT_EXPIRES_IN).toBe('3600s');
+    expect(normalized.JWT_REMEMBER_EXPIRES_IN).toBe('2592000s');
+  });
+
   it('健康阈值兼容比例和百分数写法，并约束探针超时', () => {
     const env = loadEnv({
       ...validEnv,

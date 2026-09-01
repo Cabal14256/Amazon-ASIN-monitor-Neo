@@ -69,7 +69,11 @@ function createRepositoryMock(): AuthDataRepository {
     findUserById: vi.fn().mockResolvedValue(activeUser),
     markPasswordChangeRequired: vi.fn().mockResolvedValue(undefined),
     getPermissionCodes: vi.fn().mockResolvedValue(['asin:read']),
-    getRoleCodes: vi.fn().mockResolvedValue(['operator']),
+    getRoles: vi
+      .fn()
+      .mockResolvedValue([
+        { id: 'role-operator', code: 'operator', name: 'Operator' },
+      ]),
   };
 }
 
@@ -481,25 +485,32 @@ describe('PermissionCacheService', () => {
 
     expect(redis.del).toHaveBeenCalledWith(
       `user:permissions:${activeUser.id}`,
-      `neo:user:roles:${activeUser.id}`,
+      `user:roles:${activeUser.id}`,
     );
   });
 
-  it('角色代码使用 Neo 专属键，不覆盖 legacy 角色对象缓存', async () => {
+  it('角色缓存保留 legacy 兼容的对象 payload，再为 Neo 派生代码', async () => {
     const service = cache();
 
     await expect(service.getRoles(activeUser.id)).resolves.toEqual([
       'operator',
     ]);
     expect(redis.setex).toHaveBeenCalledWith(
-      `neo:user:roles:${activeUser.id}`,
-      env.AUTH_PERMISSION_CACHE_TTL_SECONDS,
-      '["operator"]',
-    );
-    expect(redis.setex).not.toHaveBeenCalledWith(
       `user:roles:${activeUser.id}`,
-      expect.any(Number),
-      expect.any(String),
+      env.AUTH_PERMISSION_CACHE_TTL_SECONDS,
+      '[{"id":"role-operator","code":"operator","name":"Operator"}]',
     );
+  });
+
+  it('Redis 可达但共享权限键被删除时绕过内存并重新查询数据库', async () => {
+    const service = cache();
+
+    await expect(service.getPermissions(activeUser.id)).resolves.toEqual([
+      'asin:read',
+    ]);
+    vi.mocked(repository.getPermissionCodes).mockResolvedValueOnce([]);
+    await expect(service.getPermissions(activeUser.id)).resolves.toEqual([]);
+
+    expect(repository.getPermissionCodes).toHaveBeenCalledTimes(2);
   });
 });
