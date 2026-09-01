@@ -20,6 +20,7 @@ export function configureHttpApp(
   app: NestFastifyApplication,
   options: HttpAppOptions = {},
 ): void {
+  app.enableShutdownHooks();
   app.setGlobalPrefix('api/v1', {
     exclude: [
       { path: 'health', method: RequestMethod.GET },

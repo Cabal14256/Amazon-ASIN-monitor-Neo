@@ -188,13 +188,24 @@ describe('dashboard / ops / system / health 域', () => {
       }).data?.type,
     ).toBe('info');
 
-    expect(
-      healthSchema.parse({
-        status: 'ok',
-        timestamp: '2026-08-24T18:00:00+08:00',
-        uptime: 10,
-        database: { status: 'ok', connected: true, usagePercent: '1.00' },
-      }).status,
-    ).toBe('ok');
+    const health = healthSchema.parse({
+      status: 'degraded',
+      timestamp: '2026-08-24T18:00:00+08:00',
+      uptime: 10,
+      database: { status: 'ok', connected: true, usagePercent: '1.00' },
+      memory: {
+        status: 'degraded',
+        heapUsed: 60,
+        heapTotal: 80,
+        heapLimit: 100,
+        external: 1,
+        rss: 101,
+        usagePercent: '75.00',
+        heapLimitUsagePercent: '60.00',
+        thresholdPercent: '50.00',
+      },
+    });
+    expect(health.status).toBe('degraded');
+    expect(health.memory?.status).toBe('degraded');
   });
 });

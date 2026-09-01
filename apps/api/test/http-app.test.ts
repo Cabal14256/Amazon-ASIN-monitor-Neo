@@ -53,6 +53,7 @@ class TestErrorsController {
 
 describe('HTTP 全局边界', () => {
   let app: NestFastifyApplication;
+  let enableShutdownHooks: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -62,6 +63,7 @@ describe('HTTP 全局边界', () => {
     app = moduleRef.createNestApplication<NestFastifyApplication>(
       new FastifyAdapter({ logger: false }),
     );
+    enableShutdownHooks = vi.spyOn(app, 'enableShutdownHooks');
     configureHttpApp(app, { corsOrigin: 'https://dashboard.example' });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
@@ -70,6 +72,10 @@ describe('HTTP 全局边界', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await app.close();
+  });
+
+  it('注册 Nest shutdown hooks 以关闭 Fastify 与依赖客户端', () => {
+    expect(enableShutdownHooks).toHaveBeenCalledOnce();
   });
 
   it('为配置的跨源前端启用 credentialed CORS', async () => {

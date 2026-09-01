@@ -103,6 +103,17 @@ describe('loadEnv', () => {
     ).toThrow('共享数据库池连接超时不得大于健康探针总超时');
   });
 
+  it('空白健康阈值沿用默认值以兼容 legacy 可选环境变量', () => {
+    const env = loadEnv({
+      ...validEnv,
+      HEALTH_DB_POOL_DEGRADED_THRESHOLD: '',
+      HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD: '   ',
+    });
+
+    expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
+    expect(env.HEALTH_MEMORY_HEAP_LIMIT_DEGRADED_THRESHOLD).toBe(0.9);
+  });
+
   it('拒绝凭据、协议别名和默认端口不同但目标相同的双 PostgreSQL URL', () => {
     expect(() =>
       loadEnv({
@@ -111,6 +122,18 @@ describe('loadEnv', () => {
           'postgres://primary:one@localhost/amazon_asin_monitor?sslmode=require',
         COMPETITOR_DATABASE_URL:
           'postgresql://competitor:two@LOCALHOST:5432/amazon_asin_monitor',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+  });
+
+  it('按 node-postgres 优先级比较 query-string 覆盖的 host 与 port', () => {
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL:
+          'postgres://primary-alias:6543/amazon_asin_monitor?host=db.internal&port=5433',
+        COMPETITOR_DATABASE_URL:
+          'postgres://db.internal:5433/amazon_asin_monitor',
       }),
     ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
   });

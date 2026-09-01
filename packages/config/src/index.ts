@@ -10,11 +10,12 @@ import { z } from 'zod';
  * 新增 PG / Redis / 调度相关变量按目标架构（总体计划 §2）定义。
  */
 
-const healthRatioSchema = z.coerce
-  .number()
-  .positive()
-  .max(100)
-  .default(0.9)
+const healthRatioSchema = z
+  .preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.coerce.number().positive().max(100).default(0.9),
+  )
   .transform((value) => (value >= 1 ? value / 100 : value));
 
 function postgresTargetIdentity(value: string): string | undefined {
@@ -26,12 +27,13 @@ function postgresTargetIdentity(value: string): string | undefined {
     const databaseName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
     if (!databaseName) return undefined;
     const queryHost = parsed.searchParams.get('host');
-    const host = parsed.hostname
-      ? parsed.hostname.toLowerCase()
-      : queryHost
-      ? `socket:${queryHost}`
+    const effectiveHost = queryHost || parsed.hostname;
+    const host = effectiveHost
+      ? effectiveHost.startsWith('/')
+        ? `socket:${effectiveHost}`
+        : effectiveHost.toLowerCase()
       : '<default>';
-    const port = parsed.port || parsed.searchParams.get('port') || '5432';
+    const port = parsed.searchParams.get('port') || parsed.port || '5432';
     if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
       return undefined;
     }
