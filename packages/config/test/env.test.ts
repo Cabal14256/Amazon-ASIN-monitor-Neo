@@ -86,6 +86,8 @@ describe('loadEnv', () => {
       '::ffff:10.0.0.1',
     ]);
     expect(env.TRUST_PROXY).toBe(2);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '1' }).TRUST_PROXY).toBe(1);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '0' }).TRUST_PROXY).toBe(0);
     expect(loadEnv({ ...validEnv, TRUST_PROXY: 'yes' }).TRUST_PROXY).toBe(true);
     expect(loadEnv({ ...validEnv, TRUST_PROXY: 'off' }).TRUST_PROXY).toBe(
       false,

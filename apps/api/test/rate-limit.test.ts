@@ -4,6 +4,7 @@ import {
   type ExecutionContext,
   Get,
   Injectable,
+  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { APP_INTERCEPTOR, Reflector } from '@nestjs/core';
@@ -17,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type Env, loadEnv } from '@asin-monitor/config';
 import { AppModule } from '../src/app.module';
+import { AuthenticationService } from '../src/auth/authentication.service';
 import { PermissionCacheService } from '../src/auth/permission-cache.service';
 import { ENV } from '../src/config/config.module';
 import {
@@ -27,8 +29,9 @@ import { configureHttpApp } from '../src/http-app';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 import {
-  RateLimitInterceptor,
+  RateLimitRequestHook,
   StrictRateLimit,
+  StrictRateLimitInterceptor,
 } from '../src/rate-limit/rate-limit.interceptor';
 import {
   buildRateLimitKey,
@@ -215,6 +218,36 @@ describe('RateLimitService', () => {
     expect(service.isWhitelisted('192.0.2.1')).toBe(false);
   });
 
+  it('内存窗口达到上限后按分钟摊销清理，后续新客户端只做 O(1) 淘汰', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const { service } = createService();
+    const internal = service as unknown as {
+      backend: 'memory';
+      cleanMemory(now: number): void;
+      memoryWindows: Map<string, { count: number; expiresAt: number }>;
+      redisRetryAfter: number;
+    };
+    const expiresAt = Date.now() + RATE_LIMIT_WINDOW_MS;
+    for (let index = 0; index < 10_000; index += 1) {
+      internal.memoryWindows.set(`existing-${index}`, { count: 1, expiresAt });
+    }
+    internal.backend = 'memory';
+    internal.redisRetryAfter = expiresAt;
+    const clean = vi.spyOn(internal, 'cleanMemory');
+
+    for (let index = 0; index < 3; index += 1) {
+      await service.consume({
+        clientIdentifier: `new-client-${index}`,
+        policy: 'role',
+        role: 'DEFAULT',
+      });
+    }
+
+    expect(clean).toHaveBeenCalledOnce();
+    expect(internal.memoryWindows).toHaveLength(10_000);
+  });
+
   it('关闭开关时健康快照明确标记 disabled', () => {
     const env = loadEnv({ ...validEnv, API_RATE_LIMIT_ENABLED: 'false' });
     const logger = loggerMock();
@@ -247,6 +280,9 @@ describe('RateLimitModule wiring', () => {
     }).compile();
 
     expect(moduleRef.get(RateLimitService)).toBeInstanceOf(RateLimitService);
+    expect(moduleRef.get(RateLimitRequestHook)).toBeInstanceOf(
+      RateLimitRequestHook,
+    );
     expect(moduleRef.get(HealthService)).toBeInstanceOf(HealthService);
     await moduleRef.close();
   });
@@ -258,6 +294,20 @@ class PrincipalGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     request.auth = { userId: 'test-user' } as never;
     return true;
+  }
+}
+
+@Injectable()
+class RejectingGuard implements CanActivate {
+  calls = 0;
+
+  canActivate(): never {
+    this.calls += 1;
+    throw new UnauthorizedException({
+      success: false,
+      errorMessage: '会话不存在或已过期',
+      errorCode: 401,
+    });
   }
 }
 
@@ -279,6 +329,12 @@ class RateTestController {
   strict() {
     return { success: true };
   }
+
+  @Get('rejected')
+  @UseGuards(RejectingGuard)
+  rejected() {
+    return { success: true };
+  }
 }
 
 @Controller()
@@ -294,8 +350,9 @@ class ExcludedRateTestController {
   }
 }
 
-describe('RateLimitInterceptor HTTP 边界', () => {
+describe('RateLimitRequestHook HTTP 边界', () => {
   let app: NestFastifyApplication;
+  let authentication: { identifyUserId: ReturnType<typeof vi.fn> };
   let errorStats: HealthErrorStatsService;
   let logger: AppLogger;
   let metrics: MetricsService;
@@ -308,6 +365,13 @@ describe('RateLimitInterceptor HTTP 边界', () => {
     logger = loggerMock();
     metrics = new MetricsService();
     metricsToClose.push(metrics);
+    authentication = {
+      identifyUserId: vi.fn((request: FastifyRequest) =>
+        request.headers.authorization === 'Bearer signed-test-token'
+          ? 'test-user'
+          : undefined,
+      ),
+    };
     permissionCache = { getRoles: vi.fn().mockResolvedValue(['ADMIN']) };
     redis = redisMock();
     vi.mocked(redis.eval).mockImplementation(
@@ -326,20 +390,28 @@ describe('RateLimitInterceptor HTTP 边界', () => {
         { provide: ApplicationRedisClient, useValue: redis },
         { provide: AppLogger, useValue: logger },
         { provide: MetricsService, useValue: metrics },
+        { provide: AuthenticationService, useValue: authentication },
         { provide: PermissionCacheService, useValue: permissionCache },
         Reflector,
         PrincipalGuard,
+        RejectingGuard,
         RateLimitService,
+        RateLimitRequestHook,
         {
           provide: APP_INTERCEPTOR,
-          useClass: RateLimitInterceptor,
+          useClass: StrictRateLimitInterceptor,
         },
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(
       new FastifyAdapter({ logger: false }),
     );
-    configureHttpApp(app, { logger, errorStats });
+    configureHttpApp(app, {
+      logger,
+      errorStats,
+      metrics,
+      rateLimit: moduleRef.get(RateLimitRequestHook),
+    });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
   }
@@ -352,11 +424,12 @@ describe('RateLimitInterceptor HTTP 边界', () => {
     await app.close();
   });
 
-  it('Guard 建立 principal 后按角色限流，strict 元数据使用独立 20 次策略', async () => {
+  it('请求层先识别签名用户的角色，strict 元数据再附加独立 20 次策略', async () => {
     const fastify = app.getHttpAdapter().getInstance();
     const authenticated = await fastify.inject({
       method: 'GET',
       url: '/api/v1/rate-test/authenticated',
+      headers: { authorization: 'Bearer signed-test-token' },
     });
     const strict = await fastify.inject({
       method: 'GET',
@@ -364,6 +437,7 @@ describe('RateLimitInterceptor HTTP 边界', () => {
     });
 
     expect(authenticated.headers['ratelimit-limit']).toBe('1000');
+    expect(authentication.identifyUserId).toHaveBeenCalled();
     expect(permissionCache.getRoles).toHaveBeenCalledWith('test-user');
     expect(strict.headers['ratelimit-limit']).toBe('20');
     expect(strict.headers['ratelimit-policy']).toBe('20;w=900');
@@ -371,16 +445,20 @@ describe('RateLimitInterceptor HTTP 边界', () => {
 
   it('角色查询失败安全回退 DEFAULT 且日志不包含身份信息', async () => {
     permissionCache.getRoles.mockRejectedValueOnce(new Error('private user'));
-    const response = await app.getHttpAdapter().getInstance().inject({
-      method: 'GET',
-      url: '/api/v1/rate-test/authenticated',
-    });
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'GET',
+        url: '/api/v1/rate-test/authenticated',
+        headers: { authorization: 'Bearer signed-test-token' },
+      });
 
     expect(response.statusCode).toBe(200);
     expect(response.headers['ratelimit-limit']).toBe('100');
     expect(logger.warn).toHaveBeenCalledWith(
       'HTTP 限流角色读取失败，使用默认配额',
-      'RateLimitInterceptor',
+      'RateLimitRequestHook',
       { reason: 'role_lookup_failed' },
     );
     expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(
@@ -388,13 +466,52 @@ describe('RateLimitInterceptor HTTP 边界', () => {
     );
   });
 
+  it('认证 Guard 拒绝与未匹配 API 都先计数，并在下一请求到达 Guard/路由前返回 429', async () => {
+    const clientIdentifier = '127.0.0.1';
+    const key = buildRateLimitKey('role', 'DEFAULT', clientIdentifier);
+    counters.set(key, ROLE_LIMITS.DEFAULT - 1);
+    const fastify = app.getHttpAdapter().getInstance();
+    const rejectingGuard = app.get(RejectingGuard);
+
+    const rejected = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/rejected',
+      headers: { authorization: 'invalid-token' },
+    });
+    const blockedBeforeGuard = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/rejected',
+      headers: { authorization: 'invalid-token' },
+    });
+
+    expect(rejected.statusCode).toBe(401);
+    expect(blockedBeforeGuard.statusCode).toBe(429);
+    expect(rejectingGuard.calls).toBe(1);
+
+    counters.set(key, ROLE_LIMITS.DEFAULT - 1);
+    const missing = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/missing-route',
+    });
+    const blockedBeforeRouting = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/missing-route',
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(blockedBeforeRouting.statusCode).toBe(429);
+  });
+
   it('第 101 个匿名请求返回 legacy 429 信封、标准 headers 与错误统计', async () => {
     const key = buildRateLimitKey('role', 'DEFAULT', '127.0.0.1');
     counters.set(key, ROLE_LIMITS.DEFAULT);
-    const response = await app.getHttpAdapter().getInstance().inject({
-      method: 'GET',
-      url: '/api/v1/rate-test/anonymous',
-    });
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'GET',
+        url: '/api/v1/rate-test/anonymous',
+        headers: { origin: 'http://localhost:8000' },
+      });
 
     expect(response.statusCode).toBe(429);
     expect(response.json()).toEqual({
@@ -403,6 +520,7 @@ describe('RateLimitInterceptor HTTP 边界', () => {
       errorCode: 429,
     });
     expect(response.headers).toMatchObject({
+      'access-control-allow-origin': 'http://localhost:8000',
       'ratelimit-limit': '100',
       'ratelimit-remaining': '0',
       'ratelimit-reset': '900',
@@ -411,6 +529,9 @@ describe('RateLimitInterceptor HTTP 边界', () => {
     expect(errorStats.snapshot()).toMatchObject({
       recent: { count: 1, byType: { RATE_LIMIT: 1 } },
     });
+    expect(await metrics.render()).toContain(
+      'amazon_asin_monitor_http_requests_total{method="GET",route="/api/v1/rate-test/anonymous",status="429"} 1',
+    );
     expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain(
       '127.0.0.1',
     );

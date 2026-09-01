@@ -111,6 +111,7 @@ export class RateLimitService {
   private lastReset = Date.now();
   private backend: RateLimitBackend = 'redis';
   private redisRetryAfter = 0;
+  private nextMemoryCleanupAt = 0;
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -180,7 +181,10 @@ export class RateLimitService {
     let window = this.memoryWindows.get(key);
     if (!window || window.expiresAt <= now) {
       if (!window && this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
-        this.cleanMemory(now);
+        if (now >= this.nextMemoryCleanupAt) {
+          this.cleanMemory(now);
+          this.nextMemoryCleanupAt = now + 60_000;
+        }
         if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
           const oldest = this.memoryWindows.keys().next().value as
             | string

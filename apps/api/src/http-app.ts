@@ -8,12 +8,14 @@ import type { HealthErrorStatsService } from './health/health.service';
 import { AppLogger } from './logger/app-logger.service';
 import { registerHttpMetricsHook } from './metrics/http-metrics.hook';
 import type { MetricsService } from './metrics/metrics.service';
+import type { RateLimitRequestHook } from './rate-limit/rate-limit.interceptor';
 
 interface HttpAppOptions {
   corsOrigin?: string;
   logger?: AppLogger;
   metrics?: MetricsService;
   errorStats?: HealthErrorStatsService;
+  rateLimit?: RateLimitRequestHook;
 }
 
 /** 注册全局 API 前缀、兼容根路由与请求校验。 */
@@ -43,5 +45,14 @@ export function configureHttpApp(
   );
   if (options.metrics) {
     registerHttpMetricsHook(app, options.metrics);
+  }
+  if (options.rateLimit) {
+    app
+      .getHttpAdapter()
+      .getInstance()
+      .addHook('onRequest', async (request, reply) => {
+        const blocked = await options.rateLimit!.handle(request, reply);
+        if (blocked) options.errorStats?.recordStatus(429);
+      });
   }
 }

@@ -93,6 +93,25 @@ function asClaims(decoded: string | jwt.JwtPayload): AuthTokenClaims {
   return { userId: decoded.userId, sessionId: decoded.sessionId };
 }
 
+function cookieValue(
+  header: string | undefined,
+  name: string,
+): string | undefined {
+  if (!header) return undefined;
+  for (const segment of header.split(';')) {
+    const separator = segment.indexOf('=');
+    if (separator < 0 || segment.slice(0, separator).trim() !== name) continue;
+    const value = segment.slice(separator + 1).trim();
+    if (!value) return undefined;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 @Injectable()
 export class AuthenticationService {
   constructor(
@@ -103,7 +122,9 @@ export class AuthenticationService {
   ) {}
 
   private readToken(request: FastifyRequest): string | undefined {
-    const cookieToken = request.cookies[this.env.AUTH_COOKIE_NAME];
+    const cookieToken =
+      request.cookies?.[this.env.AUTH_COOKIE_NAME] ??
+      cookieValue(request.headers.cookie, this.env.AUTH_COOKIE_NAME);
     if (cookieToken) return cookieToken;
 
     const authorization = request.headers.authorization;
@@ -112,6 +133,17 @@ export class AuthenticationService {
       if (bearer) return bearer;
     }
     return undefined;
+  }
+
+  /** 请求层限流仅验证签名与标准 claims，不触发 Session/用户数据库查询。 */
+  identifyUserId(request: FastifyRequest): string | undefined {
+    const token = this.readToken(request);
+    if (!token) return undefined;
+    try {
+      return this.verifyToken(token).userId;
+    } catch {
+      return undefined;
+    }
   }
 
   private clearCookies(request: FastifyRequest, reply: FastifyReply): void {

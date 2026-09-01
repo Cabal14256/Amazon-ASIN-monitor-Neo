@@ -154,6 +154,28 @@ describe('Neo JWT/Session HTTP 鉴权与 RBAC', () => {
     vi.restoreAllMocks();
   });
 
+  it('请求层身份识别仅验签 claims，支持原始 Cookie 且不访问 Session 数据库', () => {
+    const authentication = app.get(AuthenticationService);
+    vi.mocked(repository.findSessionById).mockClear();
+    const signed = token();
+
+    expect(
+      authentication.identifyUserId({
+        cookies: undefined,
+        headers: {
+          cookie: `${env.AUTH_COOKIE_NAME}=${encodeURIComponent(signed)}`,
+        },
+      } as unknown as FastifyRequest),
+    ).toBe(activeUser.id);
+    expect(
+      authentication.identifyUserId({
+        cookies: {},
+        headers: { authorization: 'Bearer invalid' },
+      } as unknown as FastifyRequest),
+    ).toBeUndefined();
+    expect(repository.findSessionById).not.toHaveBeenCalled();
+  });
+
   it('未提供 token 返回 legacy 401 信封且不清理 Cookie', async () => {
     const response = await app.getHttpAdapter().getInstance().inject({
       method: 'GET',

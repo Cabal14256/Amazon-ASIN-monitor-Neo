@@ -358,11 +358,13 @@ export class HealthService {
       this.probeRedis(),
     ]);
     const memory = memoryHealth(this.env);
+    const rateLimiter = this.rateLimiter.snapshot(redis.connected);
     const status =
       database.status === 'ok' &&
       competitorDatabase.status === 'ok' &&
       redis.status === 'ok' &&
-      memory.status === 'ok'
+      memory.status === 'ok' &&
+      rateLimiter.status !== 'degraded'
         ? 'ok'
         : 'degraded';
     return {
@@ -372,7 +374,7 @@ export class HealthService {
       database,
       competitorDatabase,
       memory,
-      rateLimiter: this.rateLimiter.snapshot(redis.connected),
+      rateLimiter,
       cache: {
         status: redis.status,
         connected: redis.connected,

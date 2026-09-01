@@ -45,26 +45,36 @@ const saturatedPoolSnapshot = {
   activeConnections: 10,
 };
 
-function rateLimiterStub(): RateLimitService {
+function rateLimiterStub(
+  forcedStatus?: 'degraded' | 'disabled' | 'ok',
+): RateLimitService {
   return {
-    snapshot: vi.fn((redisAvailable: boolean) => ({
-      status: redisAvailable ? 'ok' : 'degraded',
-      stats: {
-        enabled: true,
-        backend: redisAvailable ? 'redis' : 'memory',
-        redisAvailable,
-        totalRequests: 0,
-        blockedRequests: 0,
-        byRole: {
-          ADMIN: { requests: 0, blocked: 0 },
-          EDITOR: { requests: 0, blocked: 0 },
-          READONLY: { requests: 0, blocked: 0 },
-          DEFAULT: { requests: 0, blocked: 0 },
+    snapshot: vi.fn((redisAvailable: boolean) => {
+      const status = forcedStatus ?? (redisAvailable ? 'ok' : 'degraded');
+      return {
+        status,
+        stats: {
+          enabled: status !== 'disabled',
+          backend:
+            status === 'disabled'
+              ? 'disabled'
+              : status === 'degraded'
+              ? 'memory'
+              : 'redis',
+          redisAvailable,
+          totalRequests: 0,
+          blockedRequests: 0,
+          byRole: {
+            ADMIN: { requests: 0, blocked: 0 },
+            EDITOR: { requests: 0, blocked: 0 },
+            READONLY: { requests: 0, blocked: 0 },
+            DEFAULT: { requests: 0, blocked: 0 },
+          },
+          lastReset: 0,
+          blockRate: '0.00',
         },
-        lastReset: 0,
-        blockRate: '0.00',
-      },
-    })),
+      };
+    }),
   } as unknown as RateLimitService;
 }
 
@@ -76,6 +86,7 @@ function buildService(
     queryCompetitor?: () => Promise<void>;
     pingRedis?: () => Promise<void>;
     primaryPoolSnapshot?: () => typeof poolSnapshot;
+    rateLimiter?: RateLimitService;
   } = {},
 ) {
   const env = options.env ?? loadEnv(validEnv);
@@ -96,7 +107,7 @@ function buildService(
     options.logger ?? new AppLogger(),
     metrics,
     errorStats,
-    rateLimiterStub(),
+    options.rateLimiter ?? rateLimiterStub(),
   );
   return { service, metrics, errorStats };
 }
@@ -314,6 +325,22 @@ describe('HealthService', () => {
       dependency: 'competitor_database',
       reason: 'probe_failed',
     });
+    metrics.onModuleDestroy();
+  });
+
+  it('Redis PING 正常但 EVAL 降级时顶层 readiness 同步 degraded', async () => {
+    const { service, metrics } = buildService({
+      rateLimiter: rateLimiterStub('degraded'),
+    });
+
+    const health = await service.getHealth();
+
+    expect(health.cache).toMatchObject({ status: 'ok', connected: true });
+    expect(health.rateLimiter).toMatchObject({
+      status: 'degraded',
+      stats: { backend: 'memory', redisAvailable: true },
+    });
+    expect(health.status).toBe('degraded');
     metrics.onModuleDestroy();
   });
 

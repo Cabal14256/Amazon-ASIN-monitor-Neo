@@ -49,9 +49,9 @@ const trustProxySchema = z
   .transform((value): boolean | number | string | undefined => {
     if (value === undefined) return undefined;
     const normalized = value.toLowerCase();
-    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
-    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
     if (/^\d+$/.test(normalized)) return Number(normalized);
+    if (['true', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', 'no', 'off'].includes(normalized)) return false;
     return value;
   });
 
