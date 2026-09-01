@@ -160,6 +160,35 @@ describe('loadEnv', () => {
     );
   });
 
+  it('按 node-postgres 默认链归一省略的 host、port 与 database', () => {
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL: 'postgres:///shared',
+        COMPETITOR_DATABASE_URL: 'postgres://localhost:5432/shared',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        PGHOST: 'db.internal',
+        PGPORT: '6543',
+        PGDATABASE: 'shared',
+        DATABASE_URL: 'postgres:///',
+        COMPETITOR_DATABASE_URL: 'postgres://db.internal:6543/shared',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        DATABASE_URL: 'postgres://app_user@db.internal',
+        COMPETITOR_DATABASE_URL: 'postgres://db.internal/app_user',
+      }),
+    ).toThrow('主库与竞品库必须指向不同的 PostgreSQL database');
+  });
+
   it('REDIS_URI 与 legacy 分项配置归一为 REDIS_URL', () => {
     expect(
       loadEnv({

@@ -19,7 +19,23 @@ const healthRatioSchema = z
   )
   .transform((value) => (value >= 1 ? value / 100 : value));
 
-function postgresTargetIdentity(value: string): string | undefined {
+const optionalNonEmptyStringSchema = z.preprocess(
+  (value) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  z.string().trim().min(1).optional(),
+);
+
+interface PostgresTargetDefaults {
+  database?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+}
+
+function postgresTargetIdentity(
+  value: string,
+  defaults: PostgresTargetDefaults,
+): string | undefined {
   try {
     const connectionString = value.trim();
     const parsedUrl = new URL(connectionString);
@@ -27,15 +43,16 @@ function postgresTargetIdentity(value: string): string | undefined {
       return undefined;
     }
     const parsed = parsePostgresConnectionString(connectionString);
-    const databaseName = parsed.database;
+    const databaseName =
+      parsed.database || defaults.database || parsed.user || defaults.user;
     if (!databaseName) return undefined;
-    const effectiveHost = parsed.host;
+    const effectiveHost = parsed.host || defaults.host || 'localhost';
     const host = effectiveHost
       ? effectiveHost.startsWith('/')
         ? `socket:${effectiveHost}`
         : effectiveHost.toLowerCase()
       : '<default>';
-    const port = parsed.port || '5432';
+    const port = parsed.port || String(defaults.port ?? 5432);
     if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
       return undefined;
     }
@@ -66,6 +83,15 @@ const envObjectSchema = z.object({
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),
   // PostgreSQL（竞品库，平移旧 MySQL amazon_competitor_monitor，决策 D6 独立 database）
   COMPETITOR_DATABASE_URL: z.string().min(1, '缺少 COMPETITOR_DATABASE_URL'),
+  // node-postgres 在 URL 省略连接参数时读取的标准 libpq 环境变量。
+  PGHOST: optionalNonEmptyStringSchema,
+  PGPORT: z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.coerce.number().int().min(1).max(65_535).optional(),
+  ),
+  PGDATABASE: optionalNonEmptyStringSchema,
+  PGUSER: optionalNonEmptyStringSchema,
 
   // Redis（队列 / 限流 / 缓存 / PubSub 四角色不变）
   REDIS_URL: z.string().min(1, '缺少 REDIS_URL'),
@@ -119,8 +145,19 @@ const envObjectSchema = z.object({
 });
 
 export const envSchema = envObjectSchema.superRefine((env, context) => {
-  const primary = postgresTargetIdentity(env.DATABASE_URL);
-  const competitor = postgresTargetIdentity(env.COMPETITOR_DATABASE_URL);
+  const postgresDefaults = {
+    host: env.PGHOST,
+    port: env.PGPORT,
+    database: env.PGDATABASE,
+    user:
+      env.PGUSER ??
+      (process.platform === 'win32' ? process.env.USERNAME : process.env.USER),
+  };
+  const primary = postgresTargetIdentity(env.DATABASE_URL, postgresDefaults);
+  const competitor = postgresTargetIdentity(
+    env.COMPETITOR_DATABASE_URL,
+    postgresDefaults,
+  );
   if (primary && competitor && primary === competitor) {
     context.addIssue({
       code: 'custom',
