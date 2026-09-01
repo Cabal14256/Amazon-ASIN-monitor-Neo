@@ -132,9 +132,9 @@ const envObjectSchema = z.object({
     .min(1)
     .max(86_400)
     .default(900),
-  AUTH_SESSION_AUTHORITY: z.enum(['legacy-mysql', 'postgresql']),
+  AUTH_DATA_AUTHORITY: z.enum(['legacy-mysql', 'postgresql']),
 
-  // 双跑期 Session 实时权威源使用 Legacy MySQL；最终同步/写冻结后才切 PostgreSQL。
+  // 双跑期鉴权数据实时权威源使用 Legacy MySQL；最终同步/写冻结后才切 PostgreSQL。
   DB_HOST: optionalNonEmptyStringSchema,
   DB_PORT: z.coerce.number().int().min(1).max(65_535).default(3306),
   DB_USER: optionalNonEmptyStringSchema,
@@ -213,7 +213,7 @@ export const envSchema = envObjectSchema.superRefine((env, context) => {
       message: '生产环境 JWT_SECRET 不得使用公开模板值',
     });
   }
-  if (env.AUTH_SESSION_AUTHORITY === 'legacy-mysql') {
+  if (env.AUTH_DATA_AUTHORITY === 'legacy-mysql') {
     const requiredLegacyDatabaseFields = [
       ['DB_HOST', env.DB_HOST],
       ['DB_USER', env.DB_USER],
@@ -230,7 +230,7 @@ export const envSchema = envObjectSchema.superRefine((env, context) => {
         context.addIssue({
           code: 'custom',
           path: [path],
-          message: `AUTH_SESSION_AUTHORITY=legacy-mysql 时缺少 ${path}`,
+          message: `AUTH_DATA_AUTHORITY=legacy-mysql 时缺少 ${path}`,
         });
       }
     }

@@ -19,9 +19,7 @@ import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import {
   AUTH_DATA_REPOSITORY,
-  AUTH_SESSION_REPOSITORY,
   type AuthRepositoryPort,
-  type AuthSessionRepositoryPort,
 } from './auth.constants';
 import type { AuthenticatedUser, AuthPrincipal } from './auth.types';
 
@@ -101,8 +99,6 @@ export class AuthenticationService {
     @Inject(ENV) private readonly env: Env,
     @Inject(AUTH_DATA_REPOSITORY)
     private readonly repository: AuthRepositoryPort,
-    @Inject(AUTH_SESSION_REPOSITORY)
-    private readonly sessionRepository: AuthSessionRepositoryPort,
     @Inject(AppLogger) private readonly logger: AppLogger,
   ) {}
 
@@ -164,9 +160,7 @@ export class AuthenticationService {
 
     try {
       const claims = this.verifyToken(token);
-      const session = await this.sessionRepository.findSessionById(
-        claims.sessionId,
-      );
+      const session = await this.repository.findSessionById(claims.sessionId);
       if (!session) {
         throw unauthorized('会话不存在或已过期');
       }
@@ -174,11 +168,11 @@ export class AuthenticationService {
         throw forbidden('会话已失效');
       }
       if (session.expiresAt !== null && session.expiresAt <= new Date()) {
-        await this.sessionRepository.revokeSession(session.id);
+        await this.repository.revokeSession(session.id);
         throw unauthorized('会话已过期');
       }
 
-      await this.sessionRepository.touchSession(session.id);
+      await this.repository.touchSession(session.id);
       const user = await this.repository.findUserById(claims.userId);
       if (!user) {
         throw unauthorized('用户不存在');

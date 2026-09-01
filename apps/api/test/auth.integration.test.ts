@@ -10,13 +10,10 @@ import { describe, expect, it } from 'vitest';
 
 import { loadEnv } from '@asin-monitor/config';
 import { currentUserResultSchema } from '@asin-monitor/contracts';
-import { AuthRepository, LegacyMysqlSessionRepository } from '@asin-monitor/db';
-import {
-  AUTH_DATA_REPOSITORY,
-  AUTH_SESSION_REPOSITORY,
-} from '../src/auth/auth.constants';
+import { LegacyMysqlAuthRepository } from '@asin-monitor/db';
+import { AUTH_DATA_REPOSITORY } from '../src/auth/auth.constants';
 import { AuthController } from '../src/auth/auth.controller';
-import { createAuthSessionRepository } from '../src/auth/auth.module';
+import { createAuthDataRepository } from '../src/auth/auth.module';
 import { AuthenticationGuard } from '../src/auth/authentication.guard';
 import { AuthenticationService } from '../src/auth/authentication.service';
 import { PermissionCacheService } from '../src/auth/permission-cache.service';
@@ -47,12 +44,11 @@ class AuthIntegrationController {
 describe.skipIf(!integrationEnabled)(
   'Neo Auth PostgreSQL/Redis/Legacy MySQL integration',
   () => {
-    it('双跑期使用实时 MySQL Session 权威状态并复用 PG/Redis RBAC', async () => {
+    it('双跑期全部鉴权数据使用实时 MySQL 权威源，PG 快照不参与授权', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
       const pools = new ApplicationDatabasePools(env, logger);
       const redis = new ApplicationRedisClient(env, logger);
-      const repository = new AuthRepository(pools.primaryDb);
       const mysqlPool = mysql.createPool({
         host: env.DB_HOST!,
         port: env.DB_PORT,
@@ -61,15 +57,27 @@ describe.skipIf(!integrationEnabled)(
         database: env.DB_NAME!,
         timezone: '+08:00',
       });
-      const sessionRepository = createAuthSessionRepository(
-        env,
-        repository,
-        logger,
-      );
+      const repository = createAuthDataRepository(env, pools, logger);
       let app: NestFastifyApplication | undefined;
 
       try {
-        expect(env.AUTH_SESSION_AUTHORITY).toBe('legacy-mysql');
+        expect(env.AUTH_DATA_AUTHORITY).toBe('legacy-mysql');
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS users (
+          id VARCHAR(50) PRIMARY KEY,
+          username VARCHAR(50) NOT NULL,
+          password VARCHAR(255) NOT NULL,
+          real_name VARCHAR(100) NULL,
+          status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+          last_login_time DATETIME NULL,
+          last_login_ip VARCHAR(50) NULL,
+          password_expires_at DATETIME NULL,
+          password_changed_at DATETIME NULL,
+          force_password_change TINYINT(1) NULL DEFAULT 0,
+          failed_login_attempts INT NULL DEFAULT 0,
+          locked_until DATETIME NULL,
+          create_time DATETIME NULL,
+          update_time DATETIME NULL
+        )`);
         await mysqlPool.query(`CREATE TABLE IF NOT EXISTS sessions (
           id CHAR(36) PRIMARY KEY,
           user_id VARCHAR(50) NOT NULL,
@@ -81,7 +89,71 @@ describe.skipIf(!integrationEnabled)(
           last_active_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           expires_at DATETIME NULL
         )`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS roles (
+          id VARCHAR(50) PRIMARY KEY,
+          code VARCHAR(50) NOT NULL,
+          name VARCHAR(100) NOT NULL
+        )`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS permissions (
+          id VARCHAR(50) PRIMARY KEY,
+          code VARCHAR(50) NOT NULL
+        )`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS user_roles (
+          user_id VARCHAR(50) NOT NULL,
+          role_id VARCHAR(50) NOT NULL,
+          UNIQUE KEY uq_user_role (user_id, role_id)
+        )`);
+        await mysqlPool.query(`CREATE TABLE IF NOT EXISTS role_permissions (
+          role_id VARCHAR(50) NOT NULL,
+          permission_id VARCHAR(50) NOT NULL,
+          UNIQUE KEY uq_role_permission (role_id, permission_id)
+        )`);
+
+        await mysqlPool.query('DELETE FROM user_roles WHERE user_id = ?', [
+          userId,
+        ]);
+        await mysqlPool.query(
+          'DELETE FROM role_permissions WHERE role_id = ?',
+          [roleId],
+        );
         await mysqlPool.query('DELETE FROM sessions WHERE id = ?', [sessionId]);
+        await mysqlPool.query('DELETE FROM users WHERE id = ?', [userId]);
+        await mysqlPool.query('DELETE FROM roles WHERE id = ?', [roleId]);
+        await mysqlPool.query('DELETE FROM permissions WHERE id = ?', [
+          permissionId,
+        ]);
+        await mysqlPool.query(
+          `INSERT INTO users (
+             id, username, password, real_name, status,
+             password_expires_at, password_changed_at,
+             force_password_change, failed_login_attempts,
+             create_time, update_time
+           ) VALUES (
+             ?, ?, ?, ?, 'ACTIVE',
+             UTC_TIMESTAMP() + INTERVAL 9 HOUR,
+             UTC_TIMESTAMP() + INTERVAL 8 HOUR,
+             0, 0,
+             UTC_TIMESTAMP() + INTERVAL 8 HOUR,
+             UTC_TIMESTAMP() + INTERVAL 8 HOUR
+           )`,
+          [userId, 'neo-auth-integration', 'unused-hash', 'Integration User'],
+        );
+        await mysqlPool.query(
+          'INSERT INTO roles (id, code, name) VALUES (?, ?, ?)',
+          [roleId, 'neo-integration-role', 'Neo integration role'],
+        );
+        await mysqlPool.query(
+          'INSERT INTO permissions (id, code) VALUES (?, ?)',
+          [permissionId, 'asin:read'],
+        );
+        await mysqlPool.query(
+          'INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)',
+          [userId, roleId],
+        );
+        await mysqlPool.query(
+          'INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)',
+          [roleId, permissionId],
+        );
         await mysqlPool.query(
           `INSERT INTO sessions (
              id, user_id, created_at, last_active_at, expires_at
@@ -99,23 +171,6 @@ describe.skipIf(!integrationEnabled)(
         await pools.primaryPool.query('DELETE FROM roles WHERE id = $1', [
           roleId,
         ]);
-        await pools.primaryPool.query(
-          `INSERT INTO users (id, username, password, real_name, status, force_password_change)
-         VALUES ($1, $2, $3, $4, 'ACTIVE', false)`,
-          [userId, 'neo-auth-integration', 'unused-hash', 'Integration User'],
-        );
-        await pools.primaryPool.query(
-          `INSERT INTO roles (id, code, name) VALUES ($1, $2, $3)`,
-          [roleId, 'neo-integration-role', 'Neo integration role'],
-        );
-        await pools.primaryPool.query(
-          'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)',
-          [userId, roleId],
-        );
-        await pools.primaryPool.query(
-          'INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)',
-          [roleId, permissionId],
-        );
         await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
 
         const moduleRef = await Test.createTestingModule({
@@ -123,7 +178,6 @@ describe.skipIf(!integrationEnabled)(
           providers: [
             { provide: ENV, useValue: env },
             { provide: AUTH_DATA_REPOSITORY, useValue: repository },
-            { provide: AUTH_SESSION_REPOSITORY, useValue: sessionRepository },
             { provide: ApplicationRedisClient, useValue: redis },
             { provide: AppLogger, useValue: logger },
             AuthenticationService,
@@ -170,11 +224,16 @@ describe.skipIf(!integrationEnabled)(
         await expect(redis.get(`user:permissions:${userId}`)).resolves.toBe(
           '["asin:read"]',
         );
-        const pgSession = await pools.primaryPool.query<{ count: string }>(
-          'SELECT count(*)::text AS count FROM sessions WHERE id = $1',
-          [sessionId],
+        const pgAuthorityRows = await pools.primaryPool.query<{
+          sessions: string;
+          users: string;
+        }>(
+          `SELECT
+             (SELECT count(*) FROM sessions WHERE id = $1)::text AS sessions,
+             (SELECT count(*) FROM users WHERE id = $2)::text AS users`,
+          [sessionId, userId],
         );
-        expect(pgSession.rows[0]?.count).toBe('0');
+        expect(pgAuthorityRows.rows[0]).toEqual({ sessions: '0', users: '0' });
         const [touchedRows] = await mysqlPool.query<
           (RowDataPacket & { active: number })[]
         >(
@@ -183,6 +242,61 @@ describe.skipIf(!integrationEnabled)(
         );
         expect(touchedRows[0]?.active).toBe(1);
 
+        await mysqlPool.query(
+          `UPDATE users
+              SET password_expires_at = UTC_TIMESTAMP() + INTERVAL 7 HOUR,
+                  force_password_change = 0
+            WHERE id = ?`,
+          [userId],
+        );
+        const passwordPolicy = await fastify.inject({
+          method: 'GET',
+          url: '/api/v1/auth/current-user',
+          headers: { authorization: `Bearer ${authToken}` },
+        });
+        expect(passwordPolicy.statusCode).toBe(200);
+        expect(passwordPolicy.json()).toMatchObject({
+          data: { mustChangePassword: true, passwordExpired: true },
+        });
+        const [passwordRows] = await mysqlPool.query<
+          (RowDataPacket & { required: number })[]
+        >('SELECT force_password_change AS required FROM users WHERE id = ?', [
+          userId,
+        ]);
+        expect(passwordRows[0]?.required).toBe(1);
+
+        await mysqlPool.query('DELETE FROM user_roles WHERE user_id = ?', [
+          userId,
+        ]);
+        await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
+        const revokedPermission = await fastify.inject({
+          method: 'GET',
+          url: '/api/v1/auth-integration/allowed',
+          headers: { authorization: `Bearer ${authToken}` },
+        });
+        expect(revokedPermission.statusCode).toBe(403);
+        expect(revokedPermission.json()).toMatchObject({
+          errorMessage: '没有权限执行此操作',
+        });
+
+        await mysqlPool.query(
+          "UPDATE users SET status = 'SUSPENDED' WHERE id = ?",
+          [userId],
+        );
+        const suspended = await fastify.inject({
+          method: 'GET',
+          url: '/api/v1/auth/current-user',
+          headers: { authorization: `Bearer ${authToken}` },
+        });
+        expect(suspended.statusCode).toBe(403);
+        expect(suspended.json()).toMatchObject({
+          errorMessage: '用户已被停用',
+        });
+
+        await mysqlPool.query(
+          "UPDATE users SET status = 'ACTIVE' WHERE id = ?",
+          [userId],
+        );
         await mysqlPool.query(
           "UPDATE sessions SET status = 'REVOKED' WHERE id = ?",
           [sessionId],
@@ -199,10 +313,22 @@ describe.skipIf(!integrationEnabled)(
           await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
         }
         if (app) await app.close();
-        if (sessionRepository instanceof LegacyMysqlSessionRepository) {
-          await sessionRepository.onModuleDestroy();
+        if (repository instanceof LegacyMysqlAuthRepository) {
+          await repository.onModuleDestroy();
         }
+        await mysqlPool.query('DELETE FROM user_roles WHERE user_id = ?', [
+          userId,
+        ]);
+        await mysqlPool.query(
+          'DELETE FROM role_permissions WHERE role_id = ?',
+          [roleId],
+        );
         await mysqlPool.query('DELETE FROM sessions WHERE id = ?', [sessionId]);
+        await mysqlPool.query('DELETE FROM users WHERE id = ?', [userId]);
+        await mysqlPool.query('DELETE FROM roles WHERE id = ?', [roleId]);
+        await mysqlPool.query('DELETE FROM permissions WHERE id = ?', [
+          permissionId,
+        ]);
         await mysqlPool.end();
         await pools.primaryPool.query('DELETE FROM users WHERE id = $1', [
           userId,

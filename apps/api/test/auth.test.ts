@@ -14,10 +14,7 @@ import type {
   AuthSessionRecord,
   AuthUserRecord,
 } from '@asin-monitor/db';
-import {
-  AUTH_DATA_REPOSITORY,
-  AUTH_SESSION_REPOSITORY,
-} from '../src/auth/auth.constants';
+import { AUTH_DATA_REPOSITORY } from '../src/auth/auth.constants';
 import { AuthController } from '../src/auth/auth.controller';
 import { AuthenticationGuard } from '../src/auth/authentication.guard';
 import { AuthenticationService } from '../src/auth/authentication.service';
@@ -34,7 +31,7 @@ const env = loadEnv({
   COMPETITOR_DATABASE_URL: 'postgresql://localhost/amazon_competitor_monitor',
   REDIS_URL: 'redis://localhost:6379',
   JWT_SECRET: 'test-secret',
-  AUTH_SESSION_AUTHORITY: 'postgresql',
+  AUTH_DATA_AUTHORITY: 'postgresql',
 });
 
 const activeSession: AuthSessionRecord = {
@@ -136,7 +133,6 @@ describe('Neo JWT/Session HTTP 鉴权与 RBAC', () => {
       providers: [
         { provide: ENV, useValue: env },
         { provide: AUTH_DATA_REPOSITORY, useValue: repository },
-        { provide: AUTH_SESSION_REPOSITORY, useValue: repository },
         { provide: ApplicationRedisClient, useValue: redis },
         { provide: AppLogger, useValue: logger },
         AuthenticationService,

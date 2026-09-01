@@ -6,7 +6,7 @@ import {
   createShanghaiTimestampTypeOverrides,
   parseShanghaiTimestamp,
 } from '../src/client';
-import { LegacyMysqlSessionRepository } from '../src/repositories/legacy-mysql-session-repository';
+import { LegacyMysqlAuthRepository } from '../src/repositories/legacy-mysql-auth-repository';
 
 const legacyConfig = {
   host: '127.0.0.1',
@@ -41,7 +41,7 @@ describe('PostgreSQL timestamp without time zone D8 解析', () => {
   });
 });
 
-describe('Legacy MySQL Session 权威 repository', () => {
+describe('Legacy MySQL 鉴权数据权威 repository', () => {
   it('参数化读取并按 D8 将 MySQL DATETIME 映射为 Session 记录', async () => {
     const query = vi.fn().mockResolvedValue([
       [
@@ -59,7 +59,7 @@ describe('Legacy MySQL Session 权威 repository', () => {
       ],
       [],
     ]);
-    const repository = new LegacyMysqlSessionRepository(legacyConfig, {
+    const repository = new LegacyMysqlAuthRepository(legacyConfig, {
       query,
       end: vi.fn(),
     } as unknown as Pool);
@@ -84,7 +84,7 @@ describe('Legacy MySQL Session 权威 repository', () => {
   it('撤销、touch 与连接池关闭保持参数化且关闭幂等', async () => {
     const query = vi.fn().mockResolvedValue([{}, []]);
     const end = vi.fn().mockResolvedValue(undefined);
-    const repository = new LegacyMysqlSessionRepository(legacyConfig, {
+    const repository = new LegacyMysqlAuthRepository(legacyConfig, {
       query,
       end,
     } as unknown as Pool);
@@ -109,5 +109,61 @@ describe('Legacy MySQL Session 权威 repository', () => {
       }),
     );
     expect(end).toHaveBeenCalledOnce();
+  });
+
+  it('用户、密码策略、权限和角色都读取或写入同一个实时 MySQL 权威源', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 'user-3',
+            username: 'legacy-user',
+            real_name: 'Legacy User',
+            status: 'ACTIVE',
+            last_login_time: null,
+            last_login_ip: null,
+            password_expires_at: '2026-09-30 12:00:00.000',
+            password_changed_at: '2026-08-30 12:00:00.000',
+            force_password_change: 0,
+            failed_login_attempts: 0,
+            locked_until: null,
+            create_time: '2026-08-01 12:00:00.000',
+            update_time: '2026-09-01 12:00:00.000',
+          },
+        ],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ code: 'custom:read' }], []])
+      .mockResolvedValueOnce([
+        [{ id: 'role-3', code: 'CUSTOM', name: 'Custom role' }],
+        [],
+      ])
+      .mockResolvedValueOnce([{}, []]);
+    const repository = new LegacyMysqlAuthRepository(legacyConfig, {
+      query,
+      end: vi.fn(),
+    } as unknown as Pool);
+
+    await expect(repository.findUserById('user-3')).resolves.toMatchObject({
+      id: 'user-3',
+      status: 'ACTIVE',
+      forcePasswordChange: false,
+      passwordExpiresAt: new Date('2026-09-30T04:00:00.000Z'),
+    });
+    await expect(repository.getPermissionCodes('user-3')).resolves.toEqual([
+      'custom:read',
+    ]);
+    await expect(repository.getRoles('user-3')).resolves.toEqual([
+      { id: 'role-3', code: 'CUSTOM', name: 'Custom role' },
+    ]);
+    await repository.markPasswordChangeRequired('user-3');
+
+    expect(query).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sql: expect.stringContaining('force_password_change = 1'),
+        values: ['user-3'],
+      }),
+    );
   });
 });
