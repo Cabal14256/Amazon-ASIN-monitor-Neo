@@ -87,7 +87,8 @@ export class LegacyMysqlSessionRepository implements AuthSessionRepository {
   async revokeSession(sessionId: string): Promise<void> {
     await this.pool.query({
       sql: `UPDATE sessions
-               SET status = 'REVOKED', last_active_at = NOW()
+               SET status = 'REVOKED',
+                   last_active_at = UTC_TIMESTAMP() + INTERVAL 8 HOUR
              WHERE id = ?`,
       values: [sessionId],
       timeout: this.config.queryTimeoutMs,
@@ -96,7 +97,9 @@ export class LegacyMysqlSessionRepository implements AuthSessionRepository {
 
   async touchSession(sessionId: string): Promise<void> {
     await this.pool.query({
-      sql: 'UPDATE sessions SET last_active_at = NOW() WHERE id = ?',
+      sql: `UPDATE sessions
+               SET last_active_at = UTC_TIMESTAMP() + INTERVAL 8 HOUR
+             WHERE id = ?`,
       values: [sessionId],
       timeout: this.config.queryTimeoutMs,
     });

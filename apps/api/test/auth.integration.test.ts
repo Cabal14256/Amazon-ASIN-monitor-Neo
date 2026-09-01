@@ -83,8 +83,14 @@ describe.skipIf(!integrationEnabled)(
         )`);
         await mysqlPool.query('DELETE FROM sessions WHERE id = ?', [sessionId]);
         await mysqlPool.query(
-          `INSERT INTO sessions (id, user_id, expires_at)
-           VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR))`,
+          `INSERT INTO sessions (
+             id, user_id, created_at, last_active_at, expires_at
+           ) VALUES (
+             ?, ?,
+             UTC_TIMESTAMP() + INTERVAL 8 HOUR,
+             UTC_TIMESTAMP() + INTERVAL 8 HOUR,
+             UTC_TIMESTAMP() + INTERVAL 9 HOUR
+           )`,
           [sessionId, userId],
         );
         await pools.primaryPool.query('DELETE FROM users WHERE id = $1', [

@@ -96,11 +96,17 @@ describe('Legacy MySQL Session 权威 repository', () => {
 
     expect(query).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ values: ['session-2'] }),
+      expect.objectContaining({
+        sql: expect.stringContaining('UTC_TIMESTAMP() + INTERVAL 8 HOUR'),
+        values: ['session-2'],
+      }),
     );
     expect(query).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ values: ['session-2'] }),
+      expect.objectContaining({
+        sql: expect.stringContaining('UTC_TIMESTAMP() + INTERVAL 8 HOUR'),
+        values: ['session-2'],
+      }),
     );
     expect(end).toHaveBeenCalledOnce();
   });
