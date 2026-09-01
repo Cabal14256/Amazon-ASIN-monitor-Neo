@@ -41,7 +41,9 @@ export class PermissionCacheService {
   ) {}
 
   private key(type: CacheType, userId: string): string {
-    return `user:${type}:${userId}`;
+    return type === 'roles'
+      ? `neo:user:roles:${userId}`
+      : `user:permissions:${userId}`;
   }
 
   private getMemory<T>(

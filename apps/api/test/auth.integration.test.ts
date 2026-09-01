@@ -79,7 +79,10 @@ describe.skipIf(!integrationEnabled)(
          VALUES ($1, $2, LOCALTIMESTAMP + interval '1 hour')`,
           [sessionId, userId],
         );
-        await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
+        await redis.del(
+          `user:permissions:${userId}`,
+          `neo:user:roles:${userId}`,
+        );
 
         const moduleRef = await Test.createTestingModule({
           controllers: [AuthController, AuthIntegrationController],
@@ -139,7 +142,10 @@ describe.skipIf(!integrationEnabled)(
         expect(touched.rows[0]?.active).toBe(true);
       } finally {
         if (redis.client.status !== 'end') {
-          await redis.del(`user:permissions:${userId}`, `user:roles:${userId}`);
+          await redis.del(
+            `user:permissions:${userId}`,
+            `neo:user:roles:${userId}`,
+          );
         }
         if (app) await app.close();
         await pools.primaryPool.query('DELETE FROM users WHERE id = $1', [

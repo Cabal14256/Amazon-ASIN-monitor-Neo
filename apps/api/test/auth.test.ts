@@ -481,7 +481,25 @@ describe('PermissionCacheService', () => {
 
     expect(redis.del).toHaveBeenCalledWith(
       `user:permissions:${activeUser.id}`,
+      `neo:user:roles:${activeUser.id}`,
+    );
+  });
+
+  it('角色代码使用 Neo 专属键，不覆盖 legacy 角色对象缓存', async () => {
+    const service = cache();
+
+    await expect(service.getRoles(activeUser.id)).resolves.toEqual([
+      'operator',
+    ]);
+    expect(redis.setex).toHaveBeenCalledWith(
+      `neo:user:roles:${activeUser.id}`,
+      env.AUTH_PERMISSION_CACHE_TTL_SECONDS,
+      '["operator"]',
+    );
+    expect(redis.setex).not.toHaveBeenCalledWith(
       `user:roles:${activeUser.id}`,
+      expect.any(Number),
+      expect.any(String),
     );
   });
 });
