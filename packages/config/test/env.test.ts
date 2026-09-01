@@ -103,7 +103,9 @@ describe('loadEnv', () => {
 
   it('JWT_SECRET 校验不改变与 legacy 共享的密钥字节', () => {
     const secret = '  legacy-shared-secret\n';
-    expect(loadEnv({ ...validEnv, JWT_SECRET: secret }).JWT_SECRET).toBe(secret);
+    expect(loadEnv({ ...validEnv, JWT_SECRET: secret }).JWT_SECRET).toBe(
+      secret,
+    );
     expect(() => loadEnv({ ...validEnv, JWT_SECRET: ' \t\n ' })).toThrow(
       '缺少 JWT_SECRET',
     );
