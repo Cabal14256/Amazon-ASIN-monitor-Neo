@@ -144,9 +144,11 @@ export class RateLimitRequestHook {
       policy: 'role' as const,
       role: 'DEFAULT' as const,
     };
-    const decision = await this.rateLimiter.consume(input, { record: false });
+    const decision = await this.rateLimiter.consume(input, {
+      recordRequest: false,
+    });
     if (!decision.allowed) {
-      this.rateLimiter.recordDecision(decision);
+      this.rateLimiter.recordRequest('DEFAULT', true);
       sendBlocked(reply, decision, this.logger, 'RateLimitRequestHook');
       return true;
     }
@@ -155,23 +157,16 @@ export class RateLimitRequestHook {
     return false;
   }
 
-  async release(request: FastifyRequest): Promise<void> {
-    const provisional = this.provisional.get(request);
-    if (!provisional) return;
-    this.provisional.delete(request);
-    await this.rateLimiter.release(provisional.decision);
-  }
-
-  commit(request: FastifyRequest): RateLimitDecision | undefined {
+  take(request: FastifyRequest): RateLimitDecision | undefined {
     const provisional = this.provisional.get(request);
     if (!provisional) return undefined;
     this.provisional.delete(request);
-    this.rateLimiter.recordDecision(provisional.decision);
     return provisional.decision;
   }
 
   complete(request: FastifyRequest): void {
-    this.commit(request);
+    const decision = this.take(request);
+    if (decision) this.rateLimiter.recordRequest('DEFAULT', false);
   }
 }
 
@@ -202,18 +197,31 @@ export class RateLimitInterceptor implements NestInterceptor {
       this.logger,
       'RateLimitInterceptor',
     );
-    let roleDecision =
-      role === 'DEFAULT' ? this.requestHook.commit(request) : undefined;
-    if (!roleDecision) {
-      roleDecision = await this.rateLimiter.consume({
+    const provisional = this.requestHook.take(request);
+    let roleDecision: RateLimitDecision;
+    if (provisional && role !== 'DEFAULT') {
+      roleDecision = await this.rateLimiter.transfer(provisional, {
         clientIdentifier: request.ip,
         policy: 'role',
         role,
       });
-      if (roleDecision.allowed) await this.requestHook.release(request);
+    } else if (provisional) {
+      roleDecision = provisional;
+    } else {
+      roleDecision = await this.rateLimiter.consume(
+        {
+          clientIdentifier: request.ip,
+          policy: 'role',
+          role,
+        },
+        {
+          recordRequest: false,
+        },
+      );
     }
     applyHeaders(reply, roleDecision);
     if (!roleDecision.allowed) {
+      this.rateLimiter.recordRequest(role, true);
       throwBlocked(reply, roleDecision, this.logger, 'RateLimitInterceptor');
     }
 
@@ -222,16 +230,22 @@ export class RateLimitInterceptor implements NestInterceptor {
         context.getHandler(),
         context.getClass(),
       ]) ?? 'role';
-    if (policy !== 'strict') return next.handle();
-    const decision = await this.rateLimiter.consume({
-      clientIdentifier: request.ip,
-      policy,
-      role,
-    });
-    applyHeaders(reply, decision);
-    if (!decision.allowed) {
-      throwBlocked(reply, decision, this.logger, 'RateLimitInterceptor');
+    if (policy === 'strict') {
+      const decision = await this.rateLimiter.consume(
+        {
+          clientIdentifier: request.ip,
+          policy,
+          role,
+        },
+        { recordRequest: false },
+      );
+      applyHeaders(reply, decision);
+      if (!decision.allowed) {
+        this.rateLimiter.recordRequest(role, true);
+        throwBlocked(reply, decision, this.logger, 'RateLimitInterceptor');
+      }
     }
+    this.rateLimiter.recordRequest(role, false);
     return next.handle();
   }
 }

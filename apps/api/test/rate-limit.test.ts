@@ -116,8 +116,12 @@ describe('RateLimitService', () => {
     async (role, limit) => {
       const redis = redisMock();
       vi.mocked(redis.eval)
-        .mockResolvedValueOnce([limit, RATE_LIMIT_WINDOW_MS])
-        .mockResolvedValueOnce([limit + 1, RATE_LIMIT_WINDOW_MS - 1]);
+        .mockResolvedValueOnce([limit, RATE_LIMIT_WINDOW_MS, 'window-a'])
+        .mockResolvedValueOnce([
+          limit + 1,
+          RATE_LIMIT_WINDOW_MS - 1,
+          'window-a',
+        ]);
       const { service, metrics } = createService({ redis });
       const input = {
         clientIdentifier: '203.0.113.10',
@@ -147,6 +151,99 @@ describe('RateLimitService', () => {
     },
   );
 
+  it('释放预占时携带窗口 generation，旧请求不会递减新窗口', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce([1, RATE_LIMIT_WINDOW_MS, 'reserved-generation'])
+      .mockResolvedValueOnce(0);
+    const { service } = createService({ redis });
+    const decision = await service.consume(
+      {
+        clientIdentifier: '203.0.113.15',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+
+    await service.release(decision);
+
+    const [releaseScript, releaseKeys, releaseArguments] = vi.mocked(redis.eval)
+      .mock.calls[1]!;
+    expect(releaseScript).toContain(
+      "redis.call('HGET', KEYS[1], 'generation')",
+    );
+    expect(releaseScript).toContain('generation ~= ARGV[1]');
+    expect(releaseKeys).toEqual([decision.storageKey]);
+    expect(releaseArguments).toEqual(['reserved-generation']);
+  });
+
+  it('认证角色计数与 DEFAULT 预占释放在同一个 Redis 脚本内完成', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce([1, RATE_LIMIT_WINDOW_MS, 'source-generation'])
+      .mockResolvedValueOnce([1, RATE_LIMIT_WINDOW_MS, 'target-generation', 1]);
+    const { service } = createService({ redis });
+    const source = await service.consume(
+      {
+        clientIdentifier: '203.0.113.16',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+
+    const transferred = await service.transfer(source, {
+      clientIdentifier: '203.0.113.16',
+      policy: 'role',
+      role: 'ADMIN',
+    });
+
+    expect(transferred).toMatchObject({
+      backend: 'redis',
+      count: 1,
+      generation: 'target-generation',
+      role: 'ADMIN',
+    });
+    expect(redis.eval).toHaveBeenCalledTimes(2);
+    const [transferScript, transferKeys, transferArguments] = vi.mocked(
+      redis.eval,
+    ).mock.calls[1]!;
+    expect(transferScript).toContain("redis.call('HINCRBY', KEYS[2]");
+    expect(transferScript).toContain("redis.call('HGET', KEYS[1]");
+    expect(transferKeys.slice(0, 2)).toEqual([
+      source.storageKey,
+      buildRateLimitKey(rateLimitPrefix, 'role', 'ADMIN', '203.0.113.16'),
+    ]);
+    expect(transferArguments[3]).toBe('source-generation');
+  });
+
+  it('原子转移调用失败时保留较严格的 DEFAULT 决策并进入降级', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce([1, RATE_LIMIT_WINDOW_MS, 'source-generation'])
+      .mockRejectedValueOnce(new Error('transfer unavailable'));
+    const { service } = createService({ redis });
+    const source = await service.consume(
+      {
+        clientIdentifier: '203.0.113.17',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+
+    await expect(
+      service.transfer(source, {
+        clientIdentifier: '203.0.113.17',
+        policy: 'role',
+        role: 'ADMIN',
+      }),
+    ).resolves.toBe(source);
+    expect(redis.eval).toHaveBeenCalledTimes(2);
+    expect(service.snapshot(true).status).toBe('degraded');
+  });
+
   it('Redis 故障时使用不延长窗口的内存降级，并在冷却后自动恢复', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
@@ -154,7 +251,7 @@ describe('RateLimitService', () => {
     vi.mocked(redis.eval)
       .mockRejectedValueOnce(new Error('redis://user:secret@cache/0'))
       .mockRejectedValueOnce(new Error('still unavailable'))
-      .mockResolvedValueOnce([1, RATE_LIMIT_WINDOW_MS]);
+      .mockResolvedValueOnce([5, RATE_LIMIT_WINDOW_MS, 'redis-window']);
     const logger = loggerMock();
     const { service } = createService({ logger, redis });
     const input = {
@@ -186,8 +283,13 @@ describe('RateLimitService', () => {
     vi.advanceTimersByTime(5_001);
     await expect(service.consume(input)).resolves.toMatchObject({
       backend: 'redis',
-      count: 1,
+      count: 5,
     });
+    const [mergeScript, mergeKeys, mergeArguments] = vi.mocked(redis.eval).mock
+      .calls[2]!;
+    expect(mergeScript).toContain("redis.call('HGET', KEYS[2], 'count')");
+    expect(mergeKeys).toHaveLength(2);
+    expect(mergeArguments[2]).toBe(4);
     expect(logger.warn).toHaveBeenCalledWith(
       'HTTP 限流 Redis 不可用，切换内存降级',
       'RateLimitService',
@@ -235,7 +337,7 @@ describe('RateLimitService', () => {
 
     expect(followers.every(({ backend }) => backend === 'memory')).toBe(true);
     expect(redis.eval).toHaveBeenCalledTimes(2);
-    finishProbe([1, RATE_LIMIT_WINDOW_MS]);
+    finishProbe([1, RATE_LIMIT_WINDOW_MS, 'leader-window']);
     await expect(leader).resolves.toMatchObject({ backend: 'redis', count: 1 });
   });
 
@@ -262,12 +364,11 @@ describe('RateLimitService', () => {
     expect(redis.eval).toHaveBeenCalledTimes(2);
     const [script, keys, arguments_] = vi.mocked(redis.eval).mock.calls[1]!;
     for (const command of [
-      'SET',
-      'INCR',
+      'HSET',
+      'HINCRBY',
       'PTTL',
       'PEXPIRE',
-      'GET',
-      'DECR',
+      'HGET',
       'DEL',
     ]) {
       expect(script).toContain(`redis.call('${command}'`);
@@ -275,7 +376,8 @@ describe('RateLimitService', () => {
     expect(keys[0]).toMatch(
       /^spapi:ratelimiter:http:neo:capability:[0-9a-f-]+$/,
     );
-    expect(arguments_).toEqual([1_000]);
+    expect(arguments_[0]).toBe(1_000);
+    expect(arguments_[1]).toEqual(expect.any(String));
   });
 
   it('实例启动时 readiness 即验证完整限流命令，ACL 不足保持 degraded', async () => {
@@ -319,13 +421,23 @@ describe('RateLimitService', () => {
     const internal = service as unknown as {
       backend: 'memory';
       cleanMemory(now: number): void;
-      memoryOverflowWindows: Map<string, { count: number; expiresAt: number }>;
-      memoryWindows: Map<string, { count: number; expiresAt: number }>;
+      memoryOverflowWindows: Map<
+        string,
+        { count: number; expiresAt: number; generation: string }
+      >;
+      memoryWindows: Map<
+        string,
+        { count: number; expiresAt: number; generation: string }
+      >;
       redisRetryAfter: number;
     };
     const expiresAt = Date.now() + RATE_LIMIT_WINDOW_MS;
     for (let index = 0; index < 10_000; index += 1) {
-      internal.memoryWindows.set(`existing-${index}`, { count: 1, expiresAt });
+      internal.memoryWindows.set(`existing-${index}`, {
+        count: 1,
+        expiresAt,
+        generation: `existing-${index}`,
+      });
     }
     internal.backend = 'memory';
     internal.redisRetryAfter = expiresAt;
@@ -467,30 +579,63 @@ describe('RateLimitRequestHook HTTP 边界', () => {
   let permissionCache: { getRoles: ReturnType<typeof vi.fn> };
   let redis: ApplicationRedisClient;
   let counters: Map<string, number>;
+  let generations: Map<string, string>;
 
   async function createApp(env = loadEnv(validEnv)) {
     counters = new Map();
+    generations = new Map();
     logger = loggerMock();
     metrics = new MetricsService();
     metricsToClose.push(metrics);
     permissionCache = { getRoles: vi.fn().mockResolvedValue(['ADMIN']) };
     redis = redisMock();
     vi.mocked(redis.eval).mockImplementation(
-      async (script, keys: readonly string[]) => {
-        if (keys.length === 0) return 1;
-        const key = keys[0]!;
-        if (script.includes("redis.call('DECR'")) {
-          const current = counters.get(key) ?? 0;
+      async (script, keys: readonly string[], arguments_) => {
+        if (keys[0]?.includes(':capability:')) return 1;
+        const sourceKey = keys[0]!;
+        if (script.includes('generation ~= ARGV[1]')) {
+          if (generations.get(sourceKey) !== arguments_[0]) return 0;
+          const current = counters.get(sourceKey) ?? 0;
           if (current <= 1) {
-            counters.delete(key);
+            counters.delete(sourceKey);
+            generations.delete(sourceKey);
             return 0;
           }
-          counters.set(key, current - 1);
+          counters.set(sourceKey, current - 1);
           return current - 1;
         }
-        const count = (counters.get(key) ?? 0) + 1;
-        counters.set(key, count);
-        return [count, RATE_LIMIT_WINDOW_MS];
+        if (keys.length === 3) {
+          const targetKey = keys[1]!;
+          const targetGeneration =
+            generations.get(targetKey) ?? String(arguments_[1]);
+          generations.set(targetKey, targetGeneration);
+          const count =
+            (counters.get(targetKey) ?? 0) + 1 + Number(arguments_[4] ?? 0);
+          counters.set(targetKey, count);
+          let released = 0;
+          if (
+            count <= Number(arguments_[2]) &&
+            (generations.get(sourceKey) ?? 'seeded-window') === arguments_[3]
+          ) {
+            const sourceCount = counters.get(sourceKey) ?? 0;
+            if (sourceCount <= 1) {
+              counters.delete(sourceKey);
+              generations.delete(sourceKey);
+            } else {
+              counters.set(sourceKey, sourceCount - 1);
+            }
+            released = 1;
+          }
+          return [count, RATE_LIMIT_WINDOW_MS, targetGeneration, released];
+        }
+        const generation = generations.get(sourceKey) ?? String(arguments_[1]);
+        generations.set(sourceKey, generation);
+        const count =
+          (counters.get(sourceKey) ?? 0) +
+          1 +
+          (keys.length === 2 ? Number(arguments_[2] ?? 0) : 0);
+        counters.set(sourceKey, count);
+        return [count, RATE_LIMIT_WINDOW_MS, generation];
       },
     );
     errorStats = new HealthErrorStatsService();
@@ -551,12 +696,15 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(strict.headers['ratelimit-limit']).toBe('20');
     expect(strict.headers['ratelimit-policy']).toBe('20;w=900');
     expect(app.get(RateLimitService).snapshot(true).stats).toMatchObject({
-      totalRequests: 3,
+      totalRequests: 2,
       byRole: {
         ADMIN: { requests: 1 },
-        DEFAULT: { requests: 2 },
+        DEFAULT: { requests: 1 },
       },
     });
+    expect(await metrics.render()).toContain(
+      'amazon_asin_monitor_http_rate_limit_decisions_total{role="DEFAULT",policy="strict",outcome="allowed",backend="redis"} 1',
+    );
   });
 
   it('角色查询失败安全回退 DEFAULT 且日志不包含身份信息', async () => {
@@ -648,6 +796,43 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(principalGuard.calls).toBe(1);
     expect(permissionCache.getRoles).toHaveBeenCalledOnce();
     expect(counters.get(defaultKey)).toBe(ROLE_LIMITS.DEFAULT + 1);
+    expect(app.get(RateLimitService).snapshot(true).stats).toMatchObject({
+      totalRequests: 2,
+      blockedRequests: 2,
+      byRole: {
+        ADMIN: { requests: 1, blocked: 1 },
+        DEFAULT: { requests: 1, blocked: 1 },
+      },
+    });
+  });
+
+  it('strict 附加桶阻断时健康统计只记录一次请求，桶指标分别保留', async () => {
+    const strictKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'strict',
+      'DEFAULT',
+      '127.0.0.1',
+    );
+    counters.set(strictKey, STRICT_RATE_LIMIT);
+
+    const response = await app.getHttpAdapter().getInstance().inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/strict',
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(app.get(RateLimitService).snapshot(true).stats).toMatchObject({
+      totalRequests: 1,
+      blockedRequests: 1,
+      byRole: { DEFAULT: { requests: 1, blocked: 1 } },
+    });
+    const rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_decisions_total{role="DEFAULT",policy="role",outcome="allowed",backend="redis"} 1',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_decisions_total{role="DEFAULT",policy="strict",outcome="blocked",backend="redis"} 1',
+    );
   });
 
   it('撤销会话的 Guard 拒绝与未匹配 API 均保留 DEFAULT 预占，并在下一请求提前 429', async () => {
@@ -769,7 +954,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
 describe.skipIf(!integrationEnabled)(
   'RateLimitService Redis integration',
   () => {
-    it('两个服务实例共享原子计数、TTL 不续期且可原子释放预占', async () => {
+    it('两个实例共享计数，generation 保护释放并支持原子角色转移', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
       const redis = new ApplicationRedisClient(env, logger);
@@ -784,10 +969,22 @@ describe.skipIf(!integrationEnabled)(
         'DEFAULT',
         clientIdentifier,
       );
+      const defaultKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        clientIdentifier,
+      );
+      const adminKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'ADMIN',
+        clientIdentifier,
+      );
       try {
         await serviceA.recover(true);
         expect(serviceA.snapshot(true).status).toBe('ok');
-        await redis.del(key);
+        await redis.del(key, defaultKey, adminKey);
         const first = await serviceA.consume({
           clientIdentifier,
           policy: 'strict',
@@ -808,14 +1005,104 @@ describe.skipIf(!integrationEnabled)(
         expect(secondTtl).toBeLessThanOrEqual(firstTtl);
 
         await serviceA.release(first);
-        expect(await redis.client.get(key)).toBe('1');
+        expect(await redis.client.hget(key, 'count')).toBe('1');
         await serviceB.release(second);
-        expect(await redis.client.get(key)).toBeNull();
+        expect(await redis.client.hget(key, 'count')).toBeNull();
+
+        const stale = await serviceA.consume({
+          clientIdentifier,
+          policy: 'strict',
+          role: 'DEFAULT',
+        });
+        await redis.del(key);
+        await redis.client.hset(
+          key,
+          'count',
+          7,
+          'generation',
+          'replacement-window',
+        );
+        await redis.client.pexpire(key, RATE_LIMIT_WINDOW_MS);
+        await serviceA.release(stale);
+        expect(await redis.client.hget(key, 'count')).toBe('7');
+
+        const provisional = await serviceA.consume(
+          {
+            clientIdentifier,
+            policy: 'role',
+            role: 'DEFAULT',
+          },
+          { recordRequest: false },
+        );
+        const transferred = await serviceA.transfer(provisional, {
+          clientIdentifier,
+          policy: 'role',
+          role: 'ADMIN',
+        });
+        expect(transferred).toMatchObject({
+          backend: 'redis',
+          count: 1,
+          role: 'ADMIN',
+        });
+        expect(await redis.client.hget(defaultKey, 'count')).toBeNull();
+        expect(await redis.client.hget(adminKey, 'count')).toBe('1');
       } finally {
-        if (redis.client.status !== 'end') await redis.del(key);
+        if (redis.client.status !== 'end') {
+          await redis.del(key, defaultKey, adminKey);
+        }
         if (redis.client.status !== 'end') redis.onModuleDestroy();
         metricsA.onModuleDestroy();
         metricsB.onModuleDestroy();
+      }
+    }, 30_000);
+
+    it('Redis 恢复时把活动内存窗口增量合并到共享计数', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const redis = new ApplicationRedisClient(env, logger);
+      const metrics = new MetricsService();
+      const service = new RateLimitService(env, redis, logger, metrics);
+      const clientIdentifier = `fallback-${process.pid}-${Date.now()}`;
+      const key = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        clientIdentifier,
+      );
+      let markerKey: string | undefined;
+      try {
+        await redis.del(key);
+        const evalSpy = vi
+          .spyOn(redis, 'eval')
+          .mockRejectedValueOnce(new Error('simulated Redis outage'));
+        const input = {
+          clientIdentifier,
+          policy: 'role' as const,
+          role: 'DEFAULT' as const,
+        };
+        await expect(service.consume(input)).resolves.toMatchObject({
+          backend: 'memory',
+          count: 1,
+        });
+        await service.consume(input);
+        await service.consume(input);
+        (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+
+        await expect(service.consume(input)).resolves.toMatchObject({
+          backend: 'redis',
+          count: 4,
+        });
+        markerKey = evalSpy.mock.calls[1]?.[1][1];
+        expect(markerKey).toContain(`${key}:fallback:`);
+        expect(await redis.client.hget(key, 'count')).toBe('4');
+      } finally {
+        if (redis.client.status !== 'end') {
+          await redis.del(
+            ...[key, markerKey].filter((item): item is string => !!item),
+          );
+        }
+        if (redis.client.status !== 'end') redis.onModuleDestroy();
+        metrics.onModuleDestroy();
       }
     }, 30_000);
   },
