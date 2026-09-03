@@ -27,16 +27,15 @@ interface WindowIdentity {
 }
 
 interface MemoryWindow extends WindowIdentity {
+  clientKeys: Set<string>;
   limit: number;
   requestIds: Set<string>;
-  version: number;
 }
 
 interface MemoryWindowSnapshot {
+  clientKeys: string[];
   key: string;
-  map: Map<string, MemoryWindow>;
   requestIds: string[];
-  version: number;
   window: MemoryWindow;
 }
 
@@ -54,6 +53,7 @@ interface WindowResult {
   requestId: string;
   storageKey: string;
   ttlMs: number;
+  uncertainRedisReservation: boolean;
 }
 
 export interface RateLimitDecision {
@@ -70,77 +70,82 @@ export interface RateLimitDecision {
   resetAfterMs: number;
   role: RateLimitRole;
   storageKey: string;
+  uncertainRedisReservation: boolean;
 }
 
 const REDIS_RETRY_DELAY_MS = 5_000;
 const MAX_MEMORY_WINDOWS = 10_000;
 const RECONCILIATION_BATCH_SIZE = 100;
 const CONSUME_WINDOW_SCRIPT = `
-local generation = redis.call('HGET', KEYS[1], 'generation')
+local selected = KEYS[1]
+if ARGV[5] == '1'
+  or (redis.call('HGET', KEYS[3], 'generation') == ARGV[1]
+  and redis.call('HEXISTS', KEYS[3], KEYS[1]) == 1) then
+  selected = KEYS[2]
+end
+local generation = redis.call('HGET', selected, 'generation')
 if generation ~= ARGV[1] then
-  redis.call('DEL', KEYS[1])
-  redis.call('HSET', KEYS[1], 'generation', ARGV[1])
+  redis.call('DEL', selected)
+  redis.call('HSET', selected, 'generation', ARGV[1])
 end
 local field = 'request:' .. ARGV[4]
-local current = redis.call('HLEN', KEYS[1]) - 1
-if redis.call('HEXISTS', KEYS[1], field) == 0 and current <= tonumber(ARGV[3]) then
-  redis.call('HSET', KEYS[1], field, 1)
+local current = redis.call('HLEN', selected) - 1
+if redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) then
+  redis.call('HSET', selected, field, 1)
   current = current + 1
 end
-redis.call('PEXPIREAT', KEYS[1], ARGV[2])
-local effective = current
-if redis.call('HGET', KEYS[2], 'generation') == ARGV[1] then
-  local overflow = redis.call('HLEN', KEYS[2]) - 1
-  if overflow > effective then
-    effective = overflow
-  end
-end
-return { effective, redis.call('PTTL', KEYS[1]), ARGV[1], KEYS[1] }
+redis.call('PEXPIREAT', selected, ARGV[2])
+return { current, redis.call('PTTL', selected), ARGV[1], selected }
 `;
 const RELEASE_WINDOW_SCRIPT = `
 local released = 0
-for index = 1, #KEYS do
+for index = 1, 2 do
   if redis.call('HGET', KEYS[index], 'generation') == ARGV[1] then
-    released = released + redis.call('HDEL', KEYS[index], 'request:' .. ARGV[2])
-    if redis.call('HLEN', KEYS[index]) <= 1 then
+    local removed = redis.call('HDEL', KEYS[index], 'request:' .. ARGV[2])
+    released = released + removed
+    if removed == 1 and redis.call('HLEN', KEYS[index]) <= 1 then
       redis.call('DEL', KEYS[index])
+      if index == 2 then
+        redis.call('DEL', KEYS[3])
+      end
     end
   end
 end
 return released
 `;
 const TRANSFER_WINDOW_SCRIPT = `
-local generation = redis.call('HGET', KEYS[3], 'generation')
+local selected = KEYS[3]
+if redis.call('HGET', KEYS[5], 'generation') == ARGV[1]
+  and redis.call('HEXISTS', KEYS[5], KEYS[3]) == 1 then
+  selected = KEYS[4]
+end
+local generation = redis.call('HGET', selected, 'generation')
 if generation ~= ARGV[1] then
-  redis.call('DEL', KEYS[3])
-  redis.call('HSET', KEYS[3], 'generation', ARGV[1])
+  redis.call('DEL', selected)
+  redis.call('HSET', selected, 'generation', ARGV[1])
 end
 local field = 'request:' .. ARGV[4]
-local current = redis.call('HLEN', KEYS[3]) - 1
-if redis.call('HEXISTS', KEYS[3], field) == 0 and current <= tonumber(ARGV[3]) then
-  redis.call('HSET', KEYS[3], field, 1)
+local current = redis.call('HLEN', selected) - 1
+if redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) then
+  redis.call('HSET', selected, field, 1)
   current = current + 1
 end
-redis.call('PEXPIREAT', KEYS[3], ARGV[2])
-local effective = current
-if redis.call('HGET', KEYS[4], 'generation') == ARGV[1] then
-  local overflow = redis.call('HLEN', KEYS[4]) - 1
-  if overflow > effective then
-    effective = overflow
-  end
-end
+redis.call('PEXPIREAT', selected, ARGV[2])
 local released = 0
-if effective <= tonumber(ARGV[3]) then
+if current <= tonumber(ARGV[3]) then
   for index = 1, 2 do
     if redis.call('HGET', KEYS[index], 'generation') == ARGV[5] then
       released = released + redis.call('HDEL', KEYS[index], field)
       if redis.call('HLEN', KEYS[index]) <= 1 then
         redis.call('DEL', KEYS[index])
+        if index == 2 then
+          redis.call('DEL', KEYS[6])
+        end
       end
     end
   end
 end
-return { effective, redis.call('PTTL', KEYS[3]), ARGV[1], KEYS[3], released }
+return { current, redis.call('PTTL', selected), ARGV[1], selected, released }
 `;
 const RECONCILE_WINDOW_SCRIPT = `
 local generation = redis.call('HGET', KEYS[1], 'generation')
@@ -151,7 +156,8 @@ if not generation then
   redis.call('HSET', KEYS[1], 'generation', ARGV[1])
 end
 local current = redis.call('HLEN', KEYS[1]) - 1
-for index = 4, #ARGV do
+local requestCount = tonumber(ARGV[4])
+for index = 5, 4 + requestCount do
   local field = 'request:' .. ARGV[index]
   if redis.call('HEXISTS', KEYS[1], field) == 0 and current <= tonumber(ARGV[3]) then
     redis.call('HSET', KEYS[1], field, 1)
@@ -159,6 +165,17 @@ for index = 4, #ARGV do
   end
 end
 redis.call('PEXPIREAT', KEYS[1], ARGV[2])
+if #ARGV > 4 + requestCount then
+  local memberGeneration = redis.call('HGET', KEYS[2], 'generation')
+  if memberGeneration ~= ARGV[1] then
+    redis.call('DEL', KEYS[2])
+    redis.call('HSET', KEYS[2], 'generation', ARGV[1])
+  end
+  for index = 5 + requestCount, #ARGV do
+    redis.call('HSET', KEYS[2], ARGV[index], 1)
+  end
+  redis.call('PEXPIREAT', KEYS[2], ARGV[2])
+end
 return { current, redis.call('PTTL', KEYS[1]), ARGV[1], KEYS[1] }
 `;
 const CAPABILITY_PROBE_SCRIPT = `
@@ -248,6 +265,8 @@ export class RateLimitService {
   private nextMemoryCleanupAt = 0;
   private recoveryProbeInFlight = false;
   private recoveryPromise: Promise<void> | undefined;
+  private recoveryUsesRedis = false;
+  private reconciliationUncertain = false;
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -320,21 +339,21 @@ export class RateLimitService {
   ): MemoryWindow {
     return {
       ...identity,
+      clientKeys: new Set<string>(),
       limit,
       requestIds: new Set<string>(),
-      version: 0,
     };
   }
 
-  private addMemoryRequest(window: MemoryWindow, requestId: string): void {
+  private addMemoryRequest(window: MemoryWindow, requestId: string): boolean {
     if (
       window.requestIds.has(requestId) ||
       window.requestIds.size > window.limit
     ) {
-      return;
+      return window.requestIds.has(requestId);
     }
     window.requestIds.add(requestId);
-    window.version += 1;
+    return true;
   }
 
   private activeMemoryWindow(
@@ -360,6 +379,7 @@ export class RateLimitService {
     identity: WindowIdentity,
     limit: number,
     requestId: string,
+    uncertainRedisReservation = false,
   ): WindowResult {
     let window = this.activeMemoryWindow(
       this.memoryWindows,
@@ -395,16 +415,20 @@ export class RateLimitService {
         this.memoryWindows.set(clientKey, window);
       }
     }
-    this.addMemoryRequest(window, requestId);
+    const stored = this.addMemoryRequest(window, requestId);
+    if (stored && storageKey === overflowKey) window.clientKeys.add(clientKey);
     return {
       backend: 'memory',
       clientKey,
-      count: window.requestIds.size,
+      count: this.reconciliationUncertain
+        ? Math.max(window.requestIds.size, limit + 1)
+        : window.requestIds.size,
       generation: window.generation,
       overflowKey,
       requestId,
       storageKey,
       ttlMs: Math.max(1, window.expiresAt - Date.now()),
+      uncertainRedisReservation,
     };
   }
 
@@ -422,7 +446,6 @@ export class RateLimitService {
       ) {
         continue;
       }
-      window.version += 1;
       if (window.requestIds.size === 0) map.delete(key);
     }
   }
@@ -447,77 +470,62 @@ export class RateLimitService {
     this.cleanMemory(now);
     return [
       ...Array.from(this.memoryWindows, ([key, window]) => ({
+        clientKeys: [...window.clientKeys],
         key,
-        map: this.memoryWindows,
         requestIds: [...window.requestIds],
-        version: window.version,
         window,
       })),
       ...Array.from(this.memoryOverflowWindows, ([key, window]) => ({
+        clientKeys: [...window.clientKeys],
         key,
-        map: this.memoryOverflowWindows,
         requestIds: [...window.requestIds],
-        version: window.version,
         window,
       })),
     ];
   }
 
-  private snapshotsAreStable(snapshots: MemoryWindowSnapshot[]): boolean {
-    if (
-      snapshots.length !==
-      this.memoryWindows.size + this.memoryOverflowWindows.size
-    ) {
-      return false;
-    }
-    return snapshots.every(
-      ({ key, map, version, window }) =>
-        map.get(key) === window && window.version === version,
-    );
-  }
-
   private async reconcileMemory(): Promise<void> {
-    for (;;) {
-      const snapshots = this.memorySnapshots(Date.now());
-      if (snapshots.length === 0) {
-        this.setBackend('redis', Date.now());
-        return;
-      }
-      for (
-        let offset = 0;
-        offset < snapshots.length;
-        offset += RECONCILIATION_BATCH_SIZE
-      ) {
-        await Promise.all(
-          snapshots
-            .slice(offset, offset + RECONCILIATION_BATCH_SIZE)
-            .map(async ({ key, requestIds, window }) => {
-              const result = parseRedisWindow(
-                await this.redis.eval(
-                  RECONCILE_WINDOW_SCRIPT,
-                  [key],
-                  [
-                    window.generation,
-                    window.expiresAt,
-                    window.limit,
-                    ...requestIds,
-                  ],
-                ),
-                key,
-              );
-              if (result.generation !== window.generation) {
-                throw new Error('Redis rate-limit generation conflict');
-              }
-            }),
-        );
-      }
-      this.cleanMemory(Date.now());
-      if (!this.snapshotsAreStable(snapshots)) continue;
-      this.memoryWindows.clear();
-      this.memoryOverflowWindows.clear();
-      this.setBackend('redis', Date.now());
-      return;
+    this.reconciliationUncertain = true;
+    this.recoveryUsesRedis = true;
+    const snapshots = this.memorySnapshots(Date.now());
+    for (
+      let offset = 0;
+      offset < snapshots.length;
+      offset += RECONCILIATION_BATCH_SIZE
+    ) {
+      await Promise.all(
+        snapshots
+          .slice(offset, offset + RECONCILIATION_BATCH_SIZE)
+          .map(async ({ clientKeys, key, requestIds, window }) => {
+            const result = parseRedisWindow(
+              await this.redis.eval(
+                RECONCILE_WINDOW_SCRIPT,
+                [key, this.overflowMembershipKey(key)],
+                [
+                  window.generation,
+                  window.expiresAt,
+                  window.limit,
+                  requestIds.length,
+                  ...requestIds,
+                  ...clientKeys,
+                ],
+              ),
+              key,
+            );
+            if (result.generation !== window.generation) {
+              throw new Error('Redis rate-limit generation conflict');
+            }
+          }),
+      );
     }
+    if (!this.recoveryUsesRedis) {
+      throw new Error('Redis rate-limit recovery interrupted');
+    }
+    this.memoryWindows.clear();
+    this.memoryOverflowWindows.clear();
+    this.reconciliationUncertain = false;
+    this.setBackend('redis', Date.now());
+    this.recoveryUsesRedis = false;
   }
 
   private async runRecovery(now: number): Promise<void> {
@@ -531,6 +539,7 @@ export class RateLimitService {
         );
         await this.reconcileMemory();
       } catch {
+        this.recoveryUsesRedis = false;
         this.setBackend('memory', Date.now());
       } finally {
         this.recoveryProbeInFlight = false;
@@ -550,12 +559,19 @@ export class RateLimitService {
     identity: WindowIdentity,
     limit: number,
     requestId: string,
+    forceOverflow = false,
   ): Promise<WindowResult> {
     const window = parseRedisWindow(
       await this.redis.eval(
         CONSUME_WINDOW_SCRIPT,
-        [clientKey, overflowKey],
-        [identity.generation, identity.expiresAt, limit, requestId],
+        [clientKey, overflowKey, this.overflowMembershipKey(overflowKey)],
+        [
+          identity.generation,
+          identity.expiresAt,
+          limit,
+          requestId,
+          forceOverflow ? 1 : 0,
+        ],
       ),
       clientKey,
     );
@@ -564,8 +580,22 @@ export class RateLimitService {
       clientKey,
       overflowKey,
       requestId,
+      uncertainRedisReservation: false,
       ...window,
     };
+  }
+
+  private isFrozenOverflowClient(
+    overflowKey: string,
+    clientKey: string,
+    identity: WindowIdentity,
+  ): boolean {
+    const window = this.memoryOverflowWindows.get(overflowKey);
+    return (
+      window?.generation === identity.generation &&
+      window.expiresAt > Date.now() &&
+      window.clientKeys.has(clientKey)
+    );
   }
 
   private async consumeWindow(
@@ -577,6 +607,29 @@ export class RateLimitService {
   ): Promise<WindowResult> {
     const identity = identityAt(now);
     if (this.backend === 'memory') {
+      if (this.recoveryUsesRedis) {
+        try {
+          return await this.consumeRedis(
+            clientKey,
+            overflowKey,
+            identity,
+            limit,
+            requestId,
+            this.isFrozenOverflowClient(overflowKey, clientKey, identity),
+          );
+        } catch {
+          this.recoveryUsesRedis = false;
+          this.setBackend('memory', Date.now());
+          return this.consumeMemory(
+            clientKey,
+            overflowKey,
+            identity,
+            limit,
+            requestId,
+            true,
+          );
+        }
+      }
       const memory = this.consumeMemory(
         clientKey,
         overflowKey,
@@ -603,6 +656,7 @@ export class RateLimitService {
           identity,
           limit,
           requestId,
+          true,
         );
       }
     }
@@ -622,6 +676,7 @@ export class RateLimitService {
         identity,
         limit,
         requestId,
+        true,
       );
     }
   }
@@ -646,6 +701,10 @@ export class RateLimitService {
     const bucket =
       input.policy === 'strict' ? 'strict' : input.role.toLowerCase();
     return `${this.env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:${bucket}`;
+  }
+
+  private overflowMembershipKey(overflowKey: string): string {
+    return `${overflowKey}:clients`;
   }
 
   private recordBucketDecision(decision: RateLimitDecision): void {
@@ -685,6 +744,7 @@ export class RateLimitService {
       resetAfterMs: window.ttlMs,
       role: input.role,
       storageKey: window.storageKey,
+      uncertainRedisReservation: window.uncertainRedisReservation,
     };
   }
 
@@ -737,7 +797,14 @@ export class RateLimitService {
         const window = parseRedisWindow(
           await this.redis.eval(
             TRANSFER_WINDOW_SCRIPT,
-            [source.clientKey, source.overflowKey, clientKey, overflowKey],
+            [
+              source.clientKey,
+              source.overflowKey,
+              clientKey,
+              overflowKey,
+              this.overflowMembershipKey(overflowKey),
+              this.overflowMembershipKey(source.overflowKey),
+            ],
             [
               identity.generation,
               identity.expiresAt,
@@ -753,6 +820,7 @@ export class RateLimitService {
           clientKey,
           overflowKey,
           requestId: source.requestId,
+          uncertainRedisReservation: false,
           ...window,
         });
         this.recordBucketDecision(decision);
@@ -763,6 +831,9 @@ export class RateLimitService {
       }
     }
     if (source.backend === 'redis') return source;
+    if (source.uncertainRedisReservation || this.reconciliationUncertain) {
+      return source;
+    }
     const decision = this.decision(
       input,
       limit,
@@ -788,7 +859,11 @@ export class RateLimitService {
       try {
         await this.redis.eval(
           RELEASE_WINDOW_SCRIPT,
-          [decision.clientKey, decision.overflowKey],
+          [
+            decision.clientKey,
+            decision.overflowKey,
+            this.overflowMembershipKey(decision.overflowKey),
+          ],
           [decision.generation, decision.requestId],
         );
         return;
@@ -796,7 +871,13 @@ export class RateLimitService {
         this.setBackend('memory', now);
       }
     }
-    if (decision.backend === 'memory') this.releaseMemory(decision, now);
+    if (
+      decision.backend === 'memory' &&
+      !decision.uncertainRedisReservation &&
+      !this.reconciliationUncertain
+    ) {
+      this.releaseMemory(decision, now);
+    }
   }
 
   async recover(redisAvailable: boolean): Promise<void> {

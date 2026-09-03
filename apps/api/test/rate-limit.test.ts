@@ -174,7 +174,11 @@ describe('RateLimitService', () => {
       "redis.call('HGET', KEYS[index], 'generation')",
     );
     expect(releaseScript).toContain("redis.call('HDEL', KEYS[index]");
-    expect(releaseKeys).toEqual([decision.clientKey, decision.overflowKey]);
+    expect(releaseKeys).toEqual([
+      decision.clientKey,
+      decision.overflowKey,
+      `${decision.overflowKey}:clients`,
+    ]);
     expect(releaseArguments).toEqual([
       'reserved-generation',
       decision.requestId,
@@ -218,7 +222,7 @@ describe('RateLimitService', () => {
     const [transferScript, transferKeys, transferArguments] = vi.mocked(
       redis.eval,
     ).mock.calls[1]!;
-    expect(transferScript).toContain("redis.call('HSET', KEYS[3]");
+    expect(transferScript).toContain("redis.call('HSET', selected");
     expect(transferScript).toContain("redis.call('HGET', KEYS[index]");
     expect(transferScript).toContain("redis.call('HDEL', KEYS[index]");
     expect(transferKeys).toEqual([
@@ -226,6 +230,8 @@ describe('RateLimitService', () => {
       source.overflowKey,
       buildRateLimitKey(rateLimitPrefix, 'role', 'ADMIN', '203.0.113.16'),
       `${rateLimitPrefix}:http:neo:overflow:admin`,
+      `${rateLimitPrefix}:http:neo:overflow:admin:clients`,
+      `${source.overflowKey}:clients`,
     ]);
     expect(transferArguments[3]).toBe(source.requestId);
     expect(transferArguments[4]).toBe('source-generation');
@@ -257,6 +263,35 @@ describe('RateLimitService', () => {
     expect(service.snapshot(true).status).toBe('degraded');
   });
 
+  it('Redis 响应不确定时保留 DEFAULT 内存预占，角色转移与释放均不误删', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval).mockRejectedValueOnce(
+      new Error('consume response timeout'),
+    );
+    const { service } = createService({ redis });
+    const input = {
+      clientIdentifier: '203.0.113.18',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    const source = await service.consume(input, { recordRequest: false });
+
+    expect(source).toMatchObject({
+      backend: 'memory',
+      count: 1,
+      uncertainRedisReservation: true,
+    });
+    await expect(
+      service.transfer(source, { ...input, role: 'ADMIN' }),
+    ).resolves.toBe(source);
+    await service.release(source);
+    await expect(service.consume(input)).resolves.toMatchObject({
+      backend: 'memory',
+      count: 2,
+    });
+    expect(redis.eval).toHaveBeenCalledOnce();
+  });
+
   it('Redis 故障时使用不延长窗口的内存降级，并在冷却后自动恢复', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
@@ -266,7 +301,7 @@ describe('RateLimitService', () => {
       .mockRejectedValueOnce(new Error('still unavailable'))
       .mockResolvedValueOnce(1)
       .mockImplementationOnce(async (_script, keys, arguments_) => [
-        arguments_.length - 3,
+        Number(arguments_[3]),
         RATE_LIMIT_WINDOW_MS - 10_003,
         arguments_[0],
         keys[0],
@@ -312,14 +347,15 @@ describe('RateLimitService', () => {
     });
     const [mergeScript, mergeKeys, mergeArguments] = vi.mocked(redis.eval).mock
       .calls[3]!;
-    expect(mergeScript).toContain('for index = 4, #ARGV do');
-    expect(mergeKeys).toHaveLength(1);
-    expect(mergeArguments.slice(3)).toHaveLength(5);
+    expect(mergeScript).toContain('local requestCount = tonumber(ARGV[4])');
+    expect(mergeKeys).toHaveLength(2);
+    expect(mergeArguments[3]).toBe(5);
+    expect(mergeArguments.slice(4)).toHaveLength(5);
     const [, consumeKeys, consumeArguments] = vi.mocked(redis.eval).mock
       .calls[4]!;
-    expect(consumeKeys).toHaveLength(2);
-    expect(consumeArguments).toHaveLength(4);
-    expect(mergeArguments.slice(3)).toContain(consumeArguments[3]);
+    expect(consumeKeys).toHaveLength(3);
+    expect(consumeArguments).toHaveLength(5);
+    expect(mergeArguments.slice(4)).toContain(consumeArguments[3]);
     expect(logger.warn).toHaveBeenCalledWith(
       'HTTP 限流 Redis 不可用，切换内存降级',
       'RateLimitService',
@@ -356,8 +392,8 @@ describe('RateLimitService', () => {
       () => new Promise((resolve) => (finishProbe = resolve)),
     );
     vi.mocked(redis.eval).mockImplementation(async (script, keys, arguments_) =>
-      script.includes('for index = 4, #ARGV do')
-        ? [arguments_.length - 3, RATE_LIMIT_WINDOW_MS, arguments_[0], keys[0]]
+      script.includes('local requestCount = tonumber(ARGV[4])')
+        ? [Number(arguments_[3]), RATE_LIMIT_WINDOW_MS, arguments_[0], keys[0]]
         : [1, RATE_LIMIT_WINDOW_MS, arguments_[0], keys[0]],
     );
     const leader = service.consume({ ...input, clientIdentifier: 'leader' });
@@ -384,7 +420,7 @@ describe('RateLimitService', () => {
       .mockRejectedValueOnce(new Error('eval unavailable'))
       .mockResolvedValueOnce(1)
       .mockImplementationOnce(async (_script, keys, arguments_) => [
-        arguments_.length - 3,
+        Number(arguments_[3]),
         RATE_LIMIT_WINDOW_MS,
         arguments_[0],
         keys[0],
@@ -442,6 +478,12 @@ describe('RateLimitService', () => {
         1,
         RATE_LIMIT_WINDOW_MS,
         arguments_[0],
+        keys[0],
+      ])
+      .mockImplementationOnce(async (_script, keys, arguments_) => [
+        1,
+        RATE_LIMIT_WINDOW_MS,
+        arguments_[0],
         keys[2],
         1,
       ]);
@@ -460,17 +502,27 @@ describe('RateLimitService', () => {
     const recovery = service.recover(true);
     await vi.waitFor(() => expect(redis.eval).toHaveBeenCalledTimes(3));
     expect(service.snapshot(true).status).toBe('degraded');
+    await expect(
+      service.consume({
+        clientIdentifier: '198.51.100.45-during-recovery',
+        policy: 'role',
+        role: 'DEFAULT',
+      }),
+    ).resolves.toMatchObject({ backend: 'redis', count: 1 });
     const transfer = service.transfer(source, {
       clientIdentifier: '198.51.100.45',
       policy: 'role',
       role: 'ADMIN',
     });
-    expect(redis.eval).toHaveBeenCalledTimes(3);
+    expect(redis.eval).toHaveBeenCalledTimes(4);
 
     const [, reconcileKeys, reconcileArguments] = vi.mocked(redis.eval).mock
       .calls[2]!;
-    expect(reconcileKeys).toEqual([source.clientKey]);
-    expect(reconcileArguments.slice(3)).toContain(source.requestId);
+    expect(reconcileKeys).toEqual([
+      source.clientKey,
+      `${source.clientKey}:clients`,
+    ]);
+    expect(reconcileArguments.slice(4)).toContain(source.requestId);
     finishReconciliation([
       1,
       RATE_LIMIT_WINDOW_MS,
@@ -484,7 +536,103 @@ describe('RateLimitService', () => {
       role: 'ADMIN',
     });
     expect(service.snapshot(true).status).toBe('ok');
-    expect(redis.eval).toHaveBeenCalledTimes(4);
+    expect(redis.eval).toHaveBeenCalledTimes(5);
+  });
+
+  it('恢复期按冻结的 overflow 成员路由，不等待成员表对账落库', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const redis = redisMock();
+    const { service } = createService({ redis });
+    const input = {
+      clientIdentifier: '198.51.100.47',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    const clientKey = buildRateLimitKey(
+      rateLimitPrefix,
+      input.policy,
+      input.role,
+      input.clientIdentifier,
+    );
+    const overflowKey = `${rateLimitPrefix}:http:neo:overflow:default`;
+    const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+    const internal = service as unknown as {
+      backend: 'memory';
+      memoryOverflowWindows: Map<
+        string,
+        {
+          clientKeys: Set<string>;
+          expiresAt: number;
+          generation: string;
+          limit: number;
+          requestIds: Set<string>;
+        }
+      >;
+      recoveryUsesRedis: boolean;
+    };
+    internal.backend = 'memory';
+    internal.recoveryUsesRedis = true;
+    internal.memoryOverflowWindows.set(overflowKey, {
+      clientKeys: new Set([clientKey]),
+      expiresAt: Date.now() + RATE_LIMIT_WINDOW_MS,
+      generation,
+      limit: ROLE_LIMITS.DEFAULT,
+      requestIds: new Set(['existing']),
+    });
+    vi.mocked(redis.eval).mockResolvedValueOnce([
+      2,
+      RATE_LIMIT_WINDOW_MS,
+      generation,
+      overflowKey,
+    ]);
+
+    await expect(service.consume(input)).resolves.toMatchObject({
+      backend: 'redis',
+      count: 2,
+      storageKey: overflowKey,
+    });
+    const [script, keys, arguments_] = vi.mocked(redis.eval).mock.calls[0]!;
+    expect(script).toContain("ARGV[5] == '1'");
+    expect(keys).toEqual([clientKey, overflowKey, `${overflowKey}:clients`]);
+    expect(arguments_[4]).toBe(1);
+  });
+
+  it('对账中断后内存请求 fail-closed，成功重试后才恢复放行', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval)
+      .mockRejectedValueOnce(new Error('initial outage'))
+      .mockResolvedValueOnce(1)
+      .mockRejectedValueOnce(new Error('partial reconciliation'));
+    const { service } = createService({ redis });
+    const input = {
+      clientIdentifier: '198.51.100.48',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    await service.consume(input);
+    (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+
+    await service.recover(true);
+
+    await expect(service.consume(input)).resolves.toMatchObject({
+      allowed: false,
+      backend: 'memory',
+      count: ROLE_LIMITS.DEFAULT + 1,
+    });
+    expect(service.snapshot(true).status).toBe('degraded');
+
+    (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce(1)
+      .mockImplementationOnce(async (_script, keys, arguments_) => [
+        Number(arguments_[3]),
+        RATE_LIMIT_WINDOW_MS,
+        arguments_[0],
+        keys[0],
+      ]);
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('ok');
   });
 
   it('内存降级与 Redis 使用相同对齐窗口，不会从故障时刻续期 15 分钟', async () => {
@@ -555,8 +703,8 @@ describe('RateLimitService', () => {
           expiresAt: number;
           generation: string;
           limit: number;
+          clientKeys: Set<string>;
           requestIds: Set<string>;
-          version: number;
         }
       >;
       memoryWindows: Map<
@@ -565,8 +713,8 @@ describe('RateLimitService', () => {
           expiresAt: number;
           generation: string;
           limit: number;
+          clientKeys: Set<string>;
           requestIds: Set<string>;
-          version: number;
         }
       >;
       redisRetryAfter: number;
@@ -578,8 +726,8 @@ describe('RateLimitService', () => {
         expiresAt,
         generation,
         limit: ROLE_LIMITS.DEFAULT,
+        clientKeys: new Set(),
         requestIds: new Set([`existing-request-${index}`]),
-        version: 1,
       });
     }
     internal.backend = 'memory';
@@ -723,11 +871,13 @@ describe('RateLimitRequestHook HTTP 边界', () => {
   let redis: ApplicationRedisClient;
   let counters: Map<string, number>;
   let generations: Map<string, string>;
+  let memberships: Map<string, Set<string>>;
   let operations: Map<string, Set<string>>;
 
   async function createApp(env = loadEnv(validEnv)) {
     counters = new Map();
     generations = new Map();
+    memberships = new Map();
     operations = new Map();
     logger = loggerMock();
     metrics = new MetricsService();
@@ -783,32 +933,53 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     vi.mocked(redis.eval).mockImplementation(
       async (script, keys: readonly string[], arguments_) => {
         if (keys[0]?.includes(':capability:')) return 1;
-        if (script.includes('for index = 4, #ARGV do')) {
+        if (script.includes('local requestCount = tonumber(ARGV[4])')) {
           const key = keys[0]!;
           const generation = String(arguments_[0]);
           const limit = Number(arguments_[2]);
+          const requestCount = Number(arguments_[3]);
           let count = counters.get(key) ?? 0;
-          for (const requestId of arguments_.slice(3)) {
+          for (const requestId of arguments_.slice(4, 4 + requestCount)) {
             count = addOperation(key, generation, String(requestId), limit);
+          }
+          const memberKeys = arguments_.slice(4 + requestCount).map(String);
+          if (memberKeys.length > 0) {
+            const membershipKey = keys[1]!;
+            if (generations.get(membershipKey) !== generation) {
+              generations.set(membershipKey, generation);
+              memberships.set(membershipKey, new Set());
+            }
+            const members = memberships.get(membershipKey)!;
+            for (const memberKey of memberKeys) members.add(memberKey);
           }
           return [count, RATE_LIMIT_WINDOW_MS, generation, key];
         }
-        if (script.includes('for index = 1, #KEYS do')) {
-          return keys.reduce(
-            (released, key) =>
-              released +
+        if (script.includes('return released')) {
+          const releasedByKey = keys
+            .slice(0, 2)
+            .map((key) =>
               removeOperation(
                 key,
                 String(arguments_[0]),
                 String(arguments_[1]),
               ),
-            0,
-          );
+            );
+          if (releasedByKey[1] === 1 && !counters.has(keys[1]!)) {
+            generations.delete(keys[2]!);
+            memberships.delete(keys[2]!);
+          }
+          return releasedByKey.reduce((total, released) => total + released, 0);
         }
-        if (keys.length === 4) {
-          const targetKey = keys[2]!;
-          const targetOverflowKey = keys[3]!;
+        if (keys.length === 6) {
           const targetGeneration = String(arguments_[0]);
+          const targetClientKey = keys[2]!;
+          const targetOverflowKey = keys[3]!;
+          const targetMembershipKey = keys[4]!;
+          const targetKey =
+            generations.get(targetMembershipKey) === targetGeneration &&
+            memberships.get(targetMembershipKey)?.has(targetClientKey)
+              ? targetOverflowKey
+              : targetClientKey;
           const requestId = String(arguments_[3]);
           const count = addOperation(
             targetKey,
@@ -816,23 +987,27 @@ describe('RateLimitRequestHook HTTP 边界', () => {
             requestId,
             Number(arguments_[2]),
           );
-          const overflowCount =
-            generations.get(targetOverflowKey) === targetGeneration
-              ? counters.get(targetOverflowKey) ?? 0
-              : 0;
-          const effective = Math.max(count, overflowCount);
           let released = 0;
-          if (effective <= Number(arguments_[2])) {
+          if (count <= Number(arguments_[2])) {
             for (const sourceKey of keys.slice(0, 2)) {
-              released += removeOperation(
+              const removed = removeOperation(
                 sourceKey,
                 String(arguments_[4]),
                 requestId,
               );
+              released += removed;
+              if (
+                sourceKey === keys[1] &&
+                removed === 1 &&
+                !counters.has(sourceKey)
+              ) {
+                generations.delete(keys[5]!);
+                memberships.delete(keys[5]!);
+              }
             }
           }
           return [
-            effective,
+            count,
             RATE_LIMIT_WINDOW_MS,
             targetGeneration,
             targetKey,
@@ -841,23 +1016,21 @@ describe('RateLimitRequestHook HTTP 边界', () => {
         }
         const key = keys[0]!;
         const overflowKey = keys[1]!;
+        const membershipKey = keys[2]!;
         const generation = String(arguments_[0]);
+        const selectedKey =
+          Number(arguments_[4]) === 1 ||
+          (generations.get(membershipKey) === generation &&
+            memberships.get(membershipKey)?.has(key))
+            ? overflowKey
+            : key;
         const count = addOperation(
-          key,
+          selectedKey,
           generation,
           String(arguments_[3]),
           Number(arguments_[2]),
         );
-        const overflowCount =
-          generations.get(overflowKey) === generation
-            ? counters.get(overflowKey) ?? 0
-            : 0;
-        return [
-          Math.max(count, overflowCount),
-          RATE_LIMIT_WINDOW_MS,
-          generation,
-          key,
-        ];
+        return [count, RATE_LIMIT_WINDOW_MS, generation, selectedKey];
       },
     );
     errorStats = new HealthErrorStatsService();
@@ -899,6 +1072,43 @@ describe('RateLimitRequestHook HTTP 边界', () => {
 
   afterEach(async () => {
     await app.close();
+  });
+
+  it('overflow 总数只作用于已登记成员，独立客户端仍使用自己的窗口', async () => {
+    const service = app.get(RateLimitService);
+    const input = {
+      clientIdentifier: '127.0.0.1',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    const clientKey = buildRateLimitKey(
+      rateLimitPrefix,
+      input.policy,
+      input.role,
+      input.clientIdentifier,
+    );
+    const overflowKey = `${rateLimitPrefix}:http:neo:overflow:default`;
+    const membershipKey = `${overflowKey}:clients`;
+    const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+    counters.set(overflowKey, ROLE_LIMITS.DEFAULT + 1);
+    generations.set(overflowKey, generation);
+    operations.set(overflowKey, new Set());
+
+    const independent = await service.consume(input);
+    expect(independent).toMatchObject({
+      allowed: true,
+      count: 1,
+      storageKey: clientKey,
+    });
+    await service.release(independent);
+
+    generations.set(membershipKey, generation);
+    memberships.set(membershipKey, new Set([clientKey]));
+    await expect(service.consume(input)).resolves.toMatchObject({
+      allowed: false,
+      count: ROLE_LIMITS.DEFAULT + 1,
+      storageKey: overflowKey,
+    });
   });
 
   it('Guard 成功后释放 DEFAULT 预占并改计认证角色，strict 再附加独立策略', async () => {
@@ -1214,10 +1424,19 @@ describe.skipIf(!integrationEnabled)(
         (bucket) =>
           `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:${bucket}`,
       );
+      const overflowMembershipKeys = overflowKeys.map(
+        (key) => `${key}:clients`,
+      );
       try {
         await serviceA.recover(true);
         expect(serviceA.snapshot(true).status).toBe('ok');
-        await redis.del(key, defaultKey, adminKey, ...overflowKeys);
+        await redis.del(
+          key,
+          defaultKey,
+          adminKey,
+          ...overflowKeys,
+          ...overflowMembershipKeys,
+        );
         const first = await serviceA.consume({
           clientIdentifier,
           policy: 'strict',
@@ -1282,9 +1501,133 @@ describe.skipIf(!integrationEnabled)(
         expect((await redis.client.hlen(adminKey)) - 1).toBe(1);
       } finally {
         if (redis.client.status !== 'end') {
-          await redis.del(key, defaultKey, adminKey, ...overflowKeys);
+          await redis.del(
+            key,
+            defaultKey,
+            adminKey,
+            ...overflowKeys,
+            ...overflowMembershipKeys,
+          );
         }
         if (redis.client.status !== 'end') redis.onModuleDestroy();
+        metricsA.onModuleDestroy();
+        metricsB.onModuleDestroy();
+      }
+    }, 30_000);
+
+    it('真实 Redis 仅让已迁移成员继承 overflow 计数', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const redis = new ApplicationRedisClient(env, logger);
+      const metricsA = new MetricsService();
+      const metricsB = new MetricsService();
+      const serviceA = new RateLimitService(env, redis, logger, metricsA);
+      const serviceB = new RateLimitService(env, redis, logger, metricsB);
+      const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+      const expiresAt = (Number(generation) + 1) * RATE_LIMIT_WINDOW_MS;
+      const memberIdentifier = `overflow-member-${process.pid}-${Date.now()}`;
+      const independentIdentifier = `overflow-independent-${
+        process.pid
+      }-${Date.now()}`;
+      const memberKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        memberIdentifier,
+      );
+      const independentKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        independentIdentifier,
+      );
+      const overflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:default`;
+      const membershipKey = `${overflowKey}:clients`;
+      const internal = serviceA as unknown as {
+        backend: 'memory';
+        memoryOverflowWindows: Map<
+          string,
+          {
+            clientKeys: Set<string>;
+            expiresAt: number;
+            generation: string;
+            limit: number;
+            requestIds: Set<string>;
+          }
+        >;
+        redisRetryAfter: number;
+      };
+      try {
+        await redis.del(memberKey, independentKey, overflowKey, membershipKey);
+        internal.backend = 'memory';
+        internal.redisRetryAfter = 0;
+        internal.memoryOverflowWindows.set(overflowKey, {
+          clientKeys: new Set([memberKey]),
+          expiresAt,
+          generation,
+          limit: ROLE_LIMITS.DEFAULT,
+          requestIds: new Set(
+            Array.from(
+              { length: ROLE_LIMITS.DEFAULT + 1 },
+              (_, index) => `overflow-request-${index}`,
+            ),
+          ),
+        });
+
+        await serviceA.recover(true);
+
+        expect(await redis.client.hexists(membershipKey, memberKey)).toBe(1);
+        await expect(
+          serviceB.consume({
+            clientIdentifier: memberIdentifier,
+            policy: 'role',
+            role: 'DEFAULT',
+          }),
+        ).resolves.toMatchObject({
+          allowed: false,
+          count: ROLE_LIMITS.DEFAULT + 1,
+          storageKey: overflowKey,
+        });
+        await expect(
+          serviceB.consume({
+            clientIdentifier: independentIdentifier,
+            policy: 'role',
+            role: 'DEFAULT',
+          }),
+        ).resolves.toMatchObject({
+          allowed: true,
+          count: 1,
+          storageKey: independentKey,
+        });
+
+        await redis.del(overflowKey, membershipKey);
+        await redis.client.hset(
+          membershipKey,
+          'generation',
+          generation,
+          memberKey,
+          1,
+        );
+        await redis.client.pexpireat(membershipKey, expiresAt);
+        const releasable = await serviceB.consume({
+          clientIdentifier: memberIdentifier,
+          policy: 'role',
+          role: 'DEFAULT',
+        });
+        expect(releasable).toMatchObject({ count: 1, storageKey: overflowKey });
+        await serviceB.release(releasable);
+        expect(await redis.client.exists(overflowKey)).toBe(0);
+        expect(await redis.client.exists(membershipKey)).toBe(0);
+      } finally {
+        if (redis.client.status !== 'end') {
+          await redis.del(
+            memberKey,
+            independentKey,
+            overflowKey,
+            membershipKey,
+          );
+          redis.onModuleDestroy();
+        }
         metricsA.onModuleDestroy();
         metricsB.onModuleDestroy();
       }
@@ -1312,9 +1655,16 @@ describe.skipIf(!integrationEnabled)(
         'DEFAULT',
         clientIdentifier,
       );
+      const adminKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'ADMIN',
+        clientIdentifier,
+      );
       const overflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:default`;
+      const overflowMembershipKey = `${overflowKey}:clients`;
       try {
-        await redis.del(key, overflowKey);
+        await redis.del(key, adminKey, overflowKey, overflowMembershipKey);
         const originalEval = redis.eval.bind(redis);
         const evalSpy = vi
           .spyOn(redis, 'eval')
@@ -1327,10 +1677,18 @@ describe.skipIf(!integrationEnabled)(
           policy: 'role' as const,
           role: 'DEFAULT' as const,
         };
-        await expect(service.consume(input)).resolves.toMatchObject({
+        const source = await service.consume(input);
+        expect(source).toMatchObject({
           backend: 'memory',
           count: 1,
+          uncertainRedisReservation: true,
         });
+        await expect(
+          service.transfer(source, { ...input, role: 'ADMIN' }),
+        ).resolves.toBe(source);
+        expect((await redis.client.hlen(key)) - 1).toBe(1);
+        expect(await redis.client.exists(adminKey)).toBe(0);
+        expect(evalSpy).toHaveBeenCalledOnce();
         const preRecoveryTtl = await redis.client.pttl(key);
         await service.consume(input);
         await service.consume(input);
@@ -1342,9 +1700,12 @@ describe.skipIf(!integrationEnabled)(
         });
         const [reconcileScript, reconcileKeys, reconcileArguments] =
           evalSpy.mock.calls[2]!;
-        expect(reconcileScript).toContain('for index = 4, #ARGV do');
-        expect(reconcileKeys).toEqual([key]);
-        expect(reconcileArguments.slice(3)).toHaveLength(4);
+        expect(reconcileScript).toContain(
+          'local requestCount = tonumber(ARGV[4])',
+        );
+        expect(reconcileKeys).toEqual([key, `${key}:clients`]);
+        expect(reconcileArguments[3]).toBe(4);
+        expect(reconcileArguments.slice(4)).toHaveLength(4);
         expect((await redis.client.hlen(key)) - 1).toBe(4);
         expect(await redis.client.pttl(key)).toBeLessThanOrEqual(
           preRecoveryTtl,
@@ -1356,7 +1717,7 @@ describe.skipIf(!integrationEnabled)(
         });
       } finally {
         if (redis.client.status !== 'end') {
-          await redis.del(key, overflowKey);
+          await redis.del(key, adminKey, overflowKey, overflowMembershipKey);
         }
         if (redis.client.status !== 'end') redis.onModuleDestroy();
         metrics.onModuleDestroy();
