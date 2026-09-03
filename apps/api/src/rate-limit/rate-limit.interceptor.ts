@@ -210,7 +210,7 @@ export class RateLimitInterceptor implements NestInterceptor {
         policy: 'role',
         role,
       });
-      await this.requestHook.release(request);
+      if (roleDecision.allowed) await this.requestHook.release(request);
     }
     applyHeaders(reply, roleDecision);
     if (!roleDecision.allowed) {

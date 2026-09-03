@@ -396,7 +396,10 @@ describe('RateLimitModule wiring', () => {
 
 @Injectable()
 class PrincipalGuard implements CanActivate {
+  calls = 0;
+
   canActivate(context: ExecutionContext): boolean {
+    this.calls += 1;
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     request.auth = { userId: 'test-user' } as never;
     return true;
@@ -609,6 +612,42 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(completed.statusCode).toBe(200);
     expect(completed.headers['ratelimit-limit']).toBe('1000');
     expect(counters.get(key)).toBe(ROLE_LIMITS.DEFAULT);
+  });
+
+  it('认证角色桶拒绝时保留 DEFAULT 预占，使后续请求在 Guard 前阻断', async () => {
+    const defaultKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
+    const adminKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'ADMIN',
+      '127.0.0.1',
+    );
+    counters.set(defaultKey, ROLE_LIMITS.DEFAULT - 1);
+    counters.set(adminKey, ROLE_LIMITS.ADMIN);
+    const fastify = app.getHttpAdapter().getInstance();
+    const principalGuard = app.get(PrincipalGuard);
+
+    const roleBlocked = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated',
+    });
+    const blockedBeforeGuard = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated',
+    });
+
+    expect(roleBlocked.statusCode).toBe(429);
+    expect(roleBlocked.headers['ratelimit-limit']).toBe('1000');
+    expect(blockedBeforeGuard.statusCode).toBe(429);
+    expect(blockedBeforeGuard.headers['ratelimit-limit']).toBe('100');
+    expect(principalGuard.calls).toBe(1);
+    expect(permissionCache.getRoles).toHaveBeenCalledOnce();
+    expect(counters.get(defaultKey)).toBe(ROLE_LIMITS.DEFAULT + 1);
   });
 
   it('撤销会话的 Guard 拒绝与未匹配 API 均保留 DEFAULT 预占，并在下一请求提前 429', async () => {
