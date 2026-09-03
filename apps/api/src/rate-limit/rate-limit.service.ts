@@ -132,7 +132,7 @@ if redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) 
 end
 redis.call('PEXPIREAT', selected, ARGV[2])
 local released = 0
-if current <= tonumber(ARGV[3]) then
+if current <= tonumber(ARGV[3]) and ARGV[6] ~= '0' then
   for index = 1, 2 do
     if redis.call('HGET', KEYS[index], 'generation') == ARGV[5] then
       released = released + redis.call('HDEL', KEYS[index], field)
@@ -267,6 +267,7 @@ export class RateLimitService {
   private recoveryPromise: Promise<void> | undefined;
   private recoveryUsesRedis = false;
   private reconciliationUncertain = false;
+  private capabilityVerified = false;
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -309,6 +310,7 @@ export class RateLimitService {
     const previous = this.backend;
     this.backend = next;
     if (next === 'memory') {
+      this.capabilityVerified = false;
       this.redisRetryAfter = now + REDIS_RETRY_DELAY_MS;
       this.logger.warn(
         'HTTP 限流 Redis 不可用，切换内存降级',
@@ -524,6 +526,7 @@ export class RateLimitService {
     this.memoryWindows.clear();
     this.memoryOverflowWindows.clear();
     this.reconciliationUncertain = false;
+    this.capabilityVerified = true;
     this.setBackend('redis', Date.now());
     this.recoveryUsesRedis = false;
   }
@@ -782,6 +785,7 @@ export class RateLimitService {
       policy: RateLimitPolicy;
       role: RateLimitRole;
     },
+    options: { releaseSource?: boolean } = {},
   ): Promise<RateLimitDecision> {
     if (source.backend === 'memory' && this.recoveryPromise) {
       await this.recoveryPromise;
@@ -811,6 +815,7 @@ export class RateLimitService {
               limit,
               source.requestId,
               source.generation,
+              options.releaseSource === false ? 0 : 1,
             ],
           ),
           clientKey,
@@ -845,7 +850,9 @@ export class RateLimitService {
         source.requestId,
       ),
     );
-    if (decision.allowed) this.releaseMemory(source, now);
+    if (decision.allowed && options.releaseSource !== false) {
+      this.releaseMemory(source, now);
+    }
     this.recordBucketDecision(decision);
     return decision;
   }
@@ -880,12 +887,21 @@ export class RateLimitService {
     }
   }
 
+  startRecovery(redisAvailable: boolean): void {
+    void this.recover(redisAvailable);
+  }
+
   async recover(redisAvailable: boolean): Promise<void> {
-    if (!this.enabled || !redisAvailable) return;
+    if (!this.enabled) return;
+    if (!redisAvailable) {
+      this.capabilityVerified = false;
+      return;
+    }
     if (this.recoveryPromise) {
       await this.recoveryPromise;
       return;
     }
+    if (this.backend === 'redis' && this.capabilityVerified) return;
     const now = Date.now();
     if (this.backend === 'memory') {
       if (!this.beginRecoveryProbe(now)) return;
@@ -912,7 +928,7 @@ export class RateLimitService {
     return {
       status: !this.enabled
         ? 'disabled'
-        : redisAvailable && activeBackend === 'redis'
+        : redisAvailable && activeBackend === 'redis' && this.capabilityVerified
         ? 'ok'
         : 'degraded',
       stats: {

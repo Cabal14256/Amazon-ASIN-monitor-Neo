@@ -50,6 +50,7 @@ function rateLimiterStub(
 ): RateLimitService {
   return {
     recover: vi.fn().mockResolvedValue(undefined),
+    startRecovery: vi.fn(),
     snapshot: vi.fn((redisAvailable: boolean) => {
       const status = forcedStatus ?? (redisAvailable ? 'ok' : 'degraded');
       return {
@@ -329,8 +330,11 @@ describe('HealthService', () => {
     metrics.onModuleDestroy();
   });
 
-  it('Redis PING 正常但 EVAL 降级时顶层 readiness 同步 degraded', async () => {
+  it('Redis PING 正常但 EVAL 降级时后台触发恢复并立即返回 degraded', async () => {
     const rateLimiter = rateLimiterStub('degraded');
+    vi.mocked(rateLimiter.recover).mockImplementation(
+      () => new Promise(() => undefined),
+    );
     const { service, metrics } = buildService({
       rateLimiter,
     });
@@ -343,7 +347,8 @@ describe('HealthService', () => {
       stats: { backend: 'memory', redisAvailable: true },
     });
     expect(health.status).toBe('degraded');
-    expect(rateLimiter.recover).toHaveBeenCalledWith(true);
+    expect(rateLimiter.startRecovery).toHaveBeenCalledWith(true);
+    expect(rateLimiter.recover).not.toHaveBeenCalled();
     metrics.onModuleDestroy();
   });
 

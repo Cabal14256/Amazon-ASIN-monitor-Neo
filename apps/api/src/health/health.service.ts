@@ -358,7 +358,7 @@ export class HealthService {
       this.probeRedis(),
     ]);
     const memory = memoryHealth(this.env);
-    await this.rateLimiter.recover(redis.connected);
+    this.rateLimiter.startRecovery(redis.connected);
     const rateLimiter = this.rateLimiter.snapshot(redis.connected);
     const status =
       database.status === 'ok' &&

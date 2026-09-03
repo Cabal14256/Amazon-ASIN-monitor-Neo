@@ -197,14 +197,25 @@ export class RateLimitInterceptor implements NestInterceptor {
       this.logger,
       'RateLimitInterceptor',
     );
+    const policy =
+      this.reflector.getAllAndOverride<RateLimitPolicy>(RATE_LIMIT_POLICY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? 'role';
     const provisional = this.requestHook.take(request);
+    const retainProvisionalForStrict =
+      Boolean(provisional) && role !== 'DEFAULT' && policy === 'strict';
     let roleDecision: RateLimitDecision;
     if (provisional && role !== 'DEFAULT') {
-      roleDecision = await this.rateLimiter.transfer(provisional, {
-        clientIdentifier: request.ip,
-        policy: 'role',
-        role,
-      });
+      roleDecision = await this.rateLimiter.transfer(
+        provisional,
+        {
+          clientIdentifier: request.ip,
+          policy: 'role',
+          role,
+        },
+        { releaseSource: !retainProvisionalForStrict },
+      );
     } else if (provisional) {
       roleDecision = provisional;
     } else {
@@ -225,11 +236,6 @@ export class RateLimitInterceptor implements NestInterceptor {
       throwBlocked(reply, roleDecision, this.logger, 'RateLimitInterceptor');
     }
 
-    const policy =
-      this.reflector.getAllAndOverride<RateLimitPolicy>(RATE_LIMIT_POLICY, [
-        context.getHandler(),
-        context.getClass(),
-      ]) ?? 'role';
     if (policy === 'strict') {
       const decision = await this.rateLimiter.consume(
         {
@@ -243,6 +249,13 @@ export class RateLimitInterceptor implements NestInterceptor {
       if (!decision.allowed) {
         this.rateLimiter.recordRequest(role, true);
         throwBlocked(reply, decision, this.logger, 'RateLimitInterceptor');
+      }
+      if (
+        retainProvisionalForStrict &&
+        provisional &&
+        roleDecision !== provisional
+      ) {
+        await this.rateLimiter.release(provisional);
       }
     }
     this.rateLimiter.recordRequest(role, false);

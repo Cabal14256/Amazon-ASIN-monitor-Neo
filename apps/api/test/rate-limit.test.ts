@@ -235,6 +235,7 @@ describe('RateLimitService', () => {
     ]);
     expect(transferArguments[3]).toBe(source.requestId);
     expect(transferArguments[4]).toBe('source-generation');
+    expect(transferArguments[5]).toBe(1);
   });
 
   it('原子转移调用失败时保留较严格的 DEFAULT 决策并进入降级', async () => {
@@ -499,7 +500,7 @@ describe('RateLimitService', () => {
     expect(source.backend).toBe('memory');
     (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
 
-    const recovery = service.recover(true);
+    expect(service.startRecovery(true)).toBeUndefined();
     await vi.waitFor(() => expect(redis.eval).toHaveBeenCalledTimes(3));
     expect(service.snapshot(true).status).toBe('degraded');
     await expect(
@@ -529,7 +530,6 @@ describe('RateLimitService', () => {
       source.generation,
       source.clientKey,
     ]);
-    await recovery;
     await expect(transfer).resolves.toMatchObject({
       backend: 'redis',
       count: 1,
@@ -842,6 +842,13 @@ class RateTestController {
     return { success: true };
   }
 
+  @Get('authenticated-strict')
+  @UseGuards(PrincipalGuard)
+  @StrictRateLimit()
+  authenticatedStrict() {
+    return { success: true };
+  }
+
   @Get('rejected')
   @UseGuards(RejectingGuard)
   rejected() {
@@ -988,7 +995,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
             Number(arguments_[2]),
           );
           let released = 0;
-          if (count <= Number(arguments_[2])) {
+          if (count <= Number(arguments_[2]) && Number(arguments_[5]) !== 0) {
             for (const sourceKey of keys.slice(0, 2)) {
               const removed = removeOperation(
                 sourceKey,
@@ -1265,6 +1272,60 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(rendered).toContain(
       'amazon_asin_monitor_http_rate_limit_decisions_total{role="DEFAULT",policy="strict",outcome="blocked",backend="redis"} 1',
     );
+  });
+
+  it('认证 strict 请求通过附加桶后才释放 DEFAULT 预占', async () => {
+    const defaultKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
+    const response = await app.getHttpAdapter().getInstance().inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated-strict',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['ratelimit-limit']).toBe('20');
+    expect(counters.has(defaultKey)).toBe(false);
+    expect(app.get(PrincipalGuard).calls).toBe(1);
+  });
+
+  it('认证 strict 拒绝时保留 DEFAULT 预占，使后续请求在 Guard 前阻断', async () => {
+    const defaultKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
+    const strictKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'strict',
+      'ADMIN',
+      '127.0.0.1',
+    );
+    counters.set(defaultKey, ROLE_LIMITS.DEFAULT - 1);
+    counters.set(strictKey, STRICT_RATE_LIMIT);
+    const fastify = app.getHttpAdapter().getInstance();
+    const principalGuard = app.get(PrincipalGuard);
+
+    const strictBlocked = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated-strict',
+    });
+    const blockedBeforeGuard = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated-strict',
+    });
+
+    expect(strictBlocked.statusCode).toBe(429);
+    expect(strictBlocked.headers['ratelimit-limit']).toBe('20');
+    expect(blockedBeforeGuard.statusCode).toBe(429);
+    expect(blockedBeforeGuard.headers['ratelimit-limit']).toBe('100');
+    expect(principalGuard.calls).toBe(1);
+    expect(permissionCache.getRoles).toHaveBeenCalledOnce();
+    expect(counters.get(defaultKey)).toBe(ROLE_LIMITS.DEFAULT + 1);
   });
 
   it('撤销会话的 Guard 拒绝与未匹配 API 均保留 DEFAULT 预占，并在下一请求提前 429', async () => {
