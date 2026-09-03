@@ -888,7 +888,18 @@ export class RateLimitService {
   }
 
   startRecovery(redisAvailable: boolean): void {
-    void this.recover(redisAvailable);
+    if (!this.enabled) return;
+    if (!redisAvailable) {
+      this.capabilityVerified = false;
+      return;
+    }
+    if (
+      this.recoveryPromise ||
+      (this.backend === 'redis' && this.capabilityVerified)
+    ) {
+      return;
+    }
+    void this.recover(true);
   }
 
   async recover(redisAvailable: boolean): Promise<void> {

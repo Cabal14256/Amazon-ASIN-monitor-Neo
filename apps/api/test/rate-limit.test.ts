@@ -501,6 +501,7 @@ describe('RateLimitService', () => {
     (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
 
     expect(service.startRecovery(true)).toBeUndefined();
+    expect(service.startRecovery(true)).toBeUndefined();
     await vi.waitFor(() => expect(redis.eval).toHaveBeenCalledTimes(3));
     expect(service.snapshot(true).status).toBe('degraded');
     await expect(
