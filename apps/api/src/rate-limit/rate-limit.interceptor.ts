@@ -248,7 +248,9 @@ export class RateLimitInterceptor implements NestInterceptor {
       const decision =
         retainProvisionalForStrict &&
         provisional &&
-        (roleDecision !== provisional || provisional.backend === 'redis')
+        (roleDecision !== provisional ||
+          provisional.backend === 'redis' ||
+          provisional.uncertainRedisReservation)
           ? await this.rateLimiter.transfer(provisional, strictInput, {
               fallbackToTargetMemory: true,
             })
