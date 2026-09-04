@@ -349,6 +349,91 @@ describe('RateLimitService', () => {
     ]);
   });
 
+  it('任一来源释放失败时保留整组意图供下次恢复幂等重放', async () => {
+    const redis = redisMock();
+    vi.mocked(redis.eval)
+      .mockRejectedValueOnce(new Error('first source response timeout'))
+      .mockRejectedValueOnce(new Error('second source response timeout'));
+    const { service } = createService({ redis });
+    const internal = service as unknown as {
+      backend: 'memory' | 'redis';
+      redisRetryAfter: number;
+    };
+    const firstSource = await service.consume(
+      {
+        clientIdentifier: '203.0.113.172',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+    internal.backend = 'redis';
+    const secondSource = await service.consume(
+      {
+        clientIdentifier: '203.0.113.173',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+    await service.transfer(
+      firstSource,
+      {
+        clientIdentifier: '203.0.113.172',
+        policy: 'strict',
+        role: 'ADMIN',
+      },
+      { fallbackToTargetMemory: true },
+    );
+    await service.transfer(
+      secondSource,
+      {
+        clientIdentifier: '203.0.113.173',
+        policy: 'strict',
+        role: 'ADMIN',
+      },
+      { fallbackToTargetMemory: true },
+    );
+
+    const releaseAttempts = new Map<string, number>();
+    const generation = firstSource.generation;
+    vi.mocked(redis.eval).mockImplementation(
+      async (script, keys, arguments_) => {
+        if (keys[0]?.includes(':capability:')) return generation;
+        if (script.includes('local requestCount')) {
+          return [
+            Number(arguments_[3]),
+            RATE_LIMIT_WINDOW_MS,
+            generation,
+            keys[0],
+          ];
+        }
+        if (script.includes('return released')) {
+          const requestId = String(arguments_[1]);
+          const attempt = (releaseAttempts.get(requestId) ?? 0) + 1;
+          releaseAttempts.set(requestId, attempt);
+          if (requestId === secondSource.requestId && attempt === 1) {
+            throw new Error('second release unavailable');
+          }
+          return 1;
+        }
+        throw new Error('unexpected Redis script');
+      },
+    );
+
+    internal.redisRetryAfter = 0;
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('degraded');
+    expect(releaseAttempts.get(firstSource.requestId)).toBe(1);
+    expect(releaseAttempts.get(secondSource.requestId)).toBe(1);
+
+    internal.redisRetryAfter = 0;
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('ok');
+    expect(releaseAttempts.get(firstSource.requestId)).toBe(2);
+    expect(releaseAttempts.get(secondSource.requestId)).toBe(2);
+  });
+
   it('Redis 响应不确定时保留 DEFAULT 内存预占，角色转移与释放均不误删', async () => {
     const redis = redisMock();
     vi.mocked(redis.eval).mockRejectedValueOnce(
@@ -633,14 +718,20 @@ describe('RateLimitService', () => {
         keys[0],
       ]);
     const logger = loggerMock();
-    const { service } = createService({ logger, redis });
+    const { metrics, service } = createService({ logger, redis });
     const input = {
       clientIdentifier: '198.51.100.20',
       policy: 'strict' as const,
       role: 'DEFAULT' as const,
     };
 
+    expect(await metrics.render()).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 1',
+    );
     const first = await service.consume(input);
+    expect(await metrics.render()).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="memory"} 1',
+    );
     vi.advanceTimersByTime(1_000);
     const second = await service.consume(input);
     expect(first).toMatchObject({ backend: 'memory', count: 1 });
@@ -667,6 +758,9 @@ describe('RateLimitService', () => {
     });
     await service.recover(true);
     expect(service.snapshot(true).status).toBe('ok');
+    expect(await metrics.render()).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 1',
+    );
     const [mergeScript, mergeKeys, mergeArguments] = vi.mocked(redis.eval).mock
       .calls[3]!;
     expect(mergeScript).toContain('local requestCount = tonumber(ARGV[4])');
@@ -1291,10 +1385,10 @@ describe('RateLimitService', () => {
     expect(existingOverflowClient.storageKey).toBe(decisions[0]!.storageKey);
   });
 
-  it('关闭开关时健康快照明确标记 disabled', () => {
+  it('关闭开关时健康快照与 Prometheus 明确标记 disabled', async () => {
     const env = loadEnv({ ...validEnv, API_RATE_LIMIT_ENABLED: 'false' });
     const logger = loggerMock();
-    const { service } = createService({ env, logger });
+    const { metrics, service } = createService({ env, logger });
 
     expect(service.enabled).toBe(false);
     expect(service.snapshot(true)).toMatchObject({
@@ -1305,6 +1399,16 @@ describe('RateLimitService', () => {
       'HTTP API 限流已禁用',
       'RateLimitService',
       { reason: 'configuration' },
+    );
+    const rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="disabled"} 1',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="memory"} 0',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 0',
     );
   });
 });

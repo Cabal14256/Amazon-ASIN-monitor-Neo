@@ -433,6 +433,7 @@ export class RateLimitService {
     this.capabilityProbeKey = `${
       env.RATE_LIMITER_KEY_PREFIX
     }:http:neo:capability:${randomUUID()}`;
+    this.metrics.setRateLimitBackend(this.enabled ? 'redis' : 'disabled');
     if (!env.API_RATE_LIMIT_ENABLED) {
       logger.info('HTTP API 限流已禁用', 'RateLimitService', {
         reason: 'configuration',
@@ -489,6 +490,7 @@ export class RateLimitService {
     }
     const previous = this.backend;
     this.backend = next;
+    this.metrics.setRateLimitBackend(next);
     if (next === 'memory') {
       this.capabilityVerified = false;
       this.redisRetryAfter = now + REDIS_RETRY_DELAY_MS;
@@ -775,23 +777,25 @@ export class RateLimitService {
   private async releasePendingSources(targetStorageKey: string): Promise<void> {
     const pending = this.pendingSourceReleases.get(targetStorageKey);
     if (!pending) return;
-    for (const [requestId, source] of pending) {
+    for (const source of pending.values()) {
       await this.releaseRedis(source);
-      pending.delete(requestId);
     }
-    this.pendingSourceReleases.delete(targetStorageKey);
   }
 
   private async releaseAllPendingSources(): Promise<void> {
     // An uncertain source may itself be a memory snapshot. Release it only
     // after every snapshot is reconciled so a later batch cannot re-add it.
-    for (const targetStorageKey of [...this.pendingSourceReleases.keys()]) {
+    // Retain every intent until recovery can commit: if a later release or a
+    // concurrent Redis operation fails, the next recovery replays the entire
+    // idempotent set after re-reconciliation.
+    for (const targetStorageKey of this.pendingSourceReleases.keys()) {
       await this.releasePendingSources(targetStorageKey);
     }
   }
 
   private async reconcileMemory(
-    recoveryGeneration: string,
+    recoveryClock: ReturnType<typeof parseRecoveryClock>,
+    localStartedAt: number,
     priorityKey?: string,
   ): Promise<void> {
     this.reconciliationUncertain = true;
@@ -830,7 +834,7 @@ export class RateLimitService {
                     ...requestIds,
                     ...requestOwners,
                     isOverflow ? 1 : 0,
-                    recoveryGeneration,
+                    recoveryClock.generation,
                     RATE_LIMIT_WINDOW_MS,
                   ],
                 ),
@@ -843,13 +847,23 @@ export class RateLimitService {
       );
     }
     await this.releaseAllPendingSources();
-    if (!this.recoveryUsesRedis || this.pendingSourceReleases.size > 0) {
+    if (!this.recoveryUsesRedis) {
       throw new Error('Redis rate-limit recovery interrupted');
     }
+    this.pendingSourceReleases.clear();
     this.memoryWindows.clear();
     this.memoryOverflowWindows.clear();
     this.reconciliationUncertain = false;
     this.capabilityVerified = true;
+    if (recoveryClock.redisNowMs !== undefined) {
+      this.observeRedisClock(
+        recoveryClock.redisNowMs,
+        localStartedAt,
+        Date.now(),
+      );
+    }
+    this.setBackend('redis', Date.now());
+    this.recoveryUsesRedis = false;
   }
 
   private async runRecovery(now: number, priorityKey?: string): Promise<void> {
@@ -868,12 +882,7 @@ export class RateLimitService {
             ],
           ),
         );
-        await this.reconcileMemory(recoveryClock.generation, priorityKey);
-        if (recoveryClock.redisNowMs !== undefined) {
-          this.observeRedisClock(recoveryClock.redisNowMs, now, Date.now());
-        }
-        this.setBackend('redis', Date.now());
-        this.recoveryUsesRedis = false;
+        await this.reconcileMemory(recoveryClock, now, priorityKey);
       } catch {
         this.recoveryUsesRedis = false;
         this.setBackend('memory', Date.now());
