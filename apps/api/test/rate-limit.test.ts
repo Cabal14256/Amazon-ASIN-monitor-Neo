@@ -182,6 +182,7 @@ describe('RateLimitService', () => {
     expect(releaseArguments).toEqual([
       'reserved-generation',
       decision.requestId,
+      RATE_LIMIT_WINDOW_MS,
     ]);
   });
 
@@ -400,7 +401,7 @@ describe('RateLimitService', () => {
     const [, consumeKeys, consumeArguments] = vi.mocked(redis.eval).mock
       .calls[4]!;
     expect(consumeKeys).toHaveLength(3);
-    expect(consumeArguments).toHaveLength(6);
+    expect(consumeArguments).toHaveLength(5);
     expect(consumeArguments.at(-1)).toBe(RATE_LIMIT_WINDOW_MS);
     expect(mergeArguments.slice(4, 9)).not.toContain(consumeArguments[3]);
     expect(logger.warn).toHaveBeenCalledWith(
@@ -516,7 +517,7 @@ describe('RateLimitService', () => {
     expect(arguments_[2]).toEqual(expect.any(String));
   });
 
-  it('对账期间新流量直用 Redis，但内存与 Redis 来源的角色转移都等待成员表落库', async () => {
+  it('对账期间新流量直用 Redis，但角色转移等待整轮恢复完成', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
     const redis = redisMock();
@@ -612,6 +613,78 @@ describe('RateLimitService', () => {
     expect(redis.eval).toHaveBeenCalledTimes(6);
   });
 
+  it('第二批冻结窗口在自身对账完成前不会提前访问 Redis', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const redis = redisMock();
+    const { service } = createService({ redis });
+    const internal = service as unknown as {
+      backend: 'memory';
+      redisRetryAfter: number;
+    };
+    internal.backend = 'memory';
+    internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+    const inputs = Array.from({ length: 101 }, (_, index) => ({
+      clientIdentifier: `198.51.100.46-${index}`,
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    }));
+    for (const input of inputs) {
+      await service.consume(input, { recordRequest: false });
+    }
+    const target = inputs.at(-1)!;
+    const targetKey = buildRateLimitKey(
+      rateLimitPrefix,
+      target.policy,
+      target.role,
+      target.clientIdentifier,
+    );
+    let finishTargetReconciliation!: (value: unknown) => void;
+    vi.mocked(redis.eval).mockImplementation(
+      async (script, keys, arguments_) => {
+        if (script.includes('return 1')) return 1;
+        if (script.includes('local requestCount')) {
+          if (keys[0] === targetKey) {
+            return new Promise((resolve) => {
+              finishTargetReconciliation = resolve;
+            });
+          }
+          return [
+            Number(arguments_[3]),
+            RATE_LIMIT_WINDOW_MS,
+            arguments_[0],
+            keys[0],
+          ];
+        }
+        return [2, RATE_LIMIT_WINDOW_MS, arguments_[0], keys[0]];
+      },
+    );
+    internal.redisRetryAfter = 0;
+
+    service.startRecovery(true);
+    await vi.waitFor(() =>
+      expect(finishTargetReconciliation).toEqual(expect.any(Function)),
+    );
+    const callsBeforeConsume = vi.mocked(redis.eval).mock.calls.length;
+    const pending = service.consume(target, { recordRequest: false });
+    await Promise.resolve();
+    expect(redis.eval).toHaveBeenCalledTimes(callsBeforeConsume);
+
+    finishTargetReconciliation([
+      1,
+      RATE_LIMIT_WINDOW_MS,
+      String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS)),
+      targetKey,
+    ]);
+    await expect(pending).resolves.toMatchObject({
+      backend: 'redis',
+      count: 2,
+      storageKey: targetKey,
+    });
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('ok');
+  });
+
   it('对账失败后丢弃竞态中的 Redis 成功结果并返回不确定内存阻断', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
@@ -668,7 +741,7 @@ describe('RateLimitService', () => {
     expect(service.snapshot(true).status).toBe('degraded');
   });
 
-  it('恢复期按冻结的 overflow 成员路由，不等待成员表对账落库', async () => {
+  it('恢复期冻结的 overflow 成员等待对应成员表对账后才访问 Redis', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
     const redis = redisMock();
@@ -686,6 +759,10 @@ describe('RateLimitService', () => {
     );
     const overflowKey = `${rateLimitPrefix}:http:neo:overflow:default`;
     const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+    let resolveBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      resolveBarrier = resolve;
+    });
     const internal = service as unknown as {
       backend: 'memory';
       memoryOverflowWindows: Map<
@@ -698,6 +775,10 @@ describe('RateLimitService', () => {
           requestOwners: Map<string, string>;
         }
       >;
+      reconciliationBarriers: Map<
+        string,
+        { promise: Promise<void>; resolve: () => void }
+      >;
       recoveryUsesRedis: boolean;
     };
     internal.backend = 'memory';
@@ -709,6 +790,10 @@ describe('RateLimitService', () => {
       requestIds: new Set(['existing']),
       requestOwners: new Map([['existing', clientKey]]),
     });
+    internal.reconciliationBarriers.set(overflowKey, {
+      promise: barrier,
+      resolve: resolveBarrier,
+    });
     vi.mocked(redis.eval).mockResolvedValueOnce([
       2,
       RATE_LIMIT_WINDOW_MS,
@@ -716,15 +801,18 @@ describe('RateLimitService', () => {
       overflowKey,
     ]);
 
-    await expect(service.consume(input)).resolves.toMatchObject({
+    const pending = service.consume(input);
+    await Promise.resolve();
+    expect(redis.eval).not.toHaveBeenCalled();
+    resolveBarrier();
+    await expect(pending).resolves.toMatchObject({
       backend: 'redis',
       count: 2,
       storageKey: overflowKey,
     });
-    const [script, keys, arguments_] = vi.mocked(redis.eval).mock.calls[0]!;
-    expect(script).toContain("ARGV[5] == '1'");
+    const [, keys, arguments_] = vi.mocked(redis.eval).mock.calls[0]!;
     expect(keys).toEqual([clientKey, overflowKey, `${overflowKey}:clients`]);
-    expect(arguments_[4]).toBe(1);
+    expect(arguments_.at(-1)).toBe(RATE_LIMIT_WINDOW_MS);
   });
 
   it('对账中断后内存请求 fail-closed，成功重试后才恢复放行', async () => {
@@ -1813,6 +1901,106 @@ describe.skipIf(!integrationEnabled)(
         }
         metricsA.onModuleDestroy();
         metricsB.onModuleDestroy();
+      }
+    }, 30_000);
+
+    it('落后窗口的降级预占仍合并到 Redis 当前代并可释放或转移', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const redis = new ApplicationRedisClient(env, logger);
+      const metrics = new MetricsService();
+      const service = new RateLimitService(env, redis, logger, metrics);
+      const remainingInWindow =
+        RATE_LIMIT_WINDOW_MS - (Date.now() % RATE_LIMIT_WINDOW_MS);
+      if (remainingInWindow < 2_000) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, remainingInWindow + 100),
+        );
+      }
+      const redisAlignedNow = Date.now();
+      const releaseIdentifier = `lagging-release-${process.pid}-${redisAlignedNow}`;
+      const transferIdentifier = `lagging-transfer-${process.pid}-${redisAlignedNow}`;
+      const releaseKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        releaseIdentifier,
+      );
+      const transferKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        transferIdentifier,
+      );
+      const adminKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'ADMIN',
+        transferIdentifier,
+      );
+      const defaultOverflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:default`;
+      const adminOverflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:admin`;
+      const cleanupKeys = [
+        releaseKey,
+        transferKey,
+        adminKey,
+        defaultOverflowKey,
+        `${defaultOverflowKey}:clients`,
+        adminOverflowKey,
+        `${adminOverflowKey}:clients`,
+      ];
+      const internal = service as unknown as {
+        backend: 'memory';
+        redisRetryAfter: number;
+      };
+      const now = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(redisAlignedNow - RATE_LIMIT_WINDOW_MS);
+      try {
+        await redis.del(...cleanupKeys);
+        internal.backend = 'memory';
+        internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+        const releasable = await service.consume({
+          clientIdentifier: releaseIdentifier,
+          policy: 'role',
+          role: 'DEFAULT',
+        });
+        const transferable = await service.consume({
+          clientIdentifier: transferIdentifier,
+          policy: 'role',
+          role: 'DEFAULT',
+        });
+        expect(releasable).toMatchObject({ backend: 'memory', count: 1 });
+        expect(transferable.generation).toBe(releasable.generation);
+
+        internal.redisRetryAfter = 0;
+        await service.recover(true);
+
+        expect(service.snapshot(true).status).toBe('ok');
+        expect(await redis.client.hget(releaseKey, 'generation')).not.toBe(
+          releasable.generation,
+        );
+        expect((await redis.client.hlen(releaseKey)) - 1).toBe(1);
+        expect((await redis.client.hlen(transferKey)) - 1).toBe(1);
+
+        await service.release(releasable);
+        expect(await redis.client.exists(releaseKey)).toBe(0);
+        await expect(
+          service.transfer(transferable, {
+            clientIdentifier: transferIdentifier,
+            policy: 'role',
+            role: 'ADMIN',
+          }),
+        ).resolves.toMatchObject({ allowed: true, role: 'ADMIN' });
+        expect(await redis.client.exists(transferKey)).toBe(0);
+        expect((await redis.client.hlen(adminKey)) - 1).toBe(1);
+      } finally {
+        now.mockRestore();
+        if (redis.client.status !== 'end') {
+          await redis.del(...cleanupKeys);
+          redis.onModuleDestroy();
+        }
+        metrics.onModuleDestroy();
       }
     }, 30_000);
 
