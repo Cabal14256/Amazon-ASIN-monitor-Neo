@@ -266,7 +266,7 @@ describe('RateLimitService', () => {
     expect(service.snapshot(true).status).toBe('degraded');
   });
 
-  it('strict 原子转移失联时改用目标内存桶，且不释放来源预占', async () => {
+  it('strict 原子转移失联时先用目标内存桶，恢复后重试来源释放', async () => {
     const redis = redisMock();
     vi.mocked(redis.eval)
       .mockResolvedValueOnce([1, RATE_LIMIT_WINDOW_MS, 'source-generation'])
@@ -281,17 +281,16 @@ describe('RateLimitService', () => {
       { recordRequest: false },
     );
 
-    await expect(
-      service.transfer(
-        source,
-        {
-          clientIdentifier: '203.0.113.171',
-          policy: 'strict',
-          role: 'ADMIN',
-        },
-        { fallbackToTargetMemory: true },
-      ),
-    ).resolves.toMatchObject({
+    const fallback = await service.transfer(
+      source,
+      {
+        clientIdentifier: '203.0.113.171',
+        policy: 'strict',
+        role: 'ADMIN',
+      },
+      { fallbackToTargetMemory: true },
+    );
+    expect(fallback).toMatchObject({
       allowed: true,
       backend: 'memory',
       count: 1,
@@ -300,6 +299,44 @@ describe('RateLimitService', () => {
     });
     expect(redis.eval).toHaveBeenCalledTimes(2);
     expect(service.snapshot(true).status).toBe('degraded');
+
+    (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce(1)
+      .mockImplementationOnce(async (_script, keys, arguments_) => [
+        1,
+        RATE_LIMIT_WINDOW_MS,
+        arguments_[0],
+        keys[0],
+      ])
+      .mockRejectedValueOnce(new Error('source release unavailable'));
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('degraded');
+
+    (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce(1)
+      .mockImplementationOnce(async (_script, keys, arguments_) => [
+        1,
+        RATE_LIMIT_WINDOW_MS,
+        arguments_[0],
+        keys[0],
+      ])
+      .mockResolvedValueOnce(1);
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('ok');
+    const [, releaseKeys, releaseArguments] = vi.mocked(redis.eval).mock
+      .calls[7]!;
+    expect(releaseKeys).toEqual([
+      source.clientKey,
+      source.overflowKey,
+      `${source.overflowKey}:clients`,
+    ]);
+    expect(releaseArguments).toEqual([
+      source.generation,
+      source.requestId,
+      RATE_LIMIT_WINDOW_MS,
+    ]);
   });
 
   it('Redis 响应不确定时保留 DEFAULT 内存预占，角色转移与释放均不误删', async () => {
@@ -392,7 +429,7 @@ describe('RateLimitService', () => {
     expect(mergeKeys).toHaveLength(2);
     expect(mergeArguments[3]).toBe(5);
     expect(mergeArguments.slice(4, 9)).toHaveLength(5);
-    expect(mergeArguments.slice(9, -1)).toEqual(Array(5).fill(''));
+    expect(mergeArguments.slice(9, -3)).toEqual(Array(5).fill(''));
     expect(mergeArguments.at(-1)).toBe(RATE_LIMIT_WINDOW_MS);
     await expect(service.consume(input)).resolves.toMatchObject({
       backend: 'redis',
@@ -515,6 +552,7 @@ describe('RateLimitService', () => {
     expect(arguments_[0]).toEqual(expect.any(String));
     expect(arguments_[1]).toEqual(expect.any(Number));
     expect(arguments_[2]).toEqual(expect.any(String));
+    expect(arguments_[3]).toBe(RATE_LIMIT_WINDOW_MS);
   });
 
   it('对账期间新流量直用 Redis，但角色转移等待整轮恢复完成', async () => {
@@ -587,11 +625,8 @@ describe('RateLimitService', () => {
 
     const [, reconcileKeys, reconcileArguments] = vi.mocked(redis.eval).mock
       .calls[2]!;
-    expect(reconcileKeys).toEqual([
-      source.clientKey,
-      `${source.clientKey}:clients`,
-    ]);
-    expect(reconcileArguments.slice(4, -1)).toContain(source.requestId);
+    expect(reconcileKeys).toEqual([source.clientKey, source.overflowKey]);
+    expect(reconcileArguments.slice(4, -3)).toContain(source.requestId);
     expect(reconcileArguments.at(-1)).toBe(RATE_LIMIT_WINDOW_MS);
     finishReconciliation([
       1,
@@ -642,7 +677,7 @@ describe('RateLimitService', () => {
     let finishTargetReconciliation!: (value: unknown) => void;
     vi.mocked(redis.eval).mockImplementation(
       async (script, keys, arguments_) => {
-        if (script.includes('return 1')) return 1;
+        if (keys[0]?.includes(':capability:')) return 1;
         if (script.includes('local requestCount')) {
           if (keys[0] === targetKey) {
             return new Promise((resolve) => {
@@ -2004,6 +2039,240 @@ describe.skipIf(!integrationEnabled)(
       }
     }, 30_000);
 
+    it('恢复代际锚点阻止冻结快照跨边界进入下一个 Redis 窗口', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const redis = new ApplicationRedisClient(env, logger);
+      const metrics = new MetricsService();
+      const service = new RateLimitService(env, redis, logger, metrics);
+      const clientIdentifier = `recovery-anchor-${process.pid}-${Date.now()}`;
+      const input = {
+        clientIdentifier,
+        policy: 'role' as const,
+        role: 'DEFAULT' as const,
+      };
+      const key = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        input.policy,
+        input.role,
+        clientIdentifier,
+      );
+      const overflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:default`;
+      const cleanupKeys = [key, overflowKey, `${overflowKey}:clients`];
+      const internal = service as unknown as {
+        backend: 'memory';
+        redisRetryAfter: number;
+      };
+      try {
+        await redis.del(...cleanupKeys);
+        internal.backend = 'memory';
+        internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+        await expect(service.consume(input)).resolves.toMatchObject({
+          backend: 'memory',
+          count: 1,
+        });
+
+        const originalEval = redis.eval.bind(redis);
+        const evalSpy = vi
+          .spyOn(redis, 'eval')
+          .mockImplementationOnce(async (...arguments_) => {
+            const observedGeneration = String(
+              await originalEval(...arguments_),
+            );
+            return String(Number(observedGeneration) - 1);
+          });
+        internal.redisRetryAfter = 0;
+        await service.recover(true);
+
+        expect(service.snapshot(true).status).toBe('ok');
+        expect(await redis.client.exists(key)).toBe(0);
+        const [reconcileScript, , reconcileArguments] = evalSpy.mock.calls[1]!;
+        expect(reconcileScript).toContain(
+          'currentGeneration ~= recoveryGeneration',
+        );
+        expect(reconcileArguments.at(-2)).toMatch(/^\d+$/);
+        await expect(service.consume(input)).resolves.toMatchObject({
+          backend: 'redis',
+          count: 1,
+        });
+      } finally {
+        if (redis.client.status !== 'end') {
+          await redis.del(...cleanupKeys);
+          redis.onModuleDestroy();
+        }
+        metrics.onModuleDestroy();
+      }
+    }, 30_000);
+
+    it('strict Redis 转移未执行时在恢复对账后重试 DEFAULT 来源释放', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const redis = new ApplicationRedisClient(env, logger);
+      const metrics = new MetricsService();
+      const service = new RateLimitService(env, redis, logger, metrics);
+      const clientIdentifier = `strict-release-${process.pid}-${Date.now()}`;
+      const defaultKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        clientIdentifier,
+      );
+      const strictKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'strict',
+        'ADMIN',
+        clientIdentifier,
+      );
+      const defaultOverflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:default`;
+      const strictOverflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:strict`;
+      const cleanupKeys = [
+        defaultKey,
+        strictKey,
+        defaultOverflowKey,
+        `${defaultOverflowKey}:clients`,
+        strictOverflowKey,
+        `${strictOverflowKey}:clients`,
+      ];
+      try {
+        await redis.del(...cleanupKeys);
+        const source = await service.consume(
+          {
+            clientIdentifier,
+            policy: 'role',
+            role: 'DEFAULT',
+          },
+          { recordRequest: false },
+        );
+        vi.spyOn(redis, 'eval').mockRejectedValueOnce(
+          new Error('simulated transfer connection failure'),
+        );
+        const fallback = await service.transfer(
+          source,
+          {
+            clientIdentifier,
+            policy: 'strict',
+            role: 'ADMIN',
+          },
+          { fallbackToTargetMemory: true },
+        );
+        expect(fallback).toMatchObject({
+          allowed: true,
+          backend: 'memory',
+          policy: 'strict',
+        });
+        expect((await redis.client.hlen(defaultKey)) - 1).toBe(1);
+        expect(await redis.client.exists(strictKey)).toBe(0);
+
+        (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+        await service.recover(true);
+
+        expect(service.snapshot(true).status).toBe('ok');
+        expect(await redis.client.exists(defaultKey)).toBe(0);
+        expect((await redis.client.hlen(strictKey)) - 1).toBe(1);
+      } finally {
+        if (redis.client.status !== 'end') {
+          await redis.del(...cleanupKeys);
+          redis.onModuleDestroy();
+        }
+        metrics.onModuleDestroy();
+      }
+    }, 30_000);
+
+    it('不确定的 overflow Redis 写入恢复时不会再计入独立窗口', async () => {
+      const env = loadEnv(process.env);
+      const logger = new AppLogger();
+      const redis = new ApplicationRedisClient(env, logger);
+      const metricsA = new MetricsService();
+      const metricsB = new MetricsService();
+      const serviceA = new RateLimitService(env, redis, logger, metricsA);
+      const serviceB = new RateLimitService(env, redis, logger, metricsB);
+      const remainingInWindow =
+        RATE_LIMIT_WINDOW_MS - (Date.now() % RATE_LIMIT_WINDOW_MS);
+      if (remainingInWindow < 2_000) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, remainingInWindow + 100),
+        );
+      }
+      const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+      const expiresAt = (Number(generation) + 1) * RATE_LIMIT_WINDOW_MS;
+      const clientIdentifier = `ambiguous-overflow-${
+        process.pid
+      }-${Date.now()}`;
+      const clientKey = buildRateLimitKey(
+        env.RATE_LIMITER_KEY_PREFIX,
+        'role',
+        'DEFAULT',
+        clientIdentifier,
+      );
+      const overflowKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:overflow:default`;
+      const membershipKey = `${overflowKey}:clients`;
+      try {
+        await redis.del(clientKey, overflowKey, membershipKey);
+        await redis.client.hset(
+          overflowKey,
+          'generation',
+          generation,
+          'request:existing-overflow',
+          clientKey,
+        );
+        await redis.client.hset(
+          membershipKey,
+          'generation',
+          generation,
+          clientKey,
+          1,
+        );
+        await redis.client.pexpireat(overflowKey, expiresAt);
+        await redis.client.pexpireat(membershipKey, expiresAt);
+        const originalEval = redis.eval.bind(redis);
+        vi.spyOn(redis, 'eval').mockImplementationOnce(
+          async (...arguments_) => {
+            await originalEval(...arguments_);
+            throw new Error('simulated overflow response timeout');
+          },
+        );
+        const input = {
+          clientIdentifier,
+          policy: 'role' as const,
+          role: 'DEFAULT' as const,
+        };
+        const ambiguous = await serviceA.consume(input);
+        expect(ambiguous).toMatchObject({
+          backend: 'memory',
+          count: 1,
+          storageKey: clientKey,
+          uncertainRedisReservation: true,
+        });
+        expect(
+          await redis.client.hget(
+            overflowKey,
+            `request:${ambiguous.requestId}`,
+          ),
+        ).toBe(clientKey);
+
+        (
+          serviceA as unknown as { redisRetryAfter: number }
+        ).redisRetryAfter = 0;
+        await serviceA.recover(true);
+
+        expect((await redis.client.hlen(clientKey)) - 1).toBe(0);
+        expect((await redis.client.hlen(overflowKey)) - 1).toBe(2);
+        expect(await redis.client.hget(membershipKey, clientKey)).toBe('2');
+        await expect(serviceB.consume(input)).resolves.toMatchObject({
+          backend: 'redis',
+          count: 3,
+          storageKey: overflowKey,
+        });
+      } finally {
+        if (redis.client.status !== 'end') {
+          await redis.del(clientKey, overflowKey, membershipKey);
+          redis.onModuleDestroy();
+        }
+        metricsA.onModuleDestroy();
+        metricsB.onModuleDestroy();
+      }
+    }, 30_000);
+
     it('恢复后的 overflow 成员继续叠加故障前独立 Redis 计数', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
@@ -2330,10 +2599,10 @@ describe.skipIf(!integrationEnabled)(
         expect(reconcileScript).toContain(
           'local requestCount = tonumber(ARGV[4])',
         );
-        expect(reconcileKeys).toEqual([key, `${key}:clients`]);
+        expect(reconcileKeys).toEqual([key, overflowKey]);
         expect(reconcileArguments[3]).toBe(4);
-        expect(reconcileArguments.slice(4, -1)).toHaveLength(8);
-        expect(reconcileArguments.slice(8, -1)).toEqual(Array(4).fill(''));
+        expect(reconcileArguments.slice(4, -3)).toHaveLength(8);
+        expect(reconcileArguments.slice(8, -3)).toEqual(Array(4).fill(''));
         expect(reconcileArguments.at(-1)).toBe(RATE_LIMIT_WINDOW_MS);
         expect((await redis.client.hlen(key)) - 1).toBe(4);
         expect(await redis.client.pttl(key)).toBeLessThanOrEqual(
