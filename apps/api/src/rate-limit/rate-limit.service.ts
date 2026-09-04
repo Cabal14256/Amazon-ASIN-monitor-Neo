@@ -796,6 +796,7 @@ export class RateLimitService {
   private async reconcileMemory(
     recoveryClock: ReturnType<typeof parseRecoveryClock>,
     localStartedAt: number,
+    localProbeCompletedAt: number,
     priorityKey?: string,
   ): Promise<void> {
     this.reconciliationUncertain = true;
@@ -859,7 +860,7 @@ export class RateLimitService {
       this.observeRedisClock(
         recoveryClock.redisNowMs,
         localStartedAt,
-        Date.now(),
+        localProbeCompletedAt,
       );
     }
     this.setBackend('redis', Date.now());
@@ -870,19 +871,24 @@ export class RateLimitService {
     const recovery = (async () => {
       try {
         const identity = identityAt(this.redisAlignedNow(now));
-        const recoveryClock = parseRecoveryClock(
-          await this.redis.eval(
-            CAPABILITY_PROBE_SCRIPT,
-            [this.capabilityProbeKey],
-            [
-              identity.generation,
-              now + 1_000,
-              randomUUID(),
-              RATE_LIMIT_WINDOW_MS,
-            ],
-          ),
+        const recoveryResponse = await this.redis.eval(
+          CAPABILITY_PROBE_SCRIPT,
+          [this.capabilityProbeKey],
+          [
+            identity.generation,
+            now + 1_000,
+            randomUUID(),
+            RATE_LIMIT_WINDOW_MS,
+          ],
         );
-        await this.reconcileMemory(recoveryClock, now, priorityKey);
+        const localProbeCompletedAt = Date.now();
+        const recoveryClock = parseRecoveryClock(recoveryResponse);
+        await this.reconcileMemory(
+          recoveryClock,
+          now,
+          localProbeCompletedAt,
+          priorityKey,
+        );
       } catch {
         this.recoveryUsesRedis = false;
         this.setBackend('memory', Date.now());
@@ -1261,6 +1267,7 @@ export class RateLimitService {
     if (!this.enabled) return;
     if (!redisAvailable) {
       this.capabilityVerified = false;
+      this.setBackend('memory', Date.now());
       return;
     }
     if (
@@ -1276,6 +1283,7 @@ export class RateLimitService {
     if (!this.enabled) return;
     if (!redisAvailable) {
       this.capabilityVerified = false;
+      this.setBackend('memory', Date.now());
       return;
     }
     if (this.recoveryPromise) {

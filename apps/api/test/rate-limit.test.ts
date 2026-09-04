@@ -659,6 +659,66 @@ describe('RateLimitService', () => {
     expect(service.snapshot(true).status).toBe('ok');
   });
 
+  it('长时间内存对账不会被计入 Redis 时钟偏移样本', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const redis = redisMock();
+    const { service } = createService({ redis });
+    const internal = service as unknown as {
+      backend: 'memory';
+      redisClockOffsetMs: number;
+      redisRetryAfter: number;
+    };
+    internal.backend = 'memory';
+    internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+    await service.consume(
+      {
+        clientIdentifier: '198.51.100.203',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+
+    const recoveryStartedAt = Date.now();
+    const redisNowMs = recoveryStartedAt + 2 * 60_000;
+    const generation = String(Math.floor(redisNowMs / RATE_LIMIT_WINDOW_MS));
+    let probeCompletedAt = 0;
+    let finishReconciliation!: (value: unknown) => void;
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce([generation, redisNowMs])
+      .mockImplementationOnce(
+        (_script, keys, arguments_) =>
+          new Promise((resolve) => {
+            probeCompletedAt = Date.now();
+            finishReconciliation = resolve;
+            expect(arguments_[3]).toBe(1);
+            expect(keys[0]).toBeTruthy();
+          }),
+      );
+    internal.redisRetryAfter = 0;
+
+    const recovery = service.recover(true);
+    await vi.waitFor(() =>
+      expect(finishReconciliation).toEqual(expect.any(Function)),
+    );
+    const expectedOffset = Math.round(
+      redisNowMs - (recoveryStartedAt + probeCompletedAt) / 2,
+    );
+    vi.advanceTimersByTime(10 * 60_000);
+    finishReconciliation([
+      1,
+      RATE_LIMIT_WINDOW_MS,
+      generation,
+      'reconciled-key',
+    ]);
+    await recovery;
+
+    expect(internal.redisClockOffsetMs).toBe(expectedOffset);
+    expect(internal.redisClockOffsetMs).toBeGreaterThan(119_900);
+    expect(internal.redisClockOffsetMs).toBeLessThanOrEqual(2 * 60_000);
+  });
+
   it('无 Redis 时钟偏移时降级配额在固定窗口边界正常重置', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:14:59.900Z'));
@@ -1406,6 +1466,24 @@ describe('RateLimitService', () => {
     );
     expect(rendered).toContain(
       'amazon_asin_monitor_http_rate_limit_backend_active{backend="memory"} 0',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 0',
+    );
+  });
+
+  it('健康探针判定 Redis 不可用时立即把当前后端与 gauge 切到内存', async () => {
+    const { metrics, service } = createService();
+
+    service.startRecovery(false);
+
+    expect(service.snapshot(false)).toMatchObject({
+      status: 'degraded',
+      stats: { backend: 'memory', redisAvailable: false },
+    });
+    const rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="memory"} 1',
     );
     expect(rendered).toContain(
       'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 0',
