@@ -84,6 +84,7 @@ export interface RateLimitDecision {
 
 const REDIS_RETRY_DELAY_MS = 5_000;
 const MAX_MEMORY_WINDOWS = 10_000;
+export const MAX_MEMORY_RESERVATIONS = 100_000;
 const RECONCILIATION_BATCH_SIZE = 100;
 const CONSUME_WINDOW_SCRIPT = `
 redis.replicate_commands()
@@ -408,6 +409,8 @@ export class RateLimitService {
   private backend: RateLimitBackend = 'redis';
   private redisRetryAfter = 0;
   private nextMemoryCleanupAt = 0;
+  private lastMemoryCleanupGeneration: string | undefined;
+  private memoryReservationCount = 0;
   private recoveryProbeInFlight = false;
   private recoveryPromise: Promise<void> | undefined;
   private readonly reconciliationBarriers = new Map<
@@ -511,16 +514,42 @@ export class RateLimitService {
   private cleanMemory(now: number): void {
     for (const [key, window] of this.memoryWindows) {
       if (window.expiresAt <= now) {
-        this.memoryWindows.delete(key);
+        this.removeMemoryWindow(this.memoryWindows, key);
         this.pendingSourceReleases.delete(key);
       }
     }
     for (const [key, window] of this.memoryOverflowWindows) {
       if (window.expiresAt <= now) {
-        this.memoryOverflowWindows.delete(key);
+        this.removeMemoryWindow(this.memoryOverflowWindows, key);
         this.pendingSourceReleases.delete(key);
       }
     }
+  }
+
+  private removeMemoryWindow(
+    map: Map<string, MemoryWindow>,
+    key: string,
+  ): void {
+    const window = map.get(key);
+    if (!window) return;
+    this.memoryReservationCount = Math.max(
+      0,
+      this.memoryReservationCount - window.requestIds.size,
+    );
+    map.delete(key);
+  }
+
+  private cleanMemoryForCapacity(identity: WindowIdentity): void {
+    const now = this.redisAlignedNow(Date.now());
+    if (
+      this.lastMemoryCleanupGeneration === identity.generation &&
+      now < this.nextMemoryCleanupAt
+    ) {
+      return;
+    }
+    this.cleanMemory(now);
+    this.nextMemoryCleanupAt = now + 60_000;
+    this.lastMemoryCleanupGeneration = identity.generation;
   }
 
   private newMemoryWindow(
@@ -542,13 +571,14 @@ export class RateLimitService {
   }
 
   private addMemoryRequest(window: MemoryWindow, requestId: string): boolean {
+    if (window.requestIds.has(requestId)) return true;
     if (
-      window.requestIds.has(requestId) ||
-      this.memoryRequestCount(window) > window.limit
-    ) {
-      return window.requestIds.has(requestId);
-    }
+      this.memoryRequestCount(window) > window.limit ||
+      this.memoryReservationCount >= MAX_MEMORY_RESERVATIONS
+    )
+      return false;
     window.requestIds.add(requestId);
+    this.memoryReservationCount += 1;
     return true;
   }
 
@@ -560,7 +590,7 @@ export class RateLimitService {
     const window = map.get(key);
     if (!window) return undefined;
     if (window.generation === identity.generation) return window;
-    map.delete(key);
+    this.removeMemoryWindow(map, key);
     this.pendingSourceReleases.delete(key);
     return undefined;
   }
@@ -581,11 +611,7 @@ export class RateLimitService {
     let storageKey = clientKey;
     if (!window) {
       if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
-        const now = this.redisAlignedNow(Date.now());
-        if (now >= this.nextMemoryCleanupAt) {
-          this.cleanMemory(now);
-          this.nextMemoryCleanupAt = now + 60_000;
-        }
+        this.cleanMemoryForCapacity(identity);
       }
       const overflow = this.activeMemoryWindow(
         this.memoryOverflowWindows,
@@ -604,11 +630,7 @@ export class RateLimitService {
     }
     if (!window) {
       if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
-        const now = this.redisAlignedNow(Date.now());
-        if (now >= this.nextMemoryCleanupAt) {
-          this.cleanMemory(now);
-          this.nextMemoryCleanupAt = now + 60_000;
-        }
+        this.cleanMemoryForCapacity(identity);
       }
       if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
         window = this.newMemoryWindow(identity, limit, overflowKey);
@@ -627,7 +649,9 @@ export class RateLimitService {
     ) {
       window.requestOwners.set(requestId, clientKey);
     }
-    const count = this.memoryRequestCount(window);
+    const count = stored
+      ? this.memoryRequestCount(window)
+      : Math.max(this.memoryRequestCount(window), limit + 1);
     return {
       backend: 'memory',
       clientKey,
@@ -656,6 +680,10 @@ export class RateLimitService {
         continue;
       }
       window.requestOwners.delete(decision.requestId);
+      this.memoryReservationCount = Math.max(
+        0,
+        this.memoryReservationCount - 1,
+      );
       if (this.memoryRequestCount(window) === 0) map.delete(key);
     }
   }
@@ -854,6 +882,7 @@ export class RateLimitService {
     this.pendingSourceReleases.clear();
     this.memoryWindows.clear();
     this.memoryOverflowWindows.clear();
+    this.memoryReservationCount = 0;
     this.reconciliationUncertain = false;
     this.capabilityVerified = true;
     if (recoveryClock.redisNowMs !== undefined) {

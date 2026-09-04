@@ -34,6 +34,7 @@ import {
 } from '../src/rate-limit/rate-limit.interceptor';
 import {
   buildRateLimitKey,
+  MAX_MEMORY_RESERVATIONS,
   RATE_LIMIT_WINDOW_MS,
   RateLimitService,
   ROLE_LIMITS,
@@ -1443,6 +1444,103 @@ describe('RateLimitService', () => {
       role: 'DEFAULT',
     });
     expect(existingOverflowClient.storageKey).toBe(decisions[0]!.storageKey);
+  });
+
+  it('满载窗口跨 generation 时绕过清理节流并恢复独立桶', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:14:30.000Z'));
+    const { service } = createService();
+    const internal = service as unknown as {
+      backend: 'memory';
+      cleanMemory(now: number): void;
+      memoryOverflowWindows: Map<string, { requestIds: Set<string> }>;
+      memoryWindows: Map<
+        string,
+        {
+          expiresAt: number;
+          generation: string;
+          limit: number;
+          requestIds: Set<string>;
+          requestOwners: Map<string, string>;
+        }
+      >;
+      redisRetryAfter: number;
+    };
+    const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+    const expiresAt = new Date('2026-09-01T00:15:00.000Z').getTime();
+    for (let index = 0; index < 10_000; index += 1) {
+      internal.memoryWindows.set(`rollover-${index}`, {
+        expiresAt,
+        generation,
+        limit: ROLE_LIMITS.DEFAULT,
+        requestIds: new Set([`request-${index}`]),
+        requestOwners: new Map(),
+      });
+    }
+    internal.backend = 'memory';
+    internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+    const clean = vi.spyOn(internal, 'cleanMemory');
+
+    const beforeRollover = await service.consume({
+      clientIdentifier: 'rollover-overflow',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
+    expect(beforeRollover.storageKey).toBe(beforeRollover.overflowKey);
+    expect(clean).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(31_000);
+    const afterRollover = await service.consume({
+      clientIdentifier: 'rollover-independent',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
+
+    expect(clean).toHaveBeenCalledTimes(2);
+    expect(internal.memoryWindows).toHaveLength(1);
+    expect(internal.memoryOverflowWindows).toHaveLength(0);
+    expect(afterRollover).toMatchObject({
+      allowed: true,
+      count: 1,
+      storageKey: afterRollover.clientKey,
+    });
+  });
+
+  it('全局内存预占达到上限后 fail-closed 且不再分配 request ID', async () => {
+    const { service } = createService();
+    const internal = service as unknown as {
+      backend: 'memory';
+      memoryReservationCount: number;
+      memoryWindows: Map<string, { requestIds: Set<string> }>;
+      redisRetryAfter: number;
+    };
+    internal.backend = 'memory';
+    internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+    internal.memoryReservationCount = MAX_MEMORY_RESERVATIONS;
+    const input = {
+      clientIdentifier: 'reservation-cap',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+
+    const blocked = await service.consume(input, { recordRequest: false });
+
+    expect(blocked).toMatchObject({
+      allowed: false,
+      backend: 'memory',
+      count: ROLE_LIMITS.DEFAULT + 1,
+    });
+    expect(internal.memoryReservationCount).toBe(MAX_MEMORY_RESERVATIONS);
+    expect(
+      internal.memoryWindows.get(blocked.clientKey)?.requestIds,
+    ).toHaveLength(0);
+
+    internal.memoryReservationCount = MAX_MEMORY_RESERVATIONS - 1;
+    const finalSlot = await service.consume(input, { recordRequest: false });
+    expect(finalSlot).toMatchObject({ allowed: true, count: 1 });
+    expect(internal.memoryReservationCount).toBe(MAX_MEMORY_RESERVATIONS);
+    await service.release(finalSlot);
+    expect(internal.memoryReservationCount).toBe(MAX_MEMORY_RESERVATIONS - 1);
   });
 
   it('关闭开关时健康快照与 Prometheus 明确标记 disabled', async () => {
