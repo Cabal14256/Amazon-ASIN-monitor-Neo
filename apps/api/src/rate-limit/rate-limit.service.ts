@@ -86,6 +86,7 @@ const REDIS_RETRY_DELAY_MS = 5_000;
 const MAX_MEMORY_WINDOWS = 10_000;
 const RECONCILIATION_BATCH_SIZE = 100;
 const CONSUME_WINDOW_SCRIPT = `
+redis.replicate_commands()
 local redisTime = redis.call('TIME')
 local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 local windowMs = tonumber(ARGV[5])
@@ -133,6 +134,7 @@ redis.call('PEXPIREAT', selected, expiresAt)
 return { effective, redis.call('PTTL', selected), currentGeneration, selected }
 `;
 const RELEASE_WINDOW_SCRIPT = `
+redis.replicate_commands()
 local redisTime = redis.call('TIME')
 local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 local currentGeneration = tostring(math.floor(nowMs / tonumber(ARGV[3])))
@@ -164,6 +166,7 @@ end
 return released
 `;
 const TRANSFER_WINDOW_SCRIPT = `
+redis.replicate_commands()
 local redisTime = redis.call('TIME')
 local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 local windowMs = tonumber(ARGV[7])
@@ -230,6 +233,7 @@ end
 return { effective, redis.call('PTTL', selected), currentGeneration, selected, released }
 `;
 const RECONCILE_WINDOW_SCRIPT = `
+redis.replicate_commands()
 local redisTime = redis.call('TIME')
 local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 local windowMs = tonumber(ARGV[#ARGV])
@@ -296,6 +300,7 @@ end
 return { current, redis.call('PTTL', KEYS[1]), currentGeneration, KEYS[1] }
 `;
 const CAPABILITY_PROBE_SCRIPT = `
+redis.replicate_commands()
 local redisTime = redis.call('TIME')
 local nowMs = tonumber(redisTime[1]) * 1000 + math.floor(tonumber(redisTime[2]) / 1000)
 local currentGeneration = tostring(math.floor(nowMs / tonumber(ARGV[4])))

@@ -38,10 +38,13 @@ function shouldBypass(
   rateLimiter: RateLimitService,
 ): boolean {
   const path = requestPath(request);
+  const isHealthRead =
+    (request.method === 'GET' || request.method === 'HEAD') &&
+    EXCLUDED_PATHS.has(path);
   return (
     !rateLimiter.enabled ||
     request.method === 'OPTIONS' ||
-    EXCLUDED_PATHS.has(path) ||
+    isHealthRead ||
     !(path === '/api/v1' || path.startsWith('/api/v1/')) ||
     rateLimiter.isWhitelisted(request.ip)
   );
@@ -245,7 +248,7 @@ export class RateLimitInterceptor implements NestInterceptor {
       const decision =
         retainProvisionalForStrict &&
         provisional &&
-        roleDecision !== provisional
+        (roleDecision !== provisional || provisional.backend === 'redis')
           ? await this.rateLimiter.transfer(provisional, strictInput, {
               fallbackToTargetMemory: true,
             })

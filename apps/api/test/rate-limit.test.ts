@@ -168,8 +168,15 @@ describe('RateLimitService', () => {
 
     await service.release(decision);
 
+    const [consumeScript] = vi.mocked(redis.eval).mock.calls[0]!;
+    expect(consumeScript.trimStart()).toMatch(
+      /^redis\.replicate_commands\(\)\s+local redisTime/,
+    );
     const [releaseScript, releaseKeys, releaseArguments] = vi.mocked(redis.eval)
       .mock.calls[1]!;
+    expect(releaseScript.trimStart()).toMatch(
+      /^redis\.replicate_commands\(\)\s+local redisTime/,
+    );
     expect(releaseScript).toContain(
       "redis.call('HGET', KEYS[index], 'generation')",
     );
@@ -223,6 +230,9 @@ describe('RateLimitService', () => {
     const [transferScript, transferKeys, transferArguments] = vi.mocked(
       redis.eval,
     ).mock.calls[1]!;
+    expect(transferScript.trimStart()).toMatch(
+      /^redis\.replicate_commands\(\)\s+local redisTime/,
+    );
     expect(transferScript).toContain("redis.call('HSET', selected");
     expect(transferScript).toContain("redis.call('HGET', KEYS[index]");
     expect(transferScript).toContain("redis.call('HDEL', KEYS[index]");
@@ -426,6 +436,9 @@ describe('RateLimitService', () => {
     const [mergeScript, mergeKeys, mergeArguments] = vi.mocked(redis.eval).mock
       .calls[3]!;
     expect(mergeScript).toContain('local requestCount = tonumber(ARGV[4])');
+    expect(mergeScript.trimStart()).toMatch(
+      /^redis\.replicate_commands\(\)\s+local redisTime/,
+    );
     expect(mergeKeys).toHaveLength(2);
     expect(mergeArguments[3]).toBe(5);
     expect(mergeArguments.slice(4, 9)).toHaveLength(5);
@@ -546,6 +559,9 @@ describe('RateLimitService', () => {
     ]) {
       expect(script).toContain(`redis.call('${command}'`);
     }
+    expect(script.trimStart()).toMatch(
+      /^redis\.replicate_commands\(\)\s+local redisTime/,
+    );
     expect(keys[0]).toMatch(
       /^spapi:ratelimiter:http:neo:capability:[0-9a-f-]+$/,
     );
@@ -1596,6 +1612,45 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     ).toBe(false);
   });
 
+  it('认证 strict 的角色转移先失败时仍在恢复后释放 DEFAULT 预占', async () => {
+    const defaultKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'DEFAULT',
+      '127.0.0.1',
+    );
+    const strictKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'strict',
+      'ADMIN',
+      '127.0.0.1',
+    );
+    const evalMock = vi.mocked(redis.eval);
+    const defaultImplementation = evalMock.getMockImplementation()!;
+    evalMock
+      .mockImplementationOnce(defaultImplementation)
+      .mockRejectedValueOnce(new Error('role transfer unavailable'));
+
+    const response = await app.getHttpAdapter().getInstance().inject({
+      method: 'GET',
+      url: '/api/v1/rate-test/authenticated-strict',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['ratelimit-limit']).toBe('20');
+    expect(counters.get(defaultKey)).toBe(1);
+    expect(counters.has(strictKey)).toBe(false);
+    const service = app.get(RateLimitService);
+    expect(service.snapshot(true).status).toBe('degraded');
+
+    (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+    await service.recover(true);
+
+    expect(service.snapshot(true).status).toBe('ok');
+    expect(counters.has(defaultKey)).toBe(false);
+    expect(counters.get(strictKey)).toBe(1);
+  });
+
   it('认证 strict 拒绝时保留 DEFAULT 预占，使后续请求在 Guard 前阻断', async () => {
     const defaultKey = buildRateLimitKey(
       rateLimitPrefix,
@@ -1714,15 +1769,24 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     );
   });
 
-  it('/health、/metrics、OPTIONS、关闭开关与白名单请求绕过计数', async () => {
+  it('GET/HEAD health、metrics、OPTIONS、关闭开关与白名单绕过计数', async () => {
     const fastify = app.getHttpAdapter().getInstance();
     await fastify.inject({ method: 'GET', url: '/health' });
     await fastify.inject({ method: 'GET', url: '/metrics' });
+    await fastify.inject({ method: 'HEAD', url: '/api/v1/health' });
     await fastify.inject({
       method: 'OPTIONS',
       url: '/api/v1/rate-test/anonymous',
     });
     expect(redis.eval).not.toHaveBeenCalled();
+
+    const unsupportedHealthMethod = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/health',
+    });
+    expect(unsupportedHealthMethod.statusCode).toBe(404);
+    expect(unsupportedHealthMethod.headers['ratelimit-limit']).toBe('100');
+    expect(redis.eval).toHaveBeenCalledOnce();
 
     await app.close();
     await createApp(
