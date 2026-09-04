@@ -36,6 +36,7 @@ interface MemoryWindowSnapshot {
   clientKeys: string[];
   key: string;
   requestIds: string[];
+  requestOwners: string[];
   window: MemoryWindow;
 }
 
@@ -88,7 +89,7 @@ if ARGV[5] == '1' then
     redis.call('DEL', KEYS[3])
     redis.call('HSET', KEYS[3], 'generation', currentGeneration)
   end
-  redis.call('HSET', KEYS[3], KEYS[1], 1)
+  redis.call('HSETNX', KEYS[3], KEYS[1], 0)
   redis.call('PEXPIREAT', KEYS[3], expiresAt)
 end
 local selected = KEYS[1]
@@ -104,19 +105,47 @@ if generation ~= currentGeneration then
 end
 local field = 'request:' .. ARGV[4]
 local current = redis.call('HLEN', selected) - 1
-if redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) then
+local effective = current
+if selected == KEYS[2] then
+  local ownerCount = tonumber(redis.call('HGET', KEYS[3], KEYS[1])) or 0
+  local individualCount = 0
+  if redis.call('HGET', KEYS[1], 'generation') == currentGeneration then
+    individualCount = redis.call('HLEN', KEYS[1]) - 1
+  end
+  effective = math.max(current, individualCount + ownerCount)
+  if redis.call('HEXISTS', selected, field) == 0 and effective <= tonumber(ARGV[3]) then
+    redis.call('HSET', selected, field, KEYS[1])
+    redis.call('HINCRBY', KEYS[3], KEYS[1], 1)
+    current = current + 1
+    ownerCount = ownerCount + 1
+    effective = math.max(current, individualCount + ownerCount)
+  end
+  redis.call('PEXPIREAT', KEYS[3], expiresAt)
+elseif redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) then
   redis.call('HSET', selected, field, 1)
   current = current + 1
+  effective = current
 end
 redis.call('PEXPIREAT', selected, expiresAt)
-return { current, redis.call('PTTL', selected), currentGeneration, selected }
+return { effective, redis.call('PTTL', selected), currentGeneration, selected }
 `;
 const RELEASE_WINDOW_SCRIPT = `
 local released = 0
 for index = 1, 2 do
   if redis.call('HGET', KEYS[index], 'generation') == ARGV[1] then
-    local removed = redis.call('HDEL', KEYS[index], 'request:' .. ARGV[2])
+    local field = 'request:' .. ARGV[2]
+    local owner = nil
+    if index == 2 then
+      owner = redis.call('HGET', KEYS[index], field)
+    end
+    local removed = redis.call('HDEL', KEYS[index], field)
     released = released + removed
+    if removed == 1 and index == 2
+      and redis.call('HGET', KEYS[3], 'generation') == ARGV[1] then
+      if not owner or owner == '1' then owner = KEYS[1] end
+      local ownerCount = redis.call('HINCRBY', KEYS[3], owner, -1)
+      if ownerCount <= 0 then redis.call('HDEL', KEYS[3], owner) end
+    end
     if removed == 1 and redis.call('HLEN', KEYS[index]) <= 1 then
       redis.call('DEL', KEYS[index])
       if index == 2 then
@@ -145,16 +174,42 @@ if generation ~= currentGeneration then
 end
 local field = 'request:' .. ARGV[4]
 local current = redis.call('HLEN', selected) - 1
-if redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) then
+local effective = current
+if selected == KEYS[4] then
+  local ownerCount = tonumber(redis.call('HGET', KEYS[5], KEYS[3])) or 0
+  local individualCount = 0
+  if redis.call('HGET', KEYS[3], 'generation') == currentGeneration then
+    individualCount = redis.call('HLEN', KEYS[3]) - 1
+  end
+  effective = math.max(current, individualCount + ownerCount)
+  if redis.call('HEXISTS', selected, field) == 0 and effective <= tonumber(ARGV[3]) then
+    redis.call('HSET', selected, field, KEYS[3])
+    redis.call('HINCRBY', KEYS[5], KEYS[3], 1)
+    current = current + 1
+    ownerCount = ownerCount + 1
+    effective = math.max(current, individualCount + ownerCount)
+  end
+  redis.call('PEXPIREAT', KEYS[5], expiresAt)
+elseif redis.call('HEXISTS', selected, field) == 0 and current <= tonumber(ARGV[3]) then
   redis.call('HSET', selected, field, 1)
   current = current + 1
+  effective = current
 end
 redis.call('PEXPIREAT', selected, expiresAt)
 local released = 0
-if current <= tonumber(ARGV[3]) and ARGV[6] ~= '0' then
+if effective <= tonumber(ARGV[3]) and ARGV[6] ~= '0' then
   for index = 1, 2 do
     if redis.call('HGET', KEYS[index], 'generation') == ARGV[5] then
-      released = released + redis.call('HDEL', KEYS[index], field)
+      local owner = nil
+      if index == 2 then owner = redis.call('HGET', KEYS[index], field) end
+      local removed = redis.call('HDEL', KEYS[index], field)
+      released = released + removed
+      if removed == 1 and index == 2
+        and redis.call('HGET', KEYS[6], 'generation') == ARGV[5] then
+        if not owner or owner == '1' then owner = KEYS[1] end
+        local ownerCount = redis.call('HINCRBY', KEYS[6], owner, -1)
+        if ownerCount <= 0 then redis.call('HDEL', KEYS[6], owner) end
+      end
       if redis.call('HLEN', KEYS[index]) <= 1 then
         redis.call('DEL', KEYS[index])
         if index == 2 then
@@ -164,7 +219,7 @@ if current <= tonumber(ARGV[3]) and ARGV[6] ~= '0' then
     end
   end
 end
-return { current, redis.call('PTTL', selected), currentGeneration, selected, released }
+return { effective, redis.call('PTTL', selected), currentGeneration, selected, released }
 `;
 const RECONCILE_WINDOW_SCRIPT = `
 local redisTime = redis.call('TIME')
@@ -186,24 +241,43 @@ if generation ~= currentGeneration then
 end
 local current = redis.call('HLEN', KEYS[1]) - 1
 local requestCount = tonumber(ARGV[4])
-for index = 5, 4 + requestCount do
-  local field = 'request:' .. ARGV[index]
-  if redis.call('HEXISTS', KEYS[1], field) == 0 and current <= tonumber(ARGV[3]) then
-    redis.call('HSET', KEYS[1], field, 1)
-    current = current + 1
-  end
-end
-redis.call('PEXPIREAT', KEYS[1], expiresAt)
-if #ARGV - 1 > 4 + requestCount then
+local isOverflow = #KEYS > 2
+if isOverflow then
   local memberGeneration = redis.call('HGET', KEYS[2], 'generation')
   if memberGeneration ~= currentGeneration then
     redis.call('DEL', KEYS[2])
     redis.call('HSET', KEYS[2], 'generation', currentGeneration)
   end
-  for index = 5 + requestCount, #ARGV - 1 do
-    redis.call('HSET', KEYS[2], ARGV[index], 1)
+end
+for index = 1, requestCount do
+  local field = 'request:' .. ARGV[4 + index]
+  local owner = ARGV[4 + requestCount + index]
+  local alreadyCounted = redis.call('HEXISTS', KEYS[1], field) == 1
+  if not alreadyCounted and owner ~= ''
+    and redis.call('HGET', owner, 'generation') == currentGeneration
+    and redis.call('HEXISTS', owner, field) == 1 then
+    alreadyCounted = true
   end
-  redis.call('PEXPIREAT', KEYS[2], expiresAt)
+  if not alreadyCounted then
+    local value = owner ~= '' and owner or '1'
+    redis.call('HSET', KEYS[1], field, value)
+    current = current + 1
+    if isOverflow and owner ~= '' then
+      redis.call('HINCRBY', KEYS[2], owner, 1)
+    end
+  end
+end
+redis.call('PEXPIREAT', KEYS[1], expiresAt)
+if isOverflow then
+  for keyIndex = 3, #KEYS do
+    local ownerCount = tonumber(redis.call('HGET', KEYS[2], KEYS[keyIndex])) or 0
+    if ownerCount <= 0 then redis.call('HDEL', KEYS[2], KEYS[keyIndex]) end
+  end
+  if redis.call('HLEN', KEYS[2]) <= 1 then
+    redis.call('DEL', KEYS[2])
+  else
+    redis.call('PEXPIREAT', KEYS[2], expiresAt)
+  end
 end
 return { current, redis.call('PTTL', KEYS[1]), currentGeneration, KEYS[1] }
 `;
@@ -211,10 +285,13 @@ const CAPABILITY_PROBE_SCRIPT = `
 redis.call('TIME')
 redis.call('HSET', KEYS[1], 'generation', ARGV[1])
 redis.call('HSET', KEYS[1], 'request:' .. ARGV[3], 1)
+redis.call('HSETNX', KEYS[1], 'owner:' .. ARGV[3], 0)
+redis.call('HINCRBY', KEYS[1], 'owner:' .. ARGV[3], 1)
 redis.call('HGET', KEYS[1], 'generation')
 redis.call('HEXISTS', KEYS[1], 'request:' .. ARGV[3])
 redis.call('HLEN', KEYS[1])
 redis.call('HDEL', KEYS[1], 'request:' .. ARGV[3])
+redis.call('HDEL', KEYS[1], 'owner:' .. ARGV[3])
 redis.call('PEXPIREAT', KEYS[1], ARGV[2])
 redis.call('PTTL', KEYS[1])
 redis.call('DEL', KEYS[1])
@@ -498,26 +575,33 @@ export class RateLimitService {
     return true;
   }
 
-  private isRedisBackend(): boolean {
-    return this.backend === 'redis';
-  }
-
   private memorySnapshots(now: number): MemoryWindowSnapshot[] {
     this.cleanMemory(now);
     return [
-      ...Array.from(this.memoryWindows, ([key, window]) => ({
-        clientKeys: [...new Set(window.requestOwners.values())],
-        key,
-        requestIds: [...window.requestIds],
-        window,
-      })),
-      ...Array.from(this.memoryOverflowWindows, ([key, window]) => ({
-        clientKeys: [...new Set(window.requestOwners.values())],
-        key,
-        requestIds: [...window.requestIds],
-        window,
-      })),
+      ...Array.from(this.memoryWindows, ([key, window]) =>
+        this.memorySnapshot(key, window),
+      ),
+      ...Array.from(this.memoryOverflowWindows, ([key, window]) =>
+        this.memorySnapshot(key, window),
+      ),
     ];
+  }
+
+  private memorySnapshot(
+    key: string,
+    window: MemoryWindow,
+  ): MemoryWindowSnapshot {
+    const requestIds = [...window.requestIds];
+    const requestOwners = requestIds.map(
+      (requestId) => window.requestOwners.get(requestId) ?? '',
+    );
+    return {
+      clientKeys: [...new Set(requestOwners.filter(Boolean))],
+      key,
+      requestIds,
+      requestOwners,
+      window,
+    };
   }
 
   private async reconcileMemory(): Promise<void> {
@@ -532,25 +616,27 @@ export class RateLimitService {
       await Promise.all(
         snapshots
           .slice(offset, offset + RECONCILIATION_BATCH_SIZE)
-          .map(async ({ clientKeys, key, requestIds, window }) => {
-            parseRedisWindow(
-              await this.redis.eval(
-                RECONCILE_WINDOW_SCRIPT,
-                [key, this.overflowMembershipKey(key)],
-                [
-                  window.generation,
-                  window.expiresAt,
-                  window.limit,
-                  requestIds.length,
-                  ...requestIds,
-                  ...clientKeys,
-                  RATE_LIMIT_WINDOW_MS,
-                ],
-              ),
-              key,
-              0,
-            );
-          }),
+          .map(
+            async ({ clientKeys, key, requestIds, requestOwners, window }) => {
+              parseRedisWindow(
+                await this.redis.eval(
+                  RECONCILE_WINDOW_SCRIPT,
+                  [key, this.overflowMembershipKey(key), ...clientKeys],
+                  [
+                    window.generation,
+                    window.expiresAt,
+                    window.limit,
+                    requestIds.length,
+                    ...requestIds,
+                    ...requestOwners,
+                    RATE_LIMIT_WINDOW_MS,
+                  ],
+                ),
+                key,
+                0,
+              );
+            },
+          ),
       );
     }
     if (!this.recoveryUsesRedis) {
@@ -646,7 +732,7 @@ export class RateLimitService {
     if (this.backend === 'memory') {
       if (this.recoveryUsesRedis) {
         try {
-          return await this.consumeRedis(
+          const redisWindow = await this.consumeRedis(
             clientKey,
             overflowKey,
             identity,
@@ -654,6 +740,17 @@ export class RateLimitService {
             requestId,
             this.isFrozenOverflowClient(overflowKey, clientKey, identity),
           );
+          if (this.backend === 'memory' && !this.recoveryUsesRedis) {
+            return this.consumeMemory(
+              clientKey,
+              overflowKey,
+              identity,
+              limit,
+              requestId,
+              true,
+            );
+          }
+          return redisWindow;
         } catch {
           this.recoveryUsesRedis = false;
           this.setBackend('memory', Date.now());
@@ -675,27 +772,8 @@ export class RateLimitService {
         requestId,
       );
       if (!this.beginRecoveryProbe(now)) return memory;
-      await this.runRecovery(now);
-      if (!this.isRedisBackend()) return memory;
-      try {
-        return await this.consumeRedis(
-          clientKey,
-          overflowKey,
-          identity,
-          limit,
-          requestId,
-        );
-      } catch {
-        this.setBackend('memory', Date.now());
-        return this.consumeMemory(
-          clientKey,
-          overflowKey,
-          identity,
-          limit,
-          requestId,
-          true,
-        );
-      }
+      void this.runRecovery(now);
+      return memory;
     }
     try {
       return await this.consumeRedis(
