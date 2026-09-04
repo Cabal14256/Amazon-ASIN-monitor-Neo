@@ -1227,6 +1227,26 @@ describe('RateLimitService', () => {
         decisions[2]!.clientKey,
       ]),
     );
+
+    internal.memoryWindows.delete('existing-0');
+    const returnedToIndependent = await service.consume({
+      clientIdentifier: 'new-client-3',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
+    expect(returnedToIndependent).toMatchObject({
+      count: 1,
+      storageKey: returnedToIndependent.clientKey,
+    });
+    expect(returnedToIndependent.storageKey).not.toBe(decisions[0]!.storageKey);
+
+    internal.memoryWindows.delete('existing-1');
+    const existingOverflowClient = await service.consume({
+      clientIdentifier: 'new-client-0',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
+    expect(existingOverflowClient.storageKey).toBe(decisions[0]!.storageKey);
   });
 
   it('关闭开关时健康快照明确标记 disabled', () => {

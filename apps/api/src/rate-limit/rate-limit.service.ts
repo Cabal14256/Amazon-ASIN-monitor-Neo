@@ -572,12 +572,28 @@ export class RateLimitService {
     );
     let storageKey = clientKey;
     if (!window) {
+      if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
+        const now = Date.now();
+        if (now >= this.nextMemoryCleanupAt) {
+          this.cleanMemory(now);
+          this.nextMemoryCleanupAt = now + 60_000;
+        }
+      }
       const overflow = this.activeMemoryWindow(
         this.memoryOverflowWindows,
         overflowKey,
         identity,
       );
-      if (overflow) {
+      const alreadyUsesOverflow =
+        overflow &&
+        [
+          ...overflow.requestOwners.values(),
+          ...(overflow.previousRequestOwners?.values() ?? []),
+        ].includes(clientKey);
+      if (
+        overflow &&
+        (alreadyUsesOverflow || this.memoryWindows.size >= MAX_MEMORY_WINDOWS)
+      ) {
         window = overflow;
         storageKey = overflowKey;
       }
