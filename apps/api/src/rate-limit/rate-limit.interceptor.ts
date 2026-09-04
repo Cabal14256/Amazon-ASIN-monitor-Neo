@@ -237,25 +237,25 @@ export class RateLimitInterceptor implements NestInterceptor {
     }
 
     if (policy === 'strict') {
-      const decision = await this.rateLimiter.consume(
-        {
-          clientIdentifier: request.ip,
-          policy,
-          role,
-        },
-        { recordRequest: false },
-      );
+      const strictInput = {
+        clientIdentifier: request.ip,
+        policy,
+        role,
+      };
+      const decision =
+        retainProvisionalForStrict &&
+        provisional &&
+        roleDecision !== provisional
+          ? await this.rateLimiter.transfer(provisional, strictInput, {
+              fallbackToTargetMemory: true,
+            })
+          : await this.rateLimiter.consume(strictInput, {
+              recordRequest: false,
+            });
       applyHeaders(reply, decision);
       if (!decision.allowed) {
         this.rateLimiter.recordRequest(role, true);
         throwBlocked(reply, decision, this.logger, 'RateLimitInterceptor');
-      }
-      if (
-        retainProvisionalForStrict &&
-        provisional &&
-        roleDecision !== provisional
-      ) {
-        await this.rateLimiter.release(provisional);
       }
     }
     this.rateLimiter.recordRequest(role, false);
