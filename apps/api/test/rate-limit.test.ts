@@ -520,11 +520,15 @@ describe('RateLimitService', () => {
     ]);
   });
 
-  it('本地跨窗时保留上一代降级请求并在恢复时合并两代快照', async () => {
+  it('已观测 Redis 时钟偏移时本地跨窗仍保持同一降级窗口', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:14:59.900Z'));
     const redis = redisMock();
     const { service } = createService({ redis });
+    const redisNowMs = new Date('2026-09-01T00:16:59.900Z').getTime();
+    const generation = String(Math.floor(redisNowMs / RATE_LIMIT_WINDOW_MS));
+    vi.mocked(redis.eval).mockResolvedValueOnce([generation, redisNowMs]);
+    await service.recover(true);
     const internal = service as unknown as {
       backend: 'memory';
       redisRetryAfter: number;
@@ -546,10 +550,9 @@ describe('RateLimitService', () => {
     });
 
     expect(afterRollover).toMatchObject({ backend: 'memory', count: 2 });
-    expect(afterRollover.generation).not.toBe(beforeRollover.generation);
-    const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+    expect(afterRollover.generation).toBe(beforeRollover.generation);
     vi.mocked(redis.eval)
-      .mockResolvedValueOnce(generation)
+      .mockResolvedValueOnce([generation, redisNowMs + 200])
       .mockImplementationOnce(async (_script, keys, arguments_) => [
         Number(arguments_[3]),
         RATE_LIMIT_WINDOW_MS,
@@ -560,7 +563,7 @@ describe('RateLimitService', () => {
 
     await service.recover(true);
 
-    const [, , reconcileArguments] = vi.mocked(redis.eval).mock.calls[1]!;
+    const [, , reconcileArguments] = vi.mocked(redis.eval).mock.calls[2]!;
     expect(reconcileArguments[3]).toBe(2);
     expect(reconcileArguments.slice(4, 6)).toEqual(
       expect.arrayContaining([
@@ -569,6 +572,44 @@ describe('RateLimitService', () => {
       ]),
     );
     expect(service.snapshot(true).status).toBe('ok');
+  });
+
+  it('无 Redis 时钟偏移时降级配额在固定窗口边界正常重置', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:14:59.900Z'));
+    const { service } = createService();
+    const internal = service as unknown as {
+      backend: 'memory';
+      redisRetryAfter: number;
+    };
+    internal.backend = 'memory';
+    internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+    const input = {
+      clientIdentifier: '198.51.100.202',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+
+    let beforeRollover!: Awaited<ReturnType<typeof service.consume>>;
+    for (let index = 0; index < ROLE_LIMITS.DEFAULT; index += 1) {
+      beforeRollover = await service.consume(input, { recordRequest: false });
+    }
+    expect(beforeRollover).toMatchObject({
+      allowed: true,
+      count: ROLE_LIMITS.DEFAULT,
+    });
+
+    vi.advanceTimersByTime(200);
+    const afterRollover = await service.consume(input, {
+      recordRequest: false,
+    });
+
+    expect(afterRollover).toMatchObject({
+      allowed: true,
+      backend: 'memory',
+      count: 1,
+    });
+    expect(afterRollover.generation).not.toBe(beforeRollover.generation);
   });
 
   it('Redis 故障时保持对齐内存窗口，后台自动恢复不阻塞触发请求', async () => {
@@ -755,6 +796,7 @@ describe('RateLimitService', () => {
     expect(script.trimStart()).toMatch(
       /^redis\.replicate_commands\(\)\s+local redisTime/,
     );
+    expect(script).toContain('return { currentGeneration, tostring(nowMs) }');
     expect(keys[0]).toMatch(
       /^spapi:ratelimiter:http:neo:capability:[0-9a-f-]+$/,
     );
@@ -2256,7 +2298,7 @@ describe.skipIf(!integrationEnabled)(
       }
     }, 30_000);
 
-    it('落后主机跨本地窗口后仍把前一代降级请求合并进 Redis 活动窗口', async () => {
+    it('落后主机观测 Redis 偏移后跨本地边界仍保持服务端活动窗口', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();
       const redis = new ApplicationRedisClient(env, logger);
@@ -2287,6 +2329,9 @@ describe.skipIf(!integrationEnabled)(
       const now = vi.spyOn(Date, 'now');
       try {
         await redis.del(key, overflowKey, membershipKey);
+        now.mockReturnValue(redisWindowStart - 1);
+        await serviceA.recover(true);
+        expect(serviceA.snapshot(true).status).toBe('ok');
         const originalEval = redis.eval.bind(redis);
         vi.spyOn(redis, 'eval').mockImplementationOnce(
           async (...arguments_) => {
@@ -2294,7 +2339,6 @@ describe.skipIf(!integrationEnabled)(
             throw new Error('simulated response timeout before local rollover');
           },
         );
-        now.mockReturnValue(redisWindowStart - 1);
         const beforeRollover = await serviceA.consume({
           clientIdentifier,
           policy: 'role',
@@ -2314,7 +2358,7 @@ describe.skipIf(!integrationEnabled)(
           role: 'DEFAULT',
         });
         expect(afterRollover).toMatchObject({ backend: 'memory', count: 2 });
-        expect(afterRollover.generation).not.toBe(beforeRollover.generation);
+        expect(afterRollover.generation).toBe(beforeRollover.generation);
 
         (
           serviceA as unknown as { redisRetryAfter: number }
@@ -2478,10 +2522,11 @@ describe.skipIf(!integrationEnabled)(
         const evalSpy = vi
           .spyOn(redis, 'eval')
           .mockImplementationOnce(async (...arguments_) => {
-            const observedGeneration = String(
-              await originalEval(...arguments_),
-            );
-            return String(Number(observedGeneration) - 1);
+            const observed = (await originalEval(...arguments_)) as [
+              unknown,
+              unknown,
+            ];
+            return [String(Number(observed[0]) - 1), observed[1]];
           });
         internal.redisRetryAfter = 0;
         await service.recover(true);
