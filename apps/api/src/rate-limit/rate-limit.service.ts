@@ -1131,7 +1131,13 @@ export class RateLimitService {
       input.policy === 'strict' ? STRICT_RATE_LIMIT : ROLE_LIMITS[input.role];
     const clientKey = this.key(input);
     const overflowKey = this.overflowKey(input);
+    let sourceMayExistInRedis =
+      source.backend === 'redis' || source.uncertainRedisReservation;
+    let targetRedisReservationUncertain = false;
     if (this.backend === 'redis') {
+      // A memory decision may already have been reconciled while transfer()
+      // waited for recovery, so failures from here require Redis cleanup too.
+      sourceMayExistInRedis = true;
       try {
         const window = parseRedisWindow(
           await this.redis.eval(
@@ -1167,6 +1173,7 @@ export class RateLimitService {
         this.recordBucketDecision(decision);
         return decision;
       } catch {
+        targetRedisReservationUncertain = true;
         this.setBackend('memory', now);
         if (!options.fallbackToTargetMemory) return source;
       }
@@ -1189,16 +1196,14 @@ export class RateLimitService {
         identity,
         limit,
         source.requestId,
-        source.backend === 'redis',
+        targetRedisReservationUncertain,
       ),
     );
     if (decision.allowed && options.releaseSource !== false) {
-      if (source.uncertainRedisReservation) {
+      if (sourceMayExistInRedis) {
         this.queueSourceRelease(decision.storageKey, source);
       } else if (source.backend === 'memory') {
         this.releaseMemory(source, now);
-      } else if (options.fallbackToTargetMemory) {
-        this.queueSourceRelease(decision.storageKey, source);
       }
     }
     this.recordBucketDecision(decision);

@@ -445,6 +445,81 @@ describe('RateLimitService', () => {
     ]);
   });
 
+  it('已对账的内存来源转移响应超时时仍保留 Redis 来源释放意图', async () => {
+    const redis = redisMock();
+    const { service } = createService({ redis });
+    const internal = service as unknown as {
+      backend: 'memory';
+      redisRetryAfter: number;
+    };
+    internal.backend = 'memory';
+    internal.redisRetryAfter = Number.MAX_SAFE_INTEGER;
+    const source = await service.consume(
+      {
+        clientIdentifier: '203.0.113.182',
+        policy: 'role',
+        role: 'DEFAULT',
+      },
+      { recordRequest: false },
+    );
+    const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce(generation)
+      .mockImplementationOnce(async (_script, keys, arguments_) => [
+        Number(arguments_[3]),
+        RATE_LIMIT_WINDOW_MS,
+        generation,
+        keys[0],
+      ]);
+    internal.redisRetryAfter = 0;
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('ok');
+
+    vi.mocked(redis.eval).mockRejectedValueOnce(
+      new Error('transfer response timeout'),
+    );
+    const fallback = await service.transfer(
+      source,
+      {
+        clientIdentifier: '203.0.113.182',
+        policy: 'strict',
+        role: 'ADMIN',
+      },
+      { fallbackToTargetMemory: true },
+    );
+    expect(fallback).toMatchObject({
+      allowed: true,
+      backend: 'memory',
+      uncertainRedisReservation: true,
+    });
+
+    internal.redisRetryAfter = 0;
+    vi.mocked(redis.eval)
+      .mockResolvedValueOnce(generation)
+      .mockImplementationOnce(async (_script, keys, arguments_) => [
+        Number(arguments_[3]),
+        RATE_LIMIT_WINDOW_MS,
+        generation,
+        keys[0],
+      ])
+      .mockResolvedValueOnce(1);
+    await service.recover(true);
+
+    expect(service.snapshot(true).status).toBe('ok');
+    const [, releaseKeys, releaseArguments] = vi.mocked(redis.eval).mock
+      .calls[5]!;
+    expect(releaseKeys).toEqual([
+      source.clientKey,
+      source.overflowKey,
+      `${source.overflowKey}:clients`,
+    ]);
+    expect(releaseArguments).toEqual([
+      source.generation,
+      source.requestId,
+      RATE_LIMIT_WINDOW_MS,
+    ]);
+  });
+
   it('本地跨窗时保留上一代降级请求并在恢复时合并两代快照', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:14:59.900Z'));
