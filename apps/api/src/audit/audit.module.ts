@@ -14,7 +14,7 @@ import { AUDIT_REPOSITORY, AuditService } from './audit.service';
       provide: AUDIT_REPOSITORY,
       inject: [ApplicationDatabasePools],
       useFactory: (pools: ApplicationDatabasePools) =>
-        new AuditRepository(pools.primaryDb),
+        new AuditRepository(pools.primaryPool),
     },
     AuditService,
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
