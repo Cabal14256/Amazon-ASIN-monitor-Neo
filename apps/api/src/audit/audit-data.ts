@@ -1,7 +1,9 @@
 const MASK = '***REDACTED***';
 const OMITTED = '[omitted]';
 const SENSITIVE =
-  /password|pwd|token|secret|apikey|authorization|auth|cookie|webhook|credential/;
+  /password|pwd|token|secret|apikey|accesskey|authorization|auth|cookie|webhook|credential|configvalue|displayvalue/;
+const PERSONAL =
+  /realname|fullname|displayname|statusreason|email|phone|mobile|address|birthday|dateofbirth|passport|identitynumber/;
 
 export function auditText(value: unknown, limit: number): string | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
@@ -46,10 +48,12 @@ export function auditBody(value: unknown): Record<string, unknown> | null {
     const result: Record<string, unknown> = Object.create(null);
     for (const [key, child] of Object.entries(input)) {
       if (remaining <= 0) break;
-      const sensitive = SENSITIVE.test(
-        key.toLowerCase().replace(/[^a-z0-9]/g, ''),
-      );
-      result[key.slice(0, 100)] = sensitive ? MASK : visit(child, depth + 1);
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      // configValue/config_value 不按名称猜测安全性：所有配置值都掩码，包括新增凭据类型。
+      const sensitive = SENSITIVE.test(normalized) || PERSONAL.test(normalized);
+      result[key.replace(/\0/g, '').slice(0, 100)] = sensitive
+        ? MASK
+        : visit(child, depth + 1);
       if (sensitive) remaining -= 1;
     }
     return result;

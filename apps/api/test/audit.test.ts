@@ -140,6 +140,46 @@ describe('audit mapping and data', () => {
       Buffer.byteLength(JSON.stringify(auditBody(large))),
     ).toBeLessThanOrEqual(16_384);
   });
+
+  it('masks config values independently of companion keys and recursively excludes personal fields', () => {
+    const data = auditBody({
+      configs: [
+        {
+          configKey: 'SP_API_US_REFRESH_TOKEN',
+          configValue: 'refresh-credential',
+        },
+        { configKey: 'SP_API_CLIENT_SECRET', configValue: 'client-credential' },
+        { configKey: 'AWS_ACCESS_KEY_ID', configValue: 'aws-credential' },
+        {
+          config_key: 'NEW_CREDENTIAL_KIND',
+          config_value: 'future-credential',
+        },
+        { configKey: 'NEW_NAME', displayValue: 'display-credential' },
+      ],
+      real_name: 'personal-name',
+      statusReason: 'personal-reason',
+      nested: {
+        email: 'person@example.invalid',
+        phone: 'personal-phone',
+        realName: 'nested-person',
+      },
+    });
+    const serialized = JSON.stringify(data);
+    for (const raw of [
+      'refresh-credential',
+      'client-credential',
+      'aws-credential',
+      'future-credential',
+      'display-credential',
+      'personal-name',
+      'personal-reason',
+      'person@example.invalid',
+      'personal-phone',
+      'nested-person',
+    ])
+      expect(serialized).not.toContain(raw);
+    expect(serialized).toContain('SP_API_US_REFRESH_TOKEN');
+  });
 });
 
 @Injectable()
@@ -187,6 +227,16 @@ class AuditFixtureController {
     return { success: true };
   }
 
+  @Post('sp-api-configs')
+  configs() {
+    return { success: true };
+  }
+
+  @Put('auth/profile')
+  profile() {
+    return { success: true };
+  }
+
   @Get('export/asin')
   export(@Res() reply: FastifyReply) {
     return reply.type('text/csv').send(Readable.from(['asin\nB012345678\n']));
@@ -204,7 +254,7 @@ describe('Neo audit HTTP lifecycle', () => {
   let audit: AuditService;
   let log: AppLogger;
 
-  beforeEach(async () => {
+  async function setup(trustProxy?: boolean | number | string) {
     repository = { append: vi.fn().mockResolvedValue(undefined) };
     log = logger();
     const moduleRef = await Test.createTestingModule({
@@ -218,13 +268,18 @@ describe('Neo audit HTTP lifecycle', () => {
       ],
     }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(
-      new FastifyAdapter({ logger: false }),
+      new FastifyAdapter({
+        logger: false,
+        ...(trustProxy === undefined ? {} : { trustProxy }),
+      }),
     );
     audit = moduleRef.get(AuditService);
     configureHttpApp(app, { audit, logger: log });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
-  });
+  }
+
+  beforeEach(() => setup());
 
   afterEach(async () => {
     await app.close();
@@ -308,6 +363,60 @@ describe('Neo audit HTTP lifecycle', () => {
       resourceId: 'u-1',
       errorMessage: '操作失败',
     });
+  });
+
+  it('keeps SP-API credentials and personal profile fields out of persisted HTTP snapshots', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/sp-api-configs',
+      payload: {
+        configs: [
+          { configKey: 'SP_API_US_REFRESH_TOKEN', configValue: 'http-secret' },
+          { configKey: 'AWS_ACCESS_KEY_ID', configValue: 'aws-secret' },
+        ],
+      },
+    });
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/auth/profile',
+      payload: { real_name: 'private-name', statusReason: 'private-reason' },
+    });
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+    const saved = JSON.stringify(vi.mocked(repository.append).mock.calls);
+    for (const raw of [
+      'http-secret',
+      'aws-secret',
+      'private-name',
+      'private-reason',
+    ])
+      expect(saved).not.toContain(raw);
+    expect(saved).toContain('***REDACTED***');
+  });
+
+  it('uses forwarded client IP only when the immediate peer matches configured trusted proxies', async () => {
+    await app.close();
+    const configured = loadEnv({
+      DATABASE_URL: 'postgres://localhost/primary',
+      COMPETITOR_DATABASE_URL: 'postgres://localhost/competitor',
+      REDIS_URL: 'redis://localhost:6379',
+      JWT_SECRET: 'test-secret',
+      AUTH_DATA_AUTHORITY: 'postgresql',
+      TRUST_PROXY: 'loopback',
+    });
+    await setup(configured.TRUST_PROXY);
+    for (const remoteAddress of ['127.0.0.1', '203.0.113.42']) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/users',
+        remoteAddress,
+        headers: { 'x-forwarded-for': '198.51.100.23' },
+      });
+    }
+    await audit.flush();
+    expect(
+      vi.mocked(repository.append).mock.calls.map(([entry]) => entry.ipAddress),
+    ).toEqual(['198.51.100.23', '203.0.113.42']);
   });
 
   it('captures login failure envelopes and parser failures without copying error payload secrets', async () => {
