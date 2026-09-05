@@ -1,5 +1,5 @@
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Pool, TypeOverrides, type PoolConfig } from 'pg';
+import { Pool, TypeOverrides, type PoolClient, type PoolConfig } from 'pg';
 
 const TIMESTAMP_WITHOUT_TIME_ZONE_OID = 1114;
 const shanghaiTimestampPattern =
@@ -39,7 +39,7 @@ export function createPgPool(
   });
 }
 
-export function createDb(pool: Pool): NodePgDatabase {
+export function createDb(pool: Pool | PoolClient): NodePgDatabase {
   return drizzle(pool);
 }
 

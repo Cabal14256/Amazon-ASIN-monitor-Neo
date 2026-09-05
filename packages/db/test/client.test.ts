@@ -1,4 +1,5 @@
 import type { Pool } from 'mysql2/promise';
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -18,6 +19,19 @@ const legacyConfig = {
   connectTimeoutMs: 1_000,
   queryTimeoutMs: 2_000,
 };
+
+function mysqlPoolMock(query: ReturnType<typeof vi.fn>, end = vi.fn()) {
+  return {
+    getConnection: vi.fn().mockResolvedValue(
+      Object.assign(new EventEmitter(), {
+        query,
+        release: vi.fn(),
+        destroy: vi.fn(),
+      }),
+    ),
+    end,
+  } as unknown as Pool;
+}
 
 describe('PostgreSQL timestamp without time zone D8 解析', () => {
   it('固定按 Asia/Shanghai 解释而不依赖 Node 宿主时区', () => {
@@ -59,10 +73,10 @@ describe('Legacy MySQL 鉴权数据权威 repository', () => {
       ],
       [],
     ]);
-    const repository = new LegacyMysqlAuthRepository(legacyConfig, {
-      query,
-      end: vi.fn(),
-    } as unknown as Pool);
+    const repository = new LegacyMysqlAuthRepository(
+      legacyConfig,
+      mysqlPoolMock(query),
+    );
 
     await expect(
       repository.findSessionById('session-1'),
@@ -84,10 +98,10 @@ describe('Legacy MySQL 鉴权数据权威 repository', () => {
   it('撤销、touch 与连接池关闭保持参数化且关闭幂等', async () => {
     const query = vi.fn().mockResolvedValue([{}, []]);
     const end = vi.fn().mockResolvedValue(undefined);
-    const repository = new LegacyMysqlAuthRepository(legacyConfig, {
-      query,
-      end,
-    } as unknown as Pool);
+    const repository = new LegacyMysqlAuthRepository(
+      legacyConfig,
+      mysqlPoolMock(query, end),
+    );
 
     await repository.revokeSession('session-2');
     await repository.touchSession('session-2');
@@ -140,10 +154,10 @@ describe('Legacy MySQL 鉴权数据权威 repository', () => {
         [],
       ])
       .mockResolvedValueOnce([{}, []]);
-    const repository = new LegacyMysqlAuthRepository(legacyConfig, {
-      query,
-      end: vi.fn(),
-    } as unknown as Pool);
+    const repository = new LegacyMysqlAuthRepository(
+      legacyConfig,
+      mysqlPoolMock(query),
+    );
 
     await expect(repository.findUserById('user-3')).resolves.toMatchObject({
       id: 'user-3',

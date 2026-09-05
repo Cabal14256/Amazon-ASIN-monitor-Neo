@@ -16,6 +16,7 @@ import { createNestLoggerAdapter } from './logger/nest-logger.adapter';
 import { MetricsService } from './metrics/metrics.service';
 import { RateLimitRequestHook } from './rate-limit/rate-limit.interceptor';
 import { runApi } from './runner';
+import { WebSocketService } from './websocket/websocket.service';
 
 /**
  * 新后端入口（PROCESS_ROLE=api 角色）。
@@ -56,6 +57,7 @@ async function bootstrap(): Promise<void> {
   }
 
   const port = env.PORT;
+  app.get(WebSocketService).init(app.getHttpServer());
   await app.listen(port, '0.0.0.0');
   logger.info(`api 服务已启动: http://0.0.0.0:${port}`, 'Bootstrap');
 }

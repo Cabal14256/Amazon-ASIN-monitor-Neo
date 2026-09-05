@@ -17,8 +17,8 @@ import {
   describe,
   expect,
   it,
-  type MockInstance,
   vi,
+  type MockInstance,
 } from 'vitest';
 
 import { configureHttpApp } from '../src/http-app';
