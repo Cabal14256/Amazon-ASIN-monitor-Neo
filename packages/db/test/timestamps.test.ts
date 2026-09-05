@@ -2,6 +2,7 @@ import { getTableColumns } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
+import { databaseMigrationSpecs } from '../src/migration/registry';
 import { sessions, users } from '../src/schema';
 import {
   formatShanghaiTimestamp,
@@ -30,12 +31,27 @@ describe('D8 Drizzle timestamp codecs', () => {
     const date = new Date('2026-09-05T10:00:00.123Z');
     for (const table of [...primaryDrizzleTables, ...competitorDrizzleTables]) {
       for (const column of Object.values(getTableColumns(table))) {
-        if (column.getSQLType() !== 'timestamp without time zone') continue;
+        if (column.getSQLType() !== 'timestamp') continue;
         count++;
         expect(column.mapToDriverValue(date)).toBe('2026-09-05 18:00:00.123');
         expect(column.mapFromDriverValue('2026-09-05 18:00:00.123')).toEqual(
           date,
         );
+      }
+    }
+    expect(count).toBeGreaterThan(50);
+  });
+  it('preserves Legacy DATETIME source signatures for every migrated time column', () => {
+    let count = 0;
+    for (const database of databaseMigrationSpecs) {
+      for (const table of database.tables) {
+        for (const signature of table.targetColumnSignatures) {
+          if (!signature.includes('|timestamp without time zone|')) continue;
+          count++;
+          expect(table.sourceColumnTypeSignatures).toContain(
+            `${signature.split('|')[0]}|datetime`,
+          );
+        }
       }
     }
     expect(count).toBeGreaterThan(50);

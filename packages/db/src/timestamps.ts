@@ -22,7 +22,9 @@ export const shanghaiTimestamp = customType<{
   data: Date;
   driverData: string;
 }>({
-  dataType: () => 'timestamp without time zone',
+  // Preserve Drizzle's original SQL spelling: the migration registry maps this
+  // alias to Legacy DATETIME and to pg_catalog's timestamp without time zone.
+  dataType: () => 'timestamp',
   fromDriver: parseShanghaiTimestamp,
   toDriver: formatShanghaiTimestamp,
 });
