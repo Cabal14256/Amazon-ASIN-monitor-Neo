@@ -36,11 +36,16 @@ export function resolveConfig(
     }
     regions[region] = credentials;
   }
+  // Unlike credential fields, an explicitly stored empty/false flag disables
+  // signing. Only an absent/null DB flag falls back to the environment.
+  const databaseFlag = database.SP_API_USE_AWS_SIGNATURE;
+  const flag =
+    databaseFlag === null || databaseFlag === undefined
+      ? env.SP_API_USE_AWS_SIGNATURE
+      : databaseFlag;
   return {
     regions,
-    useAwsSignature: ['true', '1'].includes(
-      first(database.SP_API_USE_AWS_SIGNATURE, env.SP_API_USE_AWS_SIGNATURE),
-    ),
+    useAwsSignature: flag === true || flag === 'true' || flag === '1',
   };
 }
 export function snapshotConfig(config: SpApiConfig): SpApiConfig {

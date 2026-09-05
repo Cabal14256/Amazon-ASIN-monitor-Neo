@@ -48,6 +48,19 @@ describe('configuration and LWA token lifecycle', () => {
       expect(() => snapshotConfig(f.config)).toThrow('INVALID_CONFIG');
     }
   });
+  it('keeps an explicit empty DB signing flag disabled instead of falling through to env true', () => {
+    const env = { SP_API_USE_AWS_SIGNATURE: 'true' };
+    for (const value of ['', false, 'false', '0', 1]) {
+      expect(
+        resolveConfig(env, { SP_API_USE_AWS_SIGNATURE: value }).useAwsSignature,
+      ).toBe(false);
+    }
+    for (const value of [null, undefined]) {
+      expect(
+        resolveConfig(env, { SP_API_USE_AWS_SIGNATURE: value }).useAwsSignature,
+      ).toBe(true);
+    }
+  });
   it('single-flights 20 callers per region and shares only within the same region', async () => {
     const f = setup();
     const gate = deferred<HttpResponse>();
