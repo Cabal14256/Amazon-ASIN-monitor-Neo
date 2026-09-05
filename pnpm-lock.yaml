@@ -116,6 +116,9 @@ importers:
       rxjs:
         specifier: ^7.8.2
         version: 7.8.2
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -132,6 +135,9 @@ importers:
       '@types/pg':
         specifier: ^8.15.4
         version: 8.23.1
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
       tsx:
         specifier: ^4.20.3
         version: 4.23.12
@@ -3794,6 +3800,12 @@ packages:
     resolution:
       {
         integrity: sha512-EwmlvuaxPNej9+T4v5AuBPJa2x2UOJVdjCtDHgcDqitUeOtjnJKJ+apYjVcAoBEMjKW1VVFGZLUb5+qqa09XFA==,
+      }
+
+  '@types/ws@8.18.1':
+    resolution:
+      {
+        integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==,
       }
 
   '@types/yargs-parser@21.0.3':
@@ -14374,6 +14386,21 @@ packages:
       utf-8-validate:
         optional: true
 
+  ws@8.21.3:
+    resolution:
+      {
+        integrity: sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==,
+      }
+    engines: { node: '>=10.0.0' }
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xmlchars@2.2.0:
     resolution:
       {
@@ -16680,6 +16707,10 @@ snapshots:
   '@types/stylis@4.2.7': {}
 
   '@types/use-sync-external-store@0.0.3': {}
+
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 22.20.1
 
   '@types/yargs-parser@21.0.3': {}
 
@@ -24261,6 +24292,8 @@ snapshots:
       signal-exit: 3.0.7
 
   ws@8.18.3: {}
+
+  ws@8.21.3: {}
 
   xmlchars@2.2.0: {}
 
