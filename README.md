@@ -14,6 +14,8 @@
 
 定稿方案与逐阶段任务已归档在 [`docs/refactor/`](./docs/refactor/README.md)。
 
+Neo 共享 SP-API 客户端的已实现范围、取消/配额约定和未完成接入门槛见 [`P2-T3 运行说明`](./docs/runbooks/phase-2-spapi-client.md)；目前不替代 Legacy 的生产调用。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。
