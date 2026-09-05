@@ -5,13 +5,18 @@ import type {
   AuthSessionRecord,
   AuthUserRecord,
 } from '@asin-monitor/db';
-import { AuthRepository, withAuthDatabaseDeadline } from '@asin-monitor/db';
+import {
+  AuthRepository,
+  LegacyMysqlAuthRepository,
+  withAuthDatabaseDeadline,
+} from '@asin-monitor/db';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import jwt from 'jsonwebtoken';
+import type { Pool as MysqlPool } from 'mysql2/promise';
 import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -376,6 +381,7 @@ describe('Neo /ws real network gateway', () => {
     expect(repository.findUserById).not.toHaveBeenCalled();
     expect(gateway.getClientCount()).toBe(0);
     expect(pending.messages).toEqual([]);
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it('rejects oversized inbound messages with protocol 1009', async () => {
@@ -403,6 +409,52 @@ describe('Neo /ws real network gateway', () => {
     await vi.waitFor(() => expect(gateway.getClientCount()).toBe(64));
   });
 
+  it('releases all stalled legacy MySQL authentication slots and recovers admission', async () => {
+    const destroyed = vi.fn();
+    const pool = {
+      getConnection: async () => {
+        let rejectQuery: ((error: Error) => void) | undefined;
+        return Object.assign(new EventEmitter(), {
+          query: () =>
+            new Promise((_resolve, reject) => {
+              rejectQuery = reject;
+            }),
+          release: vi.fn(),
+          destroy: () => {
+            destroyed();
+            rejectQuery?.(new Error('fixture destroyed'));
+          },
+        });
+      },
+    } as unknown as MysqlPool;
+    const legacy = new LegacyMysqlAuthRepository(
+      {
+        host: 'localhost',
+        port: 3306,
+        user: 'fixture',
+        password: 'unused',
+        database: 'fixture',
+        connectionLimit: 64,
+        connectTimeoutMs: 600_000,
+        queryTimeoutMs: 600_000,
+      },
+      pool,
+    );
+    vi.mocked(repository.findSessionById).mockImplementation((id) =>
+      legacy.findSessionById(id),
+    );
+    const stalled = Array.from({ length: 64 }, () => connect());
+    const results = await Promise.all(stalled.map((client) => client.closed));
+    expect(results.every(({ code }) => code === 1013)).toBe(true);
+    expect(destroyed).toHaveBeenCalledTimes(64);
+    await vi.waitFor(() => expect(gateway['authPending']).toBe(0));
+    vi.mocked(repository.findSessionById).mockImplementation(async (id) =>
+      session(id.slice('session-'.length)),
+    );
+    const healthy = connect();
+    expect(await healthy.first).toMatchObject({ type: 'connected' });
+  });
+
   it('bounds total sockets before HTTP upgrade', async () => {
     vi.spyOn(gateway['wss']!.clients, 'size', 'get').mockReturnValue(1000);
     const overflow = connect();
@@ -425,6 +477,7 @@ describe('Neo /ws real network gateway', () => {
     expect(repository.findUserById).not.toHaveBeenCalled();
     expect(gateway.getClientCount()).toBe(0);
     expect(stalled.messages).toHaveLength(0);
+    expect(logger.error).not.toHaveBeenCalled();
   }, 10_000);
 
   it('releases all pending admission slots when PostgreSQL queries stall, then accepts a healthy connection', async () => {

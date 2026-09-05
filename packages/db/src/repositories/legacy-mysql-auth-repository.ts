@@ -1,4 +1,9 @@
-import mysql, { type Pool, type RowDataPacket } from 'mysql2/promise';
+import mysql, {
+  type Pool,
+  type PoolConnection,
+  type ResultSetHeader,
+  type RowDataPacket,
+} from 'mysql2/promise';
 
 import { parseShanghaiTimestamp } from '../client';
 import type {
@@ -84,7 +89,7 @@ export class LegacyMysqlAuthRepository implements AuthDataRepository {
         waitForConnections: true,
         connectionLimit: config.connectionLimit,
         queueLimit: 200,
-        connectTimeout: config.connectTimeoutMs,
+        connectTimeout: Math.min(config.connectTimeoutMs, 2_000),
       });
   }
 
@@ -92,19 +97,61 @@ export class LegacyMysqlAuthRepository implements AuthDataRepository {
     sql: string,
     values: readonly unknown[],
   ): Promise<T[]> {
-    const [rows] = await this.pool.query<T[]>({
-      sql,
-      values,
-      timeout: this.config.queryTimeoutMs,
-    });
-    return rows;
+    return this.query<T[]>(sql, values);
   }
 
   private async update(sql: string, values: readonly unknown[]): Promise<void> {
-    await this.pool.query({
-      sql,
-      values,
-      timeout: this.config.queryTimeoutMs,
+    await this.query<ResultSetHeader>(sql, values);
+  }
+
+  private query<T extends RowDataPacket[] | ResultSetHeader>(
+    sql: string,
+    values: readonly unknown[],
+  ): Promise<T> {
+    const deadlineMs = Math.min(this.config.queryTimeoutMs, 2_000);
+    return new Promise<T>((resolve, reject) => {
+      let client: PoolConnection | undefined;
+      let settled = false;
+      const finish = (error?: unknown, rows?: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (client) {
+          client.removeListener('error', onError);
+          if (error !== undefined) client.destroy();
+          else client.release();
+        }
+        if (error !== undefined) reject(error);
+        else resolve(rows!);
+      };
+      const onError = (error: Error) => finish(error);
+      const timer = setTimeout(
+        () =>
+          finish(
+            Object.assign(
+              new Error('Authentication database query timed out'),
+              { code: 'AUTH_QUERY_TIMEOUT' },
+            ),
+          ),
+        deadlineMs,
+      );
+      void this.pool
+        .getConnection()
+        .then(async (acquired) => {
+          if (settled) {
+            acquired.destroy();
+            return;
+          }
+          client = acquired;
+          client.on('error', onError);
+          const [rows] = await client.query<T>({
+            sql,
+            values,
+            timeout: deadlineMs,
+          });
+          finish(undefined, rows);
+        })
+        .catch(finish);
     });
   }
 

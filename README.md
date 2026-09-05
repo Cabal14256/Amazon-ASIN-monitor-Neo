@@ -389,6 +389,8 @@ Neo API 的 `/ws` 保留旧系统 9 种服务端消息与 `broadcastToUser`，�
 
 消息限速也覆盖等待鉴权的连接。PostgreSQL 鉴权操作复用主池的独占事务，局部 `statement_timeout=1500ms`，2 秒硬截止销毁连接，避免 SQL/网络阻塞永久占用 64 个握手槽；连接获取由池的 `connectionTimeoutMillis` 约束。5 秒握手期限或断连取消后不再启动下一步鉴权查询；正在执行的查询在数据库期限内终止后释放槽位。共享池的导出/分析语句不继承鉴权超时。不可 JSON 序列化的广播被丢弃并记录固定警告，不中断生产者；服务端错误用 error 级记录固定消息和白名单错误码。
 
+双跑期的 `legacy-mysql` 鉴权同样使用独占连接：连接超时及单操作总期限最多 2 秒（保留更短的环境设置），包含等候池连接的时间；超时销毁实际连接，晚到连接不再执行 SQL，后续请求可重新接入。该边界只作用于 Neo 的专用鉴权仓储，不改变旧 server 或导出任务的 `DB_QUERY_TIMEOUT`。正常关闭/断网导致的握手取消不记录鉴权依赖故障。
+
 `WS_EVENT_BUS` 当前注入进程内 `LocalWebSocketEventBus`，保留 audience/userId 的 Redis Pub/Sub 替换接口；**尚未接通 Worker 跨进程消息，也不支持多 API 实例广播、持久重放或离线补发**。队列迁移阶段必须接通实际桥接后才能将实时业务切换到 Neo。回滚本 PR 可撤销 Neo `/ws` 启动接线、共享认证提取与鉴权专用超时包装，不影响旧 server 的 `/ws` 或数据库结构。网关使用 [ws 官方服务端实现](https://github.com/websockets/ws)。
 
 ### Neo Monorepo（从项目根执行）

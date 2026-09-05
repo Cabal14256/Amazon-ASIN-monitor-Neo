@@ -216,6 +216,7 @@ export class AuthenticationService {
         user: normalizedUser,
       };
     } catch (error) {
+      if (signal?.aborted) throw signal.reason;
       if (error instanceof HttpException) {
         throw error;
       }

@@ -32,6 +32,44 @@ import { ApplicationRedisClient } from '../src/redis/redis.service';
 const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
 
 it.skipIf(!integrationEnabled)(
+  'MySQL 鉴权硬截止销毁真实慢查询连接并恢复接入',
+  async () => {
+    const env = loadEnv(process.env);
+    const repository = new LegacyMysqlAuthRepository({
+      host: env.DB_HOST!,
+      port: env.DB_PORT,
+      user: env.DB_USER!,
+      password: env.DB_PASSWORD!,
+      database: env.DB_NAME!,
+      connectionLimit: 1,
+      connectTimeoutMs: 600_000,
+      queryTimeoutMs: 600_000,
+    });
+    const query = (
+      repository as unknown as {
+        query(
+          sql: string,
+          values: readonly unknown[],
+        ): Promise<Array<{ id: number }>>;
+      }
+    ).query.bind(repository);
+    try {
+      const before = await query('SELECT CONNECTION_ID() AS id', []);
+      const started = Date.now();
+      await expect(query('SELECT SLEEP(10)', [])).rejects.toMatchObject({
+        code: 'AUTH_QUERY_TIMEOUT',
+      });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      const after = await query('SELECT CONNECTION_ID() AS id', []);
+      expect(after[0]!.id).not.toBe(before[0]!.id);
+    } finally {
+      await repository.onModuleDestroy();
+    }
+  },
+  10_000,
+);
+
+it.skipIf(!integrationEnabled)(
   'PostgreSQL 鉴权语句被实际取消并释放容量，共享池不继承超时',
   async () => {
     const pools = new ApplicationDatabasePools(

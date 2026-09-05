@@ -183,6 +183,7 @@ export class WebSocketService implements OnModuleDestroy {
         JSON.stringify({ type: 'connected', message: 'WebSocket连接成功' }),
       );
     } catch (error) {
+      if (cancellation.signal.aborted) return;
       const status = error instanceof HttpException ? error.getStatus() : 503;
       const code =
         status === 401
