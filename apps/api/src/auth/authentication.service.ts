@@ -44,7 +44,7 @@ function forbidden(message: string): ForbiddenException {
   });
 }
 
-function normalizeUserStatus(
+export function normalizeUserStatus(
   status: string,
   lockedUntil: Date | null,
   now = new Date(),
@@ -66,7 +66,7 @@ function normalizeUserStatus(
   return 'INACTIVE';
 }
 
-function userStatusMessage(status: UserStatus): string {
+export function userStatusMessage(status: UserStatus): string {
   switch (status) {
     case 'LOCKED':
       return '账户已锁定';
