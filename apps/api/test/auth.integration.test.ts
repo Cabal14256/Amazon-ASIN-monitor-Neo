@@ -103,7 +103,7 @@ it.skipIf(!integrationEnabled)(
       await repository.revokeSession(missingId);
       await repository.markPasswordChangeRequired(missingId);
     } finally {
-      await pools.onModuleDestroy();
+      await pools.onApplicationShutdown();
     }
   },
   10_000,
@@ -421,7 +421,7 @@ describe.skipIf(!integrationEnabled)(
         if (redis.client.status !== 'end') {
           redis.onModuleDestroy();
         }
-        await pools.onModuleDestroy();
+        await pools.onApplicationShutdown();
       }
     }, 30_000);
   },

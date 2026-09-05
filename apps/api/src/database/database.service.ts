@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, type OnApplicationShutdown } from '@nestjs/common';
 import type { Pool } from 'pg';
 
 import type { Env } from '@asin-monitor/config';
@@ -15,7 +15,7 @@ export type DatabaseName = 'competitor_database' | 'database';
 
 /** API 进程唯一的双 PostgreSQL 连接池与 Drizzle 客户端。 */
 @Injectable()
-export class ApplicationDatabasePools implements OnModuleDestroy {
+export class ApplicationDatabasePools implements OnApplicationShutdown {
   readonly primaryPool: Pool;
   readonly competitorPool: Pool;
   readonly primaryDb: Db;
@@ -57,7 +57,8 @@ export class ApplicationDatabasePools implements OnModuleDestroy {
     });
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /** 依赖模块最后关闭：HTTP drain 和审计 flush 期间保持数据库可用。 */
+  async onApplicationShutdown(): Promise<void> {
     await Promise.allSettled([
       this.primaryPool.end(),
       this.competitorPool.end(),

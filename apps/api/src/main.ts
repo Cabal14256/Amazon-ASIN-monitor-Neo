@@ -8,6 +8,7 @@ import {
 
 import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
+import { AuditService } from './audit/audit.service';
 import { ENV } from './config/config.module';
 import { HealthErrorStatsService } from './health/health.service';
 import { configureHttpApp } from './http-app';
@@ -44,6 +45,7 @@ async function bootstrap(): Promise<void> {
   const errorStats = app.get(HealthErrorStatsService);
   const rateLimit = app.get(RateLimitRequestHook);
   configureHttpApp(app, {
+    audit: app.get(AuditService),
     corsOrigin: env.CORS_ORIGIN,
     logger,
     metrics,

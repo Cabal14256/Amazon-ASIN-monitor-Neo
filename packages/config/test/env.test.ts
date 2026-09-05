@@ -120,6 +120,24 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...validEnv, PORT: '3100' }).PORT).toBe(3100);
   });
 
+  it('TRUST_PROXY 将 hop、布尔值与显式代理范围传给 Fastify，默认不信任代理', () => {
+    expect(loadEnv(validEnv).TRUST_PROXY).toBeUndefined();
+    for (const [input, expected] of [
+      ['1', 1],
+      ['0', 0],
+      ['2', 2],
+      ['yes', true],
+      ['off', false],
+      ['loopback', 'loopback'],
+      ['10.0.0.0/8', '10.0.0.0/8'],
+      [' ', undefined],
+    ] as const) {
+      expect(loadEnv({ ...validEnv, TRUST_PROXY: input }).TRUST_PROXY).toBe(
+        expected,
+      );
+    }
+  });
+
   it('鉴权配置拒绝非法 Cookie 名称、JWT 有效期与生产弱密钥', () => {
     expect(() =>
       loadEnv({ ...validEnv, AUTH_COOKIE_NAME: 'bad cookie' }),

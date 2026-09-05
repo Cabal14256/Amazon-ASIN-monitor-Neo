@@ -230,7 +230,7 @@ describe('HealthService', () => {
       { dependency: 'competitor_database', reason: 'idle_client_error' },
     );
     expect(JSON.stringify(warn.mock.calls)).not.toContain('raw-secret');
-    await pools.onModuleDestroy();
+    await pools.onApplicationShutdown();
   });
 
   it('健康运行依赖委托给共享应用数据库池而不创建独立 PG 池', async () => {
@@ -482,7 +482,7 @@ describe.skipIf(!integrationEnabled)(
         expect(health.cache).toMatchObject({ connected: true });
       } finally {
         redis.onModuleDestroy();
-        await databasePools.onModuleDestroy();
+        await databasePools.onApplicationShutdown();
         metrics.onModuleDestroy();
       }
     }, 30_000);
