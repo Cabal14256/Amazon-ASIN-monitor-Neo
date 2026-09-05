@@ -1055,6 +1055,36 @@ export class RateLimitService {
               true,
             );
           }
+          if (this.backend === 'memory') {
+            // A client's barrier only covers its own frozen snapshot. Later
+            // batches or source releases may still fail. Retain every allowed
+            // Redis reservation until the entire recovery commits; a retry
+            // reconciles the same requestId idempotently. Use Redis's actual
+            // generation because the consume may have crossed a window edge.
+            const expiresAt =
+              (Number(redisWindow.generation) + 1) * RATE_LIMIT_WINDOW_MS;
+            if (
+              !/^\d+$/.test(redisWindow.generation) ||
+              !Number.isSafeInteger(expiresAt) ||
+              expiresAt <= 0
+            ) {
+              throw new Error('invalid Redis rate-limit mirror generation');
+            }
+            const mirror = this.consumeMemory(
+              clientKey,
+              overflowKey,
+              { generation: redisWindow.generation, expiresAt },
+              limit,
+              requestId,
+              true,
+            );
+            const storedWindow =
+              this.memoryWindows.get(mirror.storageKey) ??
+              this.memoryOverflowWindows.get(mirror.storageKey);
+            // The Redis result is authoritative while recovery is healthy,
+            // but bounded-memory exhaustion must not admit an untracked request.
+            if (!storedWindow?.requestIds.has(requestId)) return mirror;
+          }
           return redisWindow;
         } catch {
           this.recoveryUsesRedis = false;
