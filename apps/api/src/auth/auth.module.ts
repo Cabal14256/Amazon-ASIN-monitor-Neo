@@ -58,6 +58,11 @@ export function createAuthDataRepository(
     PermissionCacheService,
     PermissionsGuard,
   ],
-  exports: [AuthenticationGuard, PermissionCacheService, PermissionsGuard],
+  exports: [
+    AuthenticationService,
+    AuthenticationGuard,
+    PermissionCacheService,
+    PermissionsGuard,
+  ],
 })
 export class AuthModule {}

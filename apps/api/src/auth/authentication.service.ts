@@ -159,6 +159,22 @@ export class AuthenticationService {
     if (!token) throw unauthorized('未提供认证令牌');
 
     try {
+      return await this.authenticateToken(token);
+    } catch (error) {
+      if (
+        error instanceof UnauthorizedException ||
+        error instanceof ForbiddenException
+      ) {
+        this.clearCookies(request, reply);
+      }
+      throw error;
+    }
+  }
+
+  /** HTTP 与 WS 复用相同的 JWT、权威会话与用户状态校验。 */
+  async authenticateToken(token: string | undefined): Promise<AuthPrincipal> {
+    if (!token) throw unauthorized('未提供认证令牌');
+    try {
       const claims = this.verifyToken(token);
       const session = await this.repository.findSessionById(claims.sessionId);
       if (!session) {
@@ -194,12 +210,6 @@ export class AuthenticationService {
       };
     } catch (error) {
       if (error instanceof HttpException) {
-        if (
-          error instanceof UnauthorizedException ||
-          error instanceof ForbiddenException
-        ) {
-          this.clearCookies(request, reply);
-        }
         throw error;
       }
       this.logger.error('鉴权流程异常', 'AuthenticationService', {
