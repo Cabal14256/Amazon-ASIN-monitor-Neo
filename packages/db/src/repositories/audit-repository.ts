@@ -40,7 +40,7 @@ export class AuditRepository implements AuditRepositoryPort {
         .then(async (acquired) => {
           if (settled) {
             // Acquisition may complete after the deadline; never execute late work.
-            acquired.release(true);
+            acquired.release();
             return;
           }
           client = acquired;

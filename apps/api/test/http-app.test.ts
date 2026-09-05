@@ -11,7 +11,15 @@ import {
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from 'vitest';
 
 import { configureHttpApp } from '../src/http-app';
 
@@ -53,7 +61,9 @@ class TestErrorsController {
 
 describe('HTTP 全局边界', () => {
   let app: NestFastifyApplication;
-  let enableShutdownHooks: ReturnType<typeof vi.spyOn>;
+  let enableShutdownHooks: MockInstance<
+    NestFastifyApplication['enableShutdownHooks']
+  >;
 
   beforeEach(async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);

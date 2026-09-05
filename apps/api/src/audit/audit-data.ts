@@ -1,7 +1,7 @@
 const MASK = '***REDACTED***';
 const OMITTED = '[omitted]';
 const SENSITIVE =
-  /password|pwd|token|secret|apikey|accesskey|authorization|auth|cookie|webhook|credential|configvalue|displayvalue/;
+  /password|pwd|token|secret|apikey|accesskey|authorization|auth|cookie|webhook|credential|configvalue|displayvalue|session|^sid$/;
 const PERSONAL =
   /realname|fullname|displayname|statusreason|email|phone|mobile|address|birthday|dateofbirth|passport|identitynumber/;
 

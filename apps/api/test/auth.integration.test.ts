@@ -6,11 +6,15 @@ import {
 import { Test } from '@nestjs/testing';
 import jwt from 'jsonwebtoken';
 import mysql, { type RowDataPacket } from 'mysql2/promise';
+import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 import { loadEnv } from '@asin-monitor/config';
 import { currentUserResultSchema } from '@asin-monitor/contracts';
-import { LegacyMysqlAuthRepository } from '@asin-monitor/db';
+import {
+  LegacyMysqlAuthRepository,
+  withAuthDatabaseDeadline,
+} from '@asin-monitor/db';
 import { AUTH_DATA_REPOSITORY } from '../src/auth/auth.constants';
 import { AuthController } from '../src/auth/auth.controller';
 import { createAuthDataRepository } from '../src/auth/auth.module';
@@ -26,6 +30,84 @@ import { AppLogger } from '../src/logger/app-logger.service';
 import { ApplicationRedisClient } from '../src/redis/redis.service';
 
 const integrationEnabled = process.env.RUN_INTEGRATION_TESTS === 'true';
+
+it.skipIf(!integrationEnabled)(
+  'MySQL 鉴权硬截止销毁真实慢查询连接并恢复接入',
+  async () => {
+    const env = loadEnv(process.env);
+    const repository = new LegacyMysqlAuthRepository({
+      host: env.DB_HOST!,
+      port: env.DB_PORT,
+      user: env.DB_USER!,
+      password: env.DB_PASSWORD!,
+      database: env.DB_NAME!,
+      connectionLimit: 1,
+      connectTimeoutMs: 600_000,
+      queryTimeoutMs: 600_000,
+    });
+    const query = (
+      repository as unknown as {
+        query(
+          sql: string,
+          values: readonly unknown[],
+        ): Promise<Array<{ id: number }>>;
+      }
+    ).query.bind(repository);
+    try {
+      const before = await query('SELECT CONNECTION_ID() AS id', []);
+      const started = Date.now();
+      await expect(query('SELECT SLEEP(10)', [])).rejects.toMatchObject({
+        code: 'AUTH_QUERY_TIMEOUT',
+      });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      const after = await query('SELECT CONNECTION_ID() AS id', []);
+      expect(after[0]!.id).not.toBe(before[0]!.id);
+    } finally {
+      await repository.onModuleDestroy();
+    }
+  },
+  10_000,
+);
+
+it.skipIf(!integrationEnabled)(
+  'PostgreSQL 鉴权语句被实际取消并释放容量，共享池不继承超时',
+  async () => {
+    const pools = new ApplicationDatabasePools(
+      loadEnv(process.env),
+      new AppLogger(),
+    );
+    try {
+      await expect(
+        withAuthDatabaseDeadline(pools.primaryPool, async (db) => {
+          await db.execute('SELECT pg_sleep(3)');
+        }),
+      ).rejects.toMatchObject({ cause: { code: '57014' } });
+      expect(pools.primaryPool.totalCount).toBe(0);
+      const result = await pools.primaryPool.query('SHOW statement_timeout');
+      expect(result.rows[0].statement_timeout).toBe('0');
+      const repository = createAuthDataRepository(
+        { ...loadEnv(process.env), AUTH_DATA_AUTHORITY: 'postgresql' },
+        pools,
+        new AppLogger(),
+      );
+      const missingId = randomUUID();
+      await expect(
+        repository.findSessionById(missingId),
+      ).resolves.toBeUndefined();
+      await expect(repository.findUserById(missingId)).resolves.toBeUndefined();
+      await expect(repository.getRoles(missingId)).resolves.toEqual([]);
+      await expect(repository.getPermissionCodes(missingId)).resolves.toEqual(
+        [],
+      );
+      await repository.touchSession(missingId);
+      await repository.revokeSession(missingId);
+      await repository.markPasswordChangeRequired(missingId);
+    } finally {
+      await pools.onApplicationShutdown();
+    }
+  },
+  10_000,
+);
 const userId = 'neo-auth-integration-user';
 const sessionId = '00000000-0000-0000-0000-000000000119';
 const roleId = 'neo-auth-integration-role';

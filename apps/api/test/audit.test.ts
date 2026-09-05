@@ -204,6 +204,8 @@ class AuditFixtureGuard implements CanActivate {
 class AuditFixtureController {
   static hold: Promise<void> | undefined;
   static started = false;
+  static completed = false;
+  static streamFailure = false;
   @Post('auth/login')
   @HttpCode(200)
   login() {
@@ -217,6 +219,7 @@ class AuditFixtureController {
     AuditFixtureController.started = true;
     await AuditFixtureController.hold;
     await new Promise<void>((resolve) => setImmediate(resolve));
+    AuditFixtureController.completed = true;
     return { success: true, data: { id: 'new-group' } };
   }
 
@@ -250,6 +253,9 @@ class AuditFixtureController {
           AuditFixtureController.started = true;
           yield 'asin\n';
           await AuditFixtureController.hold;
+          AuditFixtureController.completed = true;
+          if (AuditFixtureController.streamFailure)
+            throw new Error('private-stream-error');
           yield 'B012345678\n';
         })(),
       ),
@@ -271,6 +277,8 @@ describe('Neo audit HTTP lifecycle', () => {
   async function setup(trustProxy?: boolean | number | string) {
     AuditFixtureController.hold = undefined;
     AuditFixtureController.started = false;
+    AuditFixtureController.completed = false;
+    AuditFixtureController.streamFailure = false;
     repository = { append: vi.fn().mockResolvedValue(undefined) };
     log = logger();
     const moduleRef = await Test.createTestingModule({
@@ -343,6 +351,91 @@ describe('Neo audit HTTP lifecycle', () => {
     const encoded = JSON.stringify(vi.mocked(repository.append).mock.calls);
     for (const secret of ['raw-password', 'raw-token', 'query-secret'])
       expect(encoded).not.toContain(secret);
+  });
+
+  it.each(['sessionId', 'session_id', 'sessionIds', 'sid'])(
+    'redacts %s from nested audit snapshots',
+    (key) => {
+      expect(
+        JSON.stringify(
+          auditBody({
+            [key]: 'live-session-id',
+            nested: { [key]: ['another-session'] },
+          }),
+        ),
+      ).not.toMatch(/live-session-id|another-session/);
+    },
+  );
+
+  it.each(['mutation', 'stream'] as const)(
+    'records client-aborted %s exactly once even if the handler later finishes',
+    async (kind) => {
+      await app.listen(0, '127.0.0.1');
+      let release!: () => void;
+      AuditFixtureController.hold = new Promise((resolve) => {
+        release = resolve;
+      });
+      const abort = new AbortController();
+      const pending = fetch(
+        `${await app.getUrl()}/api/v1/${
+          kind === 'mutation' ? 'variant-groups' : 'export/asin'
+        }`,
+        {
+          signal: abort.signal,
+          method: kind === 'mutation' ? 'POST' : 'GET',
+          headers: {
+            authorization: 'Bearer fixture',
+            'content-type': 'application/json',
+            connection: 'close',
+          },
+          ...(kind === 'mutation'
+            ? { body: JSON.stringify({ name: 'aborted mutation' }) }
+            : {}),
+        },
+      )
+        .then((response) => response.text())
+        .catch(() => undefined);
+      try {
+        await vi.waitFor(() =>
+          expect(AuditFixtureController.started).toBe(true),
+        );
+        abort.abort();
+        await pending;
+        await vi.waitFor(() =>
+          expect(repository.append).toHaveBeenCalledOnce(),
+        );
+        expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+          responseStatus: 499,
+          errorMessage: '客户端连接中断',
+        });
+        release();
+        await vi.waitFor(() =>
+          expect(AuditFixtureController.completed).toBe(true),
+        );
+        await audit.flush();
+        expect(repository.append).toHaveBeenCalledOnce();
+      } finally {
+        release();
+      }
+    },
+  );
+
+  it('records a response-stream failure once without persisting its private error message', async () => {
+    await app.listen(0, '127.0.0.1');
+    AuditFixtureController.streamFailure = true;
+    await fetch(`${await app.getUrl()}/api/v1/export/asin`, {
+      headers: { connection: 'close' },
+    })
+      .then((response) => response.text())
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(repository.append).toHaveBeenCalledOnce());
+    expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+      responseStatus: 500,
+      errorMessage: '响应流中断',
+    });
+    expect(
+      JSON.stringify(vi.mocked(repository.append).mock.calls),
+    ).not.toContain('private-stream-error');
   });
 
   it('records controller and Guard failures once with their final status and trusted identity only', async () => {

@@ -82,7 +82,7 @@ describe('AuditRepository write deadline', () => {
     acquire(client as unknown as PoolClient);
     await vi.advanceTimersByTimeAsync(0);
     expect(client.query).not.toHaveBeenCalled();
-    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith();
   });
 
   it('destroys failed query connections without committing or leaking listeners', async () => {
