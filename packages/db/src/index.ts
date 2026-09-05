@@ -4,6 +4,8 @@ export * from './migration';
 export * from './repositories/auth-repository';
 export * from './repositories/bounded-auth-repository';
 export * from './repositories/legacy-mysql-auth-repository';
+export * from './repositories/redis-task-repository';
+export * from './repositories/task-state';
 export * from './schema';
 export * from './schema-competitor';
 export * from './timescale';

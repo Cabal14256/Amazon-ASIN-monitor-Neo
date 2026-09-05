@@ -381,6 +381,10 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo 任务注册表
+
+Neo 任务元数据基础仓储、取消/终态规则、7 天 TTL 与双跑独立索引说明见 [`phase-2-task-registry.md`](./docs/runbooks/phase-2-task-registry.md)。目前尚未接入任务中心端点和实际 Worker 业务消费。
+
 ### Neo WebSocket 网关
 
 Neo API 的 `/ws` 保留旧系统 9 种服务端消息与 `broadcastToUser`，使用共享 Zod 契约校验。握手复用 HTTP 的 Cookie（优先）/Bearer、JWT、权威 Session 与用户状态检查；缺失或过期认证关闭码为 4401，无效令牌/撤销会话/禁用用户为 4403。不要通过 URL query 传 Token。浏览器发送的 Origin 必须精确匹配 `CORS_ORIGIN` 的 HTTP(S) origin（不接受通配符或 `null`）；没有 Origin 的非浏览器客户端仍必须提供有效认证。鉴权服务故障关闭码为可重试的 1013，不伪装为令牌无效。

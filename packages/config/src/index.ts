@@ -120,6 +120,13 @@ const envObjectSchema = z.object({
   JWT_SECRET: z
     .string()
     .refine((value) => value.trim().length > 0, '缺少 JWT_SECRET'),
+  TASK_META_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(31_536_000)
+    .default(604_800),
+  TASK_USER_MAX_ITEMS: z.coerce.number().int().min(1).max(1000).default(200),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
   AUTH_COOKIE_NAME: cookieNameSchema.default('amazon_asin_monitor_auth'),

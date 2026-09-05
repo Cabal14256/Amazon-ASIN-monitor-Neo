@@ -19,6 +19,30 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('任务注册表保留 7 天/200 条默认值并限制 TTL 与索引范围', () => {
+    expect(loadEnv(validEnv).TASK_META_TTL_SECONDS).toBe(604800);
+    expect(loadEnv(validEnv).TASK_USER_MAX_ITEMS).toBe(200);
+    for (const field of ['TASK_META_TTL_SECONDS', 'TASK_USER_MAX_ITEMS']) {
+      for (const value of [
+        '0',
+        '-1',
+        '1.5',
+        '',
+        'NaN',
+        'Infinity',
+        '31536001',
+      ]) {
+        expect(() => loadEnv({ ...validEnv, [field]: value })).toThrow(
+          EnvValidationError,
+        );
+      }
+      expect(
+        loadEnv({ ...validEnv, [field]: '60' })[
+          field as 'TASK_META_TTL_SECONDS'
+        ],
+      ).toBe(60);
+    }
+  });
   it('接受合法环境并应用默认值', () => {
     const env = loadEnv({ ...validEnv });
     expect(env.NODE_ENV).toBe('development');
