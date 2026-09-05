@@ -14,6 +14,8 @@
 
 定稿方案与逐阶段任务已归档在 [`docs/refactor/`](./docs/refactor/README.md)。
 
+Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./docs/runbooks/phase-3-web-transport.md)；目前尚未迁移登录 UI、权限路由或业务页面。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。
