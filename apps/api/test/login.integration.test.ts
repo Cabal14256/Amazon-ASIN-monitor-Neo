@@ -87,7 +87,7 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       }
     } finally {
       if (app) await app.close();
-      else if (pools) await pools.onModuleDestroy();
+      else if (pools) await pools.onApplicationShutdown();
     }
   });
   async function user(
