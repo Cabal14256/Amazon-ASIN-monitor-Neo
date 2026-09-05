@@ -1044,6 +1044,7 @@ export class RateLimitService {
             requestId,
             now,
           );
+          if (redisWindow.count > limit) return redisWindow;
           if (this.backend === 'memory' && !this.recoveryUsesRedis) {
             return this.consumeMemory(
               clientKey,
@@ -1080,13 +1081,28 @@ export class RateLimitService {
       return memory;
     }
     try {
-      return await this.consumeRedis(
+      const redisWindow = await this.consumeRedis(
         clientKey,
         overflowKey,
         identity,
         limit,
         requestId,
         now,
+      );
+      if (this.backend === 'redis' || redisWindow.count > limit) {
+        return redisWindow;
+      }
+      // A sibling request may have entered fallback while this Redis call was
+      // pending. Keep the same reservation locally, invalidating any newer
+      // recovery snapshot before adding it. A Redis denial stays a denial.
+      this.setBackend('memory', Date.now());
+      return this.consumeMemory(
+        clientKey,
+        overflowKey,
+        identityAt(this.redisAlignedNow(Date.now())),
+        limit,
+        requestId,
+        true,
       );
     } catch {
       this.setBackend('memory', Date.now());
@@ -1203,6 +1219,7 @@ export class RateLimitService {
       role: RateLimitRole;
     },
     options: {
+      /** Compatibility flag: uncertain transitions always charge the target. */
       fallbackToTargetMemory?: boolean;
       releaseSource?: boolean;
     } = {},
@@ -1268,15 +1285,6 @@ export class RateLimitService {
         targetRedisReservationUncertain = true;
         this.setBackend('memory', now);
       }
-    }
-    if (
-      !this.reconciliationUncertain &&
-      !options.fallbackToTargetMemory &&
-      !targetRedisReservationUncertain &&
-      source.backend === 'memory' &&
-      source.uncertainRedisReservation
-    ) {
-      return source;
     }
     // Uncertain reconciliation must use the blocked target-policy memory
     // decision below, never a previously allowed DEFAULT source.
