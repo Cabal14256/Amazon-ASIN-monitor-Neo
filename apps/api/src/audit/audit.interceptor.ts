@@ -5,9 +5,8 @@ import {
   type NestInterceptor,
 } from '@nestjs/common';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import { Readable } from 'node:stream';
-import { tap } from 'rxjs';
 import { auditBody, auditText } from './audit-data';
 import { auditAction, type AuditAction } from './audit-mapping';
 import type { AuditService } from './audit.service';
@@ -18,11 +17,17 @@ type AuditRequest = FastifyRequest & {
     action: AuditAction;
     body: Record<string, unknown> | null;
     path: string;
+    ipAddress: string | null;
     error: string | null;
     recorded?: boolean;
     report?: (status?: number, error?: string) => void;
     stream?: Readable;
     streamError?: () => void;
+    handlerStarted?: boolean;
+    handlerSettled?: boolean;
+    responseFinished?: boolean;
+    disconnected?: boolean;
+    transportError?: boolean;
   };
 };
 
@@ -37,7 +42,32 @@ function capture(request: AuditRequest): void {
     request.params as Record<string, unknown>,
     body ?? {},
   );
-  if (action) request[CONTEXT] = { action, body, path, error: null };
+  if (action)
+    request[CONTEXT] = {
+      action,
+      body,
+      path,
+      ipAddress: auditText(request.ip, 50),
+      error: null,
+    };
+}
+
+function reportTransportFailure(
+  request: AuditRequest,
+  reply: FastifyReply,
+): void {
+  const state = request[CONTEXT];
+  if (!state?.handlerSettled) return;
+  if (state.responseFinished) state.report?.(reply.statusCode);
+  else if (state.transportError) state.report?.(500, '响应处理失败');
+  else if (
+    state.disconnected ||
+    (reply.raw.destroyed && !reply.raw.writableFinished)
+  )
+    state.report?.(
+      state.error ? (reply.statusCode >= 400 ? reply.statusCode : 500) : 499,
+      state.error ?? '客户端连接中断',
+    );
 }
 
 /** Preserve body before mutation; normal responses keep their final HTTP status. */
@@ -46,15 +76,8 @@ export class AuditInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler) {
     if (context.getType() !== 'http') return next.handle();
     const request = context.switchToHttp().getRequest<AuditRequest>();
-    const reply = context.switchToHttp().getResponse<FastifyReply>();
     capture(request);
-    const reportDisconnected = () => {
-      if (reply.raw.destroyed && !reply.raw.writableFinished)
-        request[CONTEXT]?.report?.(499, '客户端连接中断');
-    };
-    return next
-      .handle()
-      .pipe(tap({ complete: reportDisconnected, error: reportDisconnected }));
+    return next.handle();
   }
 }
 
@@ -68,13 +91,15 @@ export function registerAuditHooks(
     const state = request[CONTEXT];
     if (!state || state.recorded || state.report) return;
     const onClose = () => {
-      if (!reply.raw.writableFinished)
-        state.report?.(
-          state.error ? 500 : 499,
-          state.error ?? '客户端连接中断',
-        );
+      if (!reply.raw.writableFinished) {
+        state.disconnected = true;
+        reportTransportFailure(request, reply);
+      }
     };
-    const onError = () => state.report?.(500, '响应处理失败');
+    const onError = () => {
+      state.transportError = true;
+      reportTransportFailure(request, reply);
+    };
     state.report = (status = reply.statusCode, error) => {
       if (state.recorded) return;
       state.recorded = true;
@@ -93,7 +118,7 @@ export function registerAuditHooks(
         ),
         method: request.method,
         path: auditText(state.path, 500),
-        ipAddress: auditText(request.ip, 50),
+        ipAddress: state.ipAddress,
         userAgent: auditText(request.headers['user-agent'], 500),
         requestData: state.body,
         responseStatus: status,
@@ -105,6 +130,23 @@ export function registerAuditHooks(
     reply.raw.once('error', onError);
     if (reply.raw.destroyed) onClose();
   }
+  // Nest interceptors run after guards, so their completion cannot cover an
+  // authentication rejection. Wrap the route lifecycle, including every guard
+  // and the exception filter, and defer a disconnect until that work settles.
+  fastify.addHook('onRoute', (route: RouteOptions) => {
+    const handler = route.handler;
+    route.handler = async function (request, reply) {
+      watchResponse(request, reply);
+      const state = (request as AuditRequest)[CONTEXT];
+      if (state) state.handlerStarted = true;
+      try {
+        return await handler.call(this, request, reply);
+      } finally {
+        if (state) state.handlerSettled = true;
+        reportTransportFailure(request, reply);
+      }
+    };
+  });
   fastify.addHook(
     'preValidation',
     async (request: AuditRequest, reply: FastifyReply) =>
@@ -151,13 +193,19 @@ export function registerAuditHooks(
           /* Binary / streaming responses are not buffered for auditing. */
         }
       }
+      // Parser failures have no handler to wait for. A started handler can
+      // still be doing work after an explicit reply.send(), so await its exit.
+      if (state && !state.handlerStarted) state.handlerSettled = true;
+      reportTransportFailure(request, reply);
       return payload;
     },
   );
   fastify.addHook(
     'onResponse',
     async (request: AuditRequest, reply: FastifyReply) => {
-      request[CONTEXT]?.report?.(reply.statusCode);
+      const state = request[CONTEXT];
+      if (state) state.responseFinished = true;
+      reportTransportFailure(request, reply);
     },
   );
 }

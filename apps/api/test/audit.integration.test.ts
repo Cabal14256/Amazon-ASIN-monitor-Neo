@@ -7,6 +7,57 @@ import type { AppLogger } from '../src/logger/app-logger.service';
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
   'AuditRepository PostgreSQL',
   () => {
+    it('keeps shared-pool foreground queries available during a burst of lock-blocked audit writes', async () => {
+      const blockerPool = createPgPool(process.env.DATABASE_URL!, {
+        max: 1,
+        connectionTimeoutMillis: 2000,
+      });
+      const pool = createPgPool(process.env.DATABASE_URL!, {
+        max: 10,
+        connectionTimeoutMillis: 2000,
+      });
+      const blocker = await blockerPool.connect();
+      const resourceId = randomUUID();
+      const log = { error: vi.fn(), warn: vi.fn() };
+      const audit = new AuditService(
+        new AuditRepository(pool),
+        log as unknown as AppLogger,
+      );
+      const connect = vi.spyOn(pool, 'connect');
+      let unlocked = false;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query('LOCK TABLE audit_logs IN ACCESS EXCLUSIVE MODE');
+        for (let index = 0; index < 32; index++)
+          audit.record({ action: 'CREATE', resource: 'asin', resourceId });
+        await vi.waitFor(() => expect(pool.totalCount).toBe(2));
+        expect(connect).toHaveBeenCalledTimes(2);
+        expect(pool.waitingCount).toBe(0);
+        const { rows } = await pool.query('SELECT 1 AS foreground_result');
+        expect(rows[0].foreground_result).toBe(1);
+        expect(pool.totalCount).toBeLessThanOrEqual(3);
+        await blocker.query('ROLLBACK');
+        unlocked = true;
+        await audit.flush();
+        expect(log.error).not.toHaveBeenCalled();
+        const saved = await pool.query(
+          'SELECT count(*)::integer AS count FROM audit_logs WHERE resource_id = $1',
+          [resourceId],
+        );
+        expect(saved.rows[0].count).toBe(32);
+      } finally {
+        if (!unlocked) await blocker.query('ROLLBACK');
+        blocker.release();
+        await audit.onApplicationShutdown();
+        await pool.query('DELETE FROM audit_logs WHERE resource_id = $1', [
+          resourceId,
+        ]);
+        await pool.end();
+        await blockerPool.end();
+        connect.mockRestore();
+      }
+    }, 20000);
+
     it('cancels a lock-blocked insert before pool shutdown without leaking SQL timeout settings', async () => {
       const blockerPool = createPgPool(process.env.DATABASE_URL!, {
         max: 1,

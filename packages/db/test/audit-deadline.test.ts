@@ -19,6 +19,41 @@ const fixture = () => {
 afterEach(() => vi.useRealTimers());
 
 describe('AuditRepository write deadline', () => {
+  it.each(['resolve', 'reject'])(
+    'retains actual acquisition slots after the public deadline until they %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      const { pool, client, repository } = fixture();
+      let acquire!: (client: PoolClient) => void;
+      let fail!: (error: Error) => void;
+      const acquisition = new Promise<PoolClient>((resolve, reject) => {
+        acquire = resolve;
+        fail = reject;
+      });
+      pool.connect.mockImplementation(() => acquisition);
+      const writes = [repository.append(entry), repository.append(entry)].map(
+        (write) => expect(write).rejects.toMatchObject({ code: 'ETIMEDOUT' }),
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await Promise.all(writes);
+      await expect(repository.append(entry)).rejects.toMatchObject({
+        code: '53300',
+      });
+      expect(pool.connect).toHaveBeenCalledTimes(2);
+      if (outcome === 'resolve') acquire(client as unknown as PoolClient);
+      else fail(new Error('fixture acquisition failed'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.query).not.toHaveBeenCalled();
+      expect(client.release).toHaveBeenCalledTimes(
+        outcome === 'resolve' ? 2 : 0,
+      );
+      pool.connect.mockResolvedValue(client);
+      await repository.append(entry);
+      expect(pool.connect).toHaveBeenCalledTimes(3);
+      expect(client.query).toHaveBeenCalledTimes(4);
+    },
+  );
+
   it('commits with a transaction-local SQL timeout and releases a healthy client', async () => {
     const { client, repository } = fixture();
     await repository.append(entry);

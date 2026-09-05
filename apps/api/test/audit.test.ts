@@ -185,8 +185,12 @@ describe('audit mapping and data', () => {
 
 @Injectable()
 class AuditFixtureGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
+  static hold: Promise<void> | undefined;
+  static started = false;
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<FastifyRequest>();
+    AuditFixtureGuard.started = true;
+    await AuditFixtureGuard.hold;
     if (request.headers.authorization !== 'Bearer fixture')
       throw new UnauthorizedException();
     request.auth = {
@@ -206,6 +210,18 @@ class AuditFixtureController {
   static started = false;
   static completed = false;
   static streamFailure = false;
+  @Post('asins')
+  async earlyReply(@Req() request: FastifyRequest, @Res() reply: FastifyReply) {
+    reply.status(201).send({ success: true });
+    AuditFixtureController.started = true;
+    await AuditFixtureController.hold;
+    request.auth = {
+      userId: 'late-actor',
+      sessionId: 'fixture-session',
+      user: { username: 'late-user' },
+    } as FastifyRequest['auth'];
+    AuditFixtureController.completed = true;
+  }
   @Post('auth/login')
   @HttpCode(200)
   login() {
@@ -275,6 +291,8 @@ describe('Neo audit HTTP lifecycle', () => {
   let log: AppLogger;
 
   async function setup(trustProxy?: boolean | number | string) {
+    AuditFixtureGuard.hold = undefined;
+    AuditFixtureGuard.started = false;
     AuditFixtureController.hold = undefined;
     AuditFixtureController.started = false;
     AuditFixtureController.completed = false;
@@ -367,6 +385,81 @@ describe('Neo audit HTTP lifecycle', () => {
     },
   );
 
+  it('does not treat an explicit early response as handler completion', async () => {
+    await app.listen(0, '127.0.0.1');
+    let release!: () => void;
+    AuditFixtureController.hold = new Promise<void>(
+      (resolve) => (release = resolve),
+    );
+    try {
+      const response = await fetch(`${await app.getUrl()}/api/v1/asins`, {
+        method: 'POST',
+        headers: { connection: 'close' },
+      });
+      expect(response.status).toBe(201);
+      await response.text();
+      expect(AuditFixtureController.started).toBe(true);
+      expect(repository.append).not.toHaveBeenCalled();
+      release();
+      await vi.waitFor(() => expect(repository.append).toHaveBeenCalledOnce());
+      expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+        userId: 'late-actor',
+        username: 'late-user',
+        responseStatus: 201,
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it.each([true, false])(
+    'defers disconnect persistence until pending authentication settles (authorized=%s)',
+    async (authorized) => {
+      await app.listen(0, '127.0.0.1');
+      let release!: () => void;
+      AuditFixtureGuard.hold = new Promise<void>(
+        (resolve) => (release = resolve),
+      );
+      const abort = new AbortController();
+      const pending = fetch(`${await app.getUrl()}/api/v1/variant-groups`, {
+        method: 'POST',
+        signal: abort.signal,
+        headers: {
+          authorization: authorized
+            ? 'Bearer fixture'
+            : 'Bearer invalid-fixture',
+          'content-type': 'application/json',
+          connection: 'close',
+        },
+        body: JSON.stringify({ name: 'delayed authentication mutation' }),
+      })
+        .then((response) => response.text())
+        .catch(() => undefined);
+      try {
+        await vi.waitFor(() => expect(AuditFixtureGuard.started).toBe(true));
+        abort.abort();
+        await pending;
+        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        expect(repository.append).not.toHaveBeenCalled();
+        release();
+        await vi.waitFor(() =>
+          expect(repository.append).toHaveBeenCalledOnce(),
+        );
+        expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+          userId: authorized ? 'actor-23' : null,
+          username: authorized ? 'audit-user' : null,
+          ipAddress: '127.0.0.1',
+          responseStatus: authorized ? 499 : 401,
+          errorMessage: authorized ? '客户端连接中断' : '操作失败',
+        });
+        expect(AuditFixtureController.completed).toBe(authorized);
+      } finally {
+        release();
+        await pending;
+      }
+    },
+  );
+
   it.each(['mutation', 'stream'] as const)(
     'records client-aborted %s exactly once even if the handler later finishes',
     async (kind) => {
@@ -401,6 +494,11 @@ describe('Neo audit HTTP lifecycle', () => {
         );
         abort.abort();
         await pending;
+        if (kind === 'mutation') {
+          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+          expect(repository.append).not.toHaveBeenCalled();
+          release();
+        }
         await vi.waitFor(() =>
           expect(repository.append).toHaveBeenCalledOnce(),
         );
@@ -666,7 +764,7 @@ describe('Neo audit HTTP lifecycle', () => {
     for (let index = 0; index < 300; index += 1)
       audit.record({ action: 'CREATE', resource: 'asin' });
     await Promise.resolve();
-    expect(repository.append).toHaveBeenCalledTimes(256);
+    expect(repository.append).toHaveBeenCalledTimes(2);
     expect(log.warn).toHaveBeenCalledOnce();
     complete();
     await audit.flush();
@@ -686,6 +784,67 @@ it('AppModule resolves audit and its PostgreSQL repository', async () => {
   expect(moduleRef.get(AuditService)).toBeInstanceOf(AuditService);
   expect(moduleRef.get(AUDIT_REPOSITORY)).toHaveProperty('append');
   await moduleRef.close();
+});
+
+it('audit shutdown discards queued work at its deadline and never starts it after pool shutdown', async () => {
+  vi.useFakeTimers();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const repository = { append: vi.fn().mockReturnValue(blocked) };
+  const log = logger();
+  const audit = new AuditService(repository, log);
+  try {
+    for (let index = 0; index < 5; index++)
+      audit.record({ action: 'CREATE', resource: 'asin' });
+    await Promise.resolve();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+    const closing = audit.onApplicationShutdown();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await closing;
+    expect(log.warn).toHaveBeenCalledWith(
+      '审计关闭期限已到，未启动记录已丢弃',
+      'AuditService',
+      { reason: 'shutdown_deadline', count: 3 },
+    );
+    release();
+    await audit.flush();
+    audit.record({ action: 'CREATE', resource: 'asin' });
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+  } finally {
+    release();
+    vi.useRealTimers();
+  }
+});
+
+it('audit workers release failed slots and preserve queued admission order', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const repository = {
+    append: vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fixture failure'))
+      .mockReturnValueOnce(blocked)
+      .mockResolvedValue(undefined),
+  };
+  const log = logger();
+  const audit = new AuditService(repository, log);
+  try {
+    for (let index = 0; index < 4; index++)
+      audit.record({
+        action: 'CREATE',
+        resource: 'asin',
+        resourceId: String(index),
+      });
+    await vi.waitFor(() => expect(repository.append).toHaveBeenCalledTimes(4));
+    expect(
+      repository.append.mock.calls.map(([entry]) => entry.resourceId),
+    ).toEqual(['0', '1', '2', '3']);
+    expect(log.error).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await audit.flush();
+  }
 });
 
 it('AppModule keeps database pools open until the audit flush completes', async () => {

@@ -1,9 +1,18 @@
-import type { AuditEntry, AuditRepositoryPort } from '@asin-monitor/db';
+import {
+  AUDIT_MAX_ACTIVE_WRITES,
+  type AuditEntry,
+  type AuditRepositoryPort,
+} from '@asin-monitor/db';
 import { Inject, Injectable, type OnApplicationShutdown } from '@nestjs/common';
 import { AppLogger } from '../logger/app-logger.service';
 
 export const AUDIT_REPOSITORY = Symbol('AUDIT_REPOSITORY');
 const MAX_PENDING = 256;
+interface AuditJob {
+  entry: AuditEntry;
+  completion: Promise<void>;
+  resolve: () => void;
+}
 const SAFE_ERROR_CODES = new Set([
   '08000',
   '08001',
@@ -54,7 +63,10 @@ function failureCode(error: unknown): string {
 @Injectable()
 export class AuditService implements OnApplicationShutdown {
   private readonly pending = new Set<Promise<void>>();
+  private readonly queue: AuditJob[] = [];
+  private activeWrites = 0;
   private closing = false;
+  private stopped = false;
   private lastWarning = -Infinity;
 
   constructor(
@@ -72,16 +84,37 @@ export class AuditService implements OnApplicationShutdown {
       }
       return;
     }
-    const pending = Promise.resolve()
-      .then(() => this.repository.append(entry))
-      .catch((error: unknown) => {
-        this.logger.error('操作审计写入失败', 'AuditService', {
-          reason: 'audit_write_failed',
-          code: failureCode(error),
+    let resolve!: () => void;
+    const completion = new Promise<void>((done) => (resolve = done));
+    this.pending.add(completion);
+    this.queue.push({ entry, completion, resolve });
+    this.drain();
+  }
+
+  private finish(job: AuditJob): void {
+    this.pending.delete(job.completion);
+    job.resolve();
+  }
+
+  private drain(): void {
+    while (!this.stopped && this.activeWrites < AUDIT_MAX_ACTIVE_WRITES) {
+      const job = this.queue.shift();
+      if (!job) return;
+      this.activeWrites += 1;
+      void Promise.resolve()
+        .then(() => this.repository.append(job.entry))
+        .catch((error: unknown) => {
+          this.logger.error('操作审计写入失败', 'AuditService', {
+            reason: 'audit_write_failed',
+            code: failureCode(error),
+          });
+        })
+        .finally(() => {
+          this.activeWrites -= 1;
+          this.finish(job);
+          this.drain();
         });
-      })
-      .finally(() => this.pending.delete(pending));
-    this.pending.add(pending);
+    }
   }
 
   async flush(): Promise<void> {
@@ -101,6 +134,17 @@ export class AuditService implements OnApplicationShutdown {
       ]);
     } finally {
       if (timer) clearTimeout(timer);
+      // Do not start queued SQL after shutdown advances to pool.end(). Active
+      // repository operations retain their own bounded I/O/acquisition deadline.
+      this.stopped = true;
+      const dropped = this.queue.splice(0);
+      for (const job of dropped) this.finish(job);
+      if (dropped.length > 0) {
+        this.logger.warn('审计关闭期限已到，未启动记录已丢弃', 'AuditService', {
+          reason: 'shutdown_deadline',
+          count: dropped.length,
+        });
+      }
     }
   }
 }
