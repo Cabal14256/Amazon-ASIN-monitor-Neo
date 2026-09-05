@@ -28,6 +28,7 @@ interface WindowIdentity {
 
 interface MemoryWindow extends WindowIdentity {
   limit: number;
+  ownerCounts: Map<string, number>;
   overflowKey: string;
   requestIds: Set<string>;
   requestOwners: Map<string, string>;
@@ -487,6 +488,9 @@ export class RateLimitService {
   }
 
   private setBackend(next: RateLimitBackend, now: number): void {
+    // Operations started before recovery may fail after its snapshot freezes.
+    // Invalidate the snapshot before a fallback adds another reservation.
+    if (next === 'memory') this.recoveryUsesRedis = false;
     if (this.backend === next) {
       if (next === 'memory') this.redisRetryAfter = now + REDIS_RETRY_DELAY_MS;
       return;
@@ -561,6 +565,7 @@ export class RateLimitService {
       ...identity,
       limit,
       overflowKey,
+      ownerCounts: new Map<string, number>(),
       requestIds: new Set<string>(),
       requestOwners: new Map<string, string>(),
     };
@@ -618,11 +623,10 @@ export class RateLimitService {
         overflowKey,
         identity,
       );
-      const alreadyUsesOverflow =
-        overflow && [...overflow.requestOwners.values()].includes(clientKey);
       if (
         overflow &&
-        (alreadyUsesOverflow || this.memoryWindows.size >= MAX_MEMORY_WINDOWS)
+        (this.memoryWindows.size >= MAX_MEMORY_WINDOWS ||
+          overflow.ownerCounts.has(clientKey))
       ) {
         window = overflow;
         storageKey = overflowKey;
@@ -645,9 +649,13 @@ export class RateLimitService {
     if (
       stored &&
       storageKey === overflowKey &&
-      window.requestIds.has(requestId)
+      !window.requestOwners.has(requestId)
     ) {
       window.requestOwners.set(requestId, clientKey);
+      window.ownerCounts.set(
+        clientKey,
+        (window.ownerCounts.get(clientKey) ?? 0) + 1,
+      );
     }
     const count = stored
       ? this.memoryRequestCount(window)
@@ -679,7 +687,13 @@ export class RateLimitService {
       ) {
         continue;
       }
+      const owner = window.requestOwners.get(decision.requestId);
       window.requestOwners.delete(decision.requestId);
+      if (owner) {
+        const remaining = (window.ownerCounts.get(owner) ?? 1) - 1;
+        if (remaining > 0) window.ownerCounts.set(owner, remaining);
+        else window.ownerCounts.delete(owner);
+      }
       this.memoryReservationCount = Math.max(
         0,
         this.memoryReservationCount - 1,
@@ -973,10 +987,7 @@ export class RateLimitService {
       return clientKey;
     }
     const overflowWindow = this.memoryOverflowWindows.get(overflowKey);
-    if (
-      overflowWindow &&
-      [...overflowWindow.requestOwners.values()].includes(clientKey)
-    ) {
+    if (overflowWindow && overflowWindow.ownerCounts.has(clientKey)) {
       return overflowKey;
     }
     return undefined;

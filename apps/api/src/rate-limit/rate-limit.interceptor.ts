@@ -217,7 +217,10 @@ export class RateLimitInterceptor implements NestInterceptor {
           policy: 'role',
           role,
         },
-        { releaseSource: !retainProvisionalForStrict },
+        {
+          releaseSource: !retainProvisionalForStrict,
+          fallbackToTargetMemory: retainProvisionalForStrict,
+        },
       );
     } else if (provisional) {
       roleDecision = provisional;

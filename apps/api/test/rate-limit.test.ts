@@ -1052,6 +1052,89 @@ describe('RateLimitService', () => {
     expect(redis.eval).toHaveBeenCalledTimes(6);
   });
 
+  it('恢复前发起的 Redis 请求迟到失败会中止旧快照提交并保留新预占', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    const redis = redisMock();
+    let rejectLate!: (error: Error) => void;
+    let finishSnapshot!: (value: unknown) => void;
+    vi.mocked(redis.eval)
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectLate = reject;
+          }),
+      )
+      .mockRejectedValueOnce(new Error('outage'))
+      .mockResolvedValueOnce(
+        String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS)),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishSnapshot = resolve;
+          }),
+      );
+    const { service } = createService({ redis });
+    const input = {
+      clientIdentifier: 'late-fallback',
+      policy: 'role' as const,
+      role: 'DEFAULT' as const,
+    };
+    const late = service.consume(input);
+    const first = await service.consume({
+      ...input,
+      clientIdentifier: 'first-fallback',
+    });
+    const internal = service as unknown as {
+      redisRetryAfter: number;
+      memoryWindows: Map<string, { requestIds: Set<string> }>;
+    };
+    internal.redisRetryAfter = 0;
+    const recovery = service.recover(true);
+    await vi.waitFor(() =>
+      expect(finishSnapshot).toEqual(expect.any(Function)),
+    );
+    rejectLate(new Error('late response timeout'));
+    const lateDecision = await late;
+    expect(lateDecision).toMatchObject({
+      backend: 'memory',
+      allowed: false,
+      uncertainRedisReservation: true,
+    });
+    finishSnapshot([
+      1,
+      RATE_LIMIT_WINDOW_MS,
+      first.generation,
+      first.clientKey,
+    ]);
+    await recovery;
+    expect(service.snapshot(true).status).toBe('degraded');
+    expect(
+      internal.memoryWindows
+        .get(lateDecision.clientKey)
+        ?.requestIds.has(lateDecision.requestId),
+    ).toBe(true);
+
+    vi.mocked(redis.eval).mockImplementation(async (_script, keys, args) => {
+      if (keys[0]?.includes(':capability:')) return first.generation;
+      return [Number(args[3]), RATE_LIMIT_WINDOW_MS, first.generation, keys[0]];
+    });
+    internal.redisRetryAfter = 0;
+    await service.recover(true);
+    expect(service.snapshot(true).status).toBe('ok');
+    expect(
+      vi
+        .mocked(redis.eval)
+        .mock.calls.some(
+          ([script, keys, args]) =>
+            script.includes('local requestCount') &&
+            keys[0] === lateDecision.clientKey &&
+            args.includes(lateDecision.requestId),
+        ),
+    ).toBe(true);
+  });
+
   it('第二批冻结窗口在自身对账完成前不会提前访问 Redis', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
@@ -1212,6 +1295,7 @@ describe('RateLimitService', () => {
           limit: number;
           requestIds: Set<string>;
           requestOwners: Map<string, string>;
+          ownerCounts: Map<string, number>;
         }
       >;
       reconciliationBarriers: Map<
@@ -1228,6 +1312,7 @@ describe('RateLimitService', () => {
       limit: ROLE_LIMITS.DEFAULT,
       requestIds: new Set(['existing']),
       requestOwners: new Map([['existing', clientKey]]),
+      ownerCounts: new Map([[clientKey, 1]]),
     });
     internal.reconciliationBarriers.set(overflowKey, {
       promise: barrier,
@@ -1384,6 +1469,7 @@ describe('RateLimitService', () => {
           limit: number;
           requestIds: Set<string>;
           requestOwners: Map<string, string>;
+          ownerCounts: Map<string, number>;
         }
       >;
       memoryWindows: Map<
@@ -1394,6 +1480,7 @@ describe('RateLimitService', () => {
           limit: number;
           requestIds: Set<string>;
           requestOwners: Map<string, string>;
+          ownerCounts: Map<string, number>;
         }
       >;
       redisRetryAfter: number;
@@ -1407,6 +1494,7 @@ describe('RateLimitService', () => {
         limit: ROLE_LIMITS.DEFAULT,
         requestIds: new Set([`existing-request-${index}`]),
         requestOwners: new Map(),
+        ownerCounts: new Map(),
       });
     }
     internal.backend = 'memory';
@@ -1445,6 +1533,14 @@ describe('RateLimitService', () => {
         decisions[2]!.clientKey,
       ]),
     );
+    expect(overflowWindow.ownerCounts.get(decisions[0]!.clientKey)).toBe(2);
+    expect(overflowWindow.ownerCounts.has(decisions[1]!.clientKey)).toBe(false);
+    const ownerScan = vi.spyOn(overflowWindow.requestOwners, 'values');
+    await service.consume({
+      clientIdentifier: 'full-window-client',
+      policy: 'role',
+      role: 'DEFAULT',
+    });
 
     internal.memoryWindows.delete('existing-0');
     const returnedToIndependent = await service.consume({
@@ -1465,6 +1561,11 @@ describe('RateLimitService', () => {
       role: 'DEFAULT',
     });
     expect(existingOverflowClient.storageKey).toBe(decisions[0]!.storageKey);
+    expect(ownerScan).not.toHaveBeenCalled();
+    await service.release(decisions[0]!);
+    expect(overflowWindow.ownerCounts.get(decisions[0]!.clientKey)).toBe(2);
+    await service.release(decisions[0]!);
+    expect(overflowWindow.ownerCounts.get(decisions[0]!.clientKey)).toBe(2);
   });
 
   it('满载窗口跨 generation 时绕过清理节流并恢复独立桶', async () => {
@@ -1483,6 +1584,7 @@ describe('RateLimitService', () => {
           limit: number;
           requestIds: Set<string>;
           requestOwners: Map<string, string>;
+          ownerCounts: Map<string, number>;
         }
       >;
       redisRetryAfter: number;
@@ -1496,6 +1598,7 @@ describe('RateLimitService', () => {
         limit: ROLE_LIMITS.DEFAULT,
         requestIds: new Set([`request-${index}`]),
         requestOwners: new Map(),
+        ownerCounts: new Map(),
       });
     }
     internal.backend = 'memory';
@@ -1815,7 +1918,10 @@ describe('RateLimitRequestHook HTTP 边界', () => {
             generations.delete(keys[2]!);
             memberships.delete(keys[2]!);
           }
-          return releasedByKey.reduce((total, released) => total + released, 0);
+          return releasedByKey.reduce<number>(
+            (total, released) => total + released,
+            0,
+          );
         }
         if (keys.length === 6) {
           const targetGeneration = String(
@@ -2169,6 +2275,12 @@ describe('RateLimitRequestHook HTTP 边界', () => {
   });
 
   it('认证 strict 的角色转移先失败时仍在恢复后释放 DEFAULT 预占', async () => {
+    const adminKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'ADMIN',
+      '127.0.0.1',
+    );
     const defaultKey = buildRateLimitKey(
       rateLimitPrefix,
       'role',
@@ -2205,9 +2317,16 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(service.snapshot(true).status).toBe('ok');
     expect(counters.has(defaultKey)).toBe(false);
     expect(counters.get(strictKey)).toBe(1);
+    expect(counters.get(adminKey)).toBe(1);
   });
 
   it('认证 strict 的 DEFAULT 写入响应不确定时恢复后不会泄漏预占', async () => {
+    const adminKey = buildRateLimitKey(
+      rateLimitPrefix,
+      'role',
+      'ADMIN',
+      '127.0.0.1',
+    );
     const defaultKey = buildRateLimitKey(
       rateLimitPrefix,
       'role',
@@ -2245,6 +2364,7 @@ describe('RateLimitRequestHook HTTP 边界', () => {
     expect(service.snapshot(true).status).toBe('ok');
     expect(counters.has(defaultKey)).toBe(false);
     expect(counters.get(strictKey)).toBe(1);
+    expect(counters.get(adminKey)).toBe(1);
   });
 
   it('认证 strict 拒绝时保留 DEFAULT 预占，使后续请求在 Guard 前阻断', async () => {
@@ -3192,6 +3312,7 @@ describe.skipIf(!integrationEnabled)(
             limit: number;
             requestIds: Set<string>;
             requestOwners: Map<string, string>;
+            ownerCounts: Map<string, number>;
           }
         >;
         redisRetryAfter: number;
@@ -3220,6 +3341,7 @@ describe.skipIf(!integrationEnabled)(
             [duplicatedRequestId, clientKey],
             [fallbackRequestId, clientKey],
           ]),
+          ownerCounts: new Map([[clientKey, 2]]),
         });
 
         await serviceA.recover(true);
@@ -3295,6 +3417,7 @@ describe.skipIf(!integrationEnabled)(
             limit: number;
             requestIds: Set<string>;
             requestOwners: Map<string, string>;
+            ownerCounts: Map<string, number>;
           }
         >;
         redisRetryAfter: number;
@@ -3321,6 +3444,7 @@ describe.skipIf(!integrationEnabled)(
           requestOwners: new Map(
             overflowRequestIds.map((requestId) => [requestId, memberKey]),
           ),
+          ownerCounts: new Map([[memberKey, overflowRequestIds.length]]),
         });
 
         await serviceA.recover(true);
