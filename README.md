@@ -387,7 +387,9 @@ Neo API 的 `/ws` 保留旧系统 9 种服务端消息与 `broadcastToUser`，�
 
 网关仅向完成鉴权的连接推送；同用户的多个连接可接收定向任务消息。握手校验与 legacy 一致，不在每次推送时重新查询会话，后续会话撤销业务需接入主动断连。上行仅处理 JSON `ping`，返回 `pong`；每连接限 10 条消息/秒、4 KiB 单条载荷，超限分别关闭 1008/1009。最多 1000 个连接、64 个待鉴权请求，超限在 HTTP upgrade 前返回 503；鉴权超时 5 秒关闭 1013。服务端每 30 秒执行协议心跳，单连接发送积压上限 1 MiB，慢客户端关闭 1013，服务退出时关闭 1001 并在 250ms 后清理仍未断开的连接。
 
-`WS_EVENT_BUS` 当前注入进程内 `LocalWebSocketEventBus`，保留 audience/userId 的 Redis Pub/Sub 替换接口；**尚未接通 Worker 跨进程消息，也不支持多 API 实例广播、持久重放或离线补发**。队列迁移阶段必须接通实际桥接后才能将实时业务切换到 Neo。回滚本 PR 可撤销 Neo `/ws` 启动接线与共享认证提取，不影响旧 server 的 `/ws` 或数据库结构。网关使用 [ws 官方服务端实现](https://github.com/websockets/ws)。
+消息限速也覆盖等待鉴权的连接。PostgreSQL 鉴权操作复用主池的独占事务，局部 `statement_timeout=1500ms`，2 秒硬截止销毁连接，避免 SQL/网络阻塞永久占用 64 个握手槽；连接获取由池的 `connectionTimeoutMillis` 约束。5 秒握手期限或断连取消后不再启动下一步鉴权查询；正在执行的查询在数据库期限内终止后释放槽位。共享池的导出/分析语句不继承鉴权超时。不可 JSON 序列化的广播被丢弃并记录固定警告，不中断生产者；服务端错误用 error 级记录固定消息和白名单错误码。
+
+`WS_EVENT_BUS` 当前注入进程内 `LocalWebSocketEventBus`，保留 audience/userId 的 Redis Pub/Sub 替换接口；**尚未接通 Worker 跨进程消息，也不支持多 API 实例广播、持久重放或离线补发**。队列迁移阶段必须接通实际桥接后才能将实时业务切换到 Neo。回滚本 PR 可撤销 Neo `/ws` 启动接线、共享认证提取与鉴权专用超时包装，不影响旧 server 的 `/ws` 或数据库结构。网关使用 [ws 官方服务端实现](https://github.com/websockets/ws)。
 
 ### Neo Monorepo（从项目根执行）
 

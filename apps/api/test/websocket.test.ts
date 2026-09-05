@@ -5,12 +5,15 @@ import type {
   AuthSessionRecord,
   AuthUserRecord,
 } from '@asin-monitor/db';
+import { AuthRepository, withAuthDatabaseDeadline } from '@asin-monitor/db';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import jwt from 'jsonwebtoken';
+import { EventEmitter } from 'node:events';
+import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { AppModule } from '../src/app.module';
@@ -367,8 +370,10 @@ describe('Neo /ws real network gateway', () => {
     expect(gateway.getClientCount()).toBe(0);
     pending.socket.close();
     await pending.closed;
+    await vi.waitFor(() => expect(gateway['wss']!.clients.size).toBe(0));
     resolve(session());
-    await vi.waitFor(() => expect(repository.findUserById).toHaveBeenCalled());
+    await vi.waitFor(() => expect(gateway['authPending']).toBe(0));
+    expect(repository.findUserById).not.toHaveBeenCalled();
     expect(gateway.getClientCount()).toBe(0);
     expect(pending.messages).toEqual([]);
   });
@@ -416,9 +421,45 @@ describe('Neo /ws real network gateway', () => {
     const stalled = connect();
     expect((await stalled.closed).code).toBe(1013);
     release(session());
-    await vi.waitFor(() => expect(repository.findUserById).toHaveBeenCalled());
+    await vi.waitFor(() => expect(gateway['authPending']).toBe(0));
+    expect(repository.findUserById).not.toHaveBeenCalled();
     expect(gateway.getClientCount()).toBe(0);
     expect(stalled.messages).toHaveLength(0);
+  }, 10_000);
+
+  it('releases all pending admission slots when PostgreSQL queries stall, then accepts a healthy connection', async () => {
+    const destroyed: boolean[] = [];
+    const pool = {
+      connect: async () => {
+        let rejectQuery: ((error: Error) => void) | undefined;
+        return Object.assign(new EventEmitter(), {
+          query: (query: unknown) =>
+            typeof query === 'string'
+              ? Promise.resolve({ rows: [] })
+              : new Promise((_resolve, reject) => {
+                  rejectQuery = reject;
+                }),
+          release: (discard?: boolean) => {
+            destroyed.push(discard === true);
+            rejectQuery?.(new Error('fixture connection destroyed'));
+          },
+        });
+      },
+    } as unknown as Pool;
+    vi.mocked(repository.findSessionById).mockImplementation((id) =>
+      withAuthDatabaseDeadline(pool, (db) =>
+        new AuthRepository(db).findSessionById(id),
+      ),
+    );
+    const stalled = Array.from({ length: 64 }, () => connect());
+    const results = await Promise.all(stalled.map((client) => client.closed));
+    expect(results.every(({ code }) => code === 1013)).toBe(true);
+    expect(destroyed).toEqual(Array(64).fill(true));
+    await vi.waitFor(() => expect(gateway['authPending']).toBe(0));
+    vi.mocked(repository.findSessionById).mockImplementation(async (id) =>
+      session(id.slice('session-'.length)),
+    );
+    expect(await connect().first).toMatchObject({ type: 'connected' });
   }, 10_000);
 
   it('limits client message bursts', async () => {
@@ -427,6 +468,75 @@ describe('Neo /ws real network gateway', () => {
     for (let i = 0; i < 11; i++)
       client.socket.send(JSON.stringify({ type: 'ping' }));
     expect((await client.closed).code).toBe(1008);
+  });
+
+  it('limits inbound messages before asynchronous authentication finishes', async () => {
+    let release!: (record: AuthSessionRecord) => void;
+    vi.mocked(repository.findSessionById).mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    const client = connect();
+    await vi.waitFor(() =>
+      expect(repository.findSessionById).toHaveBeenCalled(),
+    );
+    for (let i = 0; i < 11; i++)
+      client.socket.send(JSON.stringify({ type: 'ping' }));
+    expect((await client.closed).code).toBe(1008);
+    expect(client.messages).toHaveLength(0);
+    release(session());
+    await vi.waitFor(() => expect(gateway['authPending']).toBe(0));
+  });
+
+  it('isolates JSON serialization failures from producers and subsequent messages', async () => {
+    const client = connect();
+    await client.first;
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() =>
+      gateway.sendStatsUpdate({ data: { total: 1n } }),
+    ).not.toThrow();
+    expect(() => gateway.sendStatsUpdate({ data: circular })).not.toThrow();
+    gateway.sendStatsUpdate({ data: { total: 1 } });
+    await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+    expect(client.messages[1]).toMatchObject({
+      type: 'stats_update',
+      data: { total: 1 },
+    });
+  });
+
+  it('logs server failures at error level independently of throttled connection warnings', () => {
+    gateway.broadcast({
+      type: 'task_progress',
+      taskId: 't',
+      progress: 101,
+      message: 'bad',
+      timestamp: 'now',
+    });
+    gateway['wss']!.emit(
+      'error',
+      Object.assign(new Error('password=private-server-value'), {
+        code: 'EMFILE',
+      }),
+    );
+    gateway['wss']!.emit(
+      'error',
+      Object.assign(new Error('raw payload'), { code: 'private-code' }),
+    );
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect(logger.error).toHaveBeenNthCalledWith(
+      1,
+      'WebSocket 服务端故障',
+      'WebSocketService',
+      { reason: 'server_error', code: 'EMFILE' },
+    );
+    expect(logger.error).toHaveBeenNthCalledWith(
+      2,
+      'WebSocket 服务端故障',
+      'WebSocketService',
+      { reason: 'server_error', code: 'unknown' },
+    );
   });
 
   it('closes slow readers without buffering unbounded output', async () => {

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 
 import type { Env } from '@asin-monitor/config';
 import {
-  AuthRepository,
+  BoundedAuthRepository,
   LegacyMysqlAuthRepository,
   type AuthDataRepository,
 } from '@asin-monitor/db';
@@ -27,7 +27,7 @@ export function createAuthDataRepository(
     logger.info('鉴权数据权威源已选择', 'AuthModule', {
       source: 'postgresql',
     });
-    return new AuthRepository(pools.primaryDb);
+    return new BoundedAuthRepository(pools.primaryPool);
   }
   logger.info('鉴权数据权威源已选择', 'AuthModule', {
     source: 'legacy_mysql',

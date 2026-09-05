@@ -172,11 +172,16 @@ export class AuthenticationService {
   }
 
   /** HTTP 与 WS 复用相同的 JWT、权威会话与用户状态校验。 */
-  async authenticateToken(token: string | undefined): Promise<AuthPrincipal> {
+  async authenticateToken(
+    token: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<AuthPrincipal> {
     if (!token) throw unauthorized('未提供认证令牌');
     try {
+      signal?.throwIfAborted();
       const claims = this.verifyToken(token);
       const session = await this.repository.findSessionById(claims.sessionId);
+      signal?.throwIfAborted();
       if (!session) {
         throw unauthorized('会话不存在或已过期');
       }
@@ -189,7 +194,9 @@ export class AuthenticationService {
       }
 
       await this.repository.touchSession(session.id);
+      signal?.throwIfAborted();
       const user = await this.repository.findUserById(claims.userId);
+      signal?.throwIfAborted();
       if (!user) {
         throw unauthorized('用户不存在');
       }

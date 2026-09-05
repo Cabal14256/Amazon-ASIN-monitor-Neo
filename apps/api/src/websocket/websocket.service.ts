@@ -77,8 +77,7 @@ export class WebSocketService implements OnModuleDestroy {
       let windowStart = Date.now();
       let count = 0;
       socket.on('message', (raw, binary) => {
-        if (!this.users.has(socket) || socket.readyState !== WebSocket.OPEN)
-          return;
+        if (socket.readyState !== WebSocket.OPEN) return;
         if (Date.now() - windowStart >= 1000) {
           windowStart = Date.now();
           count = 0;
@@ -87,6 +86,7 @@ export class WebSocketService implements OnModuleDestroy {
           socket.close(1008, '消息频率超限');
           return;
         }
+        if (!this.users.has(socket)) return;
         if (binary) return;
         try {
           if (
@@ -99,7 +99,25 @@ export class WebSocketService implements OnModuleDestroy {
       });
       void this.accept(socket, request);
     });
-    wss.on('error', () => this.warn('server_error'));
+    wss.on('error', (error) => {
+      const code =
+        'code' in error &&
+        typeof error.code === 'string' &&
+        [
+          'EADDRINUSE',
+          'EACCES',
+          'EMFILE',
+          'ENFILE',
+          'ENOBUFS',
+          'ENOMEM',
+        ].includes(error.code)
+          ? error.code
+          : 'unknown';
+      this.logger.error('WebSocket 服务端故障', 'WebSocketService', {
+        reason: 'server_error',
+        code,
+      });
+    });
     this.heartbeat = setInterval(() => {
       for (const socket of wss.clients) {
         if (!alive.has(socket)) {
@@ -137,11 +155,15 @@ export class WebSocketService implements OnModuleDestroy {
       socket.close(WS_CLOSE_CODES.FORBIDDEN, '不允许的连接来源');
       return;
     }
-    const timeout = setTimeout(
-      () => socket.close(1013, '鉴权服务暂时不可用'),
-      5000,
-    );
-    const clearDeadline = () => clearTimeout(timeout);
+    const cancellation = new AbortController();
+    const timeout = setTimeout(() => {
+      cancellation.abort();
+      socket.close(1013, '鉴权服务暂时不可用');
+    }, 5000);
+    const clearDeadline = () => {
+      clearTimeout(timeout);
+      cancellation.abort();
+    };
     socket.once('close', clearDeadline);
     this.authPending += 1;
     try {
@@ -150,7 +172,10 @@ export class WebSocketService implements OnModuleDestroy {
       const token =
         cookies[this.env.AUTH_COOKIE_NAME] ||
         (header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined);
-      const principal = await this.auth.authenticateToken(token);
+      const principal = await this.auth.authenticateToken(
+        token,
+        cancellation.signal,
+      );
       if (this.closing || socket.readyState !== WebSocket.OPEN) return;
       this.users.set(socket, principal.userId);
       this.send(
@@ -232,7 +257,13 @@ export class WebSocketService implements OnModuleDestroy {
       this.warn('invalid_event');
       return;
     }
-    const message = JSON.stringify(result.data);
+    let message: string;
+    try {
+      message = JSON.stringify(result.data);
+    } catch {
+      this.warn('invalid_event');
+      return;
+    }
     if (Buffer.byteLength(message) > MAX_BUFFER_BYTES) {
       this.warn('oversized_event');
       return;
