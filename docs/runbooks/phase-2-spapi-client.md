@@ -7,7 +7,7 @@
 - `packages/sp-api` 提供 `@asin-monitor/sp-api`，避免 API/Worker 互相导入或复制客户端。没有新运行时依赖；使用 Node HTTP/HTTPS/crypto。
 - `resolveConfig(env, database)` 的凭据字段保留 DB 区域值 → DB 全局值 → ENV 区域值 → ENV 全局值的覆盖顺序。签名开关遵循 Legacy 的独立规则：DB 明确为空或 false 仍禁用，只有 DB 缺失/null 才回退 ENV。DB 参数是配置键值快照，不会自行连接数据库。配置来源必须实现可取消的 `get(signal)` / `reload(signal)`；重载须更新来源自身缓存。
 - 固定 NA/EU Amazon HTTPS 域名，映射 US/UK/DE/FR/IT/ES marketplace。Catalog 2022 数组编码为 CSV，已有 query 不重复拼接。请求没有本系统 `/api` 前缀，也不接受调用者提供的外部域名。
-- LWA form POST、每进程每区域单次刷新、令牌过期前 60 秒刷新、配置变化使对应缓存失效；401 或 400 `invalid_client`/`invalid_grant` 只重载配置重试一次。取消一个订阅者不会中止其他订阅者共享的刷新。无效/超大 token 不入缓存。
+- LWA form POST、每客户端实例每区域单次刷新、令牌过期前 60 秒刷新、配置变化使对应缓存失效；401 或 400 `invalid_client`/`invalid_grant` 只重载配置重试一次。取消一个订阅者不会中止其他订阅者共享的刷新。无效/超大 token 不入缓存；宿主应以单例注册客户端，缓存不跨实例或进程共享。
 - SP-API 只有 HTTP 429 或明确 `QuotaExceeded`/`TooManyRequests` 自动重试；默认最多 5 次重试，即最多 6 次尝试。指数退避从 2 秒起，普通退避封顶 30 秒；合法 Retry-After 数字/日期封顶 120 秒。
 - 每次尝试（含重试）都经过调用方配额执行器；每个实际 SP-API HTTP 响应只观察一次限额元数据，包括 429。只接收有限正数速率和有界 request ID，不保存原始错误体。
 - 商品不存在必须同时有 HTTP 404 和 `NOT_FOUND` 代码；网关 HTML 404 或消息中出现 NOT_FOUND 不算商品终态。
