@@ -952,12 +952,10 @@ describe('RateLimitService', () => {
       /^redis\.replicate_commands\(\)\s+local redisTime/,
     );
     expect(script).toContain('return { currentGeneration, tostring(nowMs) }');
-    expect(keys[0]).toMatch(
-      /^spapi:ratelimiter:http:neo:capability:[0-9a-f-]+$/,
-    );
+    expect(keys[0]).toBe('spapi:ratelimiter:http:neo:capability:probe');
     expect(arguments_[0]).toEqual(expect.any(String));
     expect(arguments_[1]).toEqual(expect.any(Number));
-    expect(arguments_[2]).toEqual(expect.any(String));
+    expect(arguments_[2]).toBe('probe');
     expect(arguments_[3]).toBe(RATE_LIMIT_WINDOW_MS);
   });
 
@@ -1323,6 +1321,29 @@ describe('RateLimitService', () => {
 
     expect(redis.eval).toHaveBeenCalledOnce();
     expect(service.snapshot(true).status).toBe('degraded');
+  });
+
+  it('失败探针在重复恢复和实例重建后复用固定键与字段', async () => {
+    let clock = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const redis = redisMock();
+    vi.mocked(redis.eval).mockRejectedValue(new Error('HINCRBY denied'));
+    for (let instance = 0; instance < 3; instance++) {
+      const { service } = createService({ redis });
+      for (let attempt = 0; attempt < 10; attempt++) {
+        clock += 5001;
+        await service.recover(true);
+        expect(service.snapshot(true).status).toBe('degraded');
+      }
+    }
+    const calls = vi.mocked(redis.eval).mock.calls;
+    expect(calls).toHaveLength(30);
+    expect(new Set(calls.map(([, keys]) => keys[0]))).toEqual(
+      new Set(['spapi:ratelimiter:http:neo:capability:probe']),
+    );
+    expect(new Set(calls.map(([, , args]) => args[2]))).toEqual(
+      new Set(['probe']),
+    );
   });
 
   it('Redis key 只包含客户端摘要，白名单兼容 IPv4-mapped 地址', () => {
@@ -2390,6 +2411,63 @@ describe('RateLimitRequestHook HTTP 边界', () => {
 describe.skipIf(!integrationEnabled)(
   'RateLimitService Redis integration',
   () => {
+    it.each(['HINCRBY', 'HDEL'])(
+      'Lua 在 %s 前失败后，重复探针仍只留下固定的三个字段',
+      async (deniedCommand) => {
+        let clock = Date.now();
+        vi.spyOn(Date, 'now').mockImplementation(() => clock);
+        const base = loadEnv(process.env);
+        const env = {
+          ...base,
+          RATE_LIMITER_KEY_PREFIX: `${
+            base.RATE_LIMITER_KEY_PREFIX
+          }:probe-failure:${process.pid}:${Date.now()}:${deniedCommand}`,
+        };
+        const redis = new ApplicationRedisClient(env, loggerMock());
+        const key = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:capability:probe`;
+        const realEval = redis.eval.bind(redis);
+        vi.spyOn(redis, 'eval').mockImplementation((script, keys, args) =>
+          realEval(
+            script.replace(
+              `redis.call('${deniedCommand}'`,
+              `error('fixture command denied')\nredis.call('${deniedCommand}'`,
+            ),
+            keys,
+            args,
+          ),
+        );
+        try {
+          for (let instance = 0; instance < 3; instance++) {
+            const { service } = createService({
+              redis,
+              env,
+              logger: loggerMock(),
+            });
+            for (let attempt = 0; attempt < 10; attempt++) {
+              clock += 5001;
+              await service.recover(true);
+              expect(service.snapshot(true).status).toBe('degraded');
+            }
+          }
+          // These writes really survive the Lua error, with no expiry reached.
+          expect((await redis.client.hkeys(key)).sort()).toEqual([
+            'generation',
+            'owner:probe',
+            'request:probe',
+          ]);
+          expect(await redis.client.pttl(key)).toBe(-1);
+          expect(
+            await redis.client.keys(
+              `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:capability:*`,
+            ),
+          ).toEqual([key]);
+        } finally {
+          await redis.del(key);
+          redis.onModuleDestroy();
+        }
+      },
+    );
+
     it('两个实例共享计数，generation 保护释放并支持原子角色转移', async () => {
       const env = loadEnv(process.env);
       const logger = new AppLogger();

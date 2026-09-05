@@ -433,9 +433,9 @@ export class RateLimitService {
     @Inject(AppLogger) private readonly logger: AppLogger,
     @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {
-    this.capabilityProbeKey = `${
-      env.RATE_LIMITER_KEY_PREFIX
-    }:http:neo:capability:${randomUUID()}`;
+    // Lua errors do not roll back preceding writes. Reuse one isolated key
+    // across retries/instances so partial ACL failures cannot leak probe keys.
+    this.capabilityProbeKey = `${env.RATE_LIMITER_KEY_PREFIX}:http:neo:capability:probe`;
     this.metrics.setRateLimitBackend(this.enabled ? 'redis' : 'disabled');
     if (!env.API_RATE_LIMIT_ENABLED) {
       logger.info('HTTP API 限流已禁用', 'RateLimitService', {
@@ -903,12 +903,7 @@ export class RateLimitService {
         const recoveryResponse = await this.redis.eval(
           CAPABILITY_PROBE_SCRIPT,
           [this.capabilityProbeKey],
-          [
-            identity.generation,
-            now + 1_000,
-            randomUUID(),
-            RATE_LIMIT_WINDOW_MS,
-          ],
+          [identity.generation, now + 1_000, 'probe', RATE_LIMIT_WINDOW_MS],
         );
         const localProbeCompletedAt = Date.now();
         const recoveryClock = parseRecoveryClock(recoveryResponse);
