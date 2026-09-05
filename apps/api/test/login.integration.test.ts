@@ -13,6 +13,8 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { AuditModule } from '../src/audit/audit.module';
+import { AuditService } from '../src/audit/audit.service';
 import { AuthModule } from '../src/auth/auth.module';
 import { LOGIN_REPOSITORY } from '../src/auth/login.service';
 import { ENV } from '../src/config/config.module';
@@ -26,6 +28,7 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
   let app: NestFastifyApplication;
   let pools: ApplicationDatabasePools;
   let repo: LoginRepositoryPort;
+  let audit: AuditService;
   const prefix = `nl${randomUUID().replace(/-/g, '')}`;
   const usernames: string[] = [];
   const userIds: string[] = [];
@@ -47,7 +50,9 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
   beforeAll(async () => {
     passwordHash = await bcrypt.hash(password, 10);
     pools = new ApplicationDatabasePools(selectedEnv(), logger);
-    const module = await Test.createTestingModule({ imports: [AuthModule] })
+    const module = await Test.createTestingModule({
+      imports: [AuthModule, AuditModule],
+    })
       .overrideProvider(ENV)
       .useValue(selectedEnv())
       .overrideProvider(AppLogger)
@@ -65,7 +70,8 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       new FastifyAdapter(),
       { logger: false },
     );
-    configureHttpApp(app, { logger });
+    audit = app.get(AuditService);
+    configureHttpApp(app, { logger, audit });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
     repo = app.get(LOGIN_REPOSITORY);
@@ -74,6 +80,13 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
     vi.restoreAllMocks();
     try {
       if (pools) {
+        if (audit) await audit.flush();
+        if (usernames.length)
+          await pools.primaryPool.query(
+            `DELETE FROM audit_logs WHERE action = 'LOGIN' AND resource = 'auth'
+              AND lower(request_data->>'username') = ANY($1::text[])`,
+            [usernames.map((name) => name.toLowerCase())],
+          );
         if (userIds.length)
           await pools.primaryPool.query(
             'DELETE FROM users WHERE id = ANY($1::text[])',
@@ -122,6 +135,21 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
         url: '/api/v1/auth/login',
         payload: { username, password: suppliedPassword, rememberMe },
       });
+  async function loginAudits(username: string) {
+    await audit.flush();
+    const { rows } = await pools.primaryPool.query(
+      `SELECT * FROM audit_logs WHERE action = 'LOGIN' AND resource = 'auth'
+        AND lower(request_data->>'username') = $1 ORDER BY response_status`,
+      [username.toLowerCase()],
+    );
+    for (const row of rows) {
+      expect(row.path).toBe('/api/v1/auth/login');
+      expect(row.request_data.password).toBe('***REDACTED***');
+      expect(JSON.stringify(row)).not.toContain(password);
+      expect(JSON.stringify(row)).not.toContain(passwordHash);
+    }
+    return rows;
+  }
   it('creates a usable session atomically and matches username case without exposing the hash', async () => {
     const username = await user('case');
     const response = await login(username.toUpperCase());
@@ -154,6 +182,16 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       username,
     );
     expect(response.body).not.toContain(passwordHash);
+    const audited = await loginAudits(username);
+    expect(audited).toHaveLength(1);
+    expect(audited[0]).toMatchObject({
+      user_id: username,
+      username,
+      response_status: 200,
+      error_message: null,
+    });
+    expect(JSON.stringify(audited)).not.toContain(data.token);
+    expect(JSON.stringify(audited)).not.toContain(data.sessionId);
     // Raw database wall time must remain authoritative on the Drizzle auth read
     // path too: a one-hour-expired session cannot gain eight extra hours.
     await pools.primaryPool.query(
@@ -235,6 +273,11 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       new Date(locked.locked_until).getTime() - Date.now(),
     ).toBeGreaterThan(29 * 60000);
     expect((await login(username)).statusCode).toBe(423);
+    const audited = await loginAudits(username);
+    expect(audited.map((row) => row.response_status)).toEqual([
+      401, 401, 401, 401, 401, 423,
+    ]);
+    expect(audited.every((row) => row.user_id === null)).toBe(true);
     expect(
       Number(
         (
@@ -280,6 +323,17 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
     const response = await login(username);
     expect(response.statusCode).toBe(500);
     expect(response.cookies).toEqual([]);
+    const audited = await loginAudits(username);
+    expect(audited).toHaveLength(1);
+    expect(audited[0]).toMatchObject({
+      user_id: null,
+      username,
+      response_status: 500,
+      error_message: '操作失败',
+    });
+    expect(JSON.stringify(audited)).not.toContain(
+      'fixture private post-insert failure',
+    );
     const unchanged = (
       await pools.primaryPool.query(
         'SELECT last_login_time, failed_login_attempts FROM users WHERE id=$1',

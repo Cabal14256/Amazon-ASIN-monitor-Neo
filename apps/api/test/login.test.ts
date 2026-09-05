@@ -1,11 +1,13 @@
 import { loadEnv, type Env } from '@asin-monitor/config';
 import { loginResultSchema } from '@asin-monitor/contracts';
 import type {
+  AuditEntry,
   LoginRepositoryPort,
   LoginUnit,
   LoginUserRecord,
 } from '@asin-monitor/db';
 import { HttpException } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
@@ -14,6 +16,8 @@ import { Test } from '@nestjs/testing';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AuditInterceptor } from '../src/audit/audit.interceptor';
+import { AuditService } from '../src/audit/audit.service';
 import { LoginController } from '../src/auth/login.controller';
 import {
   comparePassword,
@@ -76,7 +80,13 @@ function fixture(overrides: Partial<Env> = {}) {
   } as unknown as AppLogger;
   const selectedEnv = { ...env, ...overrides };
   const service = new LoginService(selectedEnv, repository, compare, logger);
+  const auditRepository = {
+    append: vi.fn(async (_entry: AuditEntry) => undefined),
+  };
+  const audit = new AuditService(auditRepository, logger);
   return {
+    audit,
+    auditRepository,
     unit,
     repository,
     compare,
@@ -109,13 +119,15 @@ async function http(
       { provide: LOGIN_REPOSITORY, useValue: f.repository },
       { provide: PASSWORD_COMPARER, useValue: f.compare },
       { provide: AppLogger, useValue: f.logger },
+      { provide: AuditService, useValue: f.audit },
+      { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     ],
   }).compile();
   const app = module.createNestApplication<NestFastifyApplication>(
     new FastifyAdapter(),
     { logger: false },
   );
-  configureHttpApp(app, { logger: f.logger });
+  configureHttpApp(app, { logger: f.logger, audit: f.audit });
   if (onActor)
     app
       .getHttpAdapter()
@@ -146,6 +158,63 @@ async function expectStatus(
   }
 }
 describe('Neo login domain', () => {
+  it.each([true, false])(
+    'audits the final transaction outcome without exposing credentials (committed=%s)',
+    async (committed) => {
+      const f = fixture();
+      let release!: () => void;
+      const commitGate = new Promise<void>((resolve) => (release = resolve));
+      vi.mocked(f.repository.transaction).mockImplementationOnce(
+        async (callback) => {
+          const result = await callback(f.unit);
+          await commitGate;
+          if (!committed) throw new Error('fixture private commit failure');
+          return result;
+        },
+      );
+      const server = await http(f);
+      const pending = server.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: input,
+      });
+      try {
+        await vi.waitFor(() =>
+          expect(f.unit.createSession).toHaveBeenCalledOnce(),
+        );
+        expect(f.auditRepository.append).not.toHaveBeenCalled();
+      } finally {
+        release();
+      }
+      const response = await pending;
+      expect(response.statusCode).toBe(committed ? 200 : 500);
+      if (!committed) expect(response.cookies).toEqual([]);
+      await f.audit.flush();
+      expect(f.auditRepository.append).toHaveBeenCalledOnce();
+      const entry = f.auditRepository.append.mock.calls[0]![0];
+      expect(entry).toMatchObject({
+        action: 'LOGIN',
+        resource: 'auth',
+        path: '/api/v1/auth/login',
+        userId: committed ? f.user.id : null,
+        username: input.username,
+        responseStatus: committed ? 200 : 500,
+        errorMessage: committed ? null : '操作失败',
+        requestData: { ...input, password: '***REDACTED***' },
+      });
+      const serialized = JSON.stringify(entry);
+      for (const secret of [
+        input.password,
+        'fixture-hash',
+        'fixture private commit failure',
+        vi.mocked(f.unit.createSession).mock.calls[0]![0].id,
+      ])
+        expect(serialized).not.toContain(secret);
+      if (committed)
+        expect(serialized).not.toContain(response.json().data.token);
+    },
+  );
+
   it.each([false, true])(
     'issues compatible signed session and cookies (rememberMe=%s)',
     async (rememberMe) => {
