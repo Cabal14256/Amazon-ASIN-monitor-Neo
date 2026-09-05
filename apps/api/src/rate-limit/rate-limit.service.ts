@@ -338,6 +338,20 @@ function identityAt(now: number): WindowIdentity {
   };
 }
 
+function redisWindowIdentity(
+  window: Pick<WindowResult, 'generation'>,
+): WindowIdentity {
+  const expiresAt = (Number(window.generation) + 1) * RATE_LIMIT_WINDOW_MS;
+  if (
+    !/^\d+$/.test(window.generation) ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= 0
+  ) {
+    throw new Error('invalid Redis rate-limit mirror generation');
+  }
+  return { generation: window.generation, expiresAt };
+}
+
 function parseRedisWindow(
   value: unknown,
   storageKey: string,
@@ -478,8 +492,10 @@ export class RateLimitService {
     window: Pick<WindowResult, 'generation' | 'ttlMs'>,
     localStartedAt: number,
   ): void {
+    if (!/^\d+$/.test(window.generation)) return;
     const redisWindowEnd =
       (Number(window.generation) + 1) * RATE_LIMIT_WINDOW_MS;
+    if (!Number.isSafeInteger(redisWindowEnd)) return;
     this.observeRedisClock(
       redisWindowEnd - window.ttlMs,
       localStartedAt,
@@ -656,6 +672,26 @@ export class RateLimitService {
         window = this.newMemoryWindow(identity, limit, overflowKey);
         this.memoryWindows.set(clientKey, window);
       }
+    }
+    const reservationSource = reusableSource
+      ? this.memoryWindows.get(reusableSource.storageKey) ??
+        this.memoryOverflowWindows.get(reusableSource.storageKey)
+      : undefined;
+    if (
+      reusableSource &&
+      reservationSource &&
+      reservationSource !== window &&
+      reservationSource.generation === identity.generation &&
+      reservationSource.expiresAt > this.redisAlignedNow(Date.now()) &&
+      reservationSource.requestIds.has(requestId) &&
+      this.memoryReservationCount === MAX_MEMORY_RESERVATIONS &&
+      !window.requestIds.has(requestId) &&
+      this.memoryRequestCount(window) < Math.min(limit, window.limit)
+    ) {
+      // A known local source can fund a net-zero transfer. Admission is now
+      // guaranteed and this entire move is synchronous; a full target or an
+      // uncertain/retained source must never be released to make room.
+      this.releaseMemory(reusableSource, Date.now());
     }
     const stored = this.addMemoryRequest(window, requestId);
     if (!stored && this.memoryRequestCount(window) === 0) {
@@ -969,8 +1005,8 @@ export class RateLimitService {
     identity: WindowIdentity,
     limit: number,
     requestId: string,
-    localStartedAt: number,
   ): Promise<WindowResult> {
+    const localStartedAt = Date.now();
     const window = parseRedisWindow(
       await this.redis.eval(
         CONSUME_WINDOW_SCRIPT,
@@ -985,9 +1021,9 @@ export class RateLimitService {
       ),
       clientKey,
     );
-    if (this.backend === 'redis') {
-      this.observeRedisWindow(window, localStartedAt);
-    }
+    // Measure actual Redis I/O only, excluding a preceding client barrier or
+    // a subsequent startup probe wait, even if a sibling entered fallback.
+    this.observeRedisWindow(window, localStartedAt);
     return {
       backend: 'redis',
       clientKey,
@@ -996,6 +1032,21 @@ export class RateLimitService {
       uncertainRedisReservation: false,
       ...window,
     };
+  }
+
+  private mirrorRedisWindow(window: WindowResult, limit: number): WindowResult {
+    const identity = redisWindowIdentity(window);
+    // The Redis operation belonged to an expired window. Do not migrate it
+    // into the next quota or replace a newer live memory window with old data.
+    if (identity.expiresAt <= this.redisAlignedNow(Date.now())) return window;
+    return this.consumeMemory(
+      window.clientKey,
+      window.overflowKey,
+      identity,
+      limit,
+      window.requestId,
+      true,
+    );
   }
 
   private frozenStorageKey(
@@ -1042,18 +1093,10 @@ export class RateLimitService {
             identity,
             limit,
             requestId,
-            now,
           );
           if (redisWindow.count > limit) return redisWindow;
           if (this.backend === 'memory' && !this.recoveryUsesRedis) {
-            return this.consumeMemory(
-              clientKey,
-              overflowKey,
-              identity,
-              limit,
-              requestId,
-              true,
-            );
+            return this.mirrorRedisWindow(redisWindow, limit);
           }
           if (this.backend === 'memory') {
             // A client's barrier only covers its own frozen snapshot. Later
@@ -1061,23 +1104,8 @@ export class RateLimitService {
             // Redis reservation until the entire recovery commits; a retry
             // reconciles the same requestId idempotently. Use Redis's actual
             // generation because the consume may have crossed a window edge.
-            const expiresAt =
-              (Number(redisWindow.generation) + 1) * RATE_LIMIT_WINDOW_MS;
-            if (
-              !/^\d+$/.test(redisWindow.generation) ||
-              !Number.isSafeInteger(expiresAt) ||
-              expiresAt <= 0
-            ) {
-              throw new Error('invalid Redis rate-limit mirror generation');
-            }
-            const mirror = this.consumeMemory(
-              clientKey,
-              overflowKey,
-              { generation: redisWindow.generation, expiresAt },
-              limit,
-              requestId,
-              true,
-            );
+            const mirror = this.mirrorRedisWindow(redisWindow, limit);
+            if (mirror.backend === 'redis') return mirror;
             const storedWindow =
               this.memoryWindows.get(mirror.storageKey) ??
               this.memoryOverflowWindows.get(mirror.storageKey);
@@ -1117,23 +1145,22 @@ export class RateLimitService {
         identity,
         limit,
         requestId,
-        now,
       );
-      if (this.backend === 'redis' || redisWindow.count > limit) {
+      if (redisWindow.count > limit) return redisWindow;
+      // Startup still reports a Redis backend while the complete capability
+      // probe is pending. Do not admit traffic until that probe can commit;
+      // this also covers consumes started before the probe itself began.
+      if (!this.capabilityVerified && this.recoveryPromise) {
+        await this.recoveryPromise;
+      }
+      if (this.backend === 'redis') {
         return redisWindow;
       }
       // A sibling request may have entered fallback while this Redis call was
       // pending. Keep the same reservation locally, invalidating any newer
       // recovery snapshot before adding it. A Redis denial stays a denial.
       this.setBackend('memory', Date.now());
-      return this.consumeMemory(
-        clientKey,
-        overflowKey,
-        identityAt(this.redisAlignedNow(Date.now())),
-        limit,
-        requestId,
-        true,
-      );
+      return this.mirrorRedisWindow(redisWindow, limit);
     } catch {
       this.setBackend('memory', Date.now());
       return this.consumeMemory(
@@ -1258,7 +1285,7 @@ export class RateLimitService {
       await this.recoveryPromise;
     }
     const now = Date.now();
-    const identity = identityAt(this.redisAlignedNow(now));
+    let identity = identityAt(this.redisAlignedNow(now));
     const limit =
       input.policy === 'strict' ? STRICT_RATE_LIMIT : ROLE_LIMITS[input.role];
     const clientKey = this.key(input);
@@ -1294,8 +1321,22 @@ export class RateLimitService {
           ),
           clientKey,
         );
-        if (this.backend === 'redis' || window.count > limit) {
-          if (this.backend === 'redis') this.observeRedisWindow(window, now);
+        this.observeRedisWindow(window, now);
+        if (
+          window.count <= limit &&
+          !this.capabilityVerified &&
+          this.recoveryPromise
+        ) {
+          await this.recoveryPromise;
+        }
+        if (this.backend !== 'redis' && window.count <= limit) {
+          identity = redisWindowIdentity(window);
+        }
+        if (
+          this.backend === 'redis' ||
+          window.count > limit ||
+          identity.expiresAt <= this.redisAlignedNow(Date.now())
+        ) {
           const decision = this.decision(input, limit, {
             backend: 'redis',
             clientKey,
@@ -1335,7 +1376,11 @@ export class RateLimitService {
           : undefined,
       ),
     );
-    if (decision.allowed && options.releaseSource !== false) {
+    if (
+      decision.allowed &&
+      options.releaseSource !== false &&
+      (source.clientKey !== clientKey || source.overflowKey !== overflowKey)
+    ) {
       if (sourceMayExistInRedis) {
         this.queueSourceRelease(decision.storageKey, source);
       } else if (source.backend === 'memory') {
