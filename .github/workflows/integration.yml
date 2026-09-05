@@ -149,6 +149,9 @@ jobs:
           pnpm --filter @asin-monitor/db build
           pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts
 
+      - name: Run Neo BullMQ queue policy integration tests
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
+
       - name: Smoke test Timescale storage-policy rollback
         run: |
           docker cp packages/db/migrations/0002_timescale_storage_policies.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0002_timescale_storage_policies.rollback.sql"

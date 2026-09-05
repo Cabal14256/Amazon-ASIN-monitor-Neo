@@ -423,6 +423,12 @@ npm --prefix server run rebuild:agg
 | `npm run test:all`             | 运行后端集成检查；需要已配置的依赖服务 |
 | `npm run test:task-regression` | 运行后台任务回归检查                   |
 
+### Neo BullMQ 队列策略
+
+八类队列的 attempts/backoff、成功/失败保留时间、限速与并发已与 Legacy 注册代码自动对照。Neo 使用独立的 `${BULL_PREFIX}:neo` 命名空间；`BULL_PREFIX` 本身仍保留旧系统含义，禁止混用两种 job 数据格式。处理器预检 `buildWorkerPlans` 要求所有选中队列都有真实回调，payload 在业务域验证之前保持 `unknown`。
+
+当前入口仍只创建 Queue 和看门狗，日志明确 `mode=queue-scaffold`、`registeredProcessors=0`，尚未开启业务消费。任务元数据/索引、调度、处理器与新旧任务等价仍待后续迁移。具体策略、变量和切换/回滚纪律见 [P2-T2a 运行说明](./docs/runbooks/phase-2-bullmq-queues.md)。
+
 ## 项目结构
 
 ```text
