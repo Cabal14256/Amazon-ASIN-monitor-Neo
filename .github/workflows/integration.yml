@@ -144,6 +144,9 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
+      - name: Run Neo task registry concurrency and expiry tests
+        run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
+
       - name: Run Neo API health and auth dependency integration tests
         run: |
           pnpm --filter @asin-monitor/db build
