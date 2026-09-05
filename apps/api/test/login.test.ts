@@ -408,6 +408,59 @@ describe('Neo login domain', () => {
       comparePassword(input.password, hash.replace('$10$', '$31$')),
     ).rejects.toThrow('Unsupported password hash configuration');
   });
+  it('holds real comparison capacity after the containing transactions time out', async () => {
+    const f = fixture();
+    f.user.password =
+      '$2b$10$qZJ9My6tPcAWAYNmlFbfoOESfqFNt1lov4Gjv6eru7.rE8KItdn.m';
+    const rejectors: Array<(error: Error) => void> = [];
+    const compare = vi.spyOn(bcrypt, 'compare').mockImplementation(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectors.push(reject);
+        }),
+    );
+    const callbacks: Promise<unknown>[] = [];
+    vi.mocked(f.repository.transaction).mockImplementation((operation) => {
+      const work = operation(f.unit);
+      callbacks.push(work);
+      return Promise.race([
+        work,
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('fixture transaction deadline')),
+            5,
+          ),
+        ),
+      ]);
+    });
+    const service = new LoginService(
+      f.env,
+      f.repository,
+      comparePassword,
+      f.logger,
+    );
+    try {
+      // Request admission slots have been released, but bcrypt is still running.
+      await Promise.all(
+        Array.from({ length: 8 }, () =>
+          expectStatus(service.login(input, client), 500),
+        ),
+      );
+      await expectStatus(service.login(input, client), 429);
+      expect(compare).toHaveBeenCalledTimes(8);
+      expect(f.unit.createSession).not.toHaveBeenCalled();
+    } finally {
+      rejectors.forEach((reject) =>
+        reject(new Error('fixture computation ended')),
+      );
+      await Promise.allSettled(callbacks);
+    }
+    vi.mocked(f.repository.transaction).mockImplementation((operation) =>
+      operation(f.unit),
+    );
+    compare.mockImplementation(async () => true);
+    expect((await service.login(input, client)).data.user.id).toBe(f.user.id);
+  });
   it('JWT seconds, ms, week/year units are finite and nonzero before DB writes', () => {
     expect(tokenLifetimeSeconds('2h')).toBe(7200);
     expect(tokenLifetimeSeconds('1000ms')).toBe(1);

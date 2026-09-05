@@ -154,6 +154,21 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       username,
     );
     expect(response.body).not.toContain(passwordHash);
+    // Raw database wall time must remain authoritative on the Drizzle auth read
+    // path too: a one-hour-expired session cannot gain eight extra hours.
+    await pools.primaryPool.query(
+      "UPDATE sessions SET expires_at=LOCALTIMESTAMP - INTERVAL '1 hour' WHERE id=$1",
+      [data.sessionId],
+    );
+    const expired = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'GET',
+        url: '/api/v1/auth/current-user',
+        headers: { authorization: `Bearer ${data.token}` },
+      });
+    expect(expired.statusCode).toBe(401);
     const updated = (
       await pools.primaryPool.query(
         'SELECT last_login_time, failed_login_attempts FROM users WHERE id=$1',
@@ -161,6 +176,9 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       )
     ).rows[0];
     expect(updated.last_login_time).not.toBeNull();
+    expect(
+      Math.abs(new Date(updated.last_login_time).getTime() - Date.now()),
+    ).toBeLessThan(5000);
     expect(updated.failed_login_attempts).toBe(0);
     expect(
       (

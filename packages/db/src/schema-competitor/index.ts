@@ -7,15 +7,13 @@ import {
   integer,
   jsonb,
   pgTable,
-  timestamp,
   unique,
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/pg-core';
+import { shanghaiTimestamp as timestampColumn } from '../timestamps';
 
 const localTimestamp = sql`LOCALTIMESTAMP`;
-const timestampColumn = <TName extends string>(name: TName) =>
-  timestamp(name, { mode: 'date', withTimezone: false });
 
 export const competitorVariantGroups = pgTable(
   'competitor_variant_groups',

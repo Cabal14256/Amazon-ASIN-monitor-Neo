@@ -24,13 +24,24 @@ export type PasswordComparer = (
   password: string,
   hash: string,
 ) => Promise<boolean>;
+const MAX_PASSWORD_COMPARISONS = 8;
+let activePasswordComparisons = 0;
 export const comparePassword: PasswordComparer = async (password, hash) => {
   const rounds = bcrypt.getRounds(hash);
   // Legacy hashes use cost 10. Reject corrupt/unbounded work factors before CPU work.
   if (!Number.isInteger(rounds) || rounds < 4 || rounds > 12) {
     throw new Error('Unsupported password hash configuration');
   }
-  return bcrypt.compare(password, hash);
+  // The transaction deadline cannot cancel bcrypt. Keep this process-wide slot
+  // until the actual comparison settles, even after its HTTP request has failed.
+  if (activePasswordComparisons >= MAX_PASSWORD_COMPARISONS)
+    throw httpError(429, '登录请求繁忙，请稍后再试');
+  activePasswordComparisons++;
+  try {
+    return await bcrypt.compare(password, hash);
+  } finally {
+    activePasswordComparisons--;
+  }
 };
 // Public dummy fixture, not an account credential. Unknown usernames do one cost-10 comparison.
 const DUMMY_HASH =
