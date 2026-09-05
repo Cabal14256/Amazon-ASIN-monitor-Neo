@@ -5,12 +5,12 @@
   "description": "新前端：Vite 6 + React 19 + TS strict + TanStack Router/Query + Tailwind 4 + shadcn/ui",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && vite build",
-    "dev": "vite",
+    "build": "corepack pnpm --filter @asin-monitor/contracts build && tsc -p tsconfig.json && vite build",
+    "dev": "corepack pnpm --filter @asin-monitor/contracts build && vite",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "corepack pnpm --filter @asin-monitor/contracts build && vitest run",
+    "typecheck": "corepack pnpm --filter @asin-monitor/contracts build && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@asin-monitor/contracts": "workspace:*",
