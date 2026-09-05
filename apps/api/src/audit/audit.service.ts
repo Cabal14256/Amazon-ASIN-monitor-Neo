@@ -1,12 +1,58 @@
 import type { AuditEntry, AuditRepositoryPort } from '@asin-monitor/db';
-import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, type OnApplicationShutdown } from '@nestjs/common';
 import { AppLogger } from '../logger/app-logger.service';
 
 export const AUDIT_REPOSITORY = Symbol('AUDIT_REPOSITORY');
 const MAX_PENDING = 256;
+const SAFE_ERROR_CODES = new Set([
+  '08000',
+  '08001',
+  '08003',
+  '08004',
+  '08006',
+  '08007',
+  '08P01',
+  '28P01',
+  '28000',
+  '42501',
+  '42P01',
+  '42703',
+  '23502',
+  '23503',
+  '23505',
+  '23514',
+  '57014',
+  '53300',
+  '57P01',
+  '57P02',
+  '57P03',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+function failureCode(error: unknown): string {
+  let current = error;
+  for (
+    let depth = 0;
+    depth < 4 && current && typeof current === 'object';
+    depth++
+  ) {
+    if (
+      'code' in current &&
+      typeof current.code === 'string' &&
+      SAFE_ERROR_CODES.has(current.code)
+    )
+      return current.code;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return 'unknown';
+}
 
 @Injectable()
-export class AuditService implements OnModuleDestroy {
+export class AuditService implements OnApplicationShutdown {
   private readonly pending = new Set<Promise<void>>();
   private closing = false;
   private lastWarning = -Infinity;
@@ -28,9 +74,10 @@ export class AuditService implements OnModuleDestroy {
     }
     const pending = Promise.resolve()
       .then(() => this.repository.append(entry))
-      .catch(() => {
+      .catch((error: unknown) => {
         this.logger.error('操作审计写入失败', 'AuditService', {
           reason: 'audit_write_failed',
+          code: failureCode(error),
         });
       })
       .finally(() => this.pending.delete(pending));
@@ -41,7 +88,8 @@ export class AuditService implements OnModuleDestroy {
     await Promise.all([...this.pending]);
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /** Nest 在 HTTP adapter 完成 drain 后调用；先收完 onResponse 再关闭写入。 */
+  async onApplicationShutdown(): Promise<void> {
     this.closing = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

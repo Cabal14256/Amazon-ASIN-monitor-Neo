@@ -389,6 +389,8 @@ Neo API 的全局审计拦截器沿用 Legacy 的认证、用户、角色、ASIN
 
 配置值 `configValue`/`config_value`/`displayValue` 一律掩码，不依赖配置键是否命中已知凭据名；请求体的 `real_name`/`realName`、`statusReason`、邮箱、电话等个人字段递归脱敏。Neo 创建 Fastify 时消费 `TRUST_PROXY`：默认不信任转发头；单层受信 Nginx 可设置 `1`，更推荐按代理地址/CIDR 限定（如 `loopback`），并确保 API 端口不能绕过代理对外访问。未受信的直接连接不能通过 `X-Forwarded-For` 覆盖审计 IP。
 
+受控关闭顺序为 HTTP 请求/导出流 drain → 审计最多 5 秒 flush → PostgreSQL 连接池关闭，避免模块销毁过早丢弃最后一批请求。写入故障保留白名单 SQLSTATE/网络错误码（含 Drizzle cause），区分连接、权限、schema 与约束错误；未知错误仅记 `unknown`，不记录 SQL、连接串或行数据。
+
 ### Neo Monorepo（从项目根执行）
 
 | 命令 | 说明 |

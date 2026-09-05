@@ -31,6 +31,7 @@ import { auditAction } from '../src/audit/audit-mapping';
 import { AuditInterceptor } from '../src/audit/audit.interceptor';
 import { AUDIT_REPOSITORY, AuditService } from '../src/audit/audit.service';
 import { ENV } from '../src/config/config.module';
+import { ApplicationDatabasePools } from '../src/database/database.service';
 import { configureHttpApp } from '../src/http-app';
 import { AppLogger } from '../src/logger/app-logger.service';
 
@@ -201,6 +202,8 @@ class AuditFixtureGuard implements CanActivate {
 
 @Controller()
 class AuditFixtureController {
+  static hold: Promise<void> | undefined;
+  static started = false;
   @Post('auth/login')
   @HttpCode(200)
   login() {
@@ -211,6 +214,8 @@ class AuditFixtureController {
   @UseGuards(AuditFixtureGuard)
   async create(@Body() body: Record<string, unknown>) {
     body.name = 'mutated by handler';
+    AuditFixtureController.started = true;
+    await AuditFixtureController.hold;
     await new Promise<void>((resolve) => setImmediate(resolve));
     return { success: true, data: { id: 'new-group' } };
   }
@@ -239,7 +244,16 @@ class AuditFixtureController {
 
   @Get('export/asin')
   export(@Res() reply: FastifyReply) {
-    return reply.type('text/csv').send(Readable.from(['asin\nB012345678\n']));
+    return reply.type('text/csv').send(
+      Readable.from(
+        (async function* () {
+          AuditFixtureController.started = true;
+          yield 'asin\n';
+          await AuditFixtureController.hold;
+          yield 'B012345678\n';
+        })(),
+      ),
+    );
   }
 
   @Get('users')
@@ -255,6 +269,8 @@ describe('Neo audit HTTP lifecycle', () => {
   let log: AppLogger;
 
   async function setup(trustProxy?: boolean | number | string) {
+    AuditFixtureController.hold = undefined;
+    AuditFixtureController.started = false;
     repository = { append: vi.fn().mockResolvedValue(undefined) };
     log = logger();
     const moduleRef = await Test.createTestingModule({
@@ -282,6 +298,7 @@ describe('Neo audit HTTP lifecycle', () => {
   beforeEach(() => setup());
 
   afterEach(async () => {
+    app.getHttpServer().closeAllConnections();
     await app.close();
     vi.restoreAllMocks();
   });
@@ -473,8 +490,79 @@ describe('Neo audit HTTP lifecycle', () => {
     expect(response.statusCode).toBe(201);
     expect(log.error).toHaveBeenCalledWith('操作审计写入失败', 'AuditService', {
       reason: 'audit_write_failed',
+      code: 'unknown',
     });
   });
+
+  it.each(['ECONNREFUSED', '42501', '42P01', '23505'])(
+    'retains safe %s error classification through a Drizzle cause without logging payloads',
+    async (code) => {
+      vi.mocked(repository.append).mockRejectedValueOnce({
+        message: 'query with raw-secret',
+        cause: {
+          code,
+          message: 'postgres://user:password@host/db',
+          detail: 'private-row',
+        },
+      });
+      await app.inject({ method: 'POST', url: '/api/v1/users' });
+      await audit.flush();
+      expect(log.error).toHaveBeenCalledWith(
+        '操作审计写入失败',
+        'AuditService',
+        { reason: 'audit_write_failed', code },
+      );
+      expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toMatch(
+        /raw-secret|password|private-row/,
+      );
+    },
+  );
+
+  it.each(['mutation', 'stream'])(
+    'drains an in-flight %s before closing audit writes',
+    async (kind) => {
+      await app.listen(0, '127.0.0.1');
+      let release!: () => void;
+      AuditFixtureController.hold = new Promise((resolve) => {
+        release = resolve;
+      });
+      const response = fetch(
+        `${await app.getUrl()}/api/v1/${
+          kind === 'mutation' ? 'variant-groups' : 'export/asin'
+        }`,
+        kind === 'mutation'
+          ? {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer fixture',
+                'content-type': 'application/json',
+                connection: 'close',
+              },
+              body: JSON.stringify({ name: 'shutdown mutation' }),
+            }
+          : { headers: { connection: 'close' } },
+      );
+      try {
+        await vi.waitFor(() =>
+          expect(AuditFixtureController.started).toBe(true),
+        );
+        const closing = app.close();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        release();
+        const result = await response;
+        expect(result.status).toBe(kind === 'mutation' ? 201 : 200);
+        const body = await result.text();
+        if (kind === 'stream') expect(body).toBe('asin\nB012345678\n');
+        await closing;
+        expect(repository.append).toHaveBeenCalledOnce();
+        expect(
+          vi.mocked(repository.append).mock.calls[0]![0].responseStatus,
+        ).toBe(result.status);
+      } finally {
+        release();
+      }
+    },
+  );
 
   it('caps pending persistence and resumes after outstanding writes complete', async () => {
     let complete!: () => void;
@@ -505,4 +593,30 @@ it('AppModule resolves audit and its PostgreSQL repository', async () => {
   expect(moduleRef.get(AuditService)).toBeInstanceOf(AuditService);
   expect(moduleRef.get(AUDIT_REPOSITORY)).toHaveProperty('append');
   await moduleRef.close();
+});
+
+it('AppModule keeps database pools open until the audit flush completes', async () => {
+  const order: string[] = [];
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(ENV)
+    .useValue(validEnv)
+    .overrideProvider(AppLogger)
+    .useValue(logger())
+    .overrideProvider(AUDIT_REPOSITORY)
+    .useValue({
+      append: async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        order.push('audit');
+      },
+    })
+    .compile();
+  const pools = moduleRef.get(ApplicationDatabasePools);
+  const shutdown = pools.onApplicationShutdown.bind(pools);
+  vi.spyOn(pools, 'onApplicationShutdown').mockImplementation(async () => {
+    order.push('database');
+    await shutdown();
+  });
+  moduleRef.get(AuditService).record({ action: 'CREATE', resource: 'asin' });
+  await moduleRef.close();
+  expect(order).toEqual(['audit', 'database']);
 });
