@@ -1,0 +1,874 @@
+import { loadEnv } from '@asin-monitor/config';
+import type { AuditRepositoryPort } from '@asin-monitor/db';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  Injectable,
+  Post,
+  Put,
+  Req,
+  Res,
+  UnauthorizedException,
+  UseGuards,
+  type CanActivate,
+  type ExecutionContext,
+} from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import {
+  FastifyAdapter,
+  type NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { Test } from '@nestjs/testing';
+import type { FastifyReply, FastifyRequest } from 'fastify';
+import { Readable } from 'node:stream';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppModule } from '../src/app.module';
+import { auditBody } from '../src/audit/audit-data';
+import { auditAction } from '../src/audit/audit-mapping';
+import { AuditInterceptor } from '../src/audit/audit.interceptor';
+import { AUDIT_REPOSITORY, AuditService } from '../src/audit/audit.service';
+import { ENV } from '../src/config/config.module';
+import { ApplicationDatabasePools } from '../src/database/database.service';
+import { configureHttpApp } from '../src/http-app';
+import { AppLogger } from '../src/logger/app-logger.service';
+
+const validEnv = loadEnv({
+  DATABASE_URL: 'postgresql://localhost/amazon_asin_monitor',
+  COMPETITOR_DATABASE_URL: 'postgresql://localhost/amazon_competitor_monitor',
+  REDIS_URL: 'redis://localhost:6379',
+  JWT_SECRET: 'test-secret',
+  AUTH_DATA_AUTHORITY: 'postgresql',
+});
+const logger = () =>
+  ({
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  } as unknown as AppLogger);
+
+describe('audit mapping and data', () => {
+  it.each([
+    ['POST', '/auth/login', 'LOGIN', 'auth'],
+    ['POST', '/auth/logout', 'LOGOUT', 'auth'],
+    ['POST', '/auth/change-password', 'CHANGE_PASSWORD', 'auth'],
+    ['PUT', '/auth/profile', 'UPDATE_PROFILE', 'auth'],
+    ['POST', '/auth/sessions/revoke', 'REVOKE_SESSION', 'auth'],
+    ['POST', '/variant-groups', 'CREATE', 'variant_group'],
+    ['POST', '/variant-groups/batch-delete', 'BATCH_DELETE', 'variant_group'],
+    ['POST', '/competitor/asins/batch-create', 'BATCH_CREATE', 'asin'],
+    ['PUT', '/asins/:asinId', 'UPDATE', 'asin'],
+    ['DELETE', '/variant-groups/:groupId', 'DELETE', 'variant_group'],
+    ['POST', '/users/batch-delete', 'BATCH_DELETE', 'user'],
+    ['PUT', '/users/:userId/password', 'RESET_PASSWORD', 'user'],
+    ['PUT', '/roles/:roleId/permissions', 'UPDATE_ROLE_PERMISSIONS', 'role'],
+    ['POST', '/roles', 'POST', 'role'],
+    ['POST', '/permissions', 'POST', 'permission'],
+    ['POST', '/feishu-configs', 'UPDATE', 'feishu_config'],
+    ['PUT', '/sp-api-configs', 'UPDATE', 'sp_api_config'],
+    ['GET', '/export/asin', 'EXPORT', 'asin'],
+    ['GET', '/export/monitor-history', 'EXPORT', 'monitor_history'],
+    ['POST', '/tasks/export', 'EXPORT', 'unknown'],
+    ['POST', '/competitor/monitor/trigger', 'TRIGGER_MONITOR', 'monitor'],
+  ])('%s %s retains action %s', (method, path, action, resource) => {
+    expect(auditAction(method, `/api/v1${path}`)).toMatchObject({
+      action,
+      resource,
+    });
+  });
+
+  it('resource ids/names retain legacy fields, read-only and unrelated paths are excluded', () => {
+    expect(
+      auditAction(
+        'PUT',
+        '/api/v1/asins/:asinId',
+        { asinId: 'a-1' },
+        { asin: 'B012345678' },
+      ),
+    ).toMatchObject({ resourceId: 'a-1', resourceName: 'B012345678' });
+    expect(
+      auditAction('DELETE', '/api/v1/users/:userId', { userId: 'abcdefghij' }),
+    ).toMatchObject({
+      resourceId: 'abcdefghij',
+      resourceName: '用户 abcdefgh...',
+    });
+    for (const path of [
+      '/users',
+      '/roles/:roleId/permissions',
+      '/auth/profile',
+      '/asins',
+    ]) {
+      expect(auditAction('GET', `/api/v1${path}`)).toBeUndefined();
+    }
+    expect(auditAction('POST', '/api/v1/not-asins')).toBeUndefined();
+    expect(auditAction('POST', '/api/v1/constructor')).toBeUndefined();
+    expect(auditAction('POST', '/api/v1/__proto__')).toBeUndefined();
+    expect(auditAction('POST', '/api/v1/api/v1/users')).toBeUndefined();
+    expect(auditAction('OPTIONS', '/api/v1/users')).toBeUndefined();
+    expect(auditAction('HEAD', '/api/v1/export/asin')).toBeUndefined();
+  });
+
+  it('nested credentials are masked without mutating input; cycles and large uploads are bounded', () => {
+    const input = {
+      password: 'top-secret',
+      nested: {
+        'api-key': 'key-secret',
+        items: [{ refreshToken: 'token-secret' }],
+      },
+      webhookUrl: 'url-secret',
+      safe: 'name',
+    };
+    const encoded = JSON.stringify(auditBody(input));
+    for (const secret of [
+      'top-secret',
+      'key-secret',
+      'token-secret',
+      'url-secret',
+    ])
+      expect(encoded).not.toContain(secret);
+    expect(input.password).toBe('top-secret');
+    expect(encoded).toContain('name');
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(auditBody(cyclic)).toEqual({ self: '[omitted]' });
+    const large = Object.fromEntries(
+      Array.from({ length: 500 }, (_, i) => [`field${i}`, '中'.repeat(2000)]),
+    );
+    expect(
+      Buffer.byteLength(JSON.stringify(auditBody(large))),
+    ).toBeLessThanOrEqual(16_384);
+  });
+
+  it('masks config values independently of companion keys and recursively excludes personal fields', () => {
+    const data = auditBody({
+      configs: [
+        {
+          configKey: 'SP_API_US_REFRESH_TOKEN',
+          configValue: 'refresh-credential',
+        },
+        { configKey: 'SP_API_CLIENT_SECRET', configValue: 'client-credential' },
+        { configKey: 'AWS_ACCESS_KEY_ID', configValue: 'aws-credential' },
+        {
+          config_key: 'NEW_CREDENTIAL_KIND',
+          config_value: 'future-credential',
+        },
+        { configKey: 'NEW_NAME', displayValue: 'display-credential' },
+      ],
+      real_name: 'personal-name',
+      statusReason: 'personal-reason',
+      nested: {
+        email: 'person@example.invalid',
+        phone: 'personal-phone',
+        realName: 'nested-person',
+      },
+    });
+    const serialized = JSON.stringify(data);
+    for (const raw of [
+      'refresh-credential',
+      'client-credential',
+      'aws-credential',
+      'future-credential',
+      'display-credential',
+      'personal-name',
+      'personal-reason',
+      'person@example.invalid',
+      'personal-phone',
+      'nested-person',
+    ])
+      expect(serialized).not.toContain(raw);
+    expect(serialized).toContain('SP_API_US_REFRESH_TOKEN');
+  });
+});
+
+@Injectable()
+class AuditFixtureGuard implements CanActivate {
+  static hold: Promise<void> | undefined;
+  static started = false;
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<FastifyRequest>();
+    AuditFixtureGuard.started = true;
+    await AuditFixtureGuard.hold;
+    if (request.headers.authorization !== 'Bearer fixture')
+      throw new UnauthorizedException();
+    request.auth = {
+      userId: 'actor-23',
+      sessionId: 'session-23',
+      user: { username: 'audit-user' },
+    } as FastifyRequest['auth'];
+    if ((request.body as { denied?: boolean })?.denied)
+      throw new ForbiddenException();
+    return true;
+  }
+}
+
+@Controller()
+class AuditFixtureController {
+  static hold: Promise<void> | undefined;
+  static started = false;
+  static completed = false;
+  static streamFailure = false;
+  @Post('asins')
+  async earlyReply(@Req() request: FastifyRequest, @Res() reply: FastifyReply) {
+    reply.status(201).send({ success: true });
+    AuditFixtureController.started = true;
+    await AuditFixtureController.hold;
+    request.auth = {
+      userId: 'late-actor',
+      sessionId: 'fixture-session',
+      user: { username: 'late-user' },
+    } as FastifyRequest['auth'];
+    AuditFixtureController.completed = true;
+  }
+  @Post('auth/login')
+  @HttpCode(200)
+  login() {
+    return { success: false, errorMessage: 'arbitrary secret from provider' };
+  }
+
+  @Post('variant-groups')
+  @UseGuards(AuditFixtureGuard)
+  async create(@Body() body: Record<string, unknown>) {
+    body.name = 'mutated by handler';
+    AuditFixtureController.started = true;
+    await AuditFixtureController.hold;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    AuditFixtureController.completed = true;
+    return { success: true, data: { id: 'new-group' } };
+  }
+
+  @Put('users/:userId')
+  @UseGuards(AuditFixtureGuard)
+  async update() {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    throw new ForbiddenException({ success: false, errorMessage: 'rejected' });
+  }
+
+  @Post('users')
+  createUser(@Req() _request: FastifyRequest) {
+    return { success: true };
+  }
+
+  @Post('sp-api-configs')
+  configs() {
+    return { success: true };
+  }
+
+  @Put('auth/profile')
+  profile() {
+    return { success: true };
+  }
+
+  @Get('export/asin')
+  export(@Res() reply: FastifyReply) {
+    return reply.type('text/csv').send(
+      Readable.from(
+        (async function* () {
+          AuditFixtureController.started = true;
+          yield 'asin\n';
+          await AuditFixtureController.hold;
+          AuditFixtureController.completed = true;
+          if (AuditFixtureController.streamFailure)
+            throw new Error('private-stream-error');
+          yield 'B012345678\n';
+        })(),
+      ),
+    );
+  }
+
+  @Get('users')
+  list() {
+    return { success: true, data: [] };
+  }
+}
+
+describe('Neo audit HTTP lifecycle', () => {
+  let app: NestFastifyApplication;
+  let repository: AuditRepositoryPort;
+  let audit: AuditService;
+  let log: AppLogger;
+
+  async function setup(trustProxy?: boolean | number | string) {
+    AuditFixtureGuard.hold = undefined;
+    AuditFixtureGuard.started = false;
+    AuditFixtureController.hold = undefined;
+    AuditFixtureController.started = false;
+    AuditFixtureController.completed = false;
+    AuditFixtureController.streamFailure = false;
+    repository = { append: vi.fn().mockResolvedValue(undefined) };
+    log = logger();
+    const moduleRef = await Test.createTestingModule({
+      controllers: [AuditFixtureController],
+      providers: [
+        AuditService,
+        AuditFixtureGuard,
+        { provide: AUDIT_REPOSITORY, useValue: repository },
+        { provide: AppLogger, useValue: log },
+        { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter({
+        logger: false,
+        ...(trustProxy === undefined ? {} : { trustProxy }),
+      }),
+    );
+    audit = moduleRef.get(AuditService);
+    configureHttpApp(app, { audit, logger: log });
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+  }
+
+  beforeEach(() => setup());
+
+  afterEach(async () => {
+    app.getHttpServer().closeAllConnections();
+    await app.close();
+    vi.restoreAllMocks();
+  });
+
+  it('uses authenticated actor, immutable redacted body and final status, ignoring spoofed proxy headers', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/variant-groups?token=query-secret',
+      remoteAddress: '198.51.100.23',
+      headers: {
+        authorization: 'Bearer fixture',
+        'x-forwarded-for': '1.2.3.4',
+        'x-real-ip': '5.6.7.8',
+      },
+      payload: {
+        name: 'original',
+        password: 'raw-password',
+        nested: { refreshToken: 'raw-token' },
+        userId: 'spoofed-user',
+      },
+    });
+    await audit.flush();
+    expect(response.statusCode).toBe(201);
+    expect(repository.append).toHaveBeenCalledOnce();
+    expect(repository.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CREATE',
+        resource: 'variant_group',
+        resourceName: 'original',
+        userId: 'actor-23',
+        username: 'audit-user',
+        responseStatus: 201,
+        path: '/api/v1/variant-groups',
+        ipAddress: '198.51.100.23',
+        errorMessage: null,
+        requestData: expect.objectContaining({
+          name: 'original',
+          password: '***REDACTED***',
+        }),
+      }),
+    );
+    const encoded = JSON.stringify(vi.mocked(repository.append).mock.calls);
+    for (const secret of ['raw-password', 'raw-token', 'query-secret'])
+      expect(encoded).not.toContain(secret);
+  });
+
+  it.each(['sessionId', 'session_id', 'sessionIds', 'sid'])(
+    'redacts %s from nested audit snapshots',
+    (key) => {
+      expect(
+        JSON.stringify(
+          auditBody({
+            [key]: 'live-session-id',
+            nested: { [key]: ['another-session'] },
+          }),
+        ),
+      ).not.toMatch(/live-session-id|another-session/);
+    },
+  );
+
+  it('does not treat an explicit early response as handler completion', async () => {
+    await app.listen(0, '127.0.0.1');
+    let release!: () => void;
+    AuditFixtureController.hold = new Promise<void>(
+      (resolve) => (release = resolve),
+    );
+    try {
+      const response = await fetch(`${await app.getUrl()}/api/v1/asins`, {
+        method: 'POST',
+        headers: { connection: 'close' },
+      });
+      expect(response.status).toBe(201);
+      await response.text();
+      expect(AuditFixtureController.started).toBe(true);
+      expect(repository.append).not.toHaveBeenCalled();
+      release();
+      await vi.waitFor(() => expect(repository.append).toHaveBeenCalledOnce());
+      expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+        userId: 'late-actor',
+        username: 'late-user',
+        responseStatus: 201,
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it.each([true, false])(
+    'defers disconnect persistence until pending authentication settles (authorized=%s)',
+    async (authorized) => {
+      await app.listen(0, '127.0.0.1');
+      let release!: () => void;
+      AuditFixtureGuard.hold = new Promise<void>(
+        (resolve) => (release = resolve),
+      );
+      const abort = new AbortController();
+      const pending = fetch(`${await app.getUrl()}/api/v1/variant-groups`, {
+        method: 'POST',
+        signal: abort.signal,
+        headers: {
+          authorization: authorized
+            ? 'Bearer fixture'
+            : 'Bearer invalid-fixture',
+          'content-type': 'application/json',
+          connection: 'close',
+        },
+        body: JSON.stringify({ name: 'delayed authentication mutation' }),
+      })
+        .then((response) => response.text())
+        .catch(() => undefined);
+      try {
+        await vi.waitFor(() => expect(AuditFixtureGuard.started).toBe(true));
+        abort.abort();
+        await pending;
+        await new Promise<void>((resolve) => setTimeout(resolve, 30));
+        expect(repository.append).not.toHaveBeenCalled();
+        release();
+        await vi.waitFor(() =>
+          expect(repository.append).toHaveBeenCalledOnce(),
+        );
+        expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+          userId: authorized ? 'actor-23' : null,
+          username: authorized ? 'audit-user' : null,
+          ipAddress: '127.0.0.1',
+          responseStatus: authorized ? 499 : 401,
+          errorMessage: authorized ? '客户端连接中断' : '操作失败',
+        });
+        expect(AuditFixtureController.completed).toBe(authorized);
+      } finally {
+        release();
+        await pending;
+      }
+    },
+  );
+
+  it.each(['mutation', 'stream'] as const)(
+    'records client-aborted %s exactly once even if the handler later finishes',
+    async (kind) => {
+      await app.listen(0, '127.0.0.1');
+      let release!: () => void;
+      AuditFixtureController.hold = new Promise((resolve) => {
+        release = resolve;
+      });
+      const abort = new AbortController();
+      const pending = fetch(
+        `${await app.getUrl()}/api/v1/${
+          kind === 'mutation' ? 'variant-groups' : 'export/asin'
+        }`,
+        {
+          signal: abort.signal,
+          method: kind === 'mutation' ? 'POST' : 'GET',
+          headers: {
+            authorization: 'Bearer fixture',
+            'content-type': 'application/json',
+            connection: 'close',
+          },
+          ...(kind === 'mutation'
+            ? { body: JSON.stringify({ name: 'aborted mutation' }) }
+            : {}),
+        },
+      )
+        .then((response) => response.text())
+        .catch(() => undefined);
+      try {
+        await vi.waitFor(() =>
+          expect(AuditFixtureController.started).toBe(true),
+        );
+        abort.abort();
+        await pending;
+        if (kind === 'mutation') {
+          await new Promise<void>((resolve) => setTimeout(resolve, 30));
+          expect(repository.append).not.toHaveBeenCalled();
+          release();
+        }
+        await vi.waitFor(() =>
+          expect(repository.append).toHaveBeenCalledOnce(),
+        );
+        expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+          responseStatus: 499,
+          errorMessage: '客户端连接中断',
+        });
+        release();
+        await vi.waitFor(() =>
+          expect(AuditFixtureController.completed).toBe(true),
+        );
+        await audit.flush();
+        expect(repository.append).toHaveBeenCalledOnce();
+      } finally {
+        release();
+      }
+    },
+  );
+
+  it('records a response-stream failure once without persisting its private error message', async () => {
+    await app.listen(0, '127.0.0.1');
+    AuditFixtureController.streamFailure = true;
+    await fetch(`${await app.getUrl()}/api/v1/export/asin`, {
+      headers: { connection: 'close' },
+    })
+      .then((response) => response.text())
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(repository.append).toHaveBeenCalledOnce());
+    expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+      responseStatus: 500,
+      errorMessage: '响应流中断',
+    });
+    expect(
+      JSON.stringify(vi.mocked(repository.append).mock.calls),
+    ).not.toContain('private-stream-error');
+  });
+
+  it('records controller and Guard failures once with their final status and trusted identity only', async () => {
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/users/u-1',
+      headers: { authorization: 'Bearer fixture' },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/variant-groups',
+      payload: { username: 'spoofed' },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/variant-groups',
+      headers: { authorization: 'Bearer fixture' },
+      payload: { denied: true },
+    });
+    await audit.flush();
+    expect(
+      vi
+        .mocked(repository.append)
+        .mock.calls.map(([entry]) => [
+          entry.responseStatus,
+          entry.userId,
+          entry.username,
+        ]),
+    ).toEqual([
+      [403, 'actor-23', 'audit-user'],
+      [401, null, null],
+      [403, 'actor-23', 'audit-user'],
+    ]);
+    expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+      resourceId: 'u-1',
+      errorMessage: '操作失败',
+    });
+  });
+
+  it('keeps SP-API credentials and personal profile fields out of persisted HTTP snapshots', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/sp-api-configs',
+      payload: {
+        configs: [
+          { configKey: 'SP_API_US_REFRESH_TOKEN', configValue: 'http-secret' },
+          { configKey: 'AWS_ACCESS_KEY_ID', configValue: 'aws-secret' },
+        ],
+      },
+    });
+    await app.inject({
+      method: 'PUT',
+      url: '/api/v1/auth/profile',
+      payload: { real_name: 'private-name', statusReason: 'private-reason' },
+    });
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+    const saved = JSON.stringify(vi.mocked(repository.append).mock.calls);
+    for (const raw of [
+      'http-secret',
+      'aws-secret',
+      'private-name',
+      'private-reason',
+    ])
+      expect(saved).not.toContain(raw);
+    expect(saved).toContain('***REDACTED***');
+  });
+
+  it('uses forwarded client IP only when the immediate peer matches configured trusted proxies', async () => {
+    await app.close();
+    const configured = loadEnv({
+      DATABASE_URL: 'postgres://localhost/primary',
+      COMPETITOR_DATABASE_URL: 'postgres://localhost/competitor',
+      REDIS_URL: 'redis://localhost:6379',
+      JWT_SECRET: 'test-secret',
+      AUTH_DATA_AUTHORITY: 'postgresql',
+      TRUST_PROXY: 'loopback',
+    });
+    await setup(configured.TRUST_PROXY);
+    for (const remoteAddress of ['127.0.0.1', '203.0.113.42']) {
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/users',
+        remoteAddress,
+        headers: { 'x-forwarded-for': '198.51.100.23' },
+      });
+    }
+    await audit.flush();
+    expect(
+      vi.mocked(repository.append).mock.calls.map(([entry]) => entry.ipAddress),
+    ).toEqual(['198.51.100.23', '203.0.113.42']);
+  });
+
+  it('captures login failure envelopes and parser failures without copying error payload secrets', async () => {
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'attempted-user', password: 'never-store' },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/users',
+      headers: { 'content-type': 'application/json' },
+      payload: '{',
+    });
+    await audit.flush();
+    expect(login.statusCode).toBe(200);
+    expect(vi.mocked(repository.append).mock.calls[0]![0]).toMatchObject({
+      action: 'LOGIN',
+      username: 'attempted-user',
+      userId: null,
+      responseStatus: 200,
+      errorMessage: '操作失败',
+    });
+    expect(vi.mocked(repository.append).mock.calls[1]![0].responseStatus).toBe(
+      400,
+    );
+    expect(
+      JSON.stringify(vi.mocked(repository.append).mock.calls),
+    ).not.toContain('arbitrary secret');
+  });
+
+  it('streams exports intact, ignores normal reads and unknown API paths', async () => {
+    const exported = await app.inject({
+      method: 'GET',
+      url: '/api/v1/export/asin',
+    });
+    await app.inject({ method: 'GET', url: '/api/v1/users' });
+    await app.inject({ method: 'POST', url: '/api/v1/not-asins' });
+    await app.inject({ method: 'POST', url: '/api/v1/api/v1/users' });
+    await audit.flush();
+    expect(exported.body).toBe('asin\nB012345678\n');
+    expect(repository.append).toHaveBeenCalledOnce();
+    expect(repository.append).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'EXPORT', responseStatus: 200 }),
+    );
+  });
+
+  it('a failed audit write never changes the business response or logs repository payloads', async () => {
+    vi.mocked(repository.append).mockRejectedValueOnce(
+      new Error('postgresql://user:password@host/db actor@example.com'),
+    );
+    const response = await app.inject({ method: 'POST', url: '/api/v1/users' });
+    await audit.flush();
+    expect(response.statusCode).toBe(201);
+    expect(log.error).toHaveBeenCalledWith('操作审计写入失败', 'AuditService', {
+      reason: 'audit_write_failed',
+      code: 'unknown',
+    });
+  });
+
+  it.each(['ECONNREFUSED', '42501', '42P01', '23505'])(
+    'retains safe %s error classification through a Drizzle cause without logging payloads',
+    async (code) => {
+      vi.mocked(repository.append).mockRejectedValueOnce({
+        message: 'query with raw-secret',
+        cause: {
+          code,
+          message: 'postgres://user:password@host/db',
+          detail: 'private-row',
+        },
+      });
+      await app.inject({ method: 'POST', url: '/api/v1/users' });
+      await audit.flush();
+      expect(log.error).toHaveBeenCalledWith(
+        '操作审计写入失败',
+        'AuditService',
+        { reason: 'audit_write_failed', code },
+      );
+      expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toMatch(
+        /raw-secret|password|private-row/,
+      );
+    },
+  );
+
+  it.each(['mutation', 'stream'])(
+    'drains an in-flight %s before closing audit writes',
+    async (kind) => {
+      await app.listen(0, '127.0.0.1');
+      let release!: () => void;
+      AuditFixtureController.hold = new Promise((resolve) => {
+        release = resolve;
+      });
+      const response = fetch(
+        `${await app.getUrl()}/api/v1/${
+          kind === 'mutation' ? 'variant-groups' : 'export/asin'
+        }`,
+        kind === 'mutation'
+          ? {
+              method: 'POST',
+              headers: {
+                authorization: 'Bearer fixture',
+                'content-type': 'application/json',
+                connection: 'close',
+              },
+              body: JSON.stringify({ name: 'shutdown mutation' }),
+            }
+          : { headers: { connection: 'close' } },
+      );
+      try {
+        await vi.waitFor(() =>
+          expect(AuditFixtureController.started).toBe(true),
+        );
+        const closing = app.close();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        release();
+        const result = await response;
+        expect(result.status).toBe(kind === 'mutation' ? 201 : 200);
+        const body = await result.text();
+        if (kind === 'stream') expect(body).toBe('asin\nB012345678\n');
+        await closing;
+        expect(repository.append).toHaveBeenCalledOnce();
+        expect(
+          vi.mocked(repository.append).mock.calls[0]![0].responseStatus,
+        ).toBe(result.status);
+      } finally {
+        release();
+      }
+    },
+  );
+
+  it('caps pending persistence and resumes after outstanding writes complete', async () => {
+    let complete!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    vi.mocked(repository.append).mockReturnValue(blocked);
+    for (let index = 0; index < 300; index += 1)
+      audit.record({ action: 'CREATE', resource: 'asin' });
+    await Promise.resolve();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+    expect(log.warn).toHaveBeenCalledOnce();
+    complete();
+    await audit.flush();
+    audit.record({ action: 'CREATE', resource: 'asin' });
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledTimes(257);
+  });
+});
+
+it('AppModule resolves audit and its PostgreSQL repository', async () => {
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(ENV)
+    .useValue(validEnv)
+    .overrideProvider(AppLogger)
+    .useValue(logger())
+    .compile();
+  expect(moduleRef.get(AuditService)).toBeInstanceOf(AuditService);
+  expect(moduleRef.get(AUDIT_REPOSITORY)).toHaveProperty('append');
+  await moduleRef.close();
+});
+
+it('audit shutdown discards queued work at its deadline and never starts it after pool shutdown', async () => {
+  vi.useFakeTimers();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const repository = { append: vi.fn().mockReturnValue(blocked) };
+  const log = logger();
+  const audit = new AuditService(repository, log);
+  try {
+    for (let index = 0; index < 5; index++)
+      audit.record({ action: 'CREATE', resource: 'asin' });
+    await Promise.resolve();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+    const closing = audit.onApplicationShutdown();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await closing;
+    expect(log.warn).toHaveBeenCalledWith(
+      '审计关闭期限已到，未启动记录已丢弃',
+      'AuditService',
+      { reason: 'shutdown_deadline', count: 3 },
+    );
+    release();
+    await audit.flush();
+    audit.record({ action: 'CREATE', resource: 'asin' });
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledTimes(2);
+  } finally {
+    release();
+    vi.useRealTimers();
+  }
+});
+
+it('audit workers release failed slots and preserve queued admission order', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const repository = {
+    append: vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fixture failure'))
+      .mockReturnValueOnce(blocked)
+      .mockResolvedValue(undefined),
+  };
+  const log = logger();
+  const audit = new AuditService(repository, log);
+  try {
+    for (let index = 0; index < 4; index++)
+      audit.record({
+        action: 'CREATE',
+        resource: 'asin',
+        resourceId: String(index),
+      });
+    await vi.waitFor(() => expect(repository.append).toHaveBeenCalledTimes(4));
+    expect(
+      repository.append.mock.calls.map(([entry]) => entry.resourceId),
+    ).toEqual(['0', '1', '2', '3']);
+    expect(log.error).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await audit.flush();
+  }
+});
+
+it('AppModule keeps database pools open until the audit flush completes', async () => {
+  const order: string[] = [];
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(ENV)
+    .useValue(validEnv)
+    .overrideProvider(AppLogger)
+    .useValue(logger())
+    .overrideProvider(AUDIT_REPOSITORY)
+    .useValue({
+      append: async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        order.push('audit');
+      },
+    })
+    .compile();
+  const pools = moduleRef.get(ApplicationDatabasePools);
+  const shutdown = pools.onApplicationShutdown.bind(pools);
+  vi.spyOn(pools, 'onApplicationShutdown').mockImplementation(async () => {
+    order.push('database');
+    await shutdown();
+  });
+  moduleRef.get(AuditService).record({ action: 'CREATE', resource: 'asin' });
+  await moduleRef.close();
+  expect(order).toEqual(['audit', 'database']);
+});
