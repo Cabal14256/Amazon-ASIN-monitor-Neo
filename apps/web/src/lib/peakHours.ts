@@ -1,0 +1,111 @@
+import { toBeijingDayjs } from './beijingTime';
+
+/**
+ * 高峰期工具函数
+ * 所有时间基于北京时间（UTC+8）
+ */
+
+/**
+ * 判断指定时间是否在高峰期
+ * @param date - 日期时间（北京时间）
+ * @param country - 国家代码 (US, UK, DE, FR, ES, IT)
+ * @returns 是否在高峰期
+ */
+export function isPeakHour(date: Date | string, country: string): boolean {
+  const hour = toBeijingDayjs(date).hour();
+
+  switch (country) {
+    case 'US':
+      // US: 02-06, 09-12 (北京时间)
+      return (hour >= 2 && hour < 6) || (hour >= 9 && hour < 12);
+    case 'UK':
+      // UK: 22-24, 00-02, 03-06 (北京时间)
+      return hour >= 22 || (hour >= 0 && hour < 2) || (hour >= 3 && hour < 6);
+    case 'DE':
+    case 'FR':
+    case 'ES':
+    case 'IT':
+      // DE/FR/ES/IT (EU): 20-24, 02-05 (北京时间)
+      return hour >= 20 || (hour >= 2 && hour < 5);
+    default:
+      return false;
+  }
+}
+
+/**
+ * 获取指定国家的所有高峰期时间段
+ * @param country - 国家代码
+ * @returns 高峰期时间段数组，每个对象包含start和end小时
+ */
+export function getPeakHours(
+  country: string,
+): Array<{ start: number; end: number }> {
+  switch (country) {
+    case 'US':
+      return [
+        { start: 2, end: 6 },
+        { start: 9, end: 12 },
+      ];
+    case 'UK':
+      return [
+        { start: 22, end: 24 },
+        { start: 0, end: 2 },
+        { start: 3, end: 6 },
+      ];
+    case 'DE':
+    case 'FR':
+    case 'ES':
+    case 'IT':
+      return [
+        { start: 20, end: 24 },
+        { start: 2, end: 5 },
+      ];
+    default:
+      return [];
+  }
+}
+
+/**
+ * 判断指定时间是否在低峰期（非高峰期）
+ * @param date - 日期时间（北京时间）
+ * @param country - 国家代码
+ * @returns 是否在低峰期
+ */
+export function isOffPeakHour(date: Date | string, country: string): boolean {
+  return !isPeakHour(date, country);
+}
+
+/**
+ * 获取指定时间段的统计信息
+ * @param startTime - 开始时间（北京时间）
+ * @param endTime - 结束时间（北京时间）
+ * @param country - 国家代码
+ * @returns 统计信息
+ */
+export function getTimeRangeStats(
+  startTime: Date | string,
+  endTime: Date | string,
+  country: string,
+): { peakHours: number; offPeakHours: number; totalHours: number } {
+  const start = toBeijingDayjs(startTime).startOf('hour');
+  const end = toBeijingDayjs(endTime);
+
+  let peakHours = 0;
+  let offPeakHours = 0;
+  let current = start;
+
+  while (current.isBefore(end) || current.isSame(end)) {
+    if (isPeakHour(current.toDate(), country)) {
+      peakHours++;
+    } else {
+      offPeakHours++;
+    }
+    current = current.add(1, 'hour');
+  }
+
+  return {
+    peakHours,
+    offPeakHours,
+    totalHours: peakHours + offPeakHours,
+  };
+}
