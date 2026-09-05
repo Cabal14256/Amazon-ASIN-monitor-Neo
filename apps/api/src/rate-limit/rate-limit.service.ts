@@ -607,7 +607,23 @@ export class RateLimitService {
     limit: number,
     requestId: string,
     uncertainRedisReservation = false,
+    reusableSource?: RateLimitDecision,
   ): WindowResult {
+    // A synchronous transfer may use the slot occupied solely by its source.
+    // Keep that reservation until target admission succeeds; no await occurs
+    // between allocation and release, and a failed new allocation removes itself.
+    const sourceWindow = reusableSource
+      ? this.memoryWindows.get(reusableSource.clientKey)
+      : undefined;
+    const canReuseSourceSlot = Boolean(
+      reusableSource &&
+        reusableSource.clientKey !== clientKey &&
+        sourceWindow?.generation === identity.generation &&
+        sourceWindow.requestIds.size === 1 &&
+        sourceWindow.requestIds.has(requestId),
+    );
+    const atCapacity = () =>
+      this.memoryWindows.size >= MAX_MEMORY_WINDOWS && !canReuseSourceSlot;
     let window = this.activeMemoryWindow(
       this.memoryWindows,
       clientKey,
@@ -615,7 +631,7 @@ export class RateLimitService {
     );
     let storageKey = clientKey;
     if (!window) {
-      if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
+      if (atCapacity()) {
         this.cleanMemoryForCapacity(identity);
       }
       const overflow = this.activeMemoryWindow(
@@ -623,20 +639,16 @@ export class RateLimitService {
         overflowKey,
         identity,
       );
-      if (
-        overflow &&
-        (this.memoryWindows.size >= MAX_MEMORY_WINDOWS ||
-          overflow.ownerCounts.has(clientKey))
-      ) {
+      if (overflow && (atCapacity() || overflow.ownerCounts.has(clientKey))) {
         window = overflow;
         storageKey = overflowKey;
       }
     }
     if (!window) {
-      if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
+      if (atCapacity()) {
         this.cleanMemoryForCapacity(identity);
       }
-      if (this.memoryWindows.size >= MAX_MEMORY_WINDOWS) {
+      if (atCapacity()) {
         window = this.newMemoryWindow(identity, limit, overflowKey);
         this.memoryOverflowWindows.set(overflowKey, window);
         storageKey = overflowKey;
@@ -1235,28 +1247,34 @@ export class RateLimitService {
           ),
           clientKey,
         );
-        this.observeRedisWindow(window, now);
-        const decision = this.decision(input, limit, {
-          backend: 'redis',
-          clientKey,
-          overflowKey,
-          requestId: source.requestId,
-          uncertainRedisReservation: false,
-          ...window,
-        });
-        this.recordBucketDecision(decision);
-        return decision;
+        if (this.backend === 'redis' || window.count > limit) {
+          if (this.backend === 'redis') this.observeRedisWindow(window, now);
+          const decision = this.decision(input, limit, {
+            backend: 'redis',
+            clientKey,
+            overflowKey,
+            requestId: source.requestId,
+            uncertainRedisReservation: false,
+            ...window,
+          });
+          this.recordBucketDecision(decision);
+          return decision;
+        }
+        // Another in-flight operation entered fallback before this success.
+        // Mirror it locally and invalidate any newly frozen recovery snapshot.
+        targetRedisReservationUncertain = true;
+        this.setBackend('memory', Date.now());
       } catch {
         targetRedisReservationUncertain = true;
         this.setBackend('memory', now);
-        if (!options.fallbackToTargetMemory && !this.reconciliationUncertain)
-          return source;
       }
     }
     if (
       !this.reconciliationUncertain &&
       !options.fallbackToTargetMemory &&
-      (source.backend === 'redis' || source.uncertainRedisReservation)
+      !targetRedisReservationUncertain &&
+      source.backend === 'memory' &&
+      source.uncertainRedisReservation
     ) {
       return source;
     }
@@ -1272,6 +1290,11 @@ export class RateLimitService {
         limit,
         source.requestId,
         targetRedisReservationUncertain,
+        !sourceMayExistInRedis &&
+          !this.reconciliationUncertain &&
+          options.releaseSource !== false
+          ? source
+          : undefined,
       ),
     );
     if (decision.allowed && options.releaseSource !== false) {
