@@ -646,6 +646,14 @@ export class RateLimitService {
       }
     }
     const stored = this.addMemoryRequest(window, requestId);
+    if (!stored && this.memoryRequestCount(window) === 0) {
+      this.removeMemoryWindow(
+        storageKey === overflowKey
+          ? this.memoryOverflowWindows
+          : this.memoryWindows,
+        storageKey,
+      );
+    }
     if (
       stored &&
       storageKey === overflowKey &&
@@ -1241,18 +1249,19 @@ export class RateLimitService {
       } catch {
         targetRedisReservationUncertain = true;
         this.setBackend('memory', now);
-        if (!options.fallbackToTargetMemory) return source;
+        if (!options.fallbackToTargetMemory && !this.reconciliationUncertain)
+          return source;
       }
     }
-    if (source.backend === 'redis' && !options.fallbackToTargetMemory) {
-      return source;
-    }
     if (
-      this.reconciliationUncertain ||
-      (source.uncertainRedisReservation && !options.fallbackToTargetMemory)
+      !this.reconciliationUncertain &&
+      !options.fallbackToTargetMemory &&
+      (source.backend === 'redis' || source.uncertainRedisReservation)
     ) {
       return source;
     }
+    // Uncertain reconciliation must use the blocked target-policy memory
+    // decision below, never a previously allowed DEFAULT source.
     const decision = this.decision(
       input,
       limit,

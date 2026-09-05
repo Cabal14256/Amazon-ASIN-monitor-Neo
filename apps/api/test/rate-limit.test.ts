@@ -1376,6 +1376,51 @@ describe('RateLimitService', () => {
     expect(service.snapshot(true).status).toBe('ok');
   });
 
+  it.each([true, false])(
+    '对账失败后 strict 转移 fail-closed，不复用 allowed DEFAULT（fallback=%s）',
+    async (fallbackToTargetMemory) => {
+      const redis = redisMock();
+      const generation = String(Math.floor(Date.now() / RATE_LIMIT_WINDOW_MS));
+      vi.mocked(redis.eval).mockImplementationOnce(async (_script, keys) => [
+        1,
+        RATE_LIMIT_WINDOW_MS,
+        generation,
+        keys[0],
+      ]);
+      const { service } = createService({ redis });
+      const input = {
+        clientIdentifier: 'strict-failed-recovery',
+        policy: 'role' as const,
+        role: 'DEFAULT' as const,
+      };
+      const source = await service.consume(input);
+      expect(source.allowed).toBe(true);
+      service.startRecovery(false);
+      await service.consume({ ...input, clientIdentifier: 'reconcile-window' });
+      (service as unknown as { redisRetryAfter: number }).redisRetryAfter = 0;
+      vi.mocked(redis.eval)
+        .mockResolvedValueOnce(generation)
+        .mockRejectedValueOnce(new Error('partial reconciliation'));
+      await service.recover(true);
+      expect(service.snapshot(true).status).toBe('degraded');
+      await expect(
+        service.transfer(
+          source,
+          { ...input, policy: 'strict', role: 'ADMIN' },
+          { fallbackToTargetMemory },
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        backend: 'memory',
+        policy: 'strict',
+        role: 'ADMIN',
+        limit: STRICT_RATE_LIMIT,
+        count: STRICT_RATE_LIMIT + 1,
+        remaining: 0,
+      });
+    },
+  );
+
   it('内存降级与 Redis 使用相同对齐窗口，不会从故障时刻续期 15 分钟', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-01T00:10:00.000Z'));
@@ -1655,13 +1700,21 @@ describe('RateLimitService', () => {
       count: ROLE_LIMITS.DEFAULT + 1,
     });
     expect(internal.memoryReservationCount).toBe(MAX_MEMORY_RESERVATIONS);
-    expect(
-      internal.memoryWindows.get(blocked.clientKey)?.requestIds,
-    ).toHaveLength(0);
+    for (let index = 0; index < 10_100; index++) {
+      await service.consume(
+        { ...input, clientIdentifier: `empty-cap-${index}` },
+        { recordRequest: false },
+      );
+    }
+    expect(internal.memoryWindows.size).toBe(0);
 
     internal.memoryReservationCount = MAX_MEMORY_RESERVATIONS - 1;
-    const finalSlot = await service.consume(input, { recordRequest: false });
+    const finalSlot = await service.consume(
+      { ...input, clientIdentifier: 'new-after-capacity' },
+      { recordRequest: false },
+    );
     expect(finalSlot).toMatchObject({ allowed: true, count: 1 });
+    expect(finalSlot.storageKey).toBe(finalSlot.clientKey);
     expect(internal.memoryReservationCount).toBe(MAX_MEMORY_RESERVATIONS);
     await service.release(finalSlot);
     expect(internal.memoryReservationCount).toBe(MAX_MEMORY_RESERVATIONS - 1);
