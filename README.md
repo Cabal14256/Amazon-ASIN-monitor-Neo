@@ -385,6 +385,12 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo PostgreSQL 登录
+
+Neo 新增 `POST /api/v1/auth/login`，保留登录信封、JWT/Session、普通/记住登录有效期、账号锁定和密码过期标记。五次失败锁定 30 分钟，登录结果和失败计数在 PostgreSQL 用户行锁事务中保存，提交成功后才发放 Cookie。`AUTH_DATA_AUTHORITY=legacy-mysql` 时此新入口返回 503，不写 PostgreSQL；旧登录入口继续使用。此功能不自动切换数据权威源或生产流量。
+
+输入/密码验证并发与事务截止时间、上线前置条件、真实数据库验收及回滚边界见 [`docs/runbooks/phase-2-auth-login.md`](./docs/runbooks/phase-2-auth-login.md)。密码修改、注销、会话管理和清理调度尚需独立迁移，当前不可仅凭登录测试通过就替换 Legacy。
+
 ### Neo WebSocket 网关
 
 Neo API 的 `/ws` 保留旧系统 9 种服务端消息与 `broadcastToUser`，使用共享 Zod 契约校验。握手复用 HTTP 的 Cookie（优先）/Bearer、JWT、权威 Session 与用户状态检查；缺失或过期认证关闭码为 4401，无效令牌/撤销会话/禁用用户为 4403。不要通过 URL query 传 Token。浏览器发送的 Origin 必须精确匹配 `CORS_ORIGIN` 的 HTTP(S) origin（不接受通配符或 `null`）；没有 Origin 的非浏览器客户端仍必须提供有效认证。鉴权服务故障关闭码为可重试的 1013，不伪装为令牌无效。

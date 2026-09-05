@@ -11,7 +11,7 @@ function dateString(value: Date | null): string | null {
   return value?.toISOString() ?? null;
 }
 
-function publicUser(
+export function publicUser(
   user: NonNullable<FastifyRequest['auth']>['user'],
 ): UserPublic {
   return {
