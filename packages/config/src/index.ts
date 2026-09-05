@@ -25,6 +25,21 @@ const optionalNonEmptyStringSchema = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+// Legacy getWorkerConcurrency: invalid/nonpositive values fall back to one,
+// positive fractions are floored (with a minimum of one).
+const queueConcurrencySchema = z.preprocess((value) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0
+    ? Math.max(1, Math.floor(number))
+    : 1;
+}, z.number().int().positive());
+
+const queueLimiterSchema = (fallback: number) =>
+  z.preprocess(
+    (value) => Number(value) || fallback,
+    z.number().int().positive(),
+  );
+
 const cookieNameSchema = z
   .string()
   .trim()
@@ -188,11 +203,17 @@ const envObjectSchema = z.object({
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),
-  VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY: z.coerce
-    .number()
-    .int()
-    .positive()
-    .optional(),
+  MONITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  COMPETITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  EXPORT_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BATCH_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BATCH_DELETE_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BACKUP_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  MONITOR_QUEUE_LIMITER_MAX: queueLimiterSchema(1),
+  MONITOR_QUEUE_LIMITER_DURATION_MS: queueLimiterSchema(200),
+  COMPETITOR_QUEUE_LIMITER_MAX: queueLimiterSchema(1),
+  COMPETITOR_QUEUE_LIMITER_DURATION_MS: queueLimiterSchema(200),
 });
 
 export const envSchema = envObjectSchema.superRefine((env, context) => {

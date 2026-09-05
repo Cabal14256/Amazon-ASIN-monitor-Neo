@@ -98,6 +98,10 @@ export function resolveQueueSelection(raw: string | undefined): QueueSelection {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  if (requested.length === 0) {
+    return { enabledQueues: [...QUEUE_NAMES], unknownQueues: [] };
+  }
+
   if (
     requested.some((token) => ['all', '*'].includes(normalizeQueueToken(token)))
   ) {

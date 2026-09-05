@@ -19,6 +19,41 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('队列并发兼容 Legacy 取整与默认回退，监控限速拒绝非法负数', () => {
+    for (const [raw, expected] of [
+      ['3.9', 3],
+      ['0.5', 1],
+      ['0', 1],
+      ['-1', 1],
+      ['invalid', 1],
+      ['', 1],
+    ] as const) {
+      const env = loadEnv({
+        ...validEnv,
+        MONITOR_QUEUE_WORKER_CONCURRENCY: raw,
+        VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY: raw,
+      });
+      expect(env.MONITOR_QUEUE_WORKER_CONCURRENCY).toBe(expected);
+      expect(env.VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY).toBe(expected);
+    }
+    expect(
+      loadEnv({
+        ...validEnv,
+        MONITOR_QUEUE_LIMITER_MAX: '0',
+        COMPETITOR_QUEUE_LIMITER_DURATION_MS: 'invalid',
+      }),
+    ).toMatchObject({
+      MONITOR_QUEUE_LIMITER_MAX: 1,
+      COMPETITOR_QUEUE_LIMITER_DURATION_MS: 200,
+    });
+    expect(() =>
+      loadEnv({ ...validEnv, MONITOR_QUEUE_LIMITER_MAX: '-1' }),
+    ).toThrow(EnvValidationError);
+    expect(() =>
+      loadEnv({ ...validEnv, COMPETITOR_QUEUE_LIMITER_DURATION_MS: '1.2' }),
+    ).toThrow(EnvValidationError);
+  });
+
   it('接受合法环境并应用默认值', () => {
     const env = loadEnv({ ...validEnv });
     expect(env.NODE_ENV).toBe('development');
