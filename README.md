@@ -381,6 +381,12 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo 操作审计
+
+Neo API 的全局审计拦截器沿用 Legacy 的认证、用户、角色、ASIN/变体组、配置、导出与手动监控动作映射；在响应完成后记录最终 HTTP 状态，普通只读请求、OPTIONS/HEAD 和未知路由跳过。审计写入 PostgreSQL 主库 `audit_logs`，不依赖 MySQL 鉴权用户在 PostgreSQL 中存在副本。审计查询端点和归档调度尚待后续业务域迁移；双跑期 Legacy 的审计数据仍由旧系统提供。
+
+请求数据递归脱敏，最多 16 KiB；路由记录使用模板（资源 ID 独立记录），不保存 query、Cookie 或认证头，客户端 IP 使用 Fastify 的可信代理解析结果。错误仅保存固定失败标记与最终状态，避免供应商异常回显密钥。审计持久化不阻塞响应，最多 256 条待写入，满载或数据库失败会丢弃并记录日志，因此不是保证送达的事务审计；受控关闭最多等待 5 秒。此阶段不新增数据库迁移，回滚模块即可停止 Neo 审计写入，已有记录保留。
+
 ### Neo Monorepo（从项目根执行）
 
 | 命令 | 说明 |
