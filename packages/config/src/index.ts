@@ -31,6 +31,15 @@ const cookieNameSchema = z
   .min(1)
   .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, 'Cookie 名称包含非法字符');
 
+const booleanFlagSchema = (defaultValue: boolean) =>
+  z
+    .string()
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
+    .default(defaultValue ? 'true' : 'false')
+    .transform((value) => !['false', '0', 'no', 'off'].includes(value));
+
 const trustProxySchema = z
   .preprocess(
     (value) =>
@@ -45,6 +54,18 @@ const trustProxySchema = z
     if (['false', 'no', 'off'].includes(normalized)) return false;
     return value;
   });
+
+const rateLimitWhitelistSchema = z
+  .string()
+  .default('')
+  .transform((value) => [
+    ...new Set(
+      value
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ]);
 
 const jwtDurationSchema = z
   .string()
@@ -132,6 +153,11 @@ const envObjectSchema = z.object({
     .trim()
     .transform((value) => value || 'bull')
     .default('bull'),
+  RATE_LIMITER_KEY_PREFIX: z
+    .string()
+    .trim()
+    .transform((value) => value || 'spapi:ratelimiter')
+    .default('spapi:ratelimiter'),
 
   JWT_SECRET: z
     .string()
@@ -149,6 +175,10 @@ const envObjectSchema = z.object({
     .max(86_400)
     .default(900),
   AUTH_DATA_AUTHORITY: z.enum(['legacy-mysql', 'postgresql']),
+
+  // HTTP API 分布式限流：固定窗口与阈值保持 Legacy 语义。
+  API_RATE_LIMIT_ENABLED: booleanFlagSchema(true),
+  RATE_LIMIT_WHITELIST_IPS: rateLimitWhitelistSchema,
 
   // 双跑期鉴权数据实时权威源使用 Legacy MySQL；最终同步/写冻结后才切 PostgreSQL。
   DB_HOST: optionalNonEmptyStringSchema,
@@ -194,13 +224,7 @@ const envObjectSchema = z.object({
     .transform((value) => value.toLowerCase())
     .pipe(z.enum(['api', 'worker', 'all']))
     .default('api'),
-  SCHEDULER_ENABLED: z
-    .string()
-    .trim()
-    .transform((value) => value.toLowerCase())
-    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
-    .default('false')
-    .transform((value) => !['false', '0', 'no', 'off'].includes(value)),
+  SCHEDULER_ENABLED: booleanFlagSchema(false),
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),

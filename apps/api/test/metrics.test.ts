@@ -105,4 +105,24 @@ describe('Fastify HTTP metrics hook', () => {
       '# HELP amazon_asin_monitor_http_requests_total HTTP 请求总数',
     );
   });
+
+  it('当前限流后端以 one-hot gauge 暴露且切换时不保留旧状态', async () => {
+    metrics.setRateLimitBackend('memory');
+    let rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="memory"} 1',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 0',
+    );
+
+    metrics.setRateLimitBackend('redis');
+    rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="memory"} 0',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 1',
+    );
+  });
 });
