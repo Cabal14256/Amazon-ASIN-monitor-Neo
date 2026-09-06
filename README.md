@@ -18,6 +18,8 @@ Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./d
 
 北京时间、峰值时段统计和 21 站点链接的原样移植与兼容边界见 [`前端工具运行说明`](./docs/runbooks/phase-3-web-utils.md)。
 
+明快作业台的设计变量、基础控件与开发预览见 [`设计基础运行说明`](./docs/runbooks/phase-3-design-foundation.md)；表格、图表、应用外壳及业务页面仍按独立任务迁移。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。
