@@ -20,6 +20,8 @@ Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./d
 
 北京时间、峰值时段统计和 21 站点链接的原样移植与兼容边界见 [`前端工具运行说明`](./docs/runbooks/phase-3-web-utils.md)。
 
+明快作业台的设计变量、基础控件与开发预览见 [`设计基础运行说明`](./docs/runbooks/phase-3-design-foundation.md)；表格、图表、应用外壳及业务页面仍按独立任务迁移。
+
 Neo 双库的 Drizzle 日期列按北京时间读写，原因、验证和既有数据核查边界见 [`D8 时间映射说明`](./docs/runbooks/phase-1-drizzle-timestamps.md)。
 
 Neo 审计日志列表、详情和两类统计接口的权限、时间筛选及数据范围见 [`审计查询运行说明`](./docs/runbooks/phase-2-audit-query.md)。
