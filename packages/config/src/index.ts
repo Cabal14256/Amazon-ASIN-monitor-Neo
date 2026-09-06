@@ -31,6 +31,21 @@ const cookieNameSchema = z
   .min(1)
   .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, 'Cookie 名称包含非法字符');
 
+const trustProxySchema = z
+  .preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().trim().min(1).optional(),
+  )
+  .transform((value): boolean | number | string | undefined => {
+    if (value === undefined) return undefined;
+    const normalized = value.toLowerCase();
+    if (/^\d+$/.test(normalized)) return Number(normalized);
+    if (['true', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', 'no', 'off'].includes(normalized)) return false;
+    return value;
+  });
+
 const jwtDurationSchema = z
   .string()
   .trim()
@@ -94,6 +109,7 @@ const envObjectSchema = z.object({
     .trim()
     .min(1, 'CORS_ORIGIN 不能为空')
     .default('http://localhost:8000'),
+  TRUST_PROXY: trustProxySchema,
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),

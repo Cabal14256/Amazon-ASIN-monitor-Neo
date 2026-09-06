@@ -6,8 +6,9 @@ import {
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 
-import { loadEnvironmentFiles, type Env } from '@asin-monitor/config';
+import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
+import { AuditService } from './audit/audit.service';
 import { ENV } from './config/config.module';
 import { HealthErrorStatsService } from './health/health.service';
 import { configureHttpApp } from './http-app';
@@ -23,9 +24,15 @@ import { WebSocketService } from './websocket/websocket.service';
  * 路由结构与旧系统一致：/api/v1/* 业务端点 + 根级 /health、/metrics。
  */
 async function bootstrap(): Promise<void> {
+  const adapterEnv = loadEnv();
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ logger: false }),
+    new FastifyAdapter({
+      logger: false,
+      ...(adapterEnv.TRUST_PROXY === undefined
+        ? {}
+        : { trustProxy: adapterEnv.TRUST_PROXY }),
+    }),
     { bufferLogs: true },
   );
 
@@ -36,6 +43,7 @@ async function bootstrap(): Promise<void> {
   const metrics = app.get(MetricsService);
   const errorStats = app.get(HealthErrorStatsService);
   configureHttpApp(app, {
+    audit: app.get(AuditService),
     corsOrigin: env.CORS_ORIGIN,
     logger,
     metrics,

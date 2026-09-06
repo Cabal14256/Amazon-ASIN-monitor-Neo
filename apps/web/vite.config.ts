@@ -9,6 +9,14 @@ import { defineConfig } from 'vite';
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // The linked contracts package is also consumed by Node and currently emits
+  // CommonJS. Vite must transform it in both development and production.
+  optimizeDeps: { include: ['@asin-monitor/contracts'] },
+  build: {
+    commonjsOptions: {
+      include: [/node_modules/, /packages[\\/]contracts[\\/]dist/],
+    },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
