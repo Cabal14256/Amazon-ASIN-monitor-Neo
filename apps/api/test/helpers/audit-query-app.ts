@@ -10,16 +10,9 @@ import {
 import { Test } from '@nestjs/testing';
 import jwt from 'jsonwebtoken';
 import { vi } from 'vitest';
-import { AuditQueryController } from '../../src/audit/audit-query.controller';
-import {
-  AUDIT_QUERY_REPOSITORY,
-  AuditQueryService,
-} from '../../src/audit/audit-query.service';
+import { AUDIT_QUERY_REPOSITORY } from '../../src/audit/audit-query.service';
+import { AuditModule } from '../../src/audit/audit.module';
 import { AUTH_DATA_REPOSITORY } from '../../src/auth/auth.constants';
-import { AuthenticationGuard } from '../../src/auth/authentication.guard';
-import { AuthenticationService } from '../../src/auth/authentication.service';
-import { PermissionCacheService } from '../../src/auth/permission-cache.service';
-import { PermissionsGuard } from '../../src/auth/permissions.guard';
 import { ENV } from '../../src/config/config.module';
 import { configureHttpApp } from '../../src/http-app';
 import { AppLogger } from '../../src/logger/app-logger.service';
@@ -66,30 +59,23 @@ export async function auditQueryApp(queries: AuditQueryRepositoryPort) {
     error: vi.fn(),
   };
   const moduleRef = await Test.createTestingModule({
-    controllers: [AuditQueryController],
-    providers: [
-      { provide: ENV, useValue: env },
-      {
-        provide: AUTH_DATA_REPOSITORY,
-        useValue: auth as unknown as AuthDataRepository,
-      },
-      { provide: AUDIT_QUERY_REPOSITORY, useValue: queries },
-      { provide: AppLogger, useValue: logger },
-      {
-        provide: ApplicationRedisClient,
-        useValue: {
-          get: vi.fn().mockResolvedValue(null),
-          setex: vi.fn(),
-          del: vi.fn(),
-        },
-      },
-      AuthenticationGuard,
-      AuthenticationService,
-      PermissionsGuard,
-      PermissionCacheService,
-      AuditQueryService,
-    ],
-  }).compile();
+    imports: [AuditModule],
+  })
+    .overrideProvider(ENV)
+    .useValue(env)
+    .overrideProvider(AUTH_DATA_REPOSITORY)
+    .useValue(auth as unknown as AuthDataRepository)
+    .overrideProvider(AUDIT_QUERY_REPOSITORY)
+    .useValue(queries)
+    .overrideProvider(AppLogger)
+    .useValue(logger)
+    .overrideProvider(ApplicationRedisClient)
+    .useValue({
+      get: vi.fn().mockResolvedValue(null),
+      setex: vi.fn(),
+      del: vi.fn(),
+    })
+    .compile();
   const app = moduleRef.createNestApplication<NestFastifyApplication>(
     new FastifyAdapter({ logger: false }),
   );
