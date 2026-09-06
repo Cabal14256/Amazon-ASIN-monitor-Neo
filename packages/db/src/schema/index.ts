@@ -11,15 +11,13 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   unique,
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/pg-core';
+import { timestampColumn } from './timestamp';
 
 const localTimestamp = sql`LOCALTIMESTAMP`;
-const timestampColumn = <TName extends string>(name: TName) =>
-  timestamp(name, { mode: 'date', withTimezone: false });
 
 export const variantGroups = pgTable(
   'variant_groups',
