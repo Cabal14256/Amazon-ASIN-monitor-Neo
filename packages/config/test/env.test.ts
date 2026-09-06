@@ -19,6 +19,17 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('密码到期默认90天，拒绝非整数、非正值和超过十年的设置', () => {
+    expect(loadEnv(validEnv).PASSWORD_EXPIRE_DAYS).toBe(90);
+    expect(
+      loadEnv({ ...validEnv, PASSWORD_EXPIRE_DAYS: '30' }).PASSWORD_EXPIRE_DAYS,
+    ).toBe(30);
+    for (const value of ['', '0', '-1', '1.5', '3651', 'NaN', 'Infinity']) {
+      expect(() =>
+        loadEnv({ ...validEnv, PASSWORD_EXPIRE_DAYS: value }),
+      ).toThrow(EnvValidationError);
+    }
+  });
   it('任务注册表保留 7 天/200 条默认值并限制 TTL 与索引范围', () => {
     expect(loadEnv(validEnv).TASK_META_TTL_SECONDS).toBe(604800);
     expect(loadEnv(validEnv).TASK_USER_MAX_ITEMS).toBe(200);

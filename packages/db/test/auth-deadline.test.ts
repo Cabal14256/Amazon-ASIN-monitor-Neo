@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PgAccountRepository } from '../src/repositories/account-repository';
 import {
   AuthQueryTimeoutError,
   withAuthDatabaseDeadline,
@@ -21,6 +22,35 @@ function fixture() {
   return { pool, client };
 }
 describe('bounded PostgreSQL authentication operations', () => {
+  it('prevents a late password hash from issuing any account writes after the transaction deadline', async () => {
+    vi.useFakeTimers();
+    const { pool, client } = fixture();
+    let release!: () => void;
+    const hashWork = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lateWrite = vi.fn();
+    const task = new PgAccountRepository(pool).transaction(async (unit) => {
+      await hashWork;
+      try {
+        await unit.savePreviousPassword('fixture', 'fixture-hash', new Date());
+      } catch (error) {
+        lateWrite(error);
+        throw error;
+      }
+    });
+    const rejected = expect(task).rejects.toBeInstanceOf(AuthQueryTimeoutError);
+    await vi.advanceTimersByTimeAsync(2000);
+    await rejected;
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lateWrite).toHaveBeenCalledWith(expect.any(AuthQueryTimeoutError));
+    expect(client.query.mock.calls.map(([query]) => query)).toEqual([
+      'BEGIN',
+      'SET LOCAL statement_timeout = 1500',
+    ]);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+  });
   it('uses a local statement timeout and returns a committed connection', async () => {
     const { pool, client } = fixture();
     await expect(

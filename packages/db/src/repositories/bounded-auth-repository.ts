@@ -17,7 +17,7 @@ export class AuthQueryTimeoutError extends Error {
 /** 只约束鉴权查询，不能给导出/分析共享池施加全局 statement_timeout。 */
 export async function withAuthDatabaseDeadline<T>(
   pool: Pool,
-  operation: (db: Db) => Promise<T>,
+  operation: (db: Db, ensureOpen: () => void) => Promise<T>,
 ): Promise<T> {
   // 获取连接由应用池的 connectionTimeoutMillis 约束。
   const client: PoolClient = await pool.connect();
@@ -45,7 +45,7 @@ export async function withAuthDatabaseDeadline<T>(
         ensureOpen();
         await client.query('SET LOCAL statement_timeout = 1500');
         ensureOpen();
-        const result = await operation(createDb(client));
+        const result = await operation(createDb(client), ensureOpen);
         ensureOpen();
         await client.query('COMMIT');
         return result;
