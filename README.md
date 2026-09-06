@@ -14,9 +14,17 @@
 
 定稿方案与逐阶段任务已归档在 [`docs/refactor/`](./docs/refactor/README.md)。
 
+Neo 共享 SP-API 客户端的已实现范围、取消/配额约定和未完成接入门槛见 [`P2-T3 运行说明`](./docs/runbooks/phase-2-spapi-client.md)；目前不替代 Legacy 的生产调用。
+
 Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./docs/runbooks/phase-3-web-transport.md)；目前尚未迁移登录 UI、权限路由或业务页面。
 
 北京时间、峰值时段统计和 21 站点链接的原样移植与兼容边界见 [`前端工具运行说明`](./docs/runbooks/phase-3-web-utils.md)。
+
+明快作业台的设计变量、基础控件与开发预览见 [`设计基础运行说明`](./docs/runbooks/phase-3-design-foundation.md)；表格、图表、应用外壳及业务页面仍按独立任务迁移。
+
+Neo 双库的 Drizzle 日期列按北京时间读写，原因、验证和既有数据核查边界见 [`D8 时间映射说明`](./docs/runbooks/phase-1-drizzle-timestamps.md)。
+
+Neo 审计日志列表、详情和两类统计接口的权限、时间筛选及数据范围见 [`审计查询运行说明`](./docs/runbooks/phase-2-audit-query.md)。
 
 ## 功能概览
 
@@ -116,6 +124,20 @@ Copy-Item .env.migration.example .env.migration
 完整配置和默认值见 [`server/.env.example`](./server/.env.example)。SP-API 凭据既可以写入环境变量，也可以在管理员登录后通过“系统设置”维护；数据库中的配置优先。
 
 新 Nest API 与 BullMQ Worker 读取根目录 `.env.neo`，不会继承旧 Express 的 `PORT=3001`；模板固定 Neo API 默认端口 3100，并包含目标 PostgreSQL 主库、竞品库、Redis 与 JWT 必需变量。Neo 鉴权继续使用 `JWT_SECRET`，并可通过 `JWT_EXPIRES_IN`、`JWT_REMEMBER_EXPIRES_IN`、`AUTH_COOKIE_NAME`、`AUTH_HINT_COOKIE_NAME` 和 `AUTH_PERMISSION_CACHE_TTL_SECONDS` 调整令牌、Cookie 与 RBAC 缓存；生产环境的 JWT 密钥至少需要 32 个字符且不得保留公开模板值。`AUTH_DATA_AUTHORITY` 必须明确选择全部鉴权数据的权威源：双跑期使用 `legacy-mysql` 并在 `.env.neo` 提供与 Legacy 相同的 `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`，使用户状态、Session、密码策略、权限和角色变更实时生效；只有完成最终同步并冻结 MySQL 写入后才改为 `postgresql`。旧系统继续读取 `server/.env`，因此两套 API 可以并行启动。
+
+Neo HTTP API 默认通过共享 Redis 执行 15 分钟 fixed-window 限流：ADMIN 1000、EDITOR 500、READONLY/匿名或未知角色 100 次；后续敏感端点可显式使用 strict 20 次策略。请求层先按 DEFAULT 预占配额，因此无效凭据和未匹配的 `/api/v1/*` 同样受限；预占会保持到角色计数已落定，只有 Session Guard 成功后才转为已认证角色配额，撤销或过期会话不会获得高配额。认证 strict 请求会继续持有 DEFAULT 预占，并由同一条 Redis 原子脚本完成附加桶预占与成功后的条件释放；strict 拒绝时该预占保留，使重复流量随后在 Guard 前被阻断。若原子转移因 Redis 失联而改用已放行的 strict 内存预占、DEFAULT 写入已经执行但响应超时，或内存来源已在等待期间对账到 Redis，恢复流程都会保留可重试的 Redis 来源释放意图，等来源与目标快照全部落库后再释放 DEFAULT，避免槽位泄漏或释放后被迟到快照重新写回。
+
+`API_RATE_LIMIT_ENABLED=false` 可在受控排障窗口关闭，`RATE_LIMIT_WHITELIST_IPS` 接受逗号分隔的精确 IP，`RATE_LIMITER_KEY_PREFIX` 用于隔离共享 Redis 的不同部署。Redis 不可用时会有界降级到进程内窗口；最多保留 10000 个独立客户端窗口和 100000 条幂等预占，预占容量耗尽后新请求 fail-closed，不再继续分配 UUID。窗口满载后新客户端进入每策略 overflow 桶，不淘汰活跃计数；清理节流在 generation 变化时自动绕过，独立窗口容量释放后，未登记的新客户端重新获得独立桶，已经进入 overflow 的客户端则保持原归属。共享窗口以 Redis `TIME` 为权威时钟，避免不同 API 实例的系统时钟偏差重置 generation；所有读时钟后写数据的 Lua 都先显式启用 effects replication，以兼容 Redis 5/6 的复制配置与 Redis 7 的唯一复制模式。每次请求以随机 ID 幂等计数。overflow 按 request ID 记录客户端归属，并在 Redis 成员表内维护每个客户端的活动预占数；释放最后一条预占就原子移除该成员。恢复后仍处于 overflow 的客户端同时执行故障前独立 Redis 计数与共享桶总数，既不会取得一份新配额，也不会让未进入 overflow 的客户端承受聚合总数；不确定的 Redis 响应若实际已写入 overflow，对账也会在候选 overflow 桶内按 owner 与 request ID 去重，不再重复写入独立窗口。
+
+恢复实例会冻结当前内存快照并将其对账到 Redis，快照生成后的新请求直接使用 Redis，因此持续流量不要求静默期；属于冻结独立窗口或 overflow 成员的请求只等待自身窗口落库，其他新流量不受后续批次阻塞，角色转移则等待整轮恢复完成。能力探针取得的 Redis generation 会成为整轮对账锚点，并同时返回 Redis `TIME` 的精确毫秒值；成功的消费和转移也会按 generation + TTL 更新实例观测到的 Redis 时钟偏移。内存降级用该偏移计算 fixed-window，因此落后主机跨过本地边界时不会提前丢弃仍属于 Redis 活动窗口的预占，而无偏移的正常主机仍会在 15 分钟边界按期重置配额。若多批对账期间 Redis 已跨入下一代，剩余旧快照不会被带入新窗口。对账期间 readiness 保持 degraded，完整成功后才恢复共享后端；对账中断会暂时 fail-closed，并把竞态中虽成功返回的 Redis 消费转换为不确定内存决策，避免部分写入或 Redis 响应不确定时误放行，下一次完整对账成功后自动解除。半开探测只允许一个请求访问 Redis；由业务流量触发时，触发请求立即沿用已有内存决策，整批对账在后台完成，不会因最多 10000 个窗口而阻塞请求。
+
+自身窗口对账完成不代表整轮恢复已经提交。恢复期间已放行的 Redis 请求仍会按其实际 generation 和 request ID 镜像到有界内存记录，只有全部批次与来源释放成功后才统一清除；后续批次失败时保留这些请求，下次恢复按同一 ID 去重。若本地记录容量已满，即使 Redis 已成功预占，也不会放行无法保留记录的新请求。
+
+启动能力探针进行中，即使普通 Redis 消费或已发起的角色转移先返回成功，也要等待探针的最终结果再放行；探针失败后计入降级内存，避免取得第二份配额。明确的 Redis 拒绝仍立即拒绝。迟到成功以 Redis 返回的 generation 归属窗口，并仅用实际 Redis 调用时间估计时钟偏移（不包含等待探针或对账屏障的时间）；已过期的旧窗口只保留原 Redis 决策，不把旧计数迁入或覆盖新窗口。
+
+内存预占达到全局上限时，确定的本地来源可为净零增长的角色转移复用名额，包含 overflow 来源；只有目标确认可容纳且允许释放来源时才同步移动同一 request ID。目标已满、来源不确定或明确保留来源时仍拒绝，不提前丢弃来源；同桶转移保持幂等，不释放自己的计数。
+
+readiness 在启动及恢复时验证 fixed-window、对账与释放所需的全部 Redis 命令，成功后才报告共享后端可用。健康请求同样只触发或复用后台恢复并立即按当前状态返回。`/health.rateLimiter`、顶层 readiness 状态与 Prometheus 指标会标记实际后端。反向代理部署只有在代理链可信且正确限制来源时才配置 `TRUST_PROXY`；单层 Nginx 使用 `TRUST_PROXY=1`（一个 hop），不要使用 trust-all 的 `true`，否则客户端伪造的转发地址可能绕过限流或命中白名单。
 
 ### 4. 初始化数据库
 
@@ -385,9 +407,19 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo 任务注册表
+
+Neo 任务元数据基础仓储、取消/终态规则、7 天 TTL 与双跑独立索引说明见 [`phase-2-task-registry.md`](./docs/runbooks/phase-2-task-registry.md)。目前尚未接入任务中心端点和实际 Worker 业务消费。
+
+### Neo PostgreSQL 登录
+
+Neo 新增 `POST /api/v1/auth/login`，保留登录信封、JWT/Session、普通/记住登录有效期、账号锁定和密码过期标记。五次失败锁定 30 分钟，登录结果和失败计数在 PostgreSQL 用户行锁事务中保存，提交成功后才发放 Cookie。`AUTH_DATA_AUTHORITY=legacy-mysql` 时此新入口返回 503，不写 PostgreSQL；旧登录入口继续使用。此功能不自动切换数据权威源或生产流量。
+
+输入/密码验证并发与事务截止时间、上线前置条件、真实数据库验收及回滚边界见 [`docs/runbooks/phase-2-auth-login.md`](./docs/runbooks/phase-2-auth-login.md)。注销和本人会话列表/撤销已跟随相同鉴权数据源迁移，见 [`会话管理运行说明`](./docs/runbooks/phase-2-auth-sessions.md)；密码修改和清理调度仍需独立迁移，当前不可仅凭登录测试通过就替换 Legacy。
+
 ### Neo 操作审计
 
-Neo API 的全局审计拦截器沿用 Legacy 的认证、用户、角色、ASIN/变体组、配置、导出与手动监控动作映射；在响应完成后记录最终 HTTP 状态，普通只读请求、OPTIONS/HEAD 和未知路由跳过。审计写入 PostgreSQL 主库 `audit_logs`，不依赖 MySQL 鉴权用户在 PostgreSQL 中存在副本。审计查询端点和归档调度尚待后续业务域迁移；双跑期 Legacy 的审计数据仍由旧系统提供。
+Neo API 的全局审计拦截器沿用 Legacy 的认证、用户、角色、ASIN/变体组、配置、导出与手动监控动作映射；在响应完成后记录最终 HTTP 状态，普通只读请求、OPTIONS/HEAD 和未知路由跳过。审计写入 PostgreSQL 主库 `audit_logs`，不依赖 MySQL 鉴权用户在 PostgreSQL 中存在副本。四个只读审计端点已接入 PostgreSQL，见 [`审计查询运行说明`](./docs/runbooks/phase-2-audit-query.md)；归档调度尚待迁移，双跑期 Legacy 的新增审计仍由旧系统提供。
 
 请求数据递归脱敏，最多 16 KiB；路由记录使用模板（资源 ID 独立记录），不保存 query、Cookie 或认证头，客户端 IP 使用 Fastify 的可信代理解析结果。错误仅保存固定失败标记与最终状态，避免供应商异常回显密钥。审计持久化不阻塞响应，最多 256 条待写入，满载或数据库失败会丢弃并记录日志，因此不是保证送达的事务审计；受控关闭最多等待 5 秒。此阶段不新增数据库迁移，回滚模块即可停止 Neo 审计写入，已有记录保留。
 
@@ -454,6 +486,12 @@ Neo API 的 `/ws` 保留旧系统 9 种服务端消息与 `broadcastToUser`，�
 | `npm run test-db`              | 测试主数据库连接                       |
 | `npm run test:all`             | 运行后端集成检查；需要已配置的依赖服务 |
 | `npm run test:task-regression` | 运行后台任务回归检查                   |
+
+### Neo BullMQ 队列策略
+
+八类队列的 attempts/backoff、成功/失败保留时间、限速与并发已与 Legacy 注册代码自动对照。Neo 使用独立的 `${BULL_PREFIX}:neo` 命名空间；`BULL_PREFIX` 本身仍保留旧系统含义，禁止混用两种 job 数据格式。处理器预检 `buildWorkerPlans` 要求所有选中队列都有真实回调，payload 在业务域验证之前保持 `unknown`。
+
+当前入口仍只创建 Queue 和看门狗，日志明确 `mode=queue-scaffold`、`registeredProcessors=0`，尚未开启业务消费。任务元数据/索引、调度、处理器与新旧任务等价仍待后续迁移。具体策略、变量和切换/回滚纪律见 [P2-T2a 运行说明](./docs/runbooks/phase-2-bullmq-queues.md)。
 
 ## 项目结构
 

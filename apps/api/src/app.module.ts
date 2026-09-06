@@ -7,6 +7,7 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { LoggerModule } from './logger/logger.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { RedisModule } from './redis/redis.module';
 import { WebSocketModule } from './websocket/websocket.module';
 
@@ -20,6 +21,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     AuditModule,
     WebSocketModule,
     MetricsModule,
+    RateLimitModule,
     HealthModule,
   ],
 })
