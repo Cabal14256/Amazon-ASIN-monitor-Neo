@@ -5,6 +5,7 @@ export * from './repositories/audit-repository';
 export * from './repositories/auth-repository';
 export * from './repositories/bounded-auth-repository';
 export * from './repositories/legacy-mysql-auth-repository';
+export * from './repositories/login-repository';
 export * from './schema';
 export * from './schema-competitor';
 export * from './timescale';

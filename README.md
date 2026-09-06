@@ -387,6 +387,12 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo PostgreSQL 登录
+
+Neo 新增 `POST /api/v1/auth/login`，保留登录信封、JWT/Session、普通/记住登录有效期、账号锁定和密码过期标记。五次失败锁定 30 分钟，登录结果和失败计数在 PostgreSQL 用户行锁事务中保存，提交成功后才发放 Cookie。`AUTH_DATA_AUTHORITY=legacy-mysql` 时此新入口返回 503，不写 PostgreSQL；旧登录入口继续使用。此功能不自动切换数据权威源或生产流量。
+
+输入/密码验证并发与事务截止时间、上线前置条件、真实数据库验收及回滚边界见 [`docs/runbooks/phase-2-auth-login.md`](./docs/runbooks/phase-2-auth-login.md)。密码修改、注销、会话管理和清理调度尚需独立迁移，当前不可仅凭登录测试通过就替换 Legacy。
+
 ### Neo 操作审计
 
 Neo API 的全局审计拦截器沿用 Legacy 的认证、用户、角色、ASIN/变体组、配置、导出与手动监控动作映射；在响应完成后记录最终 HTTP 状态，普通只读请求、OPTIONS/HEAD 和未知路由跳过。审计写入 PostgreSQL 主库 `audit_logs`，不依赖 MySQL 鉴权用户在 PostgreSQL 中存在副本。审计查询端点和归档调度尚待后续业务域迁移；双跑期 Legacy 的审计数据仍由旧系统提供。
