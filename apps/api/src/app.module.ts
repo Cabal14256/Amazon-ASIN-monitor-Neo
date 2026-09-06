@@ -9,6 +9,7 @@ import { LoggerModule } from './logger/logger.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { RedisModule } from './redis/redis.module';
+import { RoleModule } from './roles/role.module';
 import { WebSocketModule } from './websocket/websocket.module';
 
 @Module({
@@ -18,6 +19,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     DatabaseModule,
     RedisModule,
     AuthModule,
+    RoleModule,
     AuditModule,
     WebSocketModule,
     MetricsModule,

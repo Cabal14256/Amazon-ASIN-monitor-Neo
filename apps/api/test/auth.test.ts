@@ -447,7 +447,9 @@ describe('PermissionCacheService', () => {
     vi.restoreAllMocks();
   });
 
-  function cache(customEnv: Env = env): PermissionCacheService {
+  function cache(
+    customEnv: Env = { ...env, AUTH_DATA_AUTHORITY: 'legacy-mysql' },
+  ): PermissionCacheService {
     return new PermissionCacheService(customEnv, redis, repository, logger);
   }
 

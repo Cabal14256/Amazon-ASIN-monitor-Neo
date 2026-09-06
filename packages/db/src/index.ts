@@ -9,6 +9,7 @@ export * from './repositories/auth-repository';
 export * from './repositories/bounded-auth-repository';
 export * from './repositories/legacy-mysql-auth-repository';
 export * from './repositories/redis-task-repository';
+export * from './repositories/role-repository';
 export * from './repositories/task-state';
 
 export * from './repositories/login-repository';

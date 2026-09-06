@@ -15,10 +15,10 @@ export const permissionSchema = z.object({
   id: z.string(),
   code: z.string(),
   name: z.string(),
-  resource: z.string(),
-  action: z.string(),
+  resource: z.string().nullable(),
+  action: z.string().nullable(),
   description: z.string().nullable().optional(),
-  create_time: dateTimeString.optional(),
+  create_time: dateTimeString.nullable().optional(),
 });
 export type Permission = z.infer<typeof permissionSchema>;
 
@@ -30,8 +30,8 @@ export const roleWithPermissionsSchema = roleSchema.extend({
         id: z.string(),
         code: z.string(),
         name: z.string(),
-        resource: z.string(),
-        action: z.string(),
+        resource: z.string().nullable(),
+        action: z.string().nullable(),
       }),
     )
     .optional(),

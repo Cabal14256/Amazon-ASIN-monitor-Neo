@@ -31,6 +31,37 @@ import {
  */
 
 describe('users 域', () => {
+  it('保留角色/权限表允许的 NULL 日期、resource 与 action', () => {
+    const permission = {
+      id: 'p-null',
+      code: 'custom:read',
+      name: '自定义',
+      resource: null,
+      action: null,
+      create_time: null,
+    };
+    expect(
+      permissionListResultSchema.parse({
+        success: true,
+        data: { list: [permission], grouped: { other: [permission] } },
+      }).data?.list[0],
+    ).toMatchObject(permission);
+    expect(
+      roleListResultSchema.parse({
+        success: true,
+        data: [
+          {
+            id: 'role-null',
+            code: 'CUSTOM',
+            name: '自定义',
+            create_time: null,
+            update_time: null,
+            permissions: [permission],
+          },
+        ],
+      }).data?.[0].create_time,
+    ).toBeNull();
+  });
   it('用户列表 data 含 list/total，列表项带 roles 摘要', () => {
     const parsed = userListResultSchema.parse({
       success: true,
