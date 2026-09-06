@@ -11,6 +11,7 @@ import type {
   AuthRoleRecord,
   AuthSessionRecord,
   AuthUserRecord,
+  SessionManagementRepositoryPort,
 } from './auth-repository';
 
 export interface LegacyMysqlAuthRepositoryConfig {
@@ -66,8 +67,24 @@ function optionalTimestamp(value: string | null): Date | null {
   return value === null ? null : parseShanghaiTimestamp(value);
 }
 
+function sessionRecord(row: LegacySessionRow): AuthSessionRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    userAgent: row.user_agent,
+    ipAddress: row.ip_address,
+    status: row.status,
+    rememberMe: Boolean(row.remember_me),
+    createdAt: parseShanghaiTimestamp(row.created_at),
+    lastActiveAt: parseShanghaiTimestamp(row.last_active_at),
+    expiresAt: optionalTimestamp(row.expires_at),
+  };
+}
+
 /** 双跑期直接读取 Legacy MySQL 的实时用户、Session 与 RBAC 权威状态。 */
-export class LegacyMysqlAuthRepository implements AuthDataRepository {
+export class LegacyMysqlAuthRepository
+  implements AuthDataRepository, SessionManagementRepositoryPort
+{
   private readonly pool: Pool;
   private closed = false;
 
@@ -167,17 +184,30 @@ export class LegacyMysqlAuthRepository implements AuthDataRepository {
       [sessionId],
     );
     if (!row) return undefined;
-    return {
-      id: row.id,
-      userId: row.user_id,
-      userAgent: row.user_agent,
-      ipAddress: row.ip_address,
-      status: row.status,
-      rememberMe: Boolean(row.remember_me),
-      createdAt: parseShanghaiTimestamp(row.created_at),
-      lastActiveAt: parseShanghaiTimestamp(row.last_active_at),
-      expiresAt: optionalTimestamp(row.expires_at),
-    };
+    return sessionRecord(row);
+  }
+
+  async listSessionsByUserId(userId: string): Promise<AuthSessionRecord[]> {
+    const rows = await this.rows<LegacySessionRow>(
+      `SELECT id, user_id, user_agent, ip_address, status, remember_me,
+              created_at, last_active_at, expires_at
+         FROM sessions WHERE user_id = ? ORDER BY created_at DESC, id DESC`,
+      [userId],
+    );
+    return rows.map(sessionRecord);
+  }
+
+  async revokeOwnedSession(
+    sessionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const result = await this.query<ResultSetHeader>(
+      `UPDATE sessions SET status = 'REVOKED',
+              last_active_at = UTC_TIMESTAMP() + INTERVAL 8 HOUR
+        WHERE id = ? AND user_id = ?`,
+      [sessionId, userId],
+    );
+    return result.affectedRows === 1;
   }
 
   async revokeSession(sessionId: string): Promise<void> {
