@@ -71,6 +71,7 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
       { logger: false },
     );
     audit = app.get(AuditService);
+    vi.spyOn(audit, 'record');
     configureHttpApp(app, { logger, audit });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
@@ -136,7 +137,25 @@ describe.skipIf(!enabled)('Neo login / real PostgreSQL', () => {
         payload: { username, password: suppliedPassword, rememberMe },
       });
   async function loginAudits(username: string) {
+    // A successful HTTP response alone does not prove that the final audit hook
+    // ran or its independent database transaction committed.
+    await vi.waitFor(() =>
+      expect(
+        vi
+          .mocked(audit.record)
+          .mock.calls.some(
+            ([entry]) =>
+              String(entry.requestData?.username).toLowerCase() ===
+              username.toLowerCase(),
+          ),
+      ).toBe(true),
+    );
     await audit.flush();
+    expect(
+      vi
+        .mocked(logger.error)
+        .mock.calls.filter(([message]) => message === '操作审计写入失败'),
+    ).toEqual([]);
     const { rows } = await pools.primaryPool.query(
       `SELECT * FROM audit_logs WHERE action = 'LOGIN' AND resource = 'auth'
         AND lower(request_data->>'username') = $1 ORDER BY response_status`,
