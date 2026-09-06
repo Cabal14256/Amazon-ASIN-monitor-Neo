@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from 'pg';
 import { createDb, type Db } from '../client';
-import { AuthRepository, type AuthDataRepository } from './auth-repository';
+import {
+  AuthRepository,
+  type AuthDataRepository,
+  type SessionManagementRepositoryPort,
+} from './auth-repository';
 
 export class AuthQueryTimeoutError extends Error {
   readonly code = 'AUTH_QUERY_TIMEOUT';
@@ -65,7 +69,9 @@ export async function withAuthDatabaseDeadline<T>(
 }
 
 /** API 鉴权专用包装，复用主池但每个操作占用独立、有截止时间的事务。 */
-export class BoundedAuthRepository implements AuthDataRepository {
+export class BoundedAuthRepository
+  implements AuthDataRepository, SessionManagementRepositoryPort
+{
   constructor(private readonly pool: Pool) {}
   private run<T>(
     operation: (repository: AuthRepository) => Promise<T>,
@@ -79,6 +85,12 @@ export class BoundedAuthRepository implements AuthDataRepository {
   }
   revokeSession(id: string) {
     return this.run((repo) => repo.revokeSession(id));
+  }
+  listSessionsByUserId(userId: string) {
+    return this.run((repo) => repo.listSessionsByUserId(userId));
+  }
+  revokeOwnedSession(sessionId: string, userId: string) {
+    return this.run((repo) => repo.revokeOwnedSession(sessionId, userId));
   }
   touchSession(id: string) {
     return this.run((repo) => repo.touchSession(id));
