@@ -15,7 +15,7 @@
 
 仅用同一套 ORM 写入后读回会使两个偏差相互抵消，不能证明与 Legacy/ETL/数据库默认时间一致。会话和密码到期时间、监控范围查询、审计展示都必须使用同一边界。
 
-双库 schema 统一使用 `src/schema/timestamp.ts` 中的 Drizzle `customType`。读取按 D8 的固定 UTC+8 转为 `Date`，写入与比较谓词将 `Date` 转为北京时间无时区字符串。SQL 类型仍返回 `timestamp`，数据库 catalog 仍为 `timestamp without time zone`；NULL 由 ORM 保留。非法 Date/不支持的无限时间值直接报错，错误不包含原始字段内容。
+双库 schema 统一使用 `src/timestamps.ts` 中的 Drizzle `customType`，pg OID parser 也复用这个模块的解析函数，schema 不反向依赖连接池模块。读取按 D8 的固定 UTC+8 转为 `Date`，写入与比较谓词将 `Date` 转为北京时间无时区字符串。SQL 类型仍返回 `timestamp`，数据库 catalog 仍为 `timestamp without time zone`；NULL 由 ORM 保留。非法 Date/不支持的无限时间值直接报错，错误不包含原始字段内容。
 
 这是明确的 ORM 类型转换，不依赖 Node 宿主时区或数据库连接的时区来猜测参数含义。数据库的 `LOCALTIMESTAMP` 默认值仍依赖数据库时区，部署必须保留 `Asia/Shanghai` 配置。JS Date 保留毫秒精度，与此前接口精度一致；不要用 Date 读写循环重存要求保留微秒精度的历史字段。
 

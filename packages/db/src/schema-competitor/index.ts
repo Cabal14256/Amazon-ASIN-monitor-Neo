@@ -11,7 +11,7 @@ import {
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/pg-core';
-import { timestampColumn } from '../schema/timestamp';
+import { shanghaiTimestamp as timestampColumn } from '../timestamps';
 
 const localTimestamp = sql`LOCALTIMESTAMP`;
 
