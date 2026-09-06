@@ -4,7 +4,7 @@
 
 ## 入口与兼容行为
 
-- `apps/web/src/services/browser-runtime.ts` 创建一个 `transport` 单例，提供 `http`、`auth`、`ws`、`session` 和 `queryClient`。`main.tsx` 使用这个 QueryClient；创建时没有 HTTP 请求，也不自动连接 WS。
+- `apps/web/src/services/browser-runtime.ts` 创建一个 `transport` 单例，提供 `http`、`auth`、`tasks`、`ws`、`session` 和 `queryClient`。`main.tsx` 使用这个 QueryClient；创建时没有 HTTP 请求，也不自动连接 WS。
 - `auth` 是登录、当前用户、注销、Session 列表/撤销、改密、资料更新七个真实 REST 端点的类型化 service，复用共享 Zod 响应契约。它可以对接 Legacy 或 Neo，不包含模拟成功后端。
 - `lib/api-url.ts` 原样迁移 Legacy helper；测试直接对照源码和旧 URL 矩阵。`http.url(path, query)` 与 `http.request(path, { query })` 共用最终 URL 入口，兼容重复 `/api`/`v1`、部署子路径和已有 query/hash。新增参数覆盖同名参数，不再拼出第二个 `?`。
 - `request` 返回完整信封，保留 `success/data/errorCode/message`，不静默丢弃分页/消息元数据。HTTP 非 2xx、`success:false` 和 401 分型为 `ApiError`；上游业务 `errorMessage` 限 500 字符供 UI 纯文本显示，不将原始请求/响应、凭据或完整网络异常附到 Error。
@@ -41,6 +41,6 @@
 
 运行根目录 `corepack pnpm --filter web test`、`typecheck`、`lint`、`build`。新测试覆盖 URL 对照、Cookie/storage、HTTP/Query 策略、七个 auth service、WS 状态机，以及真实 loopback HTTP 请求/跨域重定向拒绝/响应流超时并确认 socket close。WS 使用确定性浏览器 socket 替身，Cookie 使用模拟存储；不是实浏览器 Cookie/CORS 或真实账号验收。
 
-后续仍需完成：auth context/15 路由/权限 guard、登录与资料页、WS React hooks、任务中心与异步下载 hooks、导出浏览器落盘、设计系统和全部页面、浏览器 E2E/灰度验收。`http.url()` 目前只构建下载地址，不声称已实现完整导出/任务 UI；无前端路由或生产切流权限被此 PR 代替。
+Issue #44 补充了 [任务客户端与 Query hooks](phase-3-task-hooks.md)，包括轮询、WS 失效通知、任务等待与取消和规范化下载地址。后续仍需完成：auth context/15 路由/权限 guard、登录与资料页、其他 WS React hooks、任务中心 UI、导出浏览器落盘、设计系统和全部页面、浏览器 E2E/灰度验收。下载地址与等待函数不等于完整导出/任务 UI；无前端路由或生产切流权限被这些基础设施代替。
 
 本批无数据库/依赖版本变化，Legacy 源码不删除。回滚本 PR 即恢复旧 Neo 空骨架 QueryClient 和构建配置，不影响 Legacy 用户流量。
