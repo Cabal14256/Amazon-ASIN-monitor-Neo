@@ -7,6 +7,7 @@ import {
 } from '../lib/realtime';
 import { SessionStore } from '../lib/session';
 import { AuthApi } from './auth';
+import { TaskApi } from './tasks';
 
 export function createTransportRuntime(options: {
   pageOrigin: string;
@@ -29,6 +30,7 @@ export function createTransportRuntime(options: {
     socket: options.socket,
   });
   const clearWork = () => {
+    tasks.cancelWaits();
     ws.disconnect();
     http.cancelAll();
     queryClient.clear();
@@ -46,6 +48,7 @@ export function createTransportRuntime(options: {
     },
   });
   const auth = new AuthApi(http, session, reset, clearWork);
+  const tasks = new TaskApi(http, ws);
   const refreshSession = () => {
     session.refreshHints();
     clearWork();
@@ -56,9 +59,11 @@ export function createTransportRuntime(options: {
     ws,
     http,
     auth,
+    tasks,
     reset,
     refreshSession,
     dispose: () => {
+      tasks.cancelWaits();
       ws.disconnect();
       http.close();
       queryClient.clear();
