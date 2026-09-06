@@ -6,6 +6,7 @@ import {
   LegacyMysqlAuthRepository,
   PgLoginRepository,
   type AuthDataRepository,
+  type SessionManagementRepositoryPort,
 } from '@asin-monitor/db';
 import { ENV } from '../config/config.module';
 import { DatabaseModule } from '../database/database.module';
@@ -25,12 +26,14 @@ import {
 } from './login.service';
 import { PermissionCacheService } from './permission-cache.service';
 import { PermissionsGuard } from './permissions.guard';
+import { SessionController } from './session.controller';
+import { SessionService } from './session.service';
 
 export function createAuthDataRepository(
   env: Env,
   pools: ApplicationDatabasePools,
   logger: AppLogger,
-): AuthDataRepository {
+): AuthDataRepository & SessionManagementRepositoryPort {
   if (env.AUTH_DATA_AUTHORITY === 'postgresql') {
     logger.info('鉴权数据权威源已选择', 'AuthModule', {
       source: 'postgresql',
@@ -54,7 +57,7 @@ export function createAuthDataRepository(
 
 @Module({
   imports: [DatabaseModule, RedisModule],
-  controllers: [AuthController, LoginController],
+  controllers: [AuthController, LoginController, SessionController],
   providers: [
     {
       provide: LOGIN_REPOSITORY,
@@ -64,6 +67,7 @@ export function createAuthDataRepository(
     },
     { provide: PASSWORD_COMPARER, useValue: comparePassword },
     LoginService,
+    SessionService,
     {
       provide: AUTH_DATA_REPOSITORY,
       inject: [ENV, ApplicationDatabasePools, AppLogger],
