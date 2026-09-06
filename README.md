@@ -415,7 +415,7 @@ Neo 任务元数据基础仓储、取消/终态规则、7 天 TTL 与双跑独�
 
 Neo 新增 `POST /api/v1/auth/login`，保留登录信封、JWT/Session、普通/记住登录有效期、账号锁定和密码过期标记。五次失败锁定 30 分钟，登录结果和失败计数在 PostgreSQL 用户行锁事务中保存，提交成功后才发放 Cookie。`AUTH_DATA_AUTHORITY=legacy-mysql` 时此新入口返回 503，不写 PostgreSQL；旧登录入口继续使用。此功能不自动切换数据权威源或生产流量。
 
-输入/密码验证并发与事务截止时间、上线前置条件、真实数据库验收及回滚边界见 [`docs/runbooks/phase-2-auth-login.md`](./docs/runbooks/phase-2-auth-login.md)。注销和本人会话列表/撤销已跟随相同鉴权数据源迁移，见 [`会话管理运行说明`](./docs/runbooks/phase-2-auth-sessions.md)；密码修改和清理调度仍需独立迁移，当前不可仅凭登录测试通过就替换 Legacy。
+输入/密码验证并发与事务截止时间、上线前置条件、真实数据库验收及回滚边界见 [`docs/runbooks/phase-2-auth-login.md`](./docs/runbooks/phase-2-auth-login.md)。注销和本人会话列表/撤销已跟随相同鉴权数据源迁移，见 [`会话管理运行说明`](./docs/runbooks/phase-2-auth-sessions.md)；个人资料与原子密码修改见 [`账号更新运行说明`](./docs/runbooks/phase-2-auth-account.md)，仅在 PostgreSQL 为权威源时写入。auth 七端点已有实现，前端强制改密、清理调度及生产迁移验收仍待完成，不可仅凭接口测试通过就替换 Legacy。
 
 ### Neo 操作审计
 

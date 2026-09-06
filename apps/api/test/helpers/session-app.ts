@@ -7,7 +7,7 @@ import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
-import { Test } from '@nestjs/testing';
+import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import { vi } from 'vitest';
 import { AUTH_DATA_REPOSITORY } from '../../src/auth/auth.constants';
 import { AuthModule } from '../../src/auth/auth.module';
@@ -19,6 +19,7 @@ import { ApplicationRedisClient } from '../../src/redis/redis.service';
 export async function sessionApp(
   repository?: AuthDataRepository & SessionManagementRepositoryPort,
   overrides: NodeJS.ProcessEnv = {},
+  configure?: (builder: TestingModuleBuilder) => TestingModuleBuilder,
 ) {
   const env = loadEnv({
     DATABASE_URL: 'postgresql://localhost/session_fixture',
@@ -50,7 +51,7 @@ export async function sessionApp(
     builder = builder
       .overrideProvider(AUTH_DATA_REPOSITORY)
       .useValue(repository);
-  const moduleRef = await builder.compile();
+  const moduleRef = await (configure ? configure(builder) : builder).compile();
   const app = moduleRef.createNestApplication<NestFastifyApplication>(
     new FastifyAdapter({ logger: false }),
   );

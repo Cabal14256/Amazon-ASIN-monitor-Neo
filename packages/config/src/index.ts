@@ -186,6 +186,7 @@ const envObjectSchema = z.object({
   TASK_USER_MAX_ITEMS: z.coerce.number().int().min(1).max(1000).default(200),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
+  PASSWORD_EXPIRE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
   AUTH_COOKIE_NAME: cookieNameSchema.default('amazon_asin_monitor_auth'),
   AUTH_HINT_COOKIE_NAME: cookieNameSchema.default(
     'amazon_asin_monitor_session',

@@ -1,6 +1,7 @@
 export * from './aggregate-reconciliation';
 export * from './client';
 export * from './migration';
+export * from './repositories/account-repository';
 export * from './repositories/audit-query-deadline';
 export * from './repositories/audit-query-repository';
 export * from './repositories/audit-repository';

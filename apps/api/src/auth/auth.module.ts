@@ -4,6 +4,7 @@ import type { Env } from '@asin-monitor/config';
 import {
   BoundedAuthRepository,
   LegacyMysqlAuthRepository,
+  PgAccountRepository,
   PgLoginRepository,
   type AuthDataRepository,
   type SessionManagementRepositoryPort,
@@ -13,6 +14,13 @@ import { DatabaseModule } from '../database/database.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
 import { RedisModule } from '../redis/redis.module';
+import { AccountController } from './account.controller';
+import {
+  ACCOUNT_REPOSITORY,
+  AccountService,
+  PASSWORD_HASHER,
+  hashPassword,
+} from './account.service';
 import { AUTH_DATA_REPOSITORY } from './auth.constants';
 import { AuthController } from './auth.controller';
 import { AuthenticationGuard } from './authentication.guard';
@@ -57,7 +65,12 @@ export function createAuthDataRepository(
 
 @Module({
   imports: [DatabaseModule, RedisModule],
-  controllers: [AuthController, LoginController, SessionController],
+  controllers: [
+    AuthController,
+    LoginController,
+    SessionController,
+    AccountController,
+  ],
   providers: [
     {
       provide: LOGIN_REPOSITORY,
@@ -66,6 +79,14 @@ export function createAuthDataRepository(
         new PgLoginRepository(pools.primaryPool),
     },
     { provide: PASSWORD_COMPARER, useValue: comparePassword },
+    { provide: PASSWORD_HASHER, useValue: hashPassword },
+    {
+      provide: ACCOUNT_REPOSITORY,
+      inject: [ApplicationDatabasePools],
+      useFactory: (pools: ApplicationDatabasePools) =>
+        new PgAccountRepository(pools.primaryPool),
+    },
+    AccountService,
     LoginService,
     SessionService,
     {
