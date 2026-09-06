@@ -2,6 +2,8 @@ import fastifyCookie from '@fastify/cookie';
 import { RequestMethod } from '@nestjs/common';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 
+import { registerAuditHooks } from './audit/audit.interceptor';
+import type { AuditService } from './audit/audit.service';
 import { ApiExceptionFilter } from './common/api-exception.filter';
 import { ZodValidationPipe } from './common/zod-validation.pipe';
 import type { HealthErrorStatsService } from './health/health.service';
@@ -10,6 +12,7 @@ import { registerHttpMetricsHook } from './metrics/http-metrics.hook';
 import type { MetricsService } from './metrics/metrics.service';
 
 interface HttpAppOptions {
+  audit?: AuditService;
   corsOrigin?: string;
   logger?: AppLogger;
   metrics?: MetricsService;
@@ -22,6 +25,7 @@ export function configureHttpApp(
   options: HttpAppOptions = {},
 ): void {
   app.enableShutdownHooks();
+  if (options.audit) registerAuditHooks(app, options.audit);
   app.register(fastifyCookie);
   app.setGlobalPrefix('api/v1', {
     exclude: [
