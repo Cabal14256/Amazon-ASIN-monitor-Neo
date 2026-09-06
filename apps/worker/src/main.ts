@@ -7,6 +7,7 @@ import { Redis, type RedisOptions } from 'ioredis';
 import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
 import { attachQueueErrorLogger, attachRedisErrorLogger } from './queue-events';
+import { getNeoQueuePrefix, getQueueOptions } from './queue-policy';
 import {
   getPhysicalQueueName,
   resolveQueueSelection,
@@ -47,10 +48,10 @@ async function bootstrap(): Promise<void> {
 
   const queues = enabled.map((name) => {
     const physicalName = getPhysicalQueueName(name);
-    const queue = new Queue(physicalName, {
-      connection,
-      prefix: env.BULL_PREFIX,
-    });
+    const queue = new Queue(
+      physicalName,
+      getQueueOptions(name, env, connection),
+    );
     attachQueueErrorLogger(queue, physicalName);
     return queue;
   });
@@ -70,6 +71,9 @@ async function bootstrap(): Promise<void> {
   });
 
   logger.info('Worker 已启动', {
+    mode: 'queue-scaffold',
+    registeredProcessors: 0,
+    prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
     physicalQueues: enabled.map(getPhysicalQueueName),
     queueCount: queues.length,
