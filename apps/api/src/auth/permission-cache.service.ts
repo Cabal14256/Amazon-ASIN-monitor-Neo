@@ -10,6 +10,7 @@ import {
   AUTH_DATA_REPOSITORY,
   type AuthRepositoryPort,
 } from './auth.constants';
+import { PostgresPermissionCache } from './postgres-permission-cache';
 
 type CacheType = 'permissions' | 'roles';
 interface MemoryEntry<T> {
@@ -33,6 +34,7 @@ const rolesSchema = z.array(
 export class PermissionCacheService {
   private readonly permissions = new Map<string, MemoryEntry<string[]>>();
   private readonly roles = new Map<string, MemoryEntry<AuthRoleRecord[]>>();
+  private readonly postgres: PostgresPermissionCache;
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -41,7 +43,13 @@ export class PermissionCacheService {
     @Inject(AUTH_DATA_REPOSITORY)
     private readonly repository: AuthRepositoryPort,
     @Inject(AppLogger) private readonly logger: AppLogger,
-  ) {}
+  ) {
+    this.postgres = new PostgresPermissionCache(
+      redis,
+      logger,
+      env.AUTH_PERMISSION_CACHE_TTL_SECONDS,
+    );
+  }
 
   private key(type: CacheType, userId: string): string {
     return `user:${type}:${userId}`;
@@ -134,6 +142,10 @@ export class PermissionCacheService {
   }
 
   async getPermissions(userId: string): Promise<string[]> {
+    if (this.env.AUTH_DATA_AUTHORITY === 'postgresql')
+      return this.postgres.read('permissions', userId, permissionsSchema, () =>
+        this.repository.getPermissionCodes(userId),
+      );
     const redisValue = await this.getRedis(
       'permissions',
       userId,
@@ -157,6 +169,12 @@ export class PermissionCacheService {
   }
 
   async getRoles(userId: string): Promise<string[]> {
+    if (this.env.AUTH_DATA_AUTHORITY === 'postgresql')
+      return (
+        await this.postgres.read('roles', userId, rolesSchema, () =>
+          this.repository.getRoles(userId),
+        )
+      ).map(({ code }) => code);
     const redisValue = await this.getRedis('roles', userId, rolesSchema);
     if (redisValue.state === 'hit') {
       this.setMemory(this.roles, userId, redisValue.value);
@@ -176,6 +194,8 @@ export class PermissionCacheService {
   }
 
   async clearUserCache(userId: string): Promise<void> {
+    if (this.env.AUTH_DATA_AUTHORITY === 'postgresql')
+      return this.clearPostgresCaches();
     this.permissions.delete(userId);
     this.roles.delete(userId);
     try {
@@ -188,5 +208,9 @@ export class PermissionCacheService {
         reason: 'redis_unavailable',
       });
     }
+  }
+
+  clearPostgresCaches(): Promise<void> {
+    return this.postgres.clear();
   }
 }

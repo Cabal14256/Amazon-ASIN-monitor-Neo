@@ -3,6 +3,7 @@ import type {
   AuthDataRepository,
   SessionManagementRepositoryPort,
 } from '@asin-monitor/db';
+import type { ModuleMetadata } from '@nestjs/common';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
@@ -20,6 +21,7 @@ export async function sessionApp(
   repository?: AuthDataRepository & SessionManagementRepositoryPort,
   overrides: NodeJS.ProcessEnv = {},
   configure?: (builder: TestingModuleBuilder) => TestingModuleBuilder,
+  imports: ModuleMetadata['imports'] = [AuthModule],
 ) {
   const env = loadEnv({
     DATABASE_URL: 'postgresql://localhost/session_fixture',
@@ -36,7 +38,7 @@ export async function sessionApp(
     warn: vi.fn(),
     error: vi.fn(),
   };
-  let builder = Test.createTestingModule({ imports: [AuthModule] })
+  let builder = Test.createTestingModule({ imports })
     .overrideProvider(ENV)
     .useValue(env)
     .overrideProvider(AppLogger)

@@ -21,8 +21,8 @@ export const roleSchema = z.object({
   code: z.string(),
   name: z.string(),
   description: z.string().nullable().optional(),
-  create_time: dateTimeString.optional(),
-  update_time: dateTimeString.optional(),
+  create_time: dateTimeString.nullable().optional(),
+  update_time: dateTimeString.nullable().optional(),
 });
 export type Role = z.infer<typeof roleSchema>;
 
