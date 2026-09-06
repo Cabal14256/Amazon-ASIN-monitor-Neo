@@ -20,6 +20,8 @@ Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./d
 
 Neo 双库的 Drizzle 日期列按北京时间读写，原因、验证和既有数据核查边界见 [`D8 时间映射说明`](./docs/runbooks/phase-1-drizzle-timestamps.md)。
 
+Neo 审计日志列表、详情和两类统计接口的权限、时间筛选及数据范围见 [`审计查询运行说明`](./docs/runbooks/phase-2-audit-query.md)。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。
