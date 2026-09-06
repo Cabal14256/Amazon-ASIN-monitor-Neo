@@ -31,4 +31,6 @@ BullMQ 的 `limiter` 配置属于 Worker，跨同队列多个 Worker 共用；`d
 
 ## 验证
 
+Worker 的 `test` 命令会先构建工作区依赖，确保使用当前分支的 config/contracts 导出，避免切换分支后读取旧 dist 导致并发和限速配置缺失；无需先手工执行其他包的测试。
+
 `corepack pnpm --filter worker test` 对照 8 类旧队列策略、选择器与预检。显式 `RUN_INTEGRATION_TESTS=true` 时运行 `corepack pnpm --filter worker exec vitest run test/queue-policy.integration.test.ts`，在随机 fixture 前缀内启动两名真实 BullMQ Worker，验证跨 Worker 限速、5 秒退避重试、结果保留和 Legacy key 不变；清理仅限该随机前缀，绝不 FLUSHDB。
