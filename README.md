@@ -403,6 +403,10 @@ npm --prefix server run rebuild:agg
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
 
+### Neo 任务注册表
+
+Neo 任务元数据基础仓储、取消/终态规则、7 天 TTL 与双跑独立索引说明见 [`phase-2-task-registry.md`](./docs/runbooks/phase-2-task-registry.md)。目前尚未接入任务中心端点和实际 Worker 业务消费。
+
 ### Neo PostgreSQL 登录
 
 Neo 新增 `POST /api/v1/auth/login`，保留登录信封、JWT/Session、普通/记住登录有效期、账号锁定和密码过期标记。五次失败锁定 30 分钟，登录结果和失败计数在 PostgreSQL 用户行锁事务中保存，提交成功后才发放 Cookie。`AUTH_DATA_AUTHORITY=legacy-mysql` 时此新入口返回 503，不写 PostgreSQL；旧登录入口继续使用。此功能不自动切换数据权威源或生产流量。
