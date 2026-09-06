@@ -72,6 +72,11 @@ jobs:
       - name: Test database package
         run: pnpm --filter @asin-monitor/db test
 
+      - name: Test and typecheck shared SP-API client
+        run: |
+          pnpm --filter @asin-monitor/sp-api test
+          pnpm --filter @asin-monitor/sp-api typecheck
+
       - name: Test new api
         run: pnpm --filter @asin-monitor/api test
 
@@ -85,7 +90,7 @@ jobs:
         run: pnpm --filter @asin-monitor/web lint
 
       - name: Build new packages
-        run: pnpm --filter @asin-monitor/config --filter @asin-monitor/contracts --filter @asin-monitor/db build
+        run: pnpm --filter @asin-monitor/config --filter @asin-monitor/contracts --filter @asin-monitor/db --filter @asin-monitor/sp-api build
 
       - name: Build new api & worker
         run: pnpm --filter @asin-monitor/api --filter @asin-monitor/worker build

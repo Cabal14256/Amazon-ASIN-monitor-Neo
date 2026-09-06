@@ -1,5 +1,6 @@
 export * from './asin';
 export * from './audit';
+export * from './audit-neo';
 export * from './auth';
 export * from './backup';
 export * from './competitor';
