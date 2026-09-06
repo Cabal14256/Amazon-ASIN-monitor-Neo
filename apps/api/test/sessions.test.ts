@@ -282,7 +282,7 @@ describe('Neo own-session HTTP management', () => {
       expect(output).not.toContain('session-private-data');
     },
   );
-  it('bounds pending session operations and resumes admission after failure', async () => {
+  it('bounds pending session operations and resumes admission after completion', async () => {
     let finish!: (value: AuthSessionRecord[]) => void;
     repository.listSessionsByUserId.mockReturnValue(
       new Promise((resolve) => {
