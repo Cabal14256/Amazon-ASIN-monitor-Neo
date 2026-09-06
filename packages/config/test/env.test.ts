@@ -25,14 +25,18 @@ describe('loadEnv', () => {
     expect(env.LOG_LEVEL).toBe('INFO');
     expect(env.PORT).toBe(3100);
     expect(env.CORS_ORIGIN).toBe('http://localhost:8000');
+    expect(env.TRUST_PROXY).toBeUndefined();
     expect(env.PROCESS_ROLE).toBe('api');
     expect(env.SCHEDULER_ENABLED).toBe(false);
     expect(env.BULL_PREFIX).toBe('bull');
+    expect(env.RATE_LIMITER_KEY_PREFIX).toBe('spapi:ratelimiter');
     expect(env.JWT_EXPIRES_IN).toBe('7d');
     expect(env.JWT_REMEMBER_EXPIRES_IN).toBe('30d');
     expect(env.AUTH_COOKIE_NAME).toBe('amazon_asin_monitor_auth');
     expect(env.AUTH_HINT_COOKIE_NAME).toBe('amazon_asin_monitor_session');
     expect(env.AUTH_PERMISSION_CACHE_TTL_SECONDS).toBe(900);
+    expect(env.API_RATE_LIMIT_ENABLED).toBe(true);
+    expect(env.RATE_LIMIT_WHITELIST_IPS).toEqual([]);
     expect(env.HEALTH_PROBE_TIMEOUT_MS).toBe(2_000);
     expect(env.DATABASE_POOL_CONNECTION_TIMEOUT_MS).toBe(2_000);
     expect(env.HEALTH_DB_POOL_DEGRADED_THRESHOLD).toBe(0.9);
@@ -66,6 +70,38 @@ describe('loadEnv', () => {
         loadEnv({ ...validEnv, SCHEDULER_ENABLED: value }).SCHEDULER_ENABLED,
       ).toBe(false);
     }
+  });
+
+  it('HTTP 限流开关、白名单和 trust proxy 保持 legacy 配置语义', () => {
+    const env = loadEnv({
+      ...validEnv,
+      API_RATE_LIMIT_ENABLED: ' OFF ',
+      RATE_LIMIT_WHITELIST_IPS: ' 127.0.0.1, ::1,127.0.0.1, ::ffff:10.0.0.1 ',
+      TRUST_PROXY: '2',
+    });
+
+    expect(env.API_RATE_LIMIT_ENABLED).toBe(false);
+    expect(env.RATE_LIMIT_WHITELIST_IPS).toEqual([
+      '127.0.0.1',
+      '::1',
+      '::ffff:10.0.0.1',
+    ]);
+    expect(env.TRUST_PROXY).toBe(2);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '1' }).TRUST_PROXY).toBe(1);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: '0' }).TRUST_PROXY).toBe(0);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: 'yes' }).TRUST_PROXY).toBe(true);
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: 'off' }).TRUST_PROXY).toBe(
+      false,
+    );
+    expect(loadEnv({ ...validEnv, TRUST_PROXY: 'loopback' }).TRUST_PROXY).toBe(
+      'loopback',
+    );
+    expect(
+      loadEnv({ ...validEnv, TRUST_PROXY: ' ' }).TRUST_PROXY,
+    ).toBeUndefined();
+    expect(() =>
+      loadEnv({ ...validEnv, API_RATE_LIMIT_ENABLED: 'sometimes' }),
+    ).toThrow(EnvValidationError);
   });
 
   it('PROCESS_ROLE 只接受 api | worker | all', () => {
@@ -259,6 +295,17 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...validEnv, BULL_PREFIX: '  ' }).BULL_PREFIX).toBe(
       'bull',
     );
+  });
+
+  it('RATE_LIMITER_KEY_PREFIX 支持部署隔离并将空白回退 legacy 前缀', () => {
+    expect(
+      loadEnv({ ...validEnv, RATE_LIMITER_KEY_PREFIX: ' staging:limiter ' })
+        .RATE_LIMITER_KEY_PREFIX,
+    ).toBe('staging:limiter');
+    expect(
+      loadEnv({ ...validEnv, RATE_LIMITER_KEY_PREFIX: '  ' })
+        .RATE_LIMITER_KEY_PREFIX,
+    ).toBe('spapi:ratelimiter');
   });
 
   it('按 node-postgres 默认链归一省略的 host、port 与 database', () => {

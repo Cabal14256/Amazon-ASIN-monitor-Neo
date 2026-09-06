@@ -67,6 +67,20 @@ export class ApplicationRedisClient implements OnModuleDestroy {
     return this.client.del(...keys);
   }
 
+  async eval(
+    script: string,
+    keys: readonly string[],
+    arguments_: readonly (number | string)[],
+  ): Promise<unknown> {
+    await this.ensureConnected();
+    return this.client.eval(
+      script,
+      keys.length,
+      ...keys,
+      ...arguments_.map(String),
+    );
+  }
+
   onModuleDestroy(): void {
     this.client.disconnect(false);
   }

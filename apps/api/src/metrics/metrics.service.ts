@@ -12,6 +12,8 @@ import {
  * 保证 Grafana 看板无缝切换（总体计划 §3.5）。
  */
 export const METRICS_PREFIX = 'amazon_asin_monitor_';
+const RATE_LIMIT_BACKENDS = ['disabled', 'memory', 'redis'] as const;
+type RateLimitBackendState = (typeof RATE_LIMIT_BACKENDS)[number];
 
 @Injectable()
 export class MetricsService implements OnModuleDestroy {
@@ -106,6 +108,20 @@ export class MetricsService implements OnModuleDestroy {
     registers: [this.registry],
   });
 
+  readonly httpRateLimitDecisionsTotal = new Counter({
+    name: `${METRICS_PREFIX}http_rate_limit_decisions_total`,
+    help: 'HTTP 限流允许与阻断决策总数',
+    labelNames: ['role', 'policy', 'outcome', 'backend'] as const,
+    registers: [this.registry],
+  });
+
+  readonly httpRateLimitBackendActive = new Gauge({
+    name: `${METRICS_PREFIX}http_rate_limit_backend_active`,
+    help: 'HTTP 限流当前后端（当前后端为 1，其余为 0）',
+    labelNames: ['backend'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ prefix: METRICS_PREFIX, register: this.registry });
   }
@@ -126,6 +142,24 @@ export class MetricsService implements OnModuleDestroy {
     const labels = { dependency: input.dependency };
     this.healthDependencyUp.set(labels, input.up ? 1 : 0);
     this.healthProbeDurationSeconds.observe(labels, input.durationSeconds);
+  }
+
+  recordRateLimitDecision(input: {
+    role: 'ADMIN' | 'DEFAULT' | 'EDITOR' | 'READONLY';
+    policy: 'role' | 'strict';
+    outcome: 'allowed' | 'blocked';
+    backend: 'memory' | 'redis';
+  }): void {
+    this.httpRateLimitDecisionsTotal.inc(input);
+  }
+
+  setRateLimitBackend(backend: RateLimitBackendState): void {
+    for (const candidate of RATE_LIMIT_BACKENDS) {
+      this.httpRateLimitBackendActive.set(
+        { backend: candidate },
+        candidate === backend ? 1 : 0,
+      );
+    }
   }
 
   onModuleDestroy(): void {
