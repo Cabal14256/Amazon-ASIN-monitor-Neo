@@ -158,6 +158,9 @@ jobs:
       - name: Run Neo audit persistence integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit.integration.test.ts
 
+      - name: Run Neo audit query PostgreSQL and HTTP integration tests
+        run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
+
       - name: Smoke test Timescale storage-policy rollback
         run: |
           docker cp packages/db/migrations/0002_timescale_storage_policies.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0002_timescale_storage_policies.rollback.sql"
