@@ -10,6 +10,7 @@ import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger, utc8Iso } from '../logger/app-logger.service';
 import { MetricsService } from '../metrics/metrics.service';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { ApplicationRedisClient } from '../redis/redis.service';
 
 type DependencyName = 'competitor_database' | 'database' | 'redis';
@@ -255,6 +256,8 @@ export class HealthService {
     @Inject(MetricsService) private readonly metrics: MetricsService,
     @Inject(HealthErrorStatsService)
     private readonly errorStats: HealthErrorStatsService,
+    @Inject(RateLimitService)
+    private readonly rateLimiter: RateLimitService,
   ) {}
 
   private recordProbeState(
@@ -355,11 +358,14 @@ export class HealthService {
       this.probeRedis(),
     ]);
     const memory = memoryHealth(this.env);
+    this.rateLimiter.startRecovery(redis.connected);
+    const rateLimiter = this.rateLimiter.snapshot(redis.connected);
     const status =
       database.status === 'ok' &&
       competitorDatabase.status === 'ok' &&
       redis.status === 'ok' &&
-      memory.status === 'ok'
+      memory.status === 'ok' &&
+      rateLimiter.status !== 'degraded'
         ? 'ok'
         : 'degraded';
     return {
@@ -369,13 +375,7 @@ export class HealthService {
       database,
       competitorDatabase,
       memory,
-      rateLimiter: {
-        status: redis.status,
-        stats: {
-          mode: 'redis-backend-ready',
-          redisAvailable: redis.connected,
-        },
-      },
+      rateLimiter,
       cache: {
         status: redis.status,
         connected: redis.connected,
