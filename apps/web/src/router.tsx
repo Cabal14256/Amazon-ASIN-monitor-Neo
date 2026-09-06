@@ -1,80 +1,106 @@
 import {
-  createRootRoute,
+  createRootRouteWithContext,
   createRoute,
   createRouter,
   Outlet,
+  redirect,
+  type RouterHistory,
 } from '@tanstack/react-router';
 import { lazy, Suspense } from 'react';
+import type { IdentityStore } from './auth/identity';
+import { evaluateRouteAccess } from './auth/navigation';
+import { PAGE_ROUTES } from './auth/pages';
+import { IdentityPending, RouteGate, UnknownPage } from './auth/route-gate';
+import { routerDestination } from './auth/router-navigation';
 
-/**
- * 脚手架路由：P3-T2 将平移旧系统 15 个页面路由与权限 guard。
- */
-
-const rootRoute = createRootRoute({
-  component: () => (
-    <div className="min-h-screen">
-      <Outlet />
-    </div>
-  ),
-});
-
-const homeRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/',
-  component: function HomePlaceholder() {
-    return (
-      <main className="mx-auto flex min-h-screen max-w-3xl flex-col items-start justify-center gap-4 px-6">
-        <p className="text-sm tracking-widest text-neutral-500 uppercase">
-          Amazon ASIN Monitor · Neo
-        </p>
-        <h1 className="text-4xl font-bold">
-          重构脚手架已就绪
-          <span className="ml-3 inline-block -rotate-2 rounded-md bg-[var(--color-signal)] px-2 py-1 text-2xl text-black">
-            明快作业台
-          </span>
-        </h1>
-        <p className="text-neutral-600">
-          阶段 0 空骨架（Vite 6 + React 19 + TanStack + Tailwind 4 +
-          shadcn/ui）。 页面将按总体计划 §7 四批迁移。
-        </p>
-      </main>
-    );
-  },
-});
-
-// The preview and its specimen data are eliminated from production builds.
-const designPreview = import.meta.env.DEV
+const LoginPage = lazy(() => import('./pages/auth/login'));
+const ProfilePage = lazy(() => import('./pages/auth/profile'));
+const ForbiddenPage = lazy(() => import('./pages/auth/forbidden'));
+const UnavailablePage = lazy(() => import('./pages/unavailable'));
+const DesignPreview = import.meta.env.DEV
   ? lazy(() => import('./pages/dev/design-system'))
   : undefined;
-const previewRoutes = designPreview
-  ? [
-      createRoute({
-        getParentRoute: () => rootRoute,
-        path: '/__dev/design-system',
-        component: function PreviewRoute() {
-          const Preview = designPreview!;
-          return (
-            <Suspense
-              fallback={
-                <p role="status" className="p-8">
-                  正在载入组件预览…
-                </p>
-              }
-            >
-              <Preview />
+
+export function createAppRouter(
+  identity: IdentityStore,
+  history?: RouterHistory,
+) {
+  const root = createRootRouteWithContext<{ identity: IdentityStore }>()({
+    component: Outlet,
+    notFoundComponent: UnknownPage,
+  });
+  const routes = PAGE_ROUTES.map((page) =>
+    createRoute({
+      getParentRoute: () => root,
+      path: page.path,
+      beforeLoad: async ({ context, location }) => {
+        const state = await context.identity.ensure();
+        const decision = evaluateRouteAccess(location.href, state);
+        if (decision.type === 'redirect')
+          throw redirect(routerDestination(decision.to));
+      },
+      component: function PageRoute() {
+        return (
+          <RouteGate>
+            <Suspense fallback={<IdentityPending />}>
+              {page.path === '/login' ? (
+                <LoginPage />
+              ) : page.path === '/profile' ? (
+                <ProfilePage />
+              ) : page.path === '/403' ? (
+                <ForbiddenPage />
+              ) : (
+                <UnavailablePage title={page.name} />
+              )}
             </Suspense>
-          );
-        },
-      }),
-    ]
-  : [];
-
-const routeTree = rootRoute.addChildren([homeRoute, ...previewRoutes]);
-
-export const router = createRouter({ routeTree });
-
+          </RouteGate>
+        );
+      },
+    }),
+  );
+  const index = createRoute({
+    getParentRoute: () => root,
+    path: '/',
+    beforeLoad: async ({ context, location }) => {
+      const decision = evaluateRouteAccess(
+        location.href,
+        await context.identity.ensure(),
+      );
+      if (decision.type === 'redirect')
+        throw redirect(routerDestination(decision.to));
+    },
+    component: () => (
+      <RouteGate>
+        <IdentityPending />
+      </RouteGate>
+    ),
+  });
+  const previews = DesignPreview
+    ? [
+        createRoute({
+          getParentRoute: () => root,
+          path: '/__dev/design-system',
+          component: function Preview() {
+            const Component = DesignPreview!;
+            return (
+              <Suspense fallback={<IdentityPending />}>
+                <Component />
+              </Suspense>
+            );
+          },
+        }),
+      ]
+    : [];
+  return createRouter({
+    routeTree: root.addChildren([index, ...routes, ...previews]),
+    history,
+    context: { identity },
+    defaultPendingComponent: IdentityPending,
+    defaultPreload: false,
+  });
+}
 declare module '@tanstack/react-router' {
   interface Register {
-    router: typeof router;
+    router: ReturnType<typeof createAppRouter>;
   }
 }
