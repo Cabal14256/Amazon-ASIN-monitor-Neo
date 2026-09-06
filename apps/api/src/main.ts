@@ -15,6 +15,7 @@ import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
 import { createNestLoggerAdapter } from './logger/nest-logger.adapter';
 import { MetricsService } from './metrics/metrics.service';
+import { RateLimitRequestHook } from './rate-limit/rate-limit.interceptor';
 import { runApi } from './runner';
 import { WebSocketService } from './websocket/websocket.service';
 
@@ -42,13 +43,20 @@ async function bootstrap(): Promise<void> {
   const env = app.get<Env>(ENV);
   const metrics = app.get(MetricsService);
   const errorStats = app.get(HealthErrorStatsService);
+  const rateLimit = app.get(RateLimitRequestHook);
   configureHttpApp(app, {
     audit: app.get(AuditService),
     corsOrigin: env.CORS_ORIGIN,
     logger,
     metrics,
     errorStats,
+    rateLimit,
   });
+  if (env.TRUST_PROXY !== undefined) {
+    logger.info('API trust proxy 已配置', 'Bootstrap', {
+      mode: typeof env.TRUST_PROXY,
+    });
+  }
 
   const port = env.PORT;
   app.get(WebSocketService).init(app.getHttpServer());
