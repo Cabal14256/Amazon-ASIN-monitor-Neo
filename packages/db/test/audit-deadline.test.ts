@@ -19,6 +19,36 @@ const fixture = () => {
 afterEach(() => vi.useRealTimers());
 
 describe('AuditRepository write deadline', () => {
+  it.each(['null-prototype', 'constructor-keys'])(
+    'binds sanitized %s JSON without inspecting it as a Drizzle entity',
+    async (kind) => {
+      const requestData: Record<string, unknown> =
+        kind === 'null-prototype'
+          ? Object.assign(Object.create(null), {
+              username: "fixture'; DROP TABLE audit_logs; --",
+              password: '***REDACTED***',
+              nested: Object.assign(Object.create(null), { active: true }),
+            })
+          : JSON.parse(
+              '{"constructor":null,"__proto__":{"fixture":true},"password":"***REDACTED***"}',
+            );
+      const serialized = JSON.stringify(requestData);
+      const { client, repository } = fixture();
+      await repository.append({ ...entry, requestData });
+      const [query, parameters] = client.query.mock.calls.find(
+        ([statement]) =>
+          typeof statement !== 'string' &&
+          statement.text.startsWith('insert into "audit_logs"'),
+      )!;
+      expect(query.text).not.toContain(serialized);
+      expect(query.text).not.toContain('DROP TABLE');
+      expect(parameters).toContain(serialized);
+      expect(client.release).toHaveBeenCalledExactlyOnceWith(false);
+      expect(JSON.stringify(requestData)).toBe(serialized);
+      expect(Object.prototype).not.toHaveProperty('fixture');
+    },
+  );
+
   it.each(['resolve', 'reject'])(
     'retains actual acquisition slots after the public deadline until they %s',
     async (outcome) => {

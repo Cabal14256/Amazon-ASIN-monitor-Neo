@@ -25,11 +25,35 @@ const optionalNonEmptyStringSchema = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+// Legacy getWorkerConcurrency: invalid/nonpositive values fall back to one,
+// positive fractions are floored (with a minimum of one).
+const queueConcurrencySchema = z.preprocess((value) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0
+    ? Math.max(1, Math.floor(number))
+    : 1;
+}, z.number().int().positive());
+
+const queueLimiterSchema = (fallback: number) =>
+  z.preprocess(
+    (value) => Number(value) || fallback,
+    z.number().int().positive(),
+  );
+
 const cookieNameSchema = z
   .string()
   .trim()
   .min(1)
   .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, 'Cookie 名称包含非法字符');
+
+const booleanFlagSchema = (defaultValue: boolean) =>
+  z
+    .string()
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
+    .default(defaultValue ? 'true' : 'false')
+    .transform((value) => !['false', '0', 'no', 'off'].includes(value));
 
 const trustProxySchema = z
   .preprocess(
@@ -45,6 +69,18 @@ const trustProxySchema = z
     if (['false', 'no', 'off'].includes(normalized)) return false;
     return value;
   });
+
+const rateLimitWhitelistSchema = z
+  .string()
+  .default('')
+  .transform((value) => [
+    ...new Set(
+      value
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ]);
 
 const jwtDurationSchema = z
   .string()
@@ -132,10 +168,22 @@ const envObjectSchema = z.object({
     .trim()
     .transform((value) => value || 'bull')
     .default('bull'),
+  RATE_LIMITER_KEY_PREFIX: z
+    .string()
+    .trim()
+    .transform((value) => value || 'spapi:ratelimiter')
+    .default('spapi:ratelimiter'),
 
   JWT_SECRET: z
     .string()
     .refine((value) => value.trim().length > 0, '缺少 JWT_SECRET'),
+  TASK_META_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(31_536_000)
+    .default(604_800),
+  TASK_USER_MAX_ITEMS: z.coerce.number().int().min(1).max(1000).default(200),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
   AUTH_COOKIE_NAME: cookieNameSchema.default('amazon_asin_monitor_auth'),
@@ -149,6 +197,10 @@ const envObjectSchema = z.object({
     .max(86_400)
     .default(900),
   AUTH_DATA_AUTHORITY: z.enum(['legacy-mysql', 'postgresql']),
+
+  // HTTP API 分布式限流：固定窗口与阈值保持 Legacy 语义。
+  API_RATE_LIMIT_ENABLED: booleanFlagSchema(true),
+  RATE_LIMIT_WHITELIST_IPS: rateLimitWhitelistSchema,
 
   // 双跑期鉴权数据实时权威源使用 Legacy MySQL；最终同步/写冻结后才切 PostgreSQL。
   DB_HOST: optionalNonEmptyStringSchema,
@@ -194,21 +246,21 @@ const envObjectSchema = z.object({
     .transform((value) => value.toLowerCase())
     .pipe(z.enum(['api', 'worker', 'all']))
     .default('api'),
-  SCHEDULER_ENABLED: z
-    .string()
-    .trim()
-    .transform((value) => value.toLowerCase())
-    .pipe(z.enum(['true', '1', 'yes', 'on', 'false', '0', 'no', 'off']))
-    .default('false')
-    .transform((value) => !['false', '0', 'no', 'off'].includes(value)),
+  SCHEDULER_ENABLED: booleanFlagSchema(false),
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),
-  VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY: z.coerce
-    .number()
-    .int()
-    .positive()
-    .optional(),
+  MONITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  COMPETITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  EXPORT_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BATCH_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BATCH_DELETE_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BACKUP_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  MONITOR_QUEUE_LIMITER_MAX: queueLimiterSchema(1),
+  MONITOR_QUEUE_LIMITER_DURATION_MS: queueLimiterSchema(200),
+  COMPETITOR_QUEUE_LIMITER_MAX: queueLimiterSchema(1),
+  COMPETITOR_QUEUE_LIMITER_DURATION_MS: queueLimiterSchema(200),
 });
 
 export const envSchema = envObjectSchema.superRefine((env, context) => {

@@ -1,16 +1,10 @@
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool, TypeOverrides, type PoolClient, type PoolConfig } from 'pg';
+import { parseShanghaiTimestamp } from './timestamps';
+
+export { parseShanghaiTimestamp } from './timestamps';
 
 const TIMESTAMP_WITHOUT_TIME_ZONE_OID = 1114;
-const shanghaiTimestampPattern =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/;
-
-/** D8：把 PostgreSQL 无时区时间按 Asia/Shanghai（UTC+8，无 DST）解释。 */
-export function parseShanghaiTimestamp(value: string): Date {
-  const match = shanghaiTimestampPattern.exec(value);
-  if (!match) return new Date(value);
-  return new Date(`${match[1]}T${match[2]}+08:00`);
-}
 
 export function createShanghaiTimestampTypeOverrides(
   inherited?: PoolConfig['types'],
