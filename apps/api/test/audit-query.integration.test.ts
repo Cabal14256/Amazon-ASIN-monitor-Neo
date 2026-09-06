@@ -40,10 +40,14 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ['DELETE', 'ASIN', 'fixture-string', '2098-09-01 07:59:59'],
         ['READ', 'asin', null, null],
       ];
+      // The migration suite deliberately advances this identity past MAX_SAFE_INTEGER.
+      // Own safe IDs isolate normal response checks without rewinding the shared sequence.
+      const fixtureIdBase = randomInt(1_000_000_000, 2_000_000_000) * 10;
       for (const [action, resource, data, time] of rows) {
         const result = await pool.query(
-          'INSERT INTO audit_logs (user_id, username, action, resource, resource_id, request_data, response_status, create_time) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8) RETURNING id',
+          'INSERT INTO audit_logs (id, user_id, username, action, resource, resource_id, request_data, response_status, create_time) OVERRIDING SYSTEM VALUE VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) RETURNING id',
           [
+            fixtureIdBase + ids.length,
             userId,
             'Audit-Fixture',
             action,
