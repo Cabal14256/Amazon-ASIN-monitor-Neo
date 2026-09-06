@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import type { Pool, PoolClient } from 'pg';
 import { createDb } from '../client';
 import { auditLogs, type NewAuditLog } from '../schema';
@@ -68,7 +69,18 @@ export class AuditRepository implements AuditRepositoryPort {
           if (settled) return;
           await client.query('SET LOCAL statement_timeout = 1500');
           if (settled) return;
-          await createDb(client).insert(auditLogs).values(entry);
+          await createDb(client)
+            .insert(auditLogs)
+            .values({
+              ...entry,
+              // auditBody deliberately produces null-prototype dictionaries.
+              // Bind JSON text so Drizzle never inspects that untrusted object
+              // as an ORM entity; keep nested keys and sanitization intact.
+              requestData:
+                entry.requestData == null
+                  ? null
+                  : sql`${JSON.stringify(entry.requestData)}::jsonb`,
+            });
           if (settled) return;
           await client.query('COMMIT');
           finish();

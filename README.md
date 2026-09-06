@@ -18,6 +18,8 @@ Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./d
 
 北京时间、峰值时段统计和 21 站点链接的原样移植与兼容边界见 [`前端工具运行说明`](./docs/runbooks/phase-3-web-utils.md)。
 
+Neo 双库的 Drizzle 日期列按北京时间读写，原因、验证和既有数据核查边界见 [`D8 时间映射说明`](./docs/runbooks/phase-1-drizzle-timestamps.md)。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。
@@ -398,6 +400,12 @@ npm --prefix server run rebuild:agg
 | `npm run bench:analytics -- --help`  | 查看数据分析基准脚本参数     |
 | `node scripts/test-env.js`           | 检查后端环境变量             |
 | `node scripts/test-build.js --build` | 执行并检查完整前端构建       |
+
+### Neo PostgreSQL 登录
+
+Neo 新增 `POST /api/v1/auth/login`，保留登录信封、JWT/Session、普通/记住登录有效期、账号锁定和密码过期标记。五次失败锁定 30 分钟，登录结果和失败计数在 PostgreSQL 用户行锁事务中保存，提交成功后才发放 Cookie。`AUTH_DATA_AUTHORITY=legacy-mysql` 时此新入口返回 503，不写 PostgreSQL；旧登录入口继续使用。此功能不自动切换数据权威源或生产流量。
+
+输入/密码验证并发与事务截止时间、上线前置条件、真实数据库验收及回滚边界见 [`docs/runbooks/phase-2-auth-login.md`](./docs/runbooks/phase-2-auth-login.md)。密码修改、注销、会话管理和清理调度尚需独立迁移，当前不可仅凭登录测试通过就替换 Legacy。
 
 ### Neo 操作审计
 
