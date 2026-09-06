@@ -10,6 +10,9 @@ export function parseShanghaiTimestamp(value: string): Date {
 }
 
 export function formatShanghaiTimestamp(value: Date): string {
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+    throw new RangeError('Invalid timestamp instant');
+  }
   return new Date(value.getTime() + 8 * 3600_000)
     .toISOString()
     .slice(0, -1)
@@ -25,6 +28,12 @@ export const shanghaiTimestamp = customType<{
   // Preserve Drizzle's original SQL spelling: the migration registry maps this
   // alias to Legacy DATETIME and to pg_catalog's timestamp without time zone.
   dataType: () => 'timestamp',
-  fromDriver: parseShanghaiTimestamp,
+  fromDriver(value) {
+    const instant = parseShanghaiTimestamp(value);
+    if (!Number.isFinite(instant.getTime())) {
+      throw new RangeError('Invalid Beijing database timestamp');
+    }
+    return instant;
+  },
   toDriver: formatShanghaiTimestamp,
 });
