@@ -4,7 +4,9 @@ import type { Env } from '@asin-monitor/config';
 import {
   BoundedAuthRepository,
   LegacyMysqlAuthRepository,
+  PgLoginRepository,
   type AuthDataRepository,
+  type SessionManagementRepositoryPort,
 } from '@asin-monitor/db';
 import { ENV } from '../config/config.module';
 import { DatabaseModule } from '../database/database.module';
@@ -15,14 +17,23 @@ import { AUTH_DATA_REPOSITORY } from './auth.constants';
 import { AuthController } from './auth.controller';
 import { AuthenticationGuard } from './authentication.guard';
 import { AuthenticationService } from './authentication.service';
+import { LoginController } from './login.controller';
+import {
+  LOGIN_REPOSITORY,
+  LoginService,
+  PASSWORD_COMPARER,
+  comparePassword,
+} from './login.service';
 import { PermissionCacheService } from './permission-cache.service';
 import { PermissionsGuard } from './permissions.guard';
+import { SessionController } from './session.controller';
+import { SessionService } from './session.service';
 
 export function createAuthDataRepository(
   env: Env,
   pools: ApplicationDatabasePools,
   logger: AppLogger,
-): AuthDataRepository {
+): AuthDataRepository & SessionManagementRepositoryPort {
   if (env.AUTH_DATA_AUTHORITY === 'postgresql') {
     logger.info('鉴权数据权威源已选择', 'AuthModule', {
       source: 'postgresql',
@@ -46,8 +57,17 @@ export function createAuthDataRepository(
 
 @Module({
   imports: [DatabaseModule, RedisModule],
-  controllers: [AuthController],
+  controllers: [AuthController, LoginController, SessionController],
   providers: [
+    {
+      provide: LOGIN_REPOSITORY,
+      inject: [ApplicationDatabasePools],
+      useFactory: (pools: ApplicationDatabasePools) =>
+        new PgLoginRepository(pools.primaryPool),
+    },
+    { provide: PASSWORD_COMPARER, useValue: comparePassword },
+    LoginService,
+    SessionService,
     {
       provide: AUTH_DATA_REPOSITORY,
       inject: [ENV, ApplicationDatabasePools, AppLogger],

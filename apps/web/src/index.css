@@ -1,9 +1,6 @@
 @import 'tailwindcss';
 
-/*
- * 方向七·明快作业台 设计 token（P3-T1 将按 §11.9 补全六层动效与完整组件主题）。
- * 配色：暖奶油底 + 荧光青柠信号色；数字/ASIN/时间戳等宽 + tabular-nums。
- */
+/* 方向七：模块色表达位置，状态色表达结果；两者不互换。 */
 @theme {
   --color-cream: #f5f5f0;
   --color-cream-raised: #f8f8f8;
@@ -12,20 +9,165 @@
   --color-signal: #c8ff00;
   --color-signal-soft: #d4fd8e;
   --color-module-monitor: #304ffe;
+  --color-module-asin: #c8ff00;
+  --color-module-analytics: #a65e00;
+  --color-module-tasks: #c94726;
+  --color-module-competitor: #b4267d;
   --color-progress: #adefed;
+  --color-status-success: #176741;
+  --color-status-success-soft: #e9f6ee;
+  --color-status-danger: #b32936;
+  --color-status-danger-soft: #fff0f1;
+  --color-status-warning: #855500;
+  --color-status-warning-soft: #fff5d8;
+  --color-status-info: #2444c4;
+  --color-status-info-soft: #eef1ff;
 
   --radius-pill: 999px;
   --radius-input: 20px;
   --radius-card: 16px;
   --radius-control: 12px;
   --radius-chip: 8px;
+  --font-sans: 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+}
+
+/* shadcn semantic variables, kept separate from module/status signals. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
 }
 
 :root {
+  --background: #f5f5f0;
+  --foreground: #0a0a0a;
+  --card: #fff;
+  --card-foreground: #0a0a0a;
+  --popover: #fff;
+  --popover-foreground: #0a0a0a;
+  --primary: #c8ff00;
+  --primary-foreground: #0a0a0a;
+  --secondary: #ecece5;
+  --secondary-foreground: #292b27;
+  --muted: #efefea;
+  --muted-foreground: #60645c;
+  --accent: #edf5d8;
+  --accent-foreground: #263414;
+  --destructive: #b32936;
+  --destructive-foreground: #fff;
+  --border: #dddfd5;
+  --input: #858d7e;
+  --ring: #304ffe;
+  --radius: 1rem;
+  color-scheme: light;
+  font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
 }
 
-body {
-  background-color: var(--color-cream);
-  color: var(--color-ink);
+@layer base {
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
+  }
+  ::selection {
+    background: var(--color-signal-soft);
+    color: var(--foreground);
+  }
+}
+
+@layer utilities {
+  .neo-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .neo-row {
+    transition: background-color 180ms ease;
+  }
+  .neo-row:hover {
+    background: var(--accent);
+  }
+  .neo-row .neo-row-arrow {
+    transition: transform 180ms ease;
+  }
+  .neo-row:hover .neo-row-arrow {
+    transform: translateX(4px);
+  }
+  .neo-skeleton {
+    animation: neo-skeleton 1.5s ease-in-out infinite;
+  }
+  .neo-signal-dot {
+    animation: neo-dot 1.8s ease-in-out infinite;
+  }
+  .neo-indeterminate {
+    animation: neo-indeterminate 1.6s ease-in-out infinite;
+  }
+  .neo-spin {
+    animation: neo-spin 900ms linear infinite;
+  }
+}
+
+@keyframes neo-skeleton {
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes neo-dot {
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes neo-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+@keyframes neo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+  .neo-row:hover .neo-row-arrow {
+    transform: none;
+  }
+  .neo-indeterminate {
+    transform: none;
+  }
 }

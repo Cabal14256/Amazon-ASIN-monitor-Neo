@@ -20,6 +20,7 @@ import {
 import { configureHttpApp } from '../src/http-app';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
+import { RateLimitService } from '../src/rate-limit/rate-limit.service';
 import { ApplicationRedisClient } from '../src/redis/redis.service';
 
 const validEnv = {
@@ -44,6 +45,41 @@ const saturatedPoolSnapshot = {
   activeConnections: 10,
 };
 
+function rateLimiterStub(
+  forcedStatus?: 'degraded' | 'disabled' | 'ok',
+): RateLimitService {
+  return {
+    recover: vi.fn().mockResolvedValue(undefined),
+    startRecovery: vi.fn(),
+    snapshot: vi.fn((redisAvailable: boolean) => {
+      const status = forcedStatus ?? (redisAvailable ? 'ok' : 'degraded');
+      return {
+        status,
+        stats: {
+          enabled: status !== 'disabled',
+          backend:
+            status === 'disabled'
+              ? 'disabled'
+              : status === 'degraded'
+              ? 'memory'
+              : 'redis',
+          redisAvailable,
+          totalRequests: 0,
+          blockedRequests: 0,
+          byRole: {
+            ADMIN: { requests: 0, blocked: 0 },
+            EDITOR: { requests: 0, blocked: 0 },
+            READONLY: { requests: 0, blocked: 0 },
+            DEFAULT: { requests: 0, blocked: 0 },
+          },
+          lastReset: 0,
+          blockRate: '0.00',
+        },
+      };
+    }),
+  } as unknown as RateLimitService;
+}
+
 function buildService(
   options: {
     env?: Env;
@@ -52,6 +88,7 @@ function buildService(
     queryCompetitor?: () => Promise<void>;
     pingRedis?: () => Promise<void>;
     primaryPoolSnapshot?: () => typeof poolSnapshot;
+    rateLimiter?: RateLimitService;
   } = {},
 ) {
   const env = options.env ?? loadEnv(validEnv);
@@ -72,6 +109,7 @@ function buildService(
     options.logger ?? new AppLogger(),
     metrics,
     errorStats,
+    options.rateLimiter ?? rateLimiterStub(),
   );
   return { service, metrics, errorStats };
 }
@@ -101,7 +139,12 @@ describe('HealthService', () => {
     });
     expect(health.rateLimiter).toMatchObject({
       status: 'ok',
-      stats: { mode: 'redis-backend-ready', redisAvailable: true },
+      stats: {
+        backend: 'redis',
+        redisAvailable: true,
+        totalRequests: 0,
+        blockedRequests: 0,
+      },
     });
     expect(health.errorStats).toMatchObject({
       recent: { count: 1, byType: { RATE_LIMIT: 1 } },
@@ -287,6 +330,28 @@ describe('HealthService', () => {
     metrics.onModuleDestroy();
   });
 
+  it('Redis PING 正常但 EVAL 降级时后台触发恢复并立即返回 degraded', async () => {
+    const rateLimiter = rateLimiterStub('degraded');
+    vi.mocked(rateLimiter.recover).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const { service, metrics } = buildService({
+      rateLimiter,
+    });
+
+    const health = await service.getHealth();
+
+    expect(health.cache).toMatchObject({ status: 'ok', connected: true });
+    expect(health.rateLimiter).toMatchObject({
+      status: 'degraded',
+      stats: { backend: 'memory', redisAvailable: true },
+    });
+    expect(health.status).toBe('degraded');
+    expect(rateLimiter.startRecovery).toHaveBeenCalledWith(true);
+    expect(rateLimiter.recover).not.toHaveBeenCalled();
+    metrics.onModuleDestroy();
+  });
+
   it('超时探针有界失败并报告 probe_timeout', async () => {
     const warn = vi.fn();
     const logger = { warn, info: vi.fn() } as unknown as AppLogger;
@@ -407,6 +472,7 @@ describe.skipIf(!integrationEnabled)(
         logger,
         metrics,
         new HealthErrorStatsService(),
+        rateLimiterStub(),
       );
       try {
         const health = await service.getHealth();

@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 
 import type { Db } from '../client';
 import {
@@ -47,8 +47,15 @@ export interface AuthDataRepository extends AuthSessionRepository {
   getRoles(userId: string): Promise<AuthRoleRecord[]>;
 }
 
+export interface SessionManagementRepositoryPort {
+  listSessionsByUserId(userId: string): Promise<AuthSessionRecord[]>;
+  revokeOwnedSession(sessionId: string, userId: string): Promise<boolean>;
+}
+
 /** 鉴权域的 Drizzle 数据访问层，不持有连接池生命周期。 */
-export class AuthRepository implements AuthDataRepository {
+export class AuthRepository
+  implements AuthDataRepository, SessionManagementRepositoryPort
+{
   constructor(private readonly db: Db) {}
 
   async findSessionById(
@@ -67,6 +74,29 @@ export class AuthRepository implements AuthDataRepository {
       .update(sessions)
       .set({ status: 'REVOKED', lastActiveAt: sql`LOCALTIMESTAMP` })
       .where(eq(sessions.id, sessionId));
+  }
+
+  listSessionsByUserId(userId: string): Promise<AuthSessionRecord[]> {
+    return this.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.userId, userId))
+      .orderBy(desc(sessions.createdAt), desc(sessions.id));
+  }
+
+  async revokeOwnedSession(
+    sessionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(sessions)
+      .set({
+        status: 'REVOKED',
+        lastActiveAt: sql`timezone('Asia/Shanghai', now())`,
+      })
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)))
+      .returning({ id: sessions.id });
+    return rows.length === 1;
   }
 
   async touchSession(sessionId: string): Promise<void> {

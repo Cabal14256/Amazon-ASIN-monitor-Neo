@@ -144,13 +144,28 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
-      - name: Run Neo API health and auth dependency integration tests
+      - name: Run Neo task registry concurrency and expiry tests
+        run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
+
+      - name: Run Neo API health, auth and rate-limit dependency integration tests
         run: |
           pnpm --filter @asin-monitor/db build
-          pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts
+          pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts test/rate-limit.test.ts
+
+      - name: Run Neo PostgreSQL login transactions
+        run: pnpm --filter @asin-monitor/api exec vitest run test/login.integration.test.ts
+
+      - name: Run Neo session lifecycle on PostgreSQL and Legacy MySQL
+        run: pnpm --filter @asin-monitor/api exec vitest run test/sessions.integration.test.ts
+
+      - name: Run Neo BullMQ queue policy integration tests
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
       - name: Run Neo audit persistence integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit.integration.test.ts
+
+      - name: Run Neo audit query PostgreSQL and HTTP integration tests
+        run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
 
       - name: Smoke test Timescale storage-policy rollback
         run: |

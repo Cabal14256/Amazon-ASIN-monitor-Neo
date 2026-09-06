@@ -4,6 +4,7 @@ import {
   createRouter,
   Outlet,
 } from '@tanstack/react-router';
+import { lazy, Suspense } from 'react';
 
 /**
  * 脚手架路由：P3-T2 将平移旧系统 15 个页面路由与权限 guard。
@@ -41,7 +42,34 @@ const homeRoute = createRoute({
   },
 });
 
-const routeTree = rootRoute.addChildren([homeRoute]);
+// The preview and its specimen data are eliminated from production builds.
+const designPreview = import.meta.env.DEV
+  ? lazy(() => import('./pages/dev/design-system'))
+  : undefined;
+const previewRoutes = designPreview
+  ? [
+      createRoute({
+        getParentRoute: () => rootRoute,
+        path: '/__dev/design-system',
+        component: function PreviewRoute() {
+          const Preview = designPreview!;
+          return (
+            <Suspense
+              fallback={
+                <p role="status" className="p-8">
+                  正在载入组件预览…
+                </p>
+              }
+            >
+              <Preview />
+            </Suspense>
+          );
+        },
+      }),
+    ]
+  : [];
+
+const routeTree = rootRoute.addChildren([homeRoute, ...previewRoutes]);
 
 export const router = createRouter({ routeTree });
 
