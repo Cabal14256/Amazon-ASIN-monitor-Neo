@@ -379,7 +379,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const before = await snapshot();
       const source = migration().replace(
         'COMMIT;',
-        "DO $$ BEGIN RAISE EXCEPTION 'fixture upgrade failure'; END $$; COMMIT;",
+        () =>
+          "DO $$ BEGIN RAISE EXCEPTION 'fixture upgrade failure'; END $$; COMMIT;",
       );
       await expect(apply(false, source)).rejects.toMatchObject({
         message: 'fixture upgrade failure',
@@ -400,7 +401,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const before = await snapshot();
       const source = migration(true).replace(
         'COMMIT;',
-        "DO $$ BEGIN RAISE EXCEPTION 'fixture rollback failure'; END $$; COMMIT;",
+        () =>
+          "DO $$ BEGIN RAISE EXCEPTION 'fixture rollback failure'; END $$; COMMIT;",
       );
       await expect(apply(true, source)).rejects.toMatchObject({
         message: 'fixture rollback failure',
