@@ -41,13 +41,13 @@
 
 ## 尚未实现的接入门槛
 
-当前没有将这个包挂进 `apps/api` 或 `apps/worker` 的生产请求路径，也没有默认无限流适配器。`SpApiClient` 强制要求 `QuotaExecutor`，构造时缺失就报错。
+API 已注册单例及受保护的状态接口，尚未接入 ASIN 业务检查与 Worker 生产任务；没有默认无限流适配器。`SpApiClient` 强制要求 `QuotaExecutor`，构造时缺失就报错。
 
 后续独立 Issue 必须补齐：
 
-1. Issue #71 已补充 PostgreSQL 配置仓储、每次读取当前值的可取消来源、Nest 生命周期及三个受权限保护的管理端点，见[配置运行说明](./phase-2-spapi-config.md)。Worker 与业务客户端宿主仍待接线。
-2. Issue #69 已补充共享 Redis 原子配额、内存回退、反馈限额与有界优先级执行器，见[配额运行说明](./phase-2-spapi-quota.md)；API/Worker 宿主仍须显式注册单例并管理 Redis 连接生命周期。
-3. 真实 BullMQ Processor/调度与监控 pipeline 接线，HTML fallback、风险判断和通知对拍。Issue #77 已提供[默认关闭的有界 HTML 客户端](./phase-2-spapi-html.md)，开关和回退管线仍待宿主接线；Issue #79 已提供[默认关闭的 Legacy 备用客户端](./phase-2-spapi-legacy.md)，复用共享令牌、传输和配额。Issue #75 已提供[共享错误统计和风险指标](./phase-2-spapi-telemetry.md)；宿主仍须明确检查/尝试统计单位并应用并发建议。
+1. Issue #71 已补充 PostgreSQL 配置仓储、每次读取当前值的可取消来源、Nest 生命周期及三个受权限保护的管理端点，见[配置运行说明](./phase-2-spapi-config.md)。Issue #81 已连接[API 单例与状态接口](./phase-2-spapi-runtime.md)，Worker 与业务检查管线仍待接入。
+2. Issue #69 已补充共享 Redis 原子配额、内存回退、反馈限额与有界优先级执行器，见[配额运行说明](./phase-2-spapi-quota.md)；API 已通过 Issue #81 注册单例并处理 Redis 连接恢复，Worker 宿主仍须接入。
+3. 真实 BullMQ Processor/调度与监控 pipeline 接线，HTML fallback、风险判断和通知对拍。Issue #77 已提供[默认关闭的有界 HTML 客户端](./phase-2-spapi-html.md)，API 已读取当前数据库开关，完整业务回退管线及 Worker 宿主仍待接线；Issue #79 已提供[默认关闭的 Legacy 备用客户端](./phase-2-spapi-legacy.md)，复用共享令牌、传输和配额。Issue #75 已提供[共享错误统计和风险指标](./phase-2-spapi-telemetry.md)；API 已明确上游尝试统计单位，后续业务管线仍须记录逻辑检查并应用并发建议。
 4. 使用授权的 sandbox/灰度凭据完成集成验证，达到原始计划的影子对拍与生产切流 gate。
 
 本地/CI 测试只用虚构凭据、本地 loopback 和 CI 隔离 Redis，不调用 Amazon，不读取生产配置。不把这些通过结果当作实网联调、生产接线或整个 P2 完成。

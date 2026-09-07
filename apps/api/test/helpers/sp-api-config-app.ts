@@ -1,10 +1,11 @@
 import { loadEnv } from '@asin-monitor/config';
 import { createPgPool } from '@asin-monitor/db';
+import type { ModuleMetadata } from '@nestjs/common';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from '@nestjs/platform-fastify';
-import { Test } from '@nestjs/testing';
+import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { vi } from 'vitest';
 import { AuditModule } from '../../src/audit/audit.module';
@@ -18,7 +19,12 @@ import { SpApiConfigModule } from '../../src/sp-api-config/sp-api-config.module'
 import { SP_API_CONFIG_ENV } from '../../src/sp-api-config/sp-api-config.service';
 
 /** Real providers and transactions, isolated from public data and credentials. */
-export async function spApiConfigApp() {
+export async function spApiConfigApp(
+  options: {
+    imports?: ModuleMetadata['imports'];
+    configure?: (builder: TestingModuleBuilder) => TestingModuleBuilder;
+  } = {},
+) {
   const baseEnv = loadEnv(process.env);
   const schema = `spapi_config_71_${randomUUID().replace(/-/g, '')}`;
   const quoted = `"${schema}"`;
@@ -117,8 +123,8 @@ export async function spApiConfigApp() {
       DATABASE_URL: databaseUrl.toString(),
       AUTH_DATA_AUTHORITY: 'postgresql' as const,
     };
-    const module = await Test.createTestingModule({
-      imports: [SpApiConfigModule, AuditModule],
+    const builder = Test.createTestingModule({
+      imports: [SpApiConfigModule, AuditModule, ...(options.imports ?? [])],
     })
       .overrideProvider(ENV)
       .useValue(env)
@@ -129,8 +135,11 @@ export async function spApiConfigApp() {
         SP_API_LWA_CLIENT_ID: 'fixture-client-71',
         SP_API_LWA_CLIENT_SECRET: 'fixture-env-secret-71',
         SP_API_REFRESH_TOKEN: 'fixture-refresh-71',
-      })
-      .compile();
+      });
+    const module = await (options.configure
+      ? options.configure(builder)
+      : builder
+    ).compile();
     app = module.createNestApplication<NestFastifyApplication>(
       new FastifyAdapter({ logger: false }),
     );

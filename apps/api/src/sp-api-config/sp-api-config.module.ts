@@ -77,6 +77,10 @@ export class ApplicationSpApiConfigSource
         new PgSpApiConfigurationRepository(pools.primaryPool),
     },
   ],
-  exports: [ApplicationSpApiConfigSource],
+  exports: [
+    ApplicationSpApiConfigSource,
+    SP_API_CONFIG_ENV,
+    SP_API_CONFIG_REPOSITORY,
+  ],
 })
 export class SpApiConfigModule {}
