@@ -17,10 +17,12 @@ import { mapAsinQueryChild, mapAsinQueryGroups } from './asin-query-mapper';
 import {
   AsinWriteInputError,
   parseAsinCreate,
+  parseAsinManual,
   parseAsinMove,
   parseAsinNotify,
   parseAsinUpdate,
   parseAsinWriteId,
+  parseGroupManual,
   parseVariantGroupWrite,
 } from './asin-write-values';
 
@@ -63,6 +65,8 @@ export class AsinWriteService {
       | 'delete-group'
       | 'delete-asin'
       | 'group-notify'
+      | 'group-manual'
+      | 'asin-manual'
       | 'asin-notify',
     action: (unit: AsinWriteUnit) => Promise<T>,
   ) {
@@ -119,6 +123,28 @@ export class AsinWriteService {
       await unit.deleteGroup(parseAsinWriteId(groupId));
       return '删除成功';
     });
+  }
+  updateGroupManual(principal: AuthPrincipal, groupId: unknown, body: unknown) {
+    return this.write(principal, 'group-manual', async (unit) =>
+      groupResult(
+        await unit.updateGroupManual(
+          parseAsinWriteId(groupId),
+          parseGroupManual(body),
+          principal.userId,
+        ),
+      ),
+    );
+  }
+  updateAsinManual(principal: AuthPrincipal, asinId: unknown, body: unknown) {
+    return this.write(principal, 'asin-manual', async (unit) =>
+      asinWriteResult(
+        await unit.updateAsinManual(
+          parseAsinWriteId(asinId),
+          parseAsinManual(body),
+          principal.userId,
+        ),
+      ),
+    );
   }
   deleteAsin(principal: AuthPrincipal, asinId: unknown) {
     return this.write(principal, 'delete-asin', async (unit) => {

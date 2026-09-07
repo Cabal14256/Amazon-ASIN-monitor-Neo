@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AsinWriteInputError,
   parseAsinCreate,
+  parseAsinManual,
   parseAsinMove,
   parseAsinNotify,
   parseAsinUpdate,
   parseAsinWriteId,
+  parseGroupManual,
   parseVariantGroupWrite,
 } from '../src/asin/asin-write-values';
 
@@ -33,6 +35,8 @@ function legacy() {
     createAsin: vi.fn(async (..._args: unknown[]) => ({})),
     updateAsin: vi.fn(async (..._args: unknown[]) => ({})),
     move: vi.fn(async (..._args: unknown[]) => ({})),
+    groupManual: vi.fn(async (..._args: unknown[]) => ({})),
+    asinManual: vi.fn(async (..._args: unknown[]) => ({})),
   };
   const module = {
     exports: {} as Record<string, (req: any, res: any) => Promise<void>>,
@@ -47,12 +51,17 @@ function legacy() {
       exports: module.exports,
       require: (name: string) => {
         if (name === '../models/VariantGroup')
-          return { create: calls.createGroup, update: calls.updateGroup };
+          return {
+            create: calls.createGroup,
+            update: calls.updateGroup,
+            updateManualBroken: calls.groupManual,
+          };
         if (name === '../models/ASIN')
           return {
             create: calls.createAsin,
             update: calls.updateAsin,
             moveToGroup: calls.move,
+            updateManualBrokenAction: calls.asinManual,
           };
         if (name === '../services/sharedService')
           return {
@@ -76,6 +85,72 @@ function legacy() {
   return { ...calls, controller: module.exports };
 }
 describe('ASIN write values / actual Legacy controller inputs', () => {
+  it.each([true, false, 0, 1, '0', '1'])(
+    'matches actual Legacy group manual input %s',
+    async (markedBroken) => {
+      const f = legacy();
+      const body = { markedBroken, reason: ' reason\nwith detail ' };
+      await f.controller.updateVariantGroupManualBroken(
+        { params: { groupId: 'g' }, body },
+        {},
+      );
+      const [recordId, marked, reason] = f.groupManual.mock.calls[0];
+      expect(recordId).toBe('g');
+      expect(parseGroupManual(body)).toEqual({ markedBroken: marked, reason });
+    },
+  );
+  it.each([
+    { action: ' mark_broken ', reason: ' reason ' },
+    { action: 'clear_self_manual' },
+    {
+      action: ' exclude_group_manual ',
+      markedBroken: false,
+      reason: ' reason ',
+    },
+    { action: 'clear_group_exclusion' },
+    { action: 'invalid', markedBroken: '1', reason: ' fallback ' },
+    { markedBroken: '0' },
+    { action: 7, markedBroken: 1, reason: ' fallback ' },
+    { action: 'CLEAR_SELF_MANUAL', markedBroken: 'invalid' },
+  ])('matches actual Legacy ASIN manual action %j', async (body) => {
+    const f = legacy();
+    await f.controller.updateASINManualBroken(
+      { params: { asinId: 'a' }, body },
+      {},
+    );
+    const [recordId, fields] = f.asinManual.mock.calls[0] as [
+      string,
+      { action: string; reason: string },
+    ];
+    expect(recordId).toBe('a');
+    expect(parseAsinManual(body)).toEqual({
+      action: fields.action,
+      reason: fields.reason,
+    });
+  });
+  it.each([
+    null,
+    [],
+    {},
+    { markedBroken: 2 },
+    { markedBroken: true, reason: ' ' },
+    { markedBroken: false, reason: 'x'.repeat(501) },
+    { markedBroken: false, updatedBy: 'spoof' },
+  ])('rejects invalid group manual body %j', (value) => {
+    expect(() => parseGroupManual(value)).toThrow(AsinWriteInputError);
+  });
+  it.each([
+    null,
+    [],
+    {},
+    { action: 'invalid' },
+    { action: 'MARK_BROKEN' },
+    { action: 'EXCLUDE_GROUP_MANUAL', reason: ' ' },
+    { action: 'CLEAR_SELF_MANUAL', reason: 'x'.repeat(501) },
+    { markedBroken: false, operator: 'spoof' },
+  ])('rejects invalid ASIN manual body %j', (value) => {
+    expect(() => parseAsinManual(value)).toThrow(AsinWriteInputError);
+  });
   it.each([true, false, 0, 1])(
     'normalizes the accepted notification flag %s',
     (enabled) => {

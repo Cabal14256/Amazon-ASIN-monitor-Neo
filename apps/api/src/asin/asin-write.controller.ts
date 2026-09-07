@@ -80,6 +80,34 @@ export class AsinWriteController {
       data: await this.service.updateGroupNotify(request.auth!, groupId, body),
     };
   }
+  @Put('variant-groups/:groupId/manual-broken')
+  @Header('Cache-Control', 'no-store')
+  async updateGroupManual(
+    @Req() request: FastifyRequest,
+    @Param('groupId') groupId: string,
+    @Body() body: unknown,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.updateGroupManual(request.auth!, groupId, body),
+    };
+  }
+  @Put('asins/:asinId/manual-broken')
+  @Header('Cache-Control', 'no-store')
+  async updateAsinManual(
+    @Req() request: FastifyRequest,
+    @Param('asinId') asinId: string,
+    @Body() body: unknown,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.updateAsinManual(request.auth!, asinId, body),
+    };
+  }
   @Put('asins/:asinId/feishu-notify')
   @Header('Cache-Control', 'no-store')
   async updateAsinNotify(

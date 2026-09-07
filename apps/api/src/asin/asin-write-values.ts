@@ -1,6 +1,8 @@
 import {
+  asinManualBrokenRequestSchema,
   createAsinRequestSchema,
   feishuNotifyRequestSchema,
+  groupManualBrokenRequestSchema,
   moveAsinRequestSchema,
   updateAsinRequestSchema,
   variantGroupUpsertRequestSchema,
@@ -57,6 +59,39 @@ export function parseVariantGroupWrite(value: unknown) {
 export function parseAsinNotify(value: unknown): boolean {
   const { enabled } = parse(feishuNotifyRequestSchema.strict(), value);
   return enabled === true || enabled === 1;
+}
+const marked = (value: unknown) =>
+  value === true || value === 1 || value === '1';
+const manualKeys =
+  (keys: readonly string[]) => (value: Record<string, unknown>) =>
+    Object.keys(value).every((key) => keys.includes(key));
+export function parseGroupManual(value: unknown) {
+  const result = parse(
+    groupManualBrokenRequestSchema.refine(
+      manualKeys(['markedBroken', 'reason']),
+    ),
+    value,
+  );
+  return {
+    markedBroken: marked(result.markedBroken),
+    reason: result.reason?.trim() || '',
+  };
+}
+export function parseAsinManual(value: unknown) {
+  const result = parse(
+    asinManualBrokenRequestSchema.refine(
+      manualKeys(['action', 'markedBroken', 'reason']),
+    ),
+    value,
+  );
+  return {
+    action:
+      result.action ??
+      (marked(result.markedBroken)
+        ? ('MARK_BROKEN' as const)
+        : ('CLEAR_SELF_MANUAL' as const)),
+    reason: result.reason?.trim() || '',
+  };
 }
 function normalizeAsin<
   T extends { name?: string | null; asinType?: string | number | null },
