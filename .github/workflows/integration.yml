@@ -144,8 +144,18 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
+      - name: Apply authentication maintenance storage upgrade twice after final snapshot migration
+        run: |
+          docker cp packages/db/migrations/0003_auth_maintenance.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0003_auth_maintenance.sql"
+          docker cp packages/db/docker/apply-auth-maintenance.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-auth-maintenance.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-auth-maintenance.sh /tmp/0003_auth_maintenance.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-auth-maintenance.sh /tmp/0003_auth_maintenance.sql
+
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
+
+      - name: Run authentication cleanup and audit archive PostgreSQL transactions
+        run: pnpm --filter @asin-monitor/db exec vitest run test/auth-maintenance.integration.test.ts
 
       - name: Run Neo API health, auth and rate-limit dependency integration tests
         run: |

@@ -9,6 +9,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  pgView,
   primaryKey,
   text,
   unique,
@@ -659,12 +660,9 @@ export const rolePermissions = pgTable(
   ],
 );
 
-export const auditLogs = pgTable(
-  'audit_logs',
-  {
-    id: bigint('id', { mode: 'bigint' })
-      .generatedAlwaysAsIdentity()
-      .primaryKey(),
+function auditLogColumns() {
+  return {
+    id: bigint('id', { mode: 'bigint' }).notNull(),
     userId: varchar('user_id', { length: 50 }),
     username: varchar('username', { length: 50 }),
     action: varchar('action', { length: 50 }).notNull(),
@@ -678,6 +676,17 @@ export const auditLogs = pgTable(
     requestData: jsonb('request_data').$type<Record<string, unknown>>(),
     responseStatus: integer('response_status'),
     errorMessage: text('error_message'),
+    createTime: timestampColumn('create_time'),
+  };
+}
+
+export const auditLogs = pgTable(
+  'audit_logs',
+  {
+    ...auditLogColumns(),
+    id: bigint('id', { mode: 'bigint' })
+      .generatedAlwaysAsIdentity()
+      .primaryKey(),
     createTime: timestampColumn('create_time').default(localTimestamp),
   },
   (table) => [
@@ -689,6 +698,31 @@ export const auditLogs = pgTable(
     index('idx_audit_logs_resource_id').on(table.resourceId),
   ],
 );
+
+/** Partition DDL is owned by migration 0003 and the maintenance repository. */
+export const auditLogsArchive = pgTable(
+  'audit_logs_archive',
+  {
+    ...auditLogColumns(),
+    createTime: timestampColumn('create_time')
+      .notNull()
+      .default(localTimestamp),
+  },
+  (table) => [
+    primaryKey({ columns: [table.createTime, table.id] }),
+    index('idx_audit_archive_id').on(table.id),
+    index('idx_audit_archive_user_id').on(table.userId),
+    index('idx_audit_archive_username').on(table.username),
+    index('idx_audit_archive_action').on(table.action),
+    index('idx_audit_archive_resource').on(table.resource),
+    index('idx_audit_archive_resource_id').on(table.resourceId),
+  ],
+);
+
+export const auditLogsAll = pgView(
+  'audit_logs_all',
+  auditLogColumns(),
+).existing();
 
 export type VariantGroup = typeof variantGroups.$inferSelect;
 export type NewVariantGroup = typeof variantGroups.$inferInsert;
