@@ -1,11 +1,13 @@
 export * from './client';
 export * from './config';
+export * from './error-statistics';
 export * from './errors';
 export * from './lwa';
 export * from './quota-executor';
 export * from './quota-policy';
 export type { QuotaRedisPort } from './quota-redis';
 export * from './request';
+export * from './risk-controller';
 export * from './signature';
 export * from './transport';
 export * from './types';
