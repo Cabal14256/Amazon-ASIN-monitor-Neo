@@ -5,6 +5,7 @@ export * from './error-statistics';
 export * from './errors';
 export * from './html-client';
 export * from './html-variants';
+export * from './legacy-client';
 export * from './lwa';
 export * from './quota-executor';
 export * from './quota-policy';
