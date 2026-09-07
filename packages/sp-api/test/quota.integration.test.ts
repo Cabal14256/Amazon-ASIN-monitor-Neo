@@ -1,5 +1,6 @@
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import {
   afterAll,
@@ -191,7 +192,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       let now = Date.now();
       const { executor, client, log } = await executorFixture(50, () => now);
       await executor.execute(context(), async () => 1);
+      const ended = once(client, 'end', { signal: AbortSignal.timeout(1000) });
       client.disconnect();
+      await ended;
       await executor.execute(context('searchCatalogItems'), async () => 2);
       await client.connect();
       const task = vi.fn(async () => 3);
