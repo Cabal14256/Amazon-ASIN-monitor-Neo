@@ -42,6 +42,16 @@ export interface AsinWriteUnit extends AsinQueryUnit {
     fields: AsinWriteFields,
   ): Promise<AsinWriteSnapshot>;
   moveAsin(asinId: string, targetGroupId: string): Promise<AsinWriteSnapshot>;
+  deleteGroup(groupId: string): Promise<void>;
+  deleteAsin(asinId: string): Promise<void>;
+  updateGroupNotify(
+    groupId: string,
+    enabled: boolean,
+  ): Promise<AsinGroupReadResult>;
+  updateAsinNotify(
+    asinId: string,
+    enabled: boolean,
+  ): Promise<AsinWriteSnapshot>;
 }
 export interface AsinWriteRepositoryPort {
   transaction<T>(operation: (unit: AsinWriteUnit) => Promise<T>): Promise<T>;
@@ -131,6 +141,61 @@ class DrizzleAsinWriteUnit
     this.ensureOpen();
     if (!result) throw new AsinWriteRepositoryError('asin-not-found');
     return result;
+  }
+  async deleteGroup(groupId: string) {
+    if (!(await this.lockGroups([groupId])).has(groupId)) return;
+    await this.db.delete(variantGroups).where(eq(variantGroups.id, groupId));
+    this.ensureOpen();
+  }
+  async deleteAsin(asinId: string) {
+    let parentId: string;
+    try {
+      parentId = (await this.lockAsin(asinId)).asin.variantGroupId;
+    } catch (error) {
+      if (error instanceof AsinWriteRepositoryError) {
+        if (error.code === 'asin-not-found') return;
+        if (error.code === 'group-not-found') {
+          // The candidate parent may have been deleted with its children while
+          // we waited. A still-existing ASIN has moved, so do not delete it or
+          // touch its old parent without acquiring its new parent's lock.
+          this.ensureOpen();
+          const [remaining] = await this.db
+            .select({ id: asins.id })
+            .from(asins)
+            .where(eq(asins.id, asinId));
+          this.ensureOpen();
+          if (!remaining) return;
+          throw new AsinWriteRepositoryError('parent-changed');
+        }
+      }
+      throw error;
+    }
+    await this.db.delete(asins).where(eq(asins.id, asinId));
+    this.ensureOpen();
+    await this.db
+      .update(variantGroups)
+      .set({ updateTime: now })
+      .where(eq(variantGroups.id, parentId));
+    this.ensureOpen();
+  }
+  async updateGroupNotify(groupId: string, enabled: boolean) {
+    if (!(await this.lockGroups([groupId])).has(groupId))
+      throw new AsinWriteRepositoryError('group-not-found');
+    await this.db
+      .update(variantGroups)
+      .set({ feishuNotifyEnabled: enabled, updateTime: now })
+      .where(eq(variantGroups.id, groupId));
+    this.ensureOpen();
+    return this.detail(groupId);
+  }
+  async updateAsinNotify(asinId: string, enabled: boolean) {
+    await this.lockAsin(asinId);
+    await this.db
+      .update(asins)
+      .set({ feishuNotifyEnabled: enabled, updateTime: now })
+      .where(eq(asins.id, asinId));
+    this.ensureOpen();
+    return this.snapshot(asinId);
   }
   async createGroup(fields: VariantGroupWriteFields) {
     const id = randomUUID();

@@ -1,5 +1,6 @@
 import {
   createAsinRequestSchema,
+  feishuNotifyRequestSchema,
   moveAsinRequestSchema,
   updateAsinRequestSchema,
   variantGroupUpsertRequestSchema,
@@ -52,6 +53,10 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
 }
 export function parseVariantGroupWrite(value: unknown) {
   return parse(groupSchema, value);
+}
+export function parseAsinNotify(value: unknown): boolean {
+  const { enabled } = parse(feishuNotifyRequestSchema.strict(), value);
+  return enabled === true || enabled === 1;
 }
 function normalizeAsin<
   T extends { name?: string | null; asinType?: string | number | null },

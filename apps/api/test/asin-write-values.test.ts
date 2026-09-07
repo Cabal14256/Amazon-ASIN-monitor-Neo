@@ -6,6 +6,7 @@ import {
   AsinWriteInputError,
   parseAsinCreate,
   parseAsinMove,
+  parseAsinNotify,
   parseAsinUpdate,
   parseAsinWriteId,
   parseVariantGroupWrite,
@@ -75,6 +76,34 @@ function legacy() {
   return { ...calls, controller: module.exports };
 }
 describe('ASIN write values / actual Legacy controller inputs', () => {
+  it.each([true, false, 0, 1])(
+    'normalizes the accepted notification flag %s',
+    (enabled) => {
+      expect(parseAsinNotify({ enabled })).toBe(
+        enabled === true || enabled === 1,
+      );
+    },
+  );
+  it.each([
+    null,
+    undefined,
+    '1',
+    '0',
+    2,
+    -1,
+    {},
+    [],
+    { enabled: true, manualBroken: true },
+  ])('rejects invalid notification input %j', (value) => {
+    const input =
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      'enabled' in value
+        ? value
+        : { enabled: value };
+    expect(() => parseAsinNotify(input)).toThrow(AsinWriteInputError);
+  });
   it('uses database character limits for supplementary Unicode instead of halving them', () => {
     const name = '🛒'.repeat(255);
     const brand = '🛒'.repeat(100);
