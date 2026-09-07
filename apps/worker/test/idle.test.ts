@@ -58,13 +58,15 @@ describe('空闲 Worker 生命周期', () => {
       await new Promise((wait) => setTimeout(wait, 250));
       expect(child.exitCode).toBeNull();
       expect(child.signalCode).toBeNull();
+      child.kill('SIGTERM');
+      const outcome = await exited;
+      if (process.platform !== 'win32')
+        expect(outcome).toEqual({ code: 0, signal: null });
     } finally {
       if (deadline) clearTimeout(deadline);
       if (child.exitCode === null && child.signalCode === null)
         child.kill('SIGTERM');
-      const outcome = await exited;
-      if (process.platform !== 'win32')
-        expect(outcome).toEqual({ code: 0, signal: null });
+      await exited;
     }
   }, 5000);
 });

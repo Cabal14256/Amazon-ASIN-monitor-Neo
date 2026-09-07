@@ -8,7 +8,7 @@
     "maintenance": "node dist/auth-maintenance-control.js",
     "start": "node dist/main.js",
     "start:dev": "tsx watch src/main.ts",
-    "test": "corepack pnpm --filter @asin-monitor/worker^... build && vitest run",
+    "test": "corepack pnpm --filter @asin-monitor/worker... build && vitest run",
     "typecheck": "tsc -p tsconfig.build.json --noEmit"
   },
   "dependencies": {
