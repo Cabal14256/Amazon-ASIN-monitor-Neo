@@ -1,5 +1,6 @@
 export * from './client';
 export * from './config';
+export * from './config-source';
 export * from './errors';
 export * from './lwa';
 export * from './quota-executor';

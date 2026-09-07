@@ -11,6 +11,7 @@ export * from './repositories/bounded-auth-repository';
 export * from './repositories/legacy-mysql-auth-repository';
 export * from './repositories/redis-task-repository';
 export * from './repositories/role-repository';
+export * from './repositories/sp-api-config-repository';
 export * from './repositories/task-state';
 export * from './repositories/user-administration-repository';
 export * from './repositories/user-password-repository';

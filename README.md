@@ -14,7 +14,7 @@
 
 定稿方案与逐阶段任务已归档在 [`docs/refactor/`](./docs/refactor/README.md)。
 
-Neo 共享 SP-API 客户端的已实现范围和未完成接入门槛见 [`P2-T3 运行说明`](./docs/runbooks/phase-2-spapi-client.md)，共享原子配额、优先级执行与故障回退见[配额运行说明](./docs/runbooks/phase-2-spapi-quota.md)；目前不替代 Legacy 的生产调用。
+Neo 共享 SP-API 客户端的已实现范围和未完成接入门槛见 [`P2-T3 运行说明`](./docs/runbooks/phase-2-spapi-client.md)，共享原子配额、优先级执行与故障回退见[配额运行说明](./docs/runbooks/phase-2-spapi-quota.md)，三个受权限保护的配置接口与 PostgreSQL 配置来源见[配置运行说明](./docs/runbooks/phase-2-spapi-config.md)；目前不替代 Legacy 的生产调用。
 
 Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./docs/runbooks/phase-3-web-transport.md)。已接入服务端身份校验、15 路由权限守卫、登录/403/个人中心页面，范围与验收见 [`账号页面运行说明`](./docs/runbooks/phase-3-auth-pages.md)；其余 12 个业务页面和完整应用外壳仍待迁移。
 
