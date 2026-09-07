@@ -3,6 +3,8 @@ export * from './config';
 export * from './config-source';
 export * from './error-statistics';
 export * from './errors';
+export * from './html-client';
+export * from './html-variants';
 export * from './lwa';
 export * from './quota-executor';
 export * from './quota-policy';
