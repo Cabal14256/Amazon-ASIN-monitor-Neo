@@ -44,8 +44,9 @@ async function bootstrap(): Promise<void> {
   }
 
   if (enabled.length === 0 && !enableMaintenance) {
+    const stopped = waitForShutdownSignal();
     logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
-    const signal = await waitForShutdownSignal();
+    const signal = await stopped;
     logger.info('空闲 Worker 收到停止信号', { signal });
     return;
   }
@@ -77,6 +78,19 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   });
 
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= shutdownWorker({
+      watchdog,
+      queues: [...queues, ...(maintenance ? [maintenance] : [])],
+      watchdogRedis,
+    });
+    return shutdownPromise;
+  };
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
+
+  // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode: maintenance ? 'auth-maintenance' : 'queue-scaffold',
     registeredProcessors: maintenance ? 1 : 0,
@@ -89,18 +103,6 @@ async function bootstrap(): Promise<void> {
     queueCount: queues.length + (maintenance ? 1 : 0),
     schedulerEnabled: !!maintenance && env.SCHEDULER_ENABLED,
   });
-
-  let shutdownPromise: Promise<void> | undefined;
-  const shutdown = (): Promise<void> => {
-    shutdownPromise ??= shutdownWorker({
-      watchdog,
-      queues: [...queues, ...(maintenance ? [maintenance] : [])],
-      watchdogRedis,
-    });
-    return shutdownPromise;
-  };
-  process.on('SIGINT', () => void shutdown());
-  process.on('SIGTERM', () => void shutdown());
 }
 
 if (require.main === module) {
