@@ -4,7 +4,7 @@ import {
 } from '@asin-monitor/contracts';
 import { PgUserQueryRepository } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ApplicationDatabasePools } from '../src/database/database.service';
 import { RoleModule } from '../src/roles/role.module';
@@ -198,18 +198,19 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const f = await data();
       for (let index = 0; index < 12; index++) {
         await pools.primaryPool.query(
-          'INSERT INTO user_status_history(user_id,old_status,new_status,reason,created_at) VALUES($1,NULL,$2,$3,$4)',
+          'INSERT INTO user_status_history(id,user_id,old_status,new_status,reason,created_at) OVERRIDING SYSTEM VALUE VALUES($5,$1,NULL,$2,$3,$4)',
           [
             f.ids[0],
             'ACTIVE',
             `change-${index}`,
             `2026-09-01 08:${String(index).padStart(2, '0')}:00`,
+            randomInt(1_000_000_000_000, 2_000_000_000_000),
           ],
         );
       }
       await pools.primaryPool.query(
-        'INSERT INTO user_status_history(user_id,new_status,created_at) VALUES($1,$2,NULL)',
-        [f.ids[3], 'INACTIVE'],
+        'INSERT INTO user_status_history(id,user_id,new_status,created_at) OVERRIDING SYSTEM VALUE VALUES($3,$1,$2,NULL)',
+        [f.ids[3], 'INACTIVE', randomInt(1_000_000_000_000, 2_000_000_000_000)],
       );
       const response = await f.get(`/users/${f.ids[0]}`);
       expect(response.statusCode).toBe(200);
@@ -231,6 +232,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(response.json().data).not.toHaveProperty('password');
       expect((await f.get('/users/nonexistent-user-59')).statusCode).toBe(404);
       expect((await f.get('/users/roles/all')).statusCode).toBe(403); // Existing role dropdown keeps role:read.
+    });
+    it('rejects an actual imported history ID beyond the safe integer range', async () => {
+      const f = await data();
+      await pools.primaryPool.query(
+        'INSERT INTO user_status_history(id,user_id,new_status) OVERRIDING SYSTEM VALUE VALUES($1,$2,$3)',
+        [
+          (2n ** 60n + BigInt(randomInt(1_000_000_000))).toString(),
+          f.ids[0],
+          'ACTIVE',
+        ],
+      );
+      const response = await f.get(`/users/${f.ids[0]}`);
+      expect(response.statusCode).toBe(500);
+      expect(response.body).not.toContain('Invalid history ID');
     });
     it('holds one list snapshot across a concurrent user insertion and role replacement', async () => {
       const f = await data();
