@@ -4,6 +4,7 @@ export * from './domain/variant-status';
 export * from './migration';
 export * from './repositories/account-repository';
 export * from './repositories/asin-query-repository';
+export * from './repositories/asin-timestamp-policy';
 export * from './repositories/audit-query-deadline';
 export * from './repositories/audit-query-repository';
 export * from './repositories/audit-repository';

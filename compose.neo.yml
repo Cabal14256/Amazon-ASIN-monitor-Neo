@@ -23,6 +23,9 @@ services:
       # D4 follows the final Legacy snapshot import; it is an explicit upgrade.
       - ./packages/db/docker/apply-auth-maintenance.sh:/opt/asin-monitor/apply-auth-maintenance.sh:ro
       - ./packages/db/migrations/0003_auth_maintenance.sql:/opt/asin-monitor/0003_auth_maintenance.sql:ro
+      # ASIN write policy is also an explicit post-import primary upgrade.
+      - ./packages/db/docker/apply-asin-timestamp-policy.sh:/opt/asin-monitor/apply-asin-timestamp-policy.sh:ro
+      - ./packages/db/migrations/0004_asin_timestamp_policy.sql:/opt/asin-monitor/0004_asin_timestamp_policy.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
