@@ -202,6 +202,9 @@ jobs:
       - name: Run ASIN group queries and shared authorization locks
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-query.integration.test.ts
 
+      - name: Run ASIN writes with real constraints, timestamp policy and PostgreSQL transactions
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-write.integration.test.ts
+
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
