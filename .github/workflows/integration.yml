@@ -151,6 +151,16 @@ jobs:
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-auth-maintenance.sh /tmp/0003_auth_maintenance.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-auth-maintenance.sh /tmp/0003_auth_maintenance.sql
 
+      - name: Apply primary ASIN timestamp policy twice after final snapshot migration
+        run: |
+          docker cp packages/db/migrations/0004_asin_timestamp_policy.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0004_asin_timestamp_policy.sql"
+          docker cp packages/db/docker/apply-asin-timestamp-policy.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-asin-timestamp-policy.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-asin-timestamp-policy.sh /tmp/0004_asin_timestamp_policy.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-asin-timestamp-policy.sh /tmp/0004_asin_timestamp_policy.sql
+
+      - name: Run ASIN timestamp policy upgrade, transactions and rollback on PostgreSQL
+        run: pnpm --filter @asin-monitor/db exec vitest run test/asin-timestamp-policy.integration.test.ts
+
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
 
