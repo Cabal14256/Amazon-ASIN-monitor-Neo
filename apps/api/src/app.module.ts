@@ -10,6 +10,7 @@ import { MetricsModule } from './metrics/metrics.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { RedisModule } from './redis/redis.module';
 import { RoleModule } from './roles/role.module';
+import { UserQueryModule } from './users/user-query.module';
 import { WebSocketModule } from './websocket/websocket.module';
 
 @Module({
@@ -20,6 +21,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     RedisModule,
     AuthModule,
     RoleModule,
+    UserQueryModule,
     AuditModule,
     WebSocketModule,
     MetricsModule,

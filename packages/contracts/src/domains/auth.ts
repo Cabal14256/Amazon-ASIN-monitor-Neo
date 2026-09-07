@@ -75,8 +75,8 @@ export const userPublicSchema = z.object({
   force_password_change: z.boolean(),
   failed_login_attempts: z.number().optional(),
   locked_until: dateTimeString.nullable().optional(),
-  create_time: dateTimeString.optional(),
-  update_time: dateTimeString.optional(),
+  create_time: dateTimeString.nullable().optional(),
+  update_time: dateTimeString.nullable().optional(),
 });
 export type UserPublic = z.infer<typeof userPublicSchema>;
 
