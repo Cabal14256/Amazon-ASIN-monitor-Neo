@@ -189,6 +189,9 @@ jobs:
       - name: Run API SP-API singleton status and Redis recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/sp-api-runtime.integration.test.ts
 
+      - name: Run ASIN group queries and shared authorization locks
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-query.integration.test.ts
+
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 

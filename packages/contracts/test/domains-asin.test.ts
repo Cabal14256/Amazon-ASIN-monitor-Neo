@@ -26,6 +26,41 @@ import {
  */
 
 describe('asin 域', () => {
+  it('允许历史空创建/更新时间的原始字段与驼峰别名', () => {
+    const group = {
+      id: 'g-null-time',
+      name: 'Fixture',
+      country: 'US',
+      site: 'amazon.com',
+      brand: 'Fixture',
+      create_time: null,
+      update_time: null,
+      createTime: null,
+      updateTime: null,
+      children: [
+        {
+          id: 'a-null-time',
+          asin: 'B000000083',
+          country: 'US',
+          createTime: null,
+          updateTime: null,
+        },
+      ],
+    };
+    expect(
+      variantGroupListResultSchema.parse({
+        success: true,
+        errorCode: 0,
+        data: {
+          list: [group],
+          total: 1,
+          totalASINs: 1,
+          current: 1,
+          pageSize: 10,
+        },
+      }).data?.list[0],
+    ).toEqual(group);
+  });
   it('变体组列表 data 含 totalASINs 与 children 装饰字段', () => {
     const parsed = variantGroupListResultSchema.parse({
       success: true,

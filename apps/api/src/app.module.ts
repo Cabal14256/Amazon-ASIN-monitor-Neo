@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AsinModule } from './asin/asin.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { ConfigModule } from './config/config.module';
@@ -26,6 +27,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     RoleModule,
     SpApiConfigModule,
     SpApiRuntimeModule,
+    AsinModule,
     UserAdministrationModule,
     UserQueryModule,
     AuditModule,

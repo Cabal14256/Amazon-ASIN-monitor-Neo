@@ -10,6 +10,8 @@ import { resultSchema } from '../envelope';
  * 注意：DB 0/1 标记字段宽松接受 number/boolean；驼峰与下划线字段并存。
  */
 
+// Legacy nullable DATETIME creation/update fields are emitted as null by both
+// VariantGroup.findAll/findById and mapDecoratedAsin; preserve that JSON shape.
 const dateTimeString = z.string();
 /** MySQL TINYINT(1) 语义字段：0/1（历史数据也可能为 null） */
 const flag01 = z.union([z.literal(0), z.literal(1), z.boolean(), z.null()]);
@@ -69,8 +71,8 @@ export const decoratedAsinSchema = z
     inheritedManualBrokenUpdatedAt: dateTimeString.nullable().optional(),
     inheritedManualBrokenUpdatedBy: z.string().nullable().optional(),
     statusSource: z.string().optional(),
-    createTime: dateTimeString.optional(),
-    updateTime: dateTimeString.optional(),
+    createTime: dateTimeString.nullable().optional(),
+    updateTime: dateTimeString.nullable().optional(),
     lastCheckTime: dateTimeString.nullable().optional(),
     feishuNotifyEnabled: flag01.optional(),
   })
@@ -92,8 +94,8 @@ export const variantGroupSchema = z
     manual_broken_updated_at: dateTimeString.nullable().optional(),
     manual_broken_updated_by: z.string().nullable().optional(),
     feishu_notify_enabled: flag01.optional(),
-    create_time: dateTimeString.optional(),
-    update_time: dateTimeString.optional(),
+    create_time: dateTimeString.nullable().optional(),
+    update_time: dateTimeString.nullable().optional(),
     last_check_time: dateTimeString.nullable().optional(),
     // ── 列表组装附加字段 ──
     asin_count: z.number().optional(),
@@ -107,8 +109,8 @@ export const variantGroupSchema = z
     manualBrokenUpdatedAt: dateTimeString.nullable().optional(),
     manualBrokenUpdatedBy: z.string().nullable().optional(),
     statusSource: z.string().optional(),
-    createTime: dateTimeString.optional(),
-    updateTime: dateTimeString.optional(),
+    createTime: dateTimeString.nullable().optional(),
+    updateTime: dateTimeString.nullable().optional(),
     lastCheckTime: dateTimeString.nullable().optional(),
     feishuNotifyEnabled: flag01.optional(),
   })

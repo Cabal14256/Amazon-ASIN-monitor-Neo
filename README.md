@@ -24,6 +24,8 @@ Neo 前端 HTTP/Cookie/WS 通信层及双跑配置见 [`P3-T2 运行说明`](./d
 
 Neo 双库的 Drizzle 日期列按北京时间读写，原因、验证和既有数据核查边界见 [`D8 时间映射说明`](./docs/runbooks/phase-1-drizzle-timestamps.md)。
 
+Neo 变体组列表与详情已接入 PostgreSQL，状态继承、查询计数、当前权限和容量边界见[ASIN 查询运行说明](./docs/runbooks/phase-2-asin-queries.md)。
+
 Neo 审计日志列表、详情和两类统计接口的权限、时间筛选及数据范围见 [`审计查询运行说明`](./docs/runbooks/phase-2-audit-query.md)。
 
 Neo 角色列表、详情、权限分组、权限分配及角色下拉接口已接入 PostgreSQL，权威源门禁、并发权限保护和缓存失效边界见 [`角色管理运行说明`](./docs/runbooks/phase-2-role-management.md)。用户列表与详情见 [`用户查询运行说明`](./docs/runbooks/phase-2-user-queries.md)，创建、更新与删除见 [`用户管理运行说明`](./docs/runbooks/phase-2-user-administration.md)，管理员密码重置见 [`密码重置运行说明`](./docs/runbooks/phase-2-admin-password-reset.md)。
