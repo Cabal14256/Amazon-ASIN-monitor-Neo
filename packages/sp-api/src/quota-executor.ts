@@ -445,14 +445,21 @@ export class SpApiQuotaExecutor implements QuotaExecutor {
       const shared = remote?.available
         ? remote.value.windows.find((item) => item.key === window.key)
         : undefined;
-      return shared
-        ? {
-            ...window,
-            limit: Math.min(window.limit, shared.limit),
-            remaining: Math.min(window.remaining, shared.remaining),
-            used: Math.max(window.used, shared.used),
-          }
-        : window;
+      if (!shared) return window;
+      const limit = Math.min(window.limit, shared.limit);
+      // Capacities may differ while a header update is being published. Combine
+      // signed free capacity first, so used/remaining describe the same limit
+      // and negative free capacity still exposes outstanding consumption debt.
+      const free = Math.min(
+        window.limit - window.used,
+        shared.limit - shared.used,
+      );
+      return {
+        ...window,
+        limit,
+        remaining: Math.max(free, 0),
+        used: limit - free,
+      };
     });
     const minute = effective.find((window) => window.windowMs === 60_000)!;
     const hour = effective.find((window) => window.windowMs === 3_600_000)!;

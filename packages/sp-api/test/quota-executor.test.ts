@@ -425,6 +425,45 @@ describe('SP-API bounded priority executor', () => {
       windows: { minute: { used: 1, remaining: 44, limit: 45 } },
     });
   });
+  it('keeps effective snapshot usage consistent when local and shared metadata have different capacities', async () => {
+    const redis = {
+      status: 'reconnecting',
+      get: vi.fn(async () =>
+        JSON.stringify({
+          rate: 1,
+          burst: 2,
+          updatedAt: '1970-01-01T00:00:00.000Z',
+        }),
+      ),
+      eval: vi.fn(async (_script: string, count: number) => {
+        if (count === 1) throw new Error('fixture metadata write unavailable');
+        return [0, 0, 0];
+      }),
+    };
+    const executor = setup({ logger: logger(), redis });
+    await executor.execute(context(), async () => 1);
+    executor.observe({
+      region: 'US',
+      operation: 'getCatalogItem',
+      statusCode: 200,
+      rateLimit: 2,
+    });
+    await flush();
+    redis.status = 'ready';
+    const snapshot = await executor.snapshot('US', 'getCatalogItem');
+    expect(snapshot.windows.minute).toEqual({
+      limit: 45,
+      remaining: 45,
+      used: 0,
+      windowMs: 60000,
+    });
+    expect(snapshot.windows.second).toEqual({
+      limit: 1,
+      remaining: 0,
+      used: 1,
+      windowMs: 1000,
+    });
+  });
   it('does not bypass a healthy Redis admission slot still occupied by cancelled underlying work', async () => {
     const read = deferred<string | null>();
     const redis = {
