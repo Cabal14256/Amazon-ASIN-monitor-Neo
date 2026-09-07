@@ -12,6 +12,7 @@ export * from './repositories/redis-task-repository';
 export * from './repositories/role-repository';
 export * from './repositories/task-state';
 export * from './repositories/user-administration-repository';
+export * from './repositories/user-password-repository';
 export * from './repositories/user-query-repository';
 
 export * from './repositories/login-repository';

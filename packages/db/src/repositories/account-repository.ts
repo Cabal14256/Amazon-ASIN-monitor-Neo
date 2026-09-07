@@ -18,11 +18,13 @@ export interface AccountUnit {
   ): Promise<AuthSessionRecord | undefined>;
   recentPasswords(userId: string): Promise<string[]>;
   savePreviousPassword(userId: string, hash: string, now: Date): Promise<void>;
+  /** Own-account changes clear the flag; administrators may require a next-login change. */
   updatePassword(
     userId: string,
     hash: string,
     now: Date,
     expiresAt: Date,
+    forcePasswordChange?: boolean,
   ): Promise<void>;
   revokeOtherSessions(
     userId: string,
@@ -42,7 +44,7 @@ export interface AccountRepositoryPort {
   transaction<T>(operation: (unit: AccountUnit) => Promise<T>): Promise<T>;
 }
 
-class DrizzleAccountUnit implements AccountUnit {
+export class DrizzleAccountUnit implements AccountUnit {
   constructor(
     private readonly db: Db,
     private readonly ensureOpen: () => void,
@@ -102,6 +104,7 @@ class DrizzleAccountUnit implements AccountUnit {
     hash: string,
     now: Date,
     expiresAt: Date,
+    forcePasswordChange = false,
   ) {
     this.ensureOpen();
     await this.db
@@ -110,7 +113,7 @@ class DrizzleAccountUnit implements AccountUnit {
         password: hash,
         passwordChangedAt: now,
         passwordExpiresAt: expiresAt,
-        forcePasswordChange: false,
+        forcePasswordChange,
       })
       .where(eq(users.id, userId));
   }
