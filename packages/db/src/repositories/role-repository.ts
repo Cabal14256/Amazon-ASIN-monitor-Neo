@@ -50,10 +50,10 @@ export async function lockRoleAdministration(db: Db) {
   await db.execute(sql`select pg_advisory_xact_lock(1095977294, 1380073795)`);
 }
 
-class DrizzleRoleUnit implements RoleWriteUnit {
+export class DrizzleRoleUnit implements RoleWriteUnit {
   constructor(
-    private readonly db: Db,
-    private readonly ensureOpen: () => void,
+    protected readonly db: Db,
+    protected readonly ensureOpen: () => void,
   ) {}
   listRoles() {
     this.ensureOpen();

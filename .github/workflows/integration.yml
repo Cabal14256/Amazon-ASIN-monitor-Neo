@@ -167,6 +167,9 @@ jobs:
       - name: Run Neo user queries on PostgreSQL
         run: pnpm --filter @asin-monitor/api exec vitest run test/user-query.integration.test.ts
 
+      - name: Run Neo user administration PostgreSQL and Redis transactions
+        run: pnpm --filter @asin-monitor/api exec vitest run test/user-administration.integration.test.ts
+
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
