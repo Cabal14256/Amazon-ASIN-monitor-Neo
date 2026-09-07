@@ -335,6 +335,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await group('g');
       await asin('a', 'g');
       await history('g', 'a');
+      // Separate sessions reach the business locks independently. Reusing the
+      // first session would wait earlier at AuthenticationService.touchSession.
+      const groupHeaders = { ...headers };
+      await login('deleter-89');
       const oldHistory = await rows('monitor_history'),
         blocker = await f.pools.primaryPool.connect();
       const pending: Promise<unknown>[] = [];
@@ -344,7 +348,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           "SELECT id FROM variant_groups WHERE id='g' FOR UPDATE",
         );
         const groupDelete = Promise.resolve(
-          request('DELETE', '/variant-groups/g'),
+          request('DELETE', '/variant-groups/g', undefined, groupHeaders),
         );
         pending.push(groupDelete.catch(() => {}));
         await blockedBy(blocker);
