@@ -31,6 +31,31 @@ import {
  */
 
 describe('users 域', () => {
+  it('保留用户公开资料和状态历史允许的 NULL 日期', () => {
+    const user = {
+      id: 'u-null',
+      username: 'nullable',
+      status: 'ACTIVE',
+      force_password_change: false,
+      create_time: null,
+      update_time: null,
+    };
+    expect(
+      userListResultSchema.parse({
+        success: true,
+        data: { list: [user], total: 1 },
+      }).data?.list[0].create_time,
+    ).toBeNull();
+    expect(
+      userDetailResultSchema.parse({
+        success: true,
+        data: {
+          ...user,
+          statusHistory: [{ id: 1, new_status: 'ACTIVE', created_at: null }],
+        },
+      }).data?.statusHistory?.[0].created_at,
+    ).toBeNull();
+  });
   it('保留角色/权限表允许的 NULL 日期、resource 与 action', () => {
     const permission = {
       id: 'p-null',

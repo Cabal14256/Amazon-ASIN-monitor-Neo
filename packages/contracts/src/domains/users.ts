@@ -126,7 +126,7 @@ export const userDetailDataSchema = userPublicSchema.extend({
         changed_by: z.string().nullable().optional(),
         operator_id: z.string().nullable().optional(),
         operator_name: z.string().nullable().optional(),
-        created_at: dateTimeString.optional(),
+        created_at: dateTimeString.nullable().optional(),
         create_time: dateTimeString.optional(),
       }),
     )
