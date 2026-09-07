@@ -45,7 +45,7 @@
 
 后续独立 Issue 必须补齐：
 
-1. PostgreSQL 系统配置仓储、可取消的配置加载/刷新、Nest 生命周期及受权限保护的管理端点。
+1. Issue #71 已补充 PostgreSQL 配置仓储、每次读取当前值的可取消来源、Nest 生命周期及三个受权限保护的管理端点，见[配置运行说明](./phase-2-spapi-config.md)。Worker 与业务客户端宿主仍待接线。
 2. Issue #69 已补充共享 Redis 原子配额、内存回退、反馈限额与有界优先级执行器，见[配额运行说明](./phase-2-spapi-quota.md)；API/Worker 宿主仍须显式注册单例并管理 Redis 连接生命周期。
 3. 真实 BullMQ Processor/调度与监控 pipeline 接线，HTML fallback、风险判断和通知对拍。
 4. 使用授权的 sandbox/灰度凭据完成集成验证，达到原始计划的影子对拍与生产切流 gate。

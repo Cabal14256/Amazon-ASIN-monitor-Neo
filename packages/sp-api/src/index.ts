@@ -1,5 +1,6 @@
 export * from './client';
 export * from './config';
+export * from './config-source';
 export * from './error-statistics';
 export * from './errors';
 export * from './lwa';
