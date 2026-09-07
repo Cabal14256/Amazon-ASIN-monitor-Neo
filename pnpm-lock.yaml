@@ -238,6 +238,9 @@ importers:
       '@asin-monitor/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@asin-monitor/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       bullmq:
         specifier: ^5.58.0
         version: 5.81.3
