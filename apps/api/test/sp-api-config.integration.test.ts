@@ -221,6 +221,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await write();
       expect((await list()).body).toContain(secret);
       const connection = await f.pools.primaryPool.connect();
+      let pending:
+        | PromiseLike<{ statusCode: number; body: string }>
+        | undefined;
       try {
         await connection.query('BEGIN');
         await connection.query(
@@ -231,15 +234,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           [operatorId],
         );
         let completed = false;
-        const pending = list().then((response) => {
+        pending = list().then((response) => {
           completed = true;
           return response;
         });
-        // Observe the actual blocked transaction, not a timing-based sleep.
+        // pg_stat_activity caches its first snapshot until this transaction
+        // ends. Read current lock-manager state, scoped to this lock holder.
         await vi.waitFor(
           async () => {
             const waiting = await connection.query(
-              "SELECT count(*)::int AS count FROM pg_stat_activity WHERE wait_event='advisory' AND query LIKE '%pg_advisory_xact_lock(1095977294, 1380073795)%'",
+              "SELECT count(*)::int AS count FROM pg_locks WHERE locktype='advisory' AND NOT granted AND pg_backend_pid()=ANY(pg_blocking_pids(pid))",
             );
             expect(waiting.rows[0].count).toBeGreaterThan(0);
           },
@@ -252,8 +256,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(response.body).not.toContain(secret);
         expect((await write()).statusCode).toBe(403);
       } finally {
-        await connection.query('ROLLBACK');
-        connection.release();
+        try {
+          await connection.query('ROLLBACK');
+        } finally {
+          connection.release();
+          await pending;
+        }
       }
     });
     it('uses committed database rotation in the actual shared client and refuses cached credentials during a bounded database failure', async () => {
