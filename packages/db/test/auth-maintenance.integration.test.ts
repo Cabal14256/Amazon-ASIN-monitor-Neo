@@ -172,7 +172,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         (await pool.query('SELECT id FROM sessions ORDER BY id')).rows.map(
           (row) => row.id,
         ),
-      ).toEqual(['future', 'unbounded']);
+      ).toEqual(['future', 'unbounded'].map((id) => id.padEnd(36, ' ')));
       expect((await pool.query('SELECT id FROM users')).rows).toEqual([
         { id: 'fixture-owner' },
       ]);
