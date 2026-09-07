@@ -8,8 +8,8 @@ import type {
   RoleWriteUnit,
 } from '@asin-monitor/db';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
+import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
-import { normalizeUserStatus } from '../auth/authentication.service';
 import { PermissionCacheService } from '../auth/permission-cache.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
@@ -148,33 +148,7 @@ export class RoleService {
     });
   }
   private async verifyOperator(unit: RoleWriteUnit, principal: AuthPrincipal) {
-    const user = await unit.lockOperator(principal.userId);
-    if (
-      !user ||
-      normalizeUserStatus(user.status, user.lockedUntil) !== 'ACTIVE'
-    )
-      fail(403, '账户不可用');
-    if (
-      user.forcePasswordChange ||
-      (user.passwordExpiresAt && user.passwordExpiresAt <= new Date())
-    )
-      fail(403, '请先修改密码');
-    const session = await unit.lockSession(
-      principal.userId,
-      principal.sessionId,
-    );
-    if (
-      !session ||
-      session.status !== 'ACTIVE' ||
-      (session.expiresAt && session.expiresAt <= new Date())
-    )
-      fail(403, '会话已失效');
-    if (
-      !(await unit.operatorPermissionCodes(principal.userId)).includes(
-        'role:write',
-      )
-    )
-      fail(403, '没有权限执行此操作');
+    await authorizeAdministration(unit, principal, 'role:write');
   }
   async assignPermissions(
     principal: AuthPrincipal,
