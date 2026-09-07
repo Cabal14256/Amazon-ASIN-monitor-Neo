@@ -159,7 +159,7 @@ jobs:
 
       - name: Run Neo API health, auth and rate-limit dependency integration tests
         run: |
-          pnpm --filter @asin-monitor/db build
+          pnpm --filter @asin-monitor/api... build
           pnpm --filter @asin-monitor/api exec vitest run test/health.test.ts test/auth.integration.test.ts test/rate-limit.test.ts
 
       - name: Run Neo PostgreSQL login transactions
@@ -184,9 +184,7 @@ jobs:
         run: pnpm --filter @asin-monitor/api exec vitest run test/user-password.integration.test.ts
 
       - name: Run Neo SP-API configuration authorization and committed credential rotation
-        run: |
-          pnpm --filter @asin-monitor/sp-api build
-          pnpm --filter @asin-monitor/api exec vitest run test/sp-api-config.integration.test.ts
+        run: pnpm --filter @asin-monitor/api exec vitest run test/sp-api-config.integration.test.ts
 
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
