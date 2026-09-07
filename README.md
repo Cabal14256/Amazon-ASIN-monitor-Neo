@@ -28,7 +28,7 @@ Neo 审计日志列表、详情和两类统计接口的权限、时间筛选及�
 
 Neo 角色列表、详情、权限分组、权限分配及角色下拉接口已接入 PostgreSQL，权威源门禁、并发权限保护和缓存失效边界见 [`角色管理运行说明`](./docs/runbooks/phase-2-role-management.md)。用户列表与详情见 [`用户查询运行说明`](./docs/runbooks/phase-2-user-queries.md)，创建、更新与删除见 [`用户管理运行说明`](./docs/runbooks/phase-2-user-administration.md)，管理员密码重置见 [`密码重置运行说明`](./docs/runbooks/phase-2-admin-password-reset.md)。
 
-D4 会话清理与审计归档数据层见 [`运行说明`](./docs/runbooks/phase-2-auth-maintenance-data.md)。新审计查询依赖 `0003` 冷热统一视图，最终快照导入后须先执行 `corepack pnpm db:upgrade:auth-maintenance` 再部署 API；实际 Worker 调度另行接入。
+D4 会话清理与审计归档见[数据层说明](./docs/runbooks/phase-2-auth-maintenance-data.md)和[Worker 调度运行说明](./docs/runbooks/phase-2-auth-maintenance-worker.md)。新审计查询依赖 `0003` 冷热统一视图，最终快照导入后须先执行 `corepack pnpm db:upgrade:auth-maintenance` 再部署 API；维护专用 Worker 使用 `WORKER_ENABLED_QUEUES=maintenance`，停止已有计划需按运行说明显式暂停队列并删除计划。
 
 ## 功能概览
 

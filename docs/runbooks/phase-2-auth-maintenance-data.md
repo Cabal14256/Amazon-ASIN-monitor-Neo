@@ -2,11 +2,11 @@
 
 ## 迁移顺序
 
-本批提供 PostgreSQL 数据原语与查询兼容。Worker Processor、每日/每月调度和单调度器锁由下一独立任务接入；当前不会自动执行生产清理或归档。
+本批提供 PostgreSQL 数据原语与查询兼容。实际 Worker Processor、每日/每月调度、单调度器锁及停止恢复步骤见[Worker 运行说明](./phase-2-auth-maintenance-worker.md)；部署前须先完成下列迁移顺序。
 
 1. 保留 Legacy，按 P1 流程完成最终冻结快照导入和对拍。
 2. 在主营 PostgreSQL database 执行 `0003_auth_maintenance.sql`，再部署使用新审计查询视图的 Neo API。新视图是本版本审计查询的数据库前提。
-3. 后续 Worker 仅在 PostgreSQL 权威源下接入实际调度，并按独立运行说明验收启用。
+3. Worker 仅在 PostgreSQL 权威源下接入实际调度，并按独立运行说明验收启用。
 
 Compose 使用显式命令 `corepack pnpm db:upgrade:auth-maintenance`。新卷的自动初始化仍止于 `0002`；已有容器新增挂载后先执行 `corepack pnpm db:up` 重建容器配置，再运行升级。外部环境用 `psql -X -v ON_ERROR_STOP=1 --dbname <主营库> --file packages/db/migrations/0003_auth_maintenance.sql`，使用现有受控连接配置，不把凭据写入日志。
 
