@@ -16,7 +16,7 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import type { Pool } from 'pg';
-import { auditLogs } from '../schema';
+import { auditLogsAll as auditLogs } from '../schema';
 import { AuditQueryDeadline, AuditQueryError } from './audit-query-deadline';
 
 export interface AuditQueryRepositoryPort {

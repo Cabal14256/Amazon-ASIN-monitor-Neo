@@ -92,6 +92,11 @@ export async function userAdministrationApp() {
           table,
         )} INCLUDING ALL)`,
       );
+    // This fixture has only hot audit rows. Keep any read through the D4 view
+    // inside its private schema rather than resolving the public view.
+    await bootstrap.query(
+      `CREATE VIEW ${quoted}.audit_logs_all AS SELECT * FROM ${quoted}.audit_logs`,
+    );
     // LIKE copies CHECK, identity and indexes, but not foreign keys. Rebind the
     // actual baseline FK definitions to the private copies, including cascades.
     const foreignKeys = await bootstrap.query<{

@@ -101,6 +101,12 @@ Gate 使用 `DATABASE_URL`，并从根目录依次读取 `.env.migration`、`.en
 
 ## MySQL → PostgreSQL 翻译决策
 
+### D4 认证维护与审计归档
+
+最终 Legacy 快照导入完成后，显式运行 `corepack pnpm db:upgrade:auth-maintenance`，应用 [`0003_auth_maintenance.sql`](./migrations/0003_auth_maintenance.sql)。它新增按月分区的审计归档和冷热统一查询视图；新审计 API 依赖该视图，必须先升级数据库再部署。该步骤不加入空卷自动初始化，以保持既有快照 ETL 的精确表清单保护；升级后原 ETL 会拒绝再次重置此目标库，重复预演请使用新隔离库。
+
+会话清理/原子归档的有界批量语义、后续 Worker 接入、权限、无损回滚和验证步骤见 [`D4运行说明`](../../docs/runbooks/phase-2-auth-maintenance-data.md)。有序回滚文件为 [`0003_auth_maintenance.rollback.sql`](./migrations/0003_auth_maintenance.rollback.sql)，必须停写并核对热/冷 ID 冲突，不能直接删除归档。
+
 | Legacy 语义 | PG16/Drizzle 基线 | 说明 |
 | --- | --- | --- |
 | `TINYINT(1)` | `boolean` | 保留原默认值与可空性 |

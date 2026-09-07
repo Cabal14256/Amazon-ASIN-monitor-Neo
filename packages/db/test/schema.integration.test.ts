@@ -46,6 +46,11 @@ async function publicTableNames(
     FROM information_schema.tables
     WHERE table_schema = 'public'
       AND table_type = 'BASE TABLE'
+      AND table_name <> 'audit_logs_archive'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_inherits inheritance
+        WHERE inheritance.inhrelid = format('%I.%I', table_schema, table_name)::regclass
+      )
     ORDER BY table_name
   `);
   return result.rows.map(({ table_name }) => table_name);
@@ -122,7 +127,7 @@ describe('P1-T2 PostgreSQL schema integration', () => {
     }
   });
 
-  it('真实双库表与 Drizzle 21 + 4 表、全部列和显式索引一致', async () => {
+  it('真实双库基线21 + 4表、全部列和显式索引一致（D4归档另行验收）', async () => {
     expect(await publicTableNames(primaryPool)).toEqual([...primaryTableNames]);
     expect(await publicTableNames(competitorPool)).toEqual([
       ...competitorTableNames,
