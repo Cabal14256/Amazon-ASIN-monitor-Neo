@@ -71,6 +71,32 @@ const routes = [
     schema: asinRecordResultSchema,
   },
 ] as const;
+const lifecycleRoutes = [
+  {
+    method: 'DELETE',
+    path: '/variant-groups/group-83',
+    operation: 'deleteGroup',
+    permission: 'asin:delete',
+  },
+  {
+    method: 'DELETE',
+    path: '/asins/asin-83',
+    operation: 'deleteAsin',
+    permission: 'asin:delete',
+  },
+  {
+    method: 'PUT',
+    path: '/variant-groups/group-83/feishu-notify',
+    operation: 'updateGroupNotify',
+    permission: 'asin:write',
+  },
+  {
+    method: 'PUT',
+    path: '/asins/asin-83/feishu-notify',
+    operation: 'updateAsinNotify',
+    permission: 'asin:write',
+  },
+] as const;
 function data() {
   const user: AuthUserRecord = {
     id,
@@ -115,6 +141,10 @@ function data() {
     createAsin: vi.fn(async () => snapshot),
     updateAsin: vi.fn(async () => snapshot),
     moveAsin: vi.fn(async () => snapshot),
+    deleteGroup: vi.fn(async () => {}),
+    deleteAsin: vi.fn(async () => {}),
+    updateGroupNotify: vi.fn(async () => group),
+    updateAsinNotify: vi.fn(async () => snapshot),
   } as unknown as AsinWriteUnit;
   const repository: AsinWriteRepositoryPort = {
     transaction: vi.fn(async (operation) => operation(unit)),
@@ -186,6 +216,139 @@ describe('ASIN writes / HTTP current permission and commit boundaries', () => {
       headers: auth,
       payload,
     });
+  const lifecycleRequest = (
+    route: (typeof lifecycleRoutes)[number],
+    auth = headers as Record<string, string>,
+    path = route.path as string,
+    payload: Record<string, unknown> = { enabled: 0 },
+  ) =>
+    app.http.inject({
+      method: route.method,
+      url: `/api/v1${path}`,
+      headers: auth,
+      ...(route.method === 'PUT' ? { payload } : {}),
+    });
+  const grantLifecycle = (permission: 'asin:write' | 'asin:delete') => {
+    f.auth.getPermissionCodes.mockResolvedValue([permission]);
+    f.permissions.splice(0, f.permissions.length, permission);
+  };
+  it.each(lifecycleRoutes)('requires login for $operation', async (route) => {
+    expect((await lifecycleRequest(route, {})).statusCode).toBe(401);
+    expect(f.repository.transaction).not.toHaveBeenCalled();
+  });
+  it.each(lifecycleRoutes)(
+    'accepts only the precise permission for $operation and returns its complete envelope',
+    async (route) => {
+      grantLifecycle(route.permission);
+      const response = await lifecycleRequest(route, {
+        ...headers,
+        origin: app.env.CORS_ORIGIN,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      const recordId = route.path.includes('variant-groups')
+        ? 'group-83'
+        : 'asin-83';
+      if (route.method === 'DELETE') {
+        expect(response.json()).toEqual({
+          success: true,
+          errorCode: 0,
+          data: '删除成功',
+        });
+        expect(f.unit[route.operation]).toHaveBeenCalledWith(recordId);
+      } else {
+        (route.operation === 'updateGroupNotify'
+          ? variantGroupResultSchema
+          : asinRecordResultSchema
+        ).parse(response.json());
+        expect(f.unit[route.operation]).toHaveBeenCalledWith(recordId, false);
+      }
+    },
+  );
+  it.each(lifecycleRoutes)(
+    'does not confuse write and delete permission for $operation',
+    async (route) => {
+      grantLifecycle(
+        route.permission === 'asin:delete' ? 'asin:write' : 'asin:delete',
+      );
+      expect((await lifecycleRequest(route)).statusCode).toBe(403);
+      expect(f.repository.transaction).not.toHaveBeenCalled();
+    },
+  );
+  it.each(lifecycleRoutes)(
+    'rejects current permission revocation despite a cached guard for $operation',
+    async (route) => {
+      grantLifecycle(route.permission);
+      f.permissions.length = 0;
+      expect((await lifecycleRequest(route)).statusCode).toBe(403);
+      expect(f.unit[route.operation]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(lifecycleRoutes)(
+    'rejects an unexpected Origin for $operation',
+    async (route) => {
+      grantLifecycle(route.permission);
+      expect(
+        (
+          await lifecycleRequest(route, {
+            ...headers,
+            origin: 'https://unexpected.example',
+          })
+        ).statusCode,
+      ).toBe(403);
+      expect(f.unit[route.operation]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(lifecycleRoutes)(
+    'rejects invalid identifiers before $operation',
+    async (route) => {
+      grantLifecycle(route.permission);
+      expect(
+        (
+          await lifecycleRequest(
+            route,
+            headers,
+            route.path.replace(/(?:group|asin)-83/, '%00'),
+          )
+        ).statusCode,
+      ).toBe(400);
+      expect(f.unit[route.operation]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(lifecycleRoutes.filter((route) => route.method === 'PUT'))(
+    'rejects string flags without calling $operation',
+    async (route) => {
+      grantLifecycle(route.permission);
+      expect(
+        (await lifecycleRequest(route, headers, route.path, { enabled: '1' }))
+          .statusCode,
+      ).toBe(400);
+      expect(f.unit[route.operation]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(lifecycleRoutes.filter((route) => route.method === 'DELETE'))(
+    'does not return deletion success if the transaction fails for $operation',
+    async (route) => {
+      grantLifecycle(route.permission);
+      vi.mocked(f.repository.transaction).mockImplementationOnce(
+        async (action) => {
+          await action(f.unit);
+          throw new Error('private commit failure');
+        },
+      );
+      const response = await lifecycleRequest(route);
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toMatchObject({
+        success: false,
+        errorMessage: '服务器内部错误',
+      });
+      expect(app.logger.info).not.toHaveBeenCalledWith(
+        'ASIN 写入完成',
+        'AsinWriteService',
+        expect.any(Object),
+      );
+    },
+  );
   it.each(routes)('requires login for $method $path', async (route) => {
     expect((await request(route, {})).statusCode).toBe(401);
     expect(f.repository.transaction).not.toHaveBeenCalled();

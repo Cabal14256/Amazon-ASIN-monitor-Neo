@@ -18,6 +18,7 @@ import {
   AsinWriteInputError,
   parseAsinCreate,
   parseAsinMove,
+  parseAsinNotify,
   parseAsinUpdate,
   parseAsinWriteId,
   parseVariantGroupWrite,
@@ -58,7 +59,11 @@ export class AsinWriteService {
       | 'update-group'
       | 'create-asin'
       | 'update-asin'
-      | 'move-asin',
+      | 'move-asin'
+      | 'delete-group'
+      | 'delete-asin'
+      | 'group-notify'
+      | 'asin-notify',
     action: (unit: AsinWriteUnit) => Promise<T>,
   ) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -67,7 +72,13 @@ export class AsinWriteService {
     this.active++;
     try {
       const result = await this.repository.transaction(async (unit) => {
-        await authorizeAdministration(unit, principal, 'asin:write');
+        await authorizeAdministration(
+          unit,
+          principal,
+          operation === 'delete-group' || operation === 'delete-asin'
+            ? 'asin:delete'
+            : 'asin:write',
+        );
         return action(unit);
       });
       this.logger.info('ASIN 写入完成', 'AsinWriteService', { operation });
@@ -102,6 +113,38 @@ export class AsinWriteService {
     } finally {
       this.active--;
     }
+  }
+  deleteGroup(principal: AuthPrincipal, groupId: unknown) {
+    return this.write(principal, 'delete-group', async (unit) => {
+      await unit.deleteGroup(parseAsinWriteId(groupId));
+      return '删除成功';
+    });
+  }
+  deleteAsin(principal: AuthPrincipal, asinId: unknown) {
+    return this.write(principal, 'delete-asin', async (unit) => {
+      await unit.deleteAsin(parseAsinWriteId(asinId));
+      return '删除成功';
+    });
+  }
+  updateGroupNotify(principal: AuthPrincipal, groupId: unknown, body: unknown) {
+    return this.write(principal, 'group-notify', async (unit) =>
+      groupResult(
+        await unit.updateGroupNotify(
+          parseAsinWriteId(groupId),
+          parseAsinNotify(body),
+        ),
+      ),
+    );
+  }
+  updateAsinNotify(principal: AuthPrincipal, asinId: unknown, body: unknown) {
+    return this.write(principal, 'asin-notify', async (unit) =>
+      asinWriteResult(
+        await unit.updateAsinNotify(
+          parseAsinWriteId(asinId),
+          parseAsinNotify(body),
+        ),
+      ),
+    );
   }
   createGroup(principal: AuthPrincipal, body: unknown) {
     return this.write(principal, 'create-group', async (unit) =>
