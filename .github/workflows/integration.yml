@@ -191,6 +191,9 @@ jobs:
           pnpm --filter @asin-monitor/worker build
           pnpm --filter @asin-monitor/worker exec vitest run test/auth-maintenance.integration.test.ts test/auth-maintenance-entry.integration.test.ts --no-file-parallelism
 
+      - name: Run shared SP-API quota compatibility on Redis
+        run: pnpm --filter @asin-monitor/sp-api exec vitest run test/quota.integration.test.ts
+
       - name: Run Neo audit persistence integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit.integration.test.ts
 
