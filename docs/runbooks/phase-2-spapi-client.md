@@ -46,11 +46,11 @@
 后续独立 Issue 必须补齐：
 
 1. PostgreSQL 系统配置仓储、可取消的配置加载/刷新、Nest 生命周期及受权限保护的管理端点。
-2. Redis 按 operation + region 的原子多层配额扣减、0.75 安全系数、反馈限额、手动/定时/批量优先级调度与取消；适配器每次只调用 task 一次且等待实际 task 结束。
+2. Issue #69 已补充共享 Redis 原子配额、内存回退、反馈限额与有界优先级执行器，见[配额运行说明](./phase-2-spapi-quota.md)；API/Worker 宿主仍须显式注册单例并管理 Redis 连接生命周期。
 3. 真实 BullMQ Processor/调度与监控 pipeline 接线，HTML fallback、风险判断和通知对拍。
 4. 使用授权的 sandbox/灰度凭据完成集成验证，达到原始计划的影子对拍与生产切流 gate。
 
-本地/CI 测试只用虚构凭据和本地 loopback，不调用 Amazon，不读取生产配置。不把这些通过结果当作实网联调、配额系统或整个 P2 完成。
+本地/CI 测试只用虚构凭据、本地 loopback 和 CI 隔离 Redis，不调用 Amazon，不读取生产配置。不把这些通过结果当作实网联调、生产接线或整个 P2 完成。
 
 ## 验证及回滚
 
