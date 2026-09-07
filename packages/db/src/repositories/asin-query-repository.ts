@@ -128,7 +128,10 @@ function hydrate<T extends PgTable>(
   ) as T['$inferSelect'];
 }
 
-class DrizzleAsinQueryUnit extends DrizzleRoleUnit implements AsinQueryUnit {
+export class DrizzleAsinQueryUnit
+  extends DrizzleRoleUnit
+  implements AsinQueryUnit
+{
   // Shared row/advisory locks allow concurrent readers, but still serialize
   // against committed administration, password and session changes.
   override async lockOperator(userId: string) {
@@ -254,22 +257,31 @@ export class PgAsinQueryRepository implements AsinQueryRepositoryPort {
     if (this.active >= 16) throw new AsinQueryRepositoryError('capacity');
     this.active++;
     try {
-      return await withAuthDatabaseDeadline(
-        this.pool,
-        async (db, ensureOpen) => {
-          ensureOpen();
-          // READ COMMITTED obtains fresh authorization after a waiting writer.
-          await db.execute(sql`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
-          ensureOpen();
-          await db.execute(
-            sql`SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)`,
-          );
-          ensureOpen();
-          return operation(new DrizzleAsinQueryUnit(db, ensureOpen));
-        },
+      return await withAsinDatabaseTransaction(this.pool, (db, ensureOpen) =>
+        operation(new DrizzleAsinQueryUnit(db, ensureOpen)),
       );
     } finally {
       this.active--;
     }
   }
+}
+
+/** Business writes share authorization locks with readers. Only administration
+ * changes take the matching exclusive advisory lock; business row locks are
+ * acquired afterwards in group -> ASIN order by the relevant unit.
+ */
+export function withAsinDatabaseTransaction<T>(
+  pool: Pool,
+  operation: Parameters<typeof withAuthDatabaseDeadline<T>>[1],
+): Promise<T> {
+  return withAuthDatabaseDeadline(pool, async (db, ensureOpen) => {
+    ensureOpen();
+    await db.execute(sql`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
+    ensureOpen();
+    await db.execute(
+      sql`SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)`,
+    );
+    ensureOpen();
+    return operation(db, ensureOpen);
+  });
 }

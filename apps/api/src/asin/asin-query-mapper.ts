@@ -36,6 +36,33 @@ export function normalizeAsinType(value: string | null): '1' | '2' | null {
     ? '2'
     : null;
 }
+function mapAsinRecord(
+  row: Asin,
+  parentId: string,
+  status: ReturnType<typeof resolveAsinVariantStatus>,
+): DecoratedAsin {
+  return {
+    id: row.id,
+    asin: row.asin,
+    name: row.name,
+    asinType: normalizeAsinType(row.asinType),
+    country: row.country,
+    site: row.site,
+    brand: row.brand,
+    parentId,
+    ...statusJson(status),
+    createTime: iso(row.createTime),
+    updateTime: iso(row.updateTime),
+    lastCheckTime: iso(row.lastCheckTime),
+    feishuNotifyEnabled: flag(row.feishuNotifyEnabled) ?? 1,
+  };
+}
+export function mapAsinQueryChild(
+  row: Asin,
+  group: VariantGroup,
+): DecoratedAsin {
+  return mapAsinRecord(row, group.id, resolveAsinVariantStatus(row, group));
+}
 export function mapAsinQueryGroups(
   result: AsinGroupReadResult,
 ): GroupResponse[] {
@@ -57,21 +84,9 @@ function mapGroup(
     row,
     status: resolveAsinVariantStatus(row, group),
   }));
-  const children: DecoratedAsin[] = resolved.map(({ row, status }) => ({
-    id: row.id,
-    asin: row.asin,
-    name: row.name,
-    asinType: normalizeAsinType(row.asinType),
-    country: row.country,
-    site: row.site,
-    brand: row.brand,
-    parentId: group.id,
-    ...statusJson(status),
-    createTime: iso(row.createTime),
-    updateTime: iso(row.updateTime),
-    lastCheckTime: iso(row.lastCheckTime),
-    feishuNotifyEnabled: flag(row.feishuNotifyEnabled) ?? 1,
-  }));
+  const children = resolved.map(({ row, status }) =>
+    mapAsinRecord(row, group.id, status),
+  );
   const state = resolveGroupVariantStatus(
     group,
     resolved.map((item) => item.status),
