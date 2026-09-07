@@ -70,6 +70,20 @@ const routes = [
     operation: 'moveAsin',
     schema: asinRecordResultSchema,
   },
+  {
+    method: 'PUT',
+    path: '/variant-groups/group-83/manual-broken',
+    body: { markedBroken: '1', reason: ' group reason ' },
+    operation: 'updateGroupManual',
+    schema: variantGroupResultSchema,
+  },
+  {
+    method: 'PUT',
+    path: '/asins/asin-83/manual-broken',
+    body: { action: ' exclude_group_manual ', reason: ' exclusion reason ' },
+    operation: 'updateAsinManual',
+    schema: asinRecordResultSchema,
+  },
 ] as const;
 const lifecycleRoutes = [
   {
@@ -145,6 +159,8 @@ function data() {
     deleteAsin: vi.fn(async () => {}),
     updateGroupNotify: vi.fn(async () => group),
     updateAsinNotify: vi.fn(async () => snapshot),
+    updateGroupManual: vi.fn(async () => group),
+    updateAsinManual: vi.fn(async () => snapshot),
   } as unknown as AsinWriteUnit;
   const repository: AsinWriteRepositoryPort = {
     transaction: vi.fn(async (operation) => operation(unit)),
@@ -353,6 +369,51 @@ describe('ASIN writes / HTTP current permission and commit boundaries', () => {
     expect((await request(route, {})).statusCode).toBe(401);
     expect(f.repository.transaction).not.toHaveBeenCalled();
   });
+  it.each(routes.slice(5))(
+    'uses current operator identity for $operation and rejects actor injection',
+    async (route) => {
+      expect((await request(route)).statusCode).toBe(200);
+      expect(f.unit[route.operation]).toHaveBeenCalledWith(
+        route.path.includes('variant-groups') ? 'group-83' : 'asin-83',
+        route.operation === 'updateGroupManual'
+          ? { markedBroken: true, reason: 'group reason' }
+          : { action: 'EXCLUDE_GROUP_MANUAL', reason: 'exclusion reason' },
+        id,
+      );
+      vi.mocked(f.unit[route.operation]).mockClear();
+      expect(
+        (
+          await request(route, headers, {
+            ...route.body,
+            updatedBy: 'spoofed actor',
+          })
+        ).statusCode,
+      ).toBe(400);
+      expect(f.unit[route.operation]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(routes.slice(5))(
+    'does not report $operation success when history or commit fails',
+    async (route) => {
+      vi.mocked(f.repository.transaction).mockImplementationOnce(
+        async (action) => {
+          await action(f.unit);
+          throw new Error('private history failure');
+        },
+      );
+      const response = await request(route);
+      expect(response.statusCode).toBe(500);
+      expect(response.json().errorMessage).toBe('服务器内部错误');
+      expect(app.logger.info).not.toHaveBeenCalledWith(
+        'ASIN 写入完成',
+        'AsinWriteService',
+        expect.any(Object),
+      );
+      expect(
+        response.body + JSON.stringify(app.logger.error.mock.calls),
+      ).not.toContain('private history');
+    },
+  );
   it.each(routes)(
     'allows asin:write and emits its contract only after the transaction for $operation',
     async (route) => {

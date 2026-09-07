@@ -1,7 +1,23 @@
-import { asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { asins, variantGroups, type Asin, type VariantGroup } from '../schema';
+import {
+  asinManualHistory,
+  groupManualHistory,
+  manualActor,
+  nextAsinManualState,
+  type AsinManualFields,
+  type GroupManualFields,
+} from '../domain/asin-manual-history';
+import {
+  asins,
+  monitorHistory,
+  users,
+  variantGroups,
+  type Asin,
+  type NewMonitorHistory,
+  type VariantGroup,
+} from '../schema';
 import {
   DrizzleAsinQueryUnit,
   withAsinDatabaseTransaction,
@@ -29,6 +45,16 @@ export interface AsinWriteSnapshot {
   group: VariantGroup;
 }
 export interface AsinWriteUnit extends AsinQueryUnit {
+  updateGroupManual(
+    groupId: string,
+    fields: GroupManualFields,
+    operatorId: string,
+  ): Promise<AsinGroupReadResult>;
+  updateAsinManual(
+    asinId: string,
+    fields: AsinManualFields,
+    operatorId: string,
+  ): Promise<AsinWriteSnapshot>;
   createGroup(fields: VariantGroupWriteFields): Promise<AsinGroupReadResult>;
   updateGroup(
     groupId: string,
@@ -141,6 +167,115 @@ class DrizzleAsinWriteUnit
     this.ensureOpen();
     if (!result) throw new AsinWriteRepositoryError('asin-not-found');
     return result;
+  }
+  private async manualContext(operatorId: string) {
+    this.ensureOpen();
+    // authorizeAdministration already holds this current user's shared row lock.
+    const [operator] = await this.db
+      .select({
+        realName: users.realName,
+        username: users.username,
+        id: users.id,
+      })
+      .from(users)
+      .where(eq(users.id, operatorId));
+    const clock = await this.db.execute<{ milliseconds: string }>(
+      sql`SELECT (extract(epoch FROM clock_timestamp()) * 1000)::text AS milliseconds`,
+    );
+    this.ensureOpen();
+    // Drizzle returns raw timestamp strings; epoch is independent of session TZ.
+    const time = new Date(Number(clock.rows[0]?.milliseconds));
+    if (!operator || !Number.isFinite(time.getTime()))
+      throw new Error('Invalid manual operation context');
+    return {
+      actor: operator.realName || operator.username || operator.id,
+      time,
+    };
+  }
+  private async insertManualHistory(entries: Iterable<NewMonitorHistory>) {
+    let batch: NewMonitorHistory[] = [];
+    for (const entry of entries) {
+      batch.push(entry);
+      if (batch.length === 500) {
+        this.ensureOpen();
+        await this.db.insert(monitorHistory).values(batch);
+        batch = [];
+      }
+    }
+    this.ensureOpen();
+    if (batch.length) await this.db.insert(monitorHistory).values(batch);
+    this.ensureOpen();
+  }
+  async updateGroupManual(
+    groupId: string,
+    fields: GroupManualFields,
+    operatorId: string,
+  ) {
+    if (!(await this.lockGroups([groupId])).has(groupId))
+      throw new AsinWriteRepositoryError('group-not-found');
+    // Read the bounded complete before-state under the parent lock before mutation.
+    const previous = await this.detail(groupId);
+    const { actor, time } = await this.manualContext(operatorId);
+    await this.db
+      .update(variantGroups)
+      .set({
+        manualBroken: fields.markedBroken,
+        manualBrokenReason: fields.markedBroken ? fields.reason || null : null,
+        manualBrokenUpdatedAt: fields.markedBroken ? time : null,
+        manualBrokenUpdatedBy: fields.markedBroken ? manualActor(actor) : null,
+        updateTime: now,
+      })
+      .where(eq(variantGroups.id, groupId));
+    this.ensureOpen();
+    if (!fields.markedBroken) {
+      await this.db
+        .update(asins)
+        .set({
+          manualExcludedFromGroup: false,
+          manualExcludedReason: null,
+          manualExcludedUpdatedAt: null,
+          manualExcludedUpdatedBy: null,
+          updateTime: now,
+        })
+        .where(
+          and(
+            eq(asins.variantGroupId, groupId),
+            eq(asins.manualExcludedFromGroup, true),
+          ),
+        );
+      this.ensureOpen();
+    }
+    const current = await this.detail(groupId);
+    await this.insertManualHistory(
+      groupManualHistory(previous, current, fields, time, actor),
+    );
+    return current;
+  }
+  async updateAsinManual(
+    asinId: string,
+    fields: AsinManualFields,
+    operatorId: string,
+  ) {
+    const { asin: previous, groups } = await this.lockAsin(asinId);
+    const group = groups.get(previous.variantGroupId)!;
+    const { actor, time } = await this.manualContext(operatorId);
+    await this.db
+      .update(asins)
+      .set({
+        ...nextAsinManualState(previous, fields, time, actor),
+        updateTime: now,
+      })
+      .where(eq(asins.id, asinId));
+    this.ensureOpen();
+    await this.db
+      .update(variantGroups)
+      .set({ updateTime: now })
+      .where(eq(variantGroups.id, group.id));
+    const current = await this.snapshot(asinId);
+    await this.insertManualHistory([
+      asinManualHistory(previous, current.asin, group, fields, time, actor),
+    ]);
+    return current;
   }
   async deleteGroup(groupId: string) {
     if (!(await this.lockGroups([groupId])).has(groupId)) return;

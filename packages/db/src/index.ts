@@ -1,5 +1,6 @@
 export * from './aggregate-reconciliation';
 export * from './client';
+export * from './domain/asin-manual-history';
 export * from './domain/variant-status';
 export * from './migration';
 export * from './repositories/account-repository';
