@@ -1,6 +1,18 @@
+import type { BatchCreateAsinsData } from '@asin-monitor/contracts';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
+import {
+  addBatchAsinFailure,
+  addBatchAsinSuccess,
+  ASIN_BATCH_CREATE_CHUNK_SIZE,
+  batchAsinFitsStorage,
+  batchAsinKey,
+  batchCountry,
+  batchDuplicateMessage,
+  prepareBatchAsins,
+  type BatchAsinItem,
+} from '../domain/asin-batch-create';
 import {
   asinManualHistory,
   groupManualHistory,
@@ -45,6 +57,7 @@ export interface AsinWriteSnapshot {
   group: VariantGroup;
 }
 export interface AsinWriteUnit extends AsinQueryUnit {
+  batchCreateAsins(items: unknown[]): Promise<BatchCreateAsinsData>;
   updateGroupManual(
     groupId: string,
     fields: GroupManualFields,
@@ -167,6 +180,155 @@ class DrizzleAsinWriteUnit
     this.ensureOpen();
     if (!result) throw new AsinWriteRepositoryError('asin-not-found');
     return result;
+  }
+  async batchCreateAsins(raw: unknown[]): Promise<BatchCreateAsinsData> {
+    const { result, items } = prepareBatchAsins(raw);
+    if (!items.length) return result;
+    const parentIds = items
+      .map((item) => item.parentId!)
+      .filter((id) => !id.includes('\0') && [...id].length <= 50);
+    const groups = parentIds.length
+      ? await this.lockGroups(parentIds)
+      : new Map<string, VariantGroup>();
+    const groupValid: BatchAsinItem[] = [];
+    for (const item of items) {
+      const group = groups.get(item.parentId!);
+      if (!group) addBatchAsinFailure(result, item, '所属变体组不存在');
+      else if (batchCountry(group.country) !== item.country)
+        addBatchAsinFailure(
+          result,
+          item,
+          `ASIN国家必须与所属变体组一致（${batchCountry(group.country)}）`,
+        );
+      else groupValid.push(item);
+    }
+    const existing = new Set<string>();
+    for (
+      let offset = 0;
+      offset < groupValid.length;
+      offset += ASIN_BATCH_CREATE_CHUNK_SIZE
+    ) {
+      this.ensureOpen();
+      const chunk = groupValid.slice(
+        offset,
+        offset + ASIN_BATCH_CREATE_CHUNK_SIZE,
+      );
+      const rows = await this.db
+        .select({ asin: asins.asin, country: asins.country })
+        .from(asins)
+        .where(
+          sql`(lower(${asins.asin}), lower(${asins.country})) IN (${sql.join(
+            chunk.map(
+              (item) => sql`(lower(${item.asin}), lower(${item.country}))`,
+            ),
+            sql`,`,
+          )})`,
+        );
+      rows.forEach((row) =>
+        existing.add(
+          batchAsinKey({
+            asin: batchCountry(row.asin),
+            country: batchCountry(row.country),
+          }),
+        ),
+      );
+    }
+    const candidates: BatchAsinItem[] = [];
+    for (const item of groupValid) {
+      if (existing.has(batchAsinKey(item)))
+        addBatchAsinFailure(result, item, batchDuplicateMessage(item));
+      else candidates.push(item);
+    }
+    // Stable unique-key order also serializes overlapping batches in different
+    // parent groups. Public results retain their original validation phase order.
+    const sorted = [...candidates].sort((left, right) =>
+      batchAsinKey(left) < batchAsinKey(right)
+        ? -1
+        : batchAsinKey(left) > batchAsinKey(right)
+        ? 1
+        : 0,
+    );
+    const created = new Set<string>();
+    const failed = new Map<string, string>();
+    for (
+      let offset = 0;
+      offset < sorted.length;
+      offset += ASIN_BATCH_CREATE_CHUNK_SIZE
+    ) {
+      const chunk = sorted.slice(offset, offset + ASIN_BATCH_CREATE_CHUNK_SIZE);
+      const valid = chunk.filter((item) => {
+        if (batchAsinFitsStorage(item)) return true;
+        failed.set(item.id, '创建失败');
+        return false;
+      });
+      if (!valid.length) continue;
+      try {
+        await this.insertBatchWithSavepoint(valid);
+        valid.forEach((item) => created.add(item.id));
+      } catch (error) {
+        if (!recoverableBatchRowError(error)) throw error;
+        for (const item of valid) {
+          try {
+            await this.insertBatchWithSavepoint([item]);
+            created.add(item.id);
+          } catch (rowError) {
+            if (!recoverableBatchRowError(rowError)) throw rowError;
+            failed.set(
+              item.id,
+              duplicateAsin(rowError)
+                ? batchDuplicateMessage(item)
+                : '创建失败',
+            );
+          }
+        }
+      }
+    }
+    this.ensureOpen();
+    const createdItems = candidates.filter((item) => created.has(item.id));
+    const touched = [...new Set(createdItems.map((item) => item.parentId!))];
+    if (touched.length)
+      await this.db
+        .update(variantGroups)
+        .set({ updateTime: now })
+        .where(inArray(variantGroups.id, touched));
+    this.ensureOpen();
+    for (const item of candidates) {
+      const message = failed.get(item.id);
+      if (message) addBatchAsinFailure(result, item, message);
+    }
+    createdItems.forEach((item) => addBatchAsinSuccess(result, item));
+    return result;
+  }
+  private async insertBatchWithSavepoint(items: BatchAsinItem[]) {
+    this.ensureOpen();
+    await this.db.execute(sql`SAVEPOINT asin_batch_row`);
+    try {
+      await this.db.insert(asins).values(
+        items.map((item) => ({
+          id: item.id,
+          asin: item.asin,
+          name: item.name,
+          asinType: item.asinType,
+          country: item.country,
+          site: item.site!,
+          brand: item.brand!,
+          variantGroupId: item.parentId!,
+          isBroken: false,
+          variantStatus: 'NORMAL',
+          createTime: now,
+          updateTime: now,
+        })),
+      );
+      this.ensureOpen();
+      await this.db.execute(sql`RELEASE SAVEPOINT asin_batch_row`);
+    } catch (error) {
+      this.ensureOpen();
+      // PostgreSQL aborts the current statement scope on error. Recover before
+      // classifying/falling back; a failed rollback itself aborts the whole batch.
+      await this.db.execute(sql`ROLLBACK TO SAVEPOINT asin_batch_row`);
+      await this.db.execute(sql`RELEASE SAVEPOINT asin_batch_row`);
+      throw error;
+    }
   }
   private async manualContext(operatorId: string) {
     this.ensureOpen();
@@ -402,6 +564,24 @@ class DrizzleAsinWriteUnit
       );
     return this.snapshot(asinId);
   }
+}
+function recoverableBatchRowError(error: unknown): boolean {
+  let current = error;
+  for (
+    let depth = 0;
+    depth < 3 && current && typeof current === 'object';
+    depth++
+  ) {
+    const value = current as { code?: unknown; cause?: unknown };
+    if (
+      typeof value.code === 'string' &&
+      /^(?:22|23)[A-Z0-9]{3}$|^P0001$/.test(value.code)
+    )
+      return true;
+    current = value.cause;
+  }
+  // Connection, timeout, resource and transaction/deadlock failures abort all.
+  return false;
 }
 function duplicateAsin(error: unknown): boolean {
   let current = error;

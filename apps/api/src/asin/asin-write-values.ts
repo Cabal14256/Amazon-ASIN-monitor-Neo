@@ -1,5 +1,6 @@
 import {
   asinManualBrokenRequestSchema,
+  batchCreateAsinsRequestSchema,
   createAsinRequestSchema,
   feishuNotifyRequestSchema,
   groupManualBrokenRequestSchema,
@@ -7,6 +8,7 @@ import {
   updateAsinRequestSchema,
   variantGroupUpsertRequestSchema,
 } from '@asin-monitor/contracts';
+import { MAX_ASIN_BATCH_CREATE_ITEMS } from '@asin-monitor/db';
 import { z } from 'zod';
 
 export class AsinWriteInputError extends Error {
@@ -59,6 +61,17 @@ export function parseVariantGroupWrite(value: unknown) {
 export function parseAsinNotify(value: unknown): boolean {
   const { enabled } = parse(feishuNotifyRequestSchema.strict(), value);
   return enabled === true || enabled === 1;
+}
+export function parseAsinBatchCreate(value: unknown): unknown[] {
+  // Invalid rows are reported individually by this endpoint, unlike single create.
+  return parse(
+    batchCreateAsinsRequestSchema
+      .extend({
+        items: z.array(z.unknown()).min(1).max(MAX_ASIN_BATCH_CREATE_ITEMS),
+      })
+      .strict(),
+    value,
+  ).items;
 }
 const marked = (value: unknown) =>
   value === true || value === 1 || value === '1';

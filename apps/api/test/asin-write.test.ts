@@ -1,5 +1,6 @@
 import {
   asinRecordResultSchema,
+  batchCreateAsinsResultSchema,
   variantGroupResultSchema,
 } from '@asin-monitor/contracts';
 import {
@@ -34,6 +35,13 @@ const asinBody = {
   brand: 'Fixture',
   asinType: '1',
 };
+const batchRoute = {
+  method: 'POST',
+  path: '/asins/batch-create',
+  body: { items: [{ ...asinBody, parentId: 'group-83' }] },
+  operation: 'batchCreateAsins',
+  schema: batchCreateAsinsResultSchema,
+} as const;
 const routes = [
   {
     method: 'POST',
@@ -84,7 +92,13 @@ const routes = [
     operation: 'updateAsinManual',
     schema: asinRecordResultSchema,
   },
+  batchRoute,
 ] as const;
+const manualRoutes = routes.filter(
+  (route) =>
+    route.operation === 'updateGroupManual' ||
+    route.operation === 'updateAsinManual',
+);
 const lifecycleRoutes = [
   {
     method: 'DELETE',
@@ -161,6 +175,22 @@ function data() {
     updateAsinNotify: vi.fn(async () => snapshot),
     updateGroupManual: vi.fn(async () => group),
     updateAsinManual: vi.fn(async () => snapshot),
+    batchCreateAsins: vi.fn(async () => ({
+      total: 1,
+      successCount: 1,
+      failedCount: 0,
+      results: [
+        {
+          index: 0,
+          id: 'new-93',
+          asin: asinBody.asin,
+          country: 'US',
+          parentId: 'group-83',
+          success: true,
+        },
+      ],
+      errors: [],
+    })),
   } as unknown as AsinWriteUnit;
   const repository: AsinWriteRepositoryPort = {
     transaction: vi.fn(async (operation) => operation(unit)),
@@ -369,7 +399,7 @@ describe('ASIN writes / HTTP current permission and commit boundaries', () => {
     expect((await request(route, {})).statusCode).toBe(401);
     expect(f.repository.transaction).not.toHaveBeenCalled();
   });
-  it.each(routes.slice(5))(
+  it.each(manualRoutes)(
     'uses current operator identity for $operation and rejects actor injection',
     async (route) => {
       expect((await request(route)).statusCode).toBe(200);
@@ -392,7 +422,7 @@ describe('ASIN writes / HTTP current permission and commit boundaries', () => {
       expect(f.unit[route.operation]).not.toHaveBeenCalled();
     },
   );
-  it.each(routes.slice(5))(
+  it.each(manualRoutes)(
     'does not report $operation success when history or commit fails',
     async (route) => {
       vi.mocked(f.repository.transaction).mockImplementationOnce(
@@ -432,6 +462,95 @@ describe('ASIN writes / HTTP current permission and commit boundaries', () => {
       );
     },
   );
+  it('returns HTTP 200 with mixed per-row results and forwards raw invalid rows for validation', async () => {
+    const mixed = {
+      total: 2,
+      successCount: 1,
+      failedCount: 1,
+      results: [
+        {
+          index: 0,
+          asin: null,
+          country: null,
+          success: false,
+          message: 'ASIN编码必须是10位字母数字组合',
+        },
+        {
+          index: 1,
+          id: 'new-93',
+          asin: asinBody.asin,
+          country: 'US',
+          parentId: 'group-83',
+          success: true,
+        },
+      ],
+      errors: [
+        {
+          index: 0,
+          asin: null,
+          country: null,
+          message: 'ASIN编码必须是10位字母数字组合',
+        },
+      ],
+    };
+    vi.mocked(f.unit.batchCreateAsins).mockResolvedValueOnce(mixed);
+    const items = [null, batchRoute.body.items[0]];
+    const response = await request(batchRoute, headers, { items });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual(mixed);
+    expect(f.unit.batchCreateAsins).toHaveBeenCalledWith(items);
+  });
+  it('rejects a batch above the fixed bound before a business write', async () => {
+    expect(
+      (await request(batchRoute, headers, { items: Array(1001).fill(null) }))
+        .statusCode,
+    ).toBe(400);
+    expect(f.unit.batchCreateAsins).not.toHaveBeenCalled();
+  });
+  it('does not report batch counts as committed if parent timestamp or commit fails', async () => {
+    vi.mocked(f.repository.transaction).mockImplementationOnce(
+      async (action) => {
+        await action(f.unit);
+        throw new Error('private batch commit failure');
+      },
+    );
+    const response = await request(batchRoute);
+    expect(response.statusCode).toBe(500);
+    expect(response.json().data).toBeUndefined();
+    expect(app.logger.info).not.toHaveBeenCalledWith(
+      'ASIN 写入完成',
+      'AsinWriteService',
+      expect.any(Object),
+    );
+    expect(
+      response.body + JSON.stringify(app.logger.error.mock.calls),
+    ).not.toContain('private batch');
+  });
+  it('refuses inconsistent batch counts inside the transaction', async () => {
+    vi.mocked(f.unit.batchCreateAsins).mockResolvedValueOnce({
+      total: 1,
+      successCount: 1,
+      failedCount: 1,
+      results: [],
+      errors: [],
+    });
+    expect((await request(batchRoute)).statusCode).toBe(500);
+    expect(app.logger.info).not.toHaveBeenCalledWith(
+      'ASIN 写入完成',
+      'AsinWriteService',
+      expect.any(Object),
+    );
+  });
+  it('refuses a self-consistent result that omits requested batch rows', async () => {
+    vi.mocked(f.unit.batchCreateAsins).mockResolvedValueOnce({
+      total: 0,
+      successCount: 0,
+      failedCount: 0,
+      results: [],
+      errors: [],
+    });
+    expect((await request(batchRoute)).statusCode).toBe(500);
+  });
   it.each(routes)(
     'rejects an unexpected Origin on $operation',
     async (route) => {

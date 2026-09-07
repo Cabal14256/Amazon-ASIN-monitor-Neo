@@ -211,6 +211,9 @@ jobs:
       - name: Run ASIN manual actions and atomic monitor history transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-manual.integration.test.ts
 
+      - name: Run ASIN batch creation and PostgreSQL savepoint recovery
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-create.integration.test.ts
+
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
