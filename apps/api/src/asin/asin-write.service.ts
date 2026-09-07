@@ -1,4 +1,5 @@
 import type { Env } from '@asin-monitor/config';
+import { batchCreateAsinsDataSchema } from '@asin-monitor/contracts';
 import {
   AsinQueryRepositoryError,
   AsinTimestampPolicyError,
@@ -16,6 +17,7 @@ import { AppLogger } from '../logger/app-logger.service';
 import { mapAsinQueryChild, mapAsinQueryGroups } from './asin-query-mapper';
 import {
   AsinWriteInputError,
+  parseAsinBatchCreate,
   parseAsinCreate,
   parseAsinManual,
   parseAsinMove,
@@ -60,6 +62,7 @@ export class AsinWriteService {
       | 'create-group'
       | 'update-group'
       | 'create-asin'
+      | 'batch-create'
       | 'update-asin'
       | 'move-asin'
       | 'delete-group'
@@ -191,6 +194,22 @@ export class AsinWriteService {
     return this.write(principal, 'create-asin', async (unit) =>
       asinWriteResult(await unit.createAsin(parseAsinCreate(body))),
     );
+  }
+  batchCreateAsins(principal: AuthPrincipal, body: unknown) {
+    return this.write(principal, 'batch-create', async (unit) => {
+      const items = parseAsinBatchCreate(body);
+      const result = batchCreateAsinsDataSchema.parse(
+        await unit.batchCreateAsins(items),
+      );
+      if (
+        result.total !== items.length ||
+        result.total !== result.successCount + result.failedCount ||
+        result.results.length !== result.total ||
+        result.errors.length !== result.failedCount
+      )
+        throw new Error('Invalid ASIN batch result');
+      return result;
+    });
   }
   updateAsin(principal: AuthPrincipal, asinId: unknown, body: unknown) {
     return this.write(principal, 'update-asin', async (unit) =>
