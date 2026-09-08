@@ -4,12 +4,20 @@ import {
   type Env,
   type QueueName,
 } from '@asin-monitor/config';
-import { RedisTaskRepository, type TaskRedisPort } from '@asin-monitor/db';
+import {
+  RedisTaskRepository,
+  type TaskRedisPort,
+  type TaskState,
+} from '@asin-monitor/db';
 import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
 import { QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import {
+  cancelQueuedTask,
+  type CancellationOutcome,
+} from './task-cancellation-script';
 import type { QueueTaskSnapshot } from './task-query-values';
 
 export const TASK_QUERY_QUEUES = [
@@ -23,6 +31,10 @@ export const TASK_QUERY_QUEUES = [
 export interface TaskQueryPort {
   store: Pick<RedisTaskRepository, 'read' | 'listUser' | 'mutate'>;
   findJob(taskId: string, taskType?: string): Promise<QueueTaskSnapshot | null>;
+}
+export interface TaskCancellationPort {
+  store: Pick<RedisTaskRepository, 'read' | 'mutate'>;
+  cancelJob(task: TaskState): Promise<CancellationOutcome>;
 }
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
@@ -122,8 +134,8 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       if (this.connecting === connecting) this.connecting = undefined;
     }
   }
-  open(ensureOpen: () => void): TaskQueryPort {
-    const command = async <T>(action: () => Promise<T>): Promise<T> => {
+  private command(ensureOpen: () => void) {
+    return async <T>(action: () => Promise<T>): Promise<T> => {
       ensureOpen();
       await this.ready();
       ensureOpen();
@@ -131,6 +143,17 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       ensureOpen();
       return result;
     };
+  }
+  openCancellation(ensureOpen: () => void): TaskCancellationPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.open(ensureOpen).store,
+      cancelJob: (task) =>
+        command(() => cancelQueuedTask(this.redis, this.env, task)),
+    };
+  }
+  open(ensureOpen: () => void): TaskQueryPort {
+    const command = this.command(ensureOpen);
     // This is the exact four-command subset used by RedisTaskRepository, never an unrestricted client.
     const redis: TaskRedisPort = {
       get: (key: string) => command(() => this.redis.get(key)),

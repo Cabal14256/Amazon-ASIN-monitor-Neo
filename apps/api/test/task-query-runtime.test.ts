@@ -4,6 +4,7 @@ import { createServer, type Socket } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { TaskQueryRuntime } from '../src/tasks/task-query.runtime';
+import { taskFixture } from './helpers/task-query-fixtures';
 
 describe('task request Redis lifetime / real loopback transport', () => {
   it('fails a silent Redis peer in bounded time and closes every socket', async () => {
@@ -40,6 +41,9 @@ describe('task request Redis lifetime / real loopback transport', () => {
       await runtime.onModuleDestroy();
       await expect(
         runtime.open(() => undefined).findJob('task-95'),
+      ).rejects.toThrow('TASK_RUNTIME_CLOSED');
+      await expect(
+        runtime.openCancellation(() => undefined).cancelJob(taskFixture()),
       ).rejects.toThrow('TASK_RUNTIME_CLOSED');
     } finally {
       await runtime.onModuleDestroy();
