@@ -259,8 +259,29 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         });
       restoreAtomic = () => spy.mockRestore();
     }
-    const dump = async (key: string) =>
-      (await redis.dumpBuffer(key))?.toString('base64') ?? null;
+    // DUMP is not a canonical hash representation: even a read can advance
+    // Redis dictionary rehashing. Compare every logical field/value instead.
+    async function snapshot(key: string): Promise<unknown> {
+      const type = await redis.type(key);
+      switch (type) {
+        case 'none':
+          return { type };
+        case 'hash':
+          return { type, value: await redis.hgetall(key) };
+        case 'string':
+          return { type, value: await redis.get(key) };
+        case 'list':
+          return { type, value: await redis.lrange(key, 0, -1) };
+        case 'set':
+          return { type, value: (await redis.smembers(key)).sort() };
+        case 'zset':
+          return { type, value: await redis.zrange(key, 0, -1, 'WITHSCORES') };
+        case 'stream':
+          return { type, value: await redis.xrange(key, '-', '+') };
+        default:
+          throw new Error('Unexpected fixture Redis type');
+      }
+    }
 
     it.each(CANCELLABLE_TASK_TYPES)(
       'removes an owned waiting %s job with its logs and emits only to its owner',
@@ -350,7 +371,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       'preserves a %s result when execution wins after the HTTP metadata read',
       async (state) => {
         const { task, queue } = await enqueued();
-        let finishedHash: string | null = null;
+        let finishedHash: unknown;
         beforeAtomic(async () => {
           const job = await activate(queue, task.taskId);
           if (state === 'completed')
@@ -361,10 +382,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               'fixture-lock-97',
               false,
             );
-          finishedHash = await dump(queue.toKey(task.taskId));
+          finishedHash = await snapshot(queue.toKey(task.taskId));
         });
         expect((await cancel(task.taskId)).statusCode).toBe(400);
-        expect(await dump(queue.toKey(task.taskId))).toBe(finishedHash);
+        expect(await snapshot(queue.toKey(task.taskId))).toEqual(finishedHash);
         expect(await queue.getJobState(task.taskId)).toBe(state);
         expect(await store.read(task.taskId)).toMatchObject({
           status: 'pending',
@@ -416,7 +437,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       'observes committed %s revocation before any queue mutation',
       async (kind) => {
         const { task, queue } = await enqueued();
-        const original = await dump(queue.toKey(task.taskId));
+        const original = await snapshot(queue.toKey(task.taskId));
         if (kind === 'session')
           await f.pools.primaryPool.query(
             "UPDATE sessions SET status='REVOKED' WHERE id=$1",
@@ -428,7 +449,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             [owner.userId],
           );
         expect((await cancel(task.taskId)).statusCode).toBe(403);
-        expect(await dump(queue.toKey(task.taskId))).toBe(original);
+        expect(await snapshot(queue.toKey(task.taskId))).toEqual(original);
         expect((await store.read(task.taskId))?.revision).toBe(0);
       },
     );
@@ -442,11 +463,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             ? { createdAt: '2026-01-01T00:00:00.000Z' }
             : { userId: kind === 'foreign' ? (await login()).userId : null }),
         });
-        const original = await dump(queue.toKey(task.taskId));
+        const original = await snapshot(queue.toKey(task.taskId));
         expect((await cancel(task.taskId)).statusCode).toBe(
           kind === 'createdAt' ? 409 : 403,
         );
-        expect(await dump(queue.toKey(task.taskId))).toBe(original);
+        expect(await snapshot(queue.toKey(task.taskId))).toEqual(original);
         expect((await store.read(task.taskId))?.revision).toBe(0);
       },
     );
@@ -518,11 +539,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           { jobId: task.taskId },
         );
         await redis.set(bare, 'legacy-fixture', 'EX', 120);
-        const original = await dump(legacy.toKey(task.taskId));
+        const original = await snapshot(legacy.toKey(task.taskId));
         expect((await cancel(task.taskId)).json().data.status).toBe(
           'cancelled',
         );
-        expect(await dump(legacy.toKey(task.taskId))).toBe(original);
+        expect(await snapshot(legacy.toKey(task.taskId))).toEqual(original);
         expect(await redis.get(bare)).toBe('legacy-fixture');
       } finally {
         await redis.del(bare);
@@ -543,9 +564,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           userId: owner.userId,
           taskType: 'export',
         });
-        const original = await dump(queue.toKey(id));
+        const original = await snapshot(queue.toKey(id));
         expect((await cancel(id)).statusCode).toBe(400);
-        expect(await dump(queue.toKey(id))).toBe(original);
+        expect(await snapshot(queue.toKey(id))).toEqual(original);
         expect((await store.read(id))?.revision).toBe(0);
       }
     });
@@ -576,11 +597,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ],
         });
         const parentKey = queue.toKey(parent.job.id!),
-          original = await dump(parentKey),
-          dependencies = await dump(`${parentKey}:dependencies`);
+          original = await snapshot(parentKey),
+          dependencies = await snapshot(`${parentKey}:dependencies`);
         expect((await cancel(task.taskId)).statusCode).toBe(400);
-        expect(await dump(parentKey)).toBe(original);
-        expect(await dump(`${parentKey}:dependencies`)).toBe(dependencies);
+        expect(await snapshot(parentKey)).toEqual(original);
+        expect(await snapshot(`${parentKey}:dependencies`)).toEqual(
+          dependencies,
+        );
         expect(await queue.getJob(task.taskId)).toBeDefined();
       } finally {
         await flow.close();
@@ -607,7 +630,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       'validates %s before deletion so a Lua error cannot leave partial removals',
       async (kind) => {
         const { task, queue } = await enqueued();
-        const originalJob = await dump(queue.toKey(task.taskId));
+        const originalJob = await snapshot(queue.toKey(task.taskId));
         const originalEvents = await redis.dumpBuffer(queue.keys.events),
           previousLimit = await redis.hget(
             queue.keys.meta,
@@ -621,7 +644,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           const response = await cancel(task.taskId);
           expect(response.statusCode).toBe(500);
           expect(response.body).not.toContain('private-corrupt-fixture');
-          expect(await dump(queue.toKey(task.taskId))).toBe(originalJob);
+          expect(await snapshot(queue.toKey(task.taskId))).toEqual(originalJob);
           expect(await queue.getJobState(task.taskId)).toBe('waiting');
           expect((await store.read(task.taskId))?.revision).toBe(0);
         } finally {
