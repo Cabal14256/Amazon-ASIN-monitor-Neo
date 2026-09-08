@@ -78,11 +78,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         if (f) await f.close();
       } finally {
         try {
-          for (const queue of queues.values()) {
-            expect(queue.opts.prefix).toBe(`${prefix}:neo`);
-            await queue.obliterate({ force: true });
-            await queue.close();
-          }
+          const cleanup = await Promise.allSettled(
+            [...queues.values()].map(async (queue) => {
+              try {
+                expect(queue.opts.prefix).toBe(`${prefix}:neo`);
+                await queue.obliterate({ force: true });
+              } finally {
+                await queue.close();
+              }
+            }),
+          );
           if (redis?.status === 'ready') {
             const keys = new Set<string>();
             let cursor = '0',
@@ -108,6 +113,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             } while (cursor !== '0');
             if (keys.size) await redis.del(...keys);
           }
+          expect(
+            cleanup.filter((result) => result.status === 'rejected'),
+          ).toEqual([]);
         } finally {
           redis?.disconnect(false);
           vi.restoreAllMocks();
@@ -278,14 +286,14 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(await redis.get(metaKey('foreign-meta'))).toBe(before);
     });
     it('atomically reconciles a real completed job across independent API reads and hides private result paths', async () => {
-      const id = 'completed';
+      const id = 'job-completed';
       await create(id);
       await complete(id, {
         summary: '共2条',
         total: 2,
         filepath: '/private/report.csv',
         filename: 'report.csv',
-        downloadUrl: '/api/v1/tasks/completed/download',
+        downloadUrl: '/api/v1/tasks/job-completed/download',
         nested: { token: 'private-token-95' },
       });
       const second = await login();
@@ -327,13 +335,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(await redis.get(metaKey(id))).toBe(before);
     });
     it('reconciles a real failed job with a fixed public error', async () => {
-      await create('failed');
-      await complete('failed', null, true);
-      const response = await get('failed');
+      await create('job-failed');
+      await complete('job-failed', null, true);
+      const response = await get('job-failed');
       expect(response.statusCode).toBe(200);
       expect(response.json().data.error).toBe('任务执行失败');
       expect(response.body).not.toContain('private-driver');
-      expect(await store.read('failed')).toMatchObject({
+      expect(await store.read('job-failed')).toMatchObject({
         status: 'failed',
         error: '任务执行失败',
       });
@@ -364,6 +372,35 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       } finally {
         await redis.del(bare);
       }
+    });
+    it('returns 404 for BullMQ reserved state/metadata keys without modifying them', async () => {
+      await complete('job-reserved-fixture', { total: 1 });
+      const queue = await queueFor('export');
+      const names = [
+        'completed',
+        'failed',
+        'active',
+        'wait',
+        'meta',
+        'id',
+        'events',
+        'marker',
+        'repeat',
+      ];
+      const snapshot = async () =>
+        Promise.all(
+          names.map(
+            async (name) =>
+              (await redis.dumpBuffer(queue.toKey(name)))?.toString('base64') ??
+              null,
+          ),
+        );
+      const before = await snapshot();
+      for (const name of names) expect((await get(name)).statusCode).toBe(404);
+      expect(await snapshot()).toEqual(before);
+      expect((await get('job-reserved-fixture')).json().data.status).toBe(
+        'completed',
+      );
     });
     it('does not resurrect expired metadata and rechecks identity against a real replacement', async () => {
       const task = await create('reused');

@@ -163,6 +163,10 @@ export class TaskQueryRuntime implements OnModuleDestroy {
               );
               this.queues.set(name, queue);
             }
+            // Queue metadata/state keys are not job hashes. A valid task path
+            // such as /tasks/completed must not be passed to HGETALL on a zset.
+            if (Object.values(queue.keys).includes(queue.toKey(id)))
+              return undefined;
             try {
               return await queue.getJob(id);
             } catch (error) {

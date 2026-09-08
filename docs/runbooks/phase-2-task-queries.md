@@ -15,7 +15,7 @@
 
 - 共用 `packages/config` 的纯队列目录与 `getNeoQueuePrefix`；Worker 现有选择器、别名和策略保持不变。API 使用只读 `QueueGetters`，不创建业务任务、不注册调度、不改写 Queue 元数据。
 - 元数据前缀 `${BULL_PREFIX}:neo:task`，队列前缀 `${BULL_PREFIX}:neo`；不访问裸 `task:*` 或旧 Bull4 `${BULL_PREFIX}:<queue>` 数据。默认分别为 `bull:neo:task` 和 `bull:neo`。
-- 查询队列与 Legacy 一致：export、batch-check、batch-delete、import、backup、variant-check。已有元数据只查询其对应队列；无元数据按以上顺序回退，owner 必须明确且等于当前用户。monitor/competitor-monitor 不作为任务中心回退源。
+- 查询队列与 Legacy 一致：export、batch-check、batch-delete、import、backup、variant-check。已有元数据只查询其对应队列；无元数据按以上顺序回退，owner 必须明确且等于当前用户。monitor/competitor-monitor 不作为任务中心回退源。BullMQ 目录中的保留键（如 completed/meta/events）不当作任务读取；实际 producer 应使用 UUID 等不与内部键冲突的任务 ID。
 - 注册表终态不回退，不再依赖队列可用。非终态仅吸收 BullMQ completed/failed；读取到终态后重新读取 job hash，避免使用完成前已读取的空 returnvalue。非终态 progress 不覆盖注册表。
 - 完成与取消等通过既有 Redis CAS 状态转换处理，第一个终态获胜。新增可选身份条件 owner/type/createdAt，每次 CAS 重试都验证，拒绝过期 ID 复用后污染另一条任务。已过期元数据不会隐式复活。
 - 列表先按注册表筛选/limit，再对账，保持旧顺序；对账后可能出现已完成任务仍在本次 active 查询结果中，下次查询会重新筛选。
