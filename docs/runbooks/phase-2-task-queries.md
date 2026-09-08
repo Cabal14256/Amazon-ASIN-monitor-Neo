@@ -34,4 +34,4 @@ API 使用专用懒连接：连接与命令各 1 秒、无离线队列、无未�
 - `corepack pnpm --filter api exec vitest run test/task-query-values.test.ts test/task-query.test.ts test/task-query-runtime.test.ts` 验证公开模型、路由及真实静默 TCP 对端的失败关闭。
 - 设置测试 `RUN_INTEGRATION_TESTS=true`、PostgreSQL 和 Redis 环境，运行 `corepack pnpm --filter api exec vitest run test/task-query.integration.test.ts`。使用随机私有数据库 schema 与 Redis 前缀，真实 BullMQ 入队/领取/完成/失败、六队列回退、两会话并发对账、跨 owner 隔离、撤销、断线恢复均验收；不读取或删除生产数据。
 - 无数据库迁移。回滚 TaskQueryModule 接线停止新入口，对账过的终态保留原有 TTL；不清空 Redis、不回退已完成任务状态。
-- 本批只新增两个业务端点。取消协调、导出创建/下载流、跨进程 WS、八个实际业务 Processor、通用调度与旧队列 drain 门槛仍需后续完成，不据此切生产。
+- 本批只新增两个业务端点。后续取消入口见 [任务取消](phase-2-task-cancellation.md)；导出创建/下载流、跨进程 WS、八个实际业务 Processor、通用调度与旧队列 drain 门槛仍需完成，不据此切生产。
