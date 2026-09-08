@@ -5,6 +5,8 @@ import { config as loadDotenv } from 'dotenv';
 import { parse as parsePostgresConnectionString } from 'pg-connection-string';
 import { z } from 'zod';
 
+export * from './queues';
+
 /**
  * 共享环境变量校验。
  * 必需/推荐变量对齐旧系统 server/src/config/envValidator.js；

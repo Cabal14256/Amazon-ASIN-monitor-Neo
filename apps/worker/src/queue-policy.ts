@@ -1,4 +1,4 @@
-import type { Env } from '@asin-monitor/config';
+import { getNeoQueuePrefix, type Env } from '@asin-monitor/config';
 import type {
   ConnectionOptions,
   JobsOptions,
@@ -7,10 +7,7 @@ import type {
 } from 'bullmq';
 import { getPhysicalQueueName, type QueueName } from './queues';
 
-/** Bull and BullMQ do not share persisted job formats during migration. */
-export function getNeoQueuePrefix(env: Pick<Env, 'BULL_PREFIX'>): string {
-  return `${env.BULL_PREFIX}:neo`;
-}
+export { getNeoQueuePrefix } from '@asin-monitor/config';
 
 interface QueuePolicy {
   attempts: number;

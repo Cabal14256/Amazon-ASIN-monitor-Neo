@@ -47,6 +47,48 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it.each(['userId', 'taskType', 'createdAt'] as const)(
+    'refuses replacement %s before any transition',
+    async (field) => {
+      const { repository, redis } = fixture();
+      const task = await repository.create(input);
+      const identity = {
+        userId: task.userId,
+        taskType: task.taskType,
+        createdAt: task.createdAt,
+        [field]: 'different',
+      };
+      redis.eval.mockClear();
+      await expect(
+        repository.mutate(
+          task.taskId,
+          { kind: 'completed', result: { total: 3 } },
+          identity,
+        ),
+      ).rejects.toMatchObject({ code: 'TASK_IDENTITY_CHANGED' });
+      expect(redis.eval).not.toHaveBeenCalled();
+      expect(await repository.read(task.taskId)).toEqual(task);
+    },
+  );
+  it('rechecks owner after CAS loses to expiry and task ID reuse', async () => {
+    const { repository, redis, rows } = fixture();
+    const task = await repository.create(input);
+    redis.eval.mockImplementationOnce(async () => {
+      rows.set(
+        'fixture:neo:task:meta:task-a',
+        JSON.stringify({ ...task, userId: 'other-owner' }),
+      );
+      return 0;
+    });
+    await expect(
+      repository.mutate(task.taskId, { kind: 'completed' }, task),
+    ).rejects.toMatchObject({ code: 'TASK_IDENTITY_CHANGED' });
+    expect(await repository.read(task.taskId)).toMatchObject({
+      userId: 'other-owner',
+      status: 'pending',
+      result: null,
+    });
+  });
   it('matches Legacy creation and transition fields for sequential happy paths', async () => {
     const { repository } = fixture();
     const legacyPath = resolve(
