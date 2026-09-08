@@ -98,6 +98,9 @@ importers:
       bcryptjs:
         specifier: 3.0.3
         version: 3.0.3
+      bullmq:
+        specifier: ^5.58.0
+        version: 5.81.3
       fastify:
         specifier: 5.11.3
         version: 5.11.3

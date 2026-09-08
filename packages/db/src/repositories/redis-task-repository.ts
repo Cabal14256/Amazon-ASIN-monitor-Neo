@@ -38,6 +38,7 @@ export class TaskRegistryError extends Error {
     public readonly code:
       | 'TASK_EXISTS'
       | 'TASK_CONTENTION'
+      | 'TASK_IDENTITY_CHANGED'
       | 'TASK_RECORD_INVALID'
       | 'TASK_RECORD_TOO_LARGE',
   ) {
@@ -163,11 +164,21 @@ export class RedisTaskRepository {
   async mutate(
     taskId: string,
     change: TaskMutation,
+    expectedIdentity?: Pick<TaskState, 'userId' | 'taskType' | 'createdAt'>,
   ): Promise<TaskState | null> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const raw = await this.redis.get(this.key('meta', taskId));
       if (raw === null) return null; // Never resurrect expired or create ownerless tasks.
       const task = this.parse(raw, taskId);
+      // Recheck on every CAS attempt: an expired ID must not authorize a replacement task.
+      if (
+        expectedIdentity &&
+        (task.userId !== expectedIdentity.userId ||
+          task.taskType !== expectedIdentity.taskType ||
+          task.createdAt !== expectedIdentity.createdAt)
+      ) {
+        throw new TaskRegistryError('TASK_IDENTITY_CHANGED');
+      }
       const next = transitionTask(task, change, this.now());
       if (next === task) return task;
       if (await this.save(raw, next)) return next;

@@ -2,11 +2,12 @@
 
 ## 已实现范围
 
-`packages/db` 导出 `RedisTaskRepository` 供 API/Worker 共享数据访问。此 PR 只提供仓储和状态转换，不启动新 Redis 连接，不开放任务中心端点，也不消费或创建 BullMQ 业务任务。后续端点必须先鉴权并检查 `userId`；仓储 `read`/`mutate` 是受信服务端内部接口，不是授权边界。
+`packages/db` 导出 `RedisTaskRepository` 供 API/Worker 共享数据访问。仓储本身只提供持久化和状态转换，不拥有 Redis 连接，也不消费或创建 BullMQ 业务任务。[任务查询入口](phase-2-task-queries.md) 已接线本人列表/状态与终态对账；仓储 `read`/`mutate` 是受信服务端内部接口，不是授权边界，调用方必须先鉴权并检查 `userId`。
 
 - `create`：要求可信 `userId`、`taskId`、`taskType`；不接受客户端指定初始状态、时间、结果或 owner 更新。
 - `read`/`listUser`：实时读取共享 Redis，无进程内缓存。列表按更新时间倒序，支持 `all`、`active` 与具体状态，limit 为 1–200；在完整有界索引内过滤，不使用 `limit*3` 截断。
 - `mutate`：processing/progress/cancel-request/cancelled/completed/failed。取消请求保持粘性，后到进度不会清除；第一个终态获胜，后续任何转换不覆盖结果，也不续期；完成可能先于取消生效，不保证撤回已提交的业务修改。
+- `mutate` 可传入预期 userId/taskType/createdAt，每次读取和 CAS 重试都重新核对；身份不同报 `TASK_IDENTITY_CHANGED`，防止任务过期后 ID 复用时覆盖新记录。任务查询对账必须携带该条件。
 - 元数据和索引通过 Lua 比较旧值再写入；竞争时最多重读/重算 8 次，仍冲突报 `TASK_CONTENTION`。不使用客户端 get/set 的无保护覆盖，也不允许更新缺失任务时隐式创建无主记录。
 
 ## 数据与配置
@@ -33,4 +34,4 @@ Lua 提供无其他客户端插入的比较/写入，不提供任意运行错误
 - 单测对照 Legacy 顺序状态行为，并覆盖取消竞争、终态不可逆、配置/JSON 限制、缺失/过期无复活、错误明确传播和索引过滤。
 - 显式 `RUN_INTEGRATION_TESTS=true` 加测试 `REDIS_URL` 运行 `corepack pnpm --filter db exec vitest run test/task-registry.integration.test.ts`：两真实客户端竞争 20 轮、TTL/索引裁剪、owner/命名空间隔离、类型错误写前校验。仅使用随机 `fixture-task-registry-*` 前缀并按确切 key 清理，无 FLUSHDB。
 - 没有数据库 schema 迁移，不读取/写入真实生产任务。回滚仓储接线即可停止新元数据写入；现有键按 TTL 自然过期，不主动删除历史。
-- 尚待任务中心授权/序列化端点、取消与 BullMQ job 协调、跨进程 WS 发布、实际 Processor/调度和新旧产物对拍。只有这些完成且旧队列 drain 门槛通过后，才能切换生产。
+- 本人查询/序列化与终态对账已接线；尚待取消与 BullMQ job 协调、导出创建/下载流、跨进程 WS 发布、实际 Processor/调度和新旧产物对拍。只有这些完成且旧队列 drain 门槛通过后，才能切换生产。

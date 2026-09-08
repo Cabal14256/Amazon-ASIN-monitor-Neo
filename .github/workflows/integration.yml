@@ -217,6 +217,9 @@ jobs:
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
+      - name: Run owned task queries and BullMQ terminal reconciliation
+        run: pnpm --filter @asin-monitor/api exec vitest run test/task-query.integration.test.ts
+
       - name: Run authentication maintenance scheduling and compiled Worker lifecycle
         run: |
           pnpm --filter @asin-monitor/worker build
