@@ -47,6 +47,20 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it('persists a producer message without changing the pending state', async () => {
+    const { repository } = fixture();
+    const task = await repository.create({
+      ...input,
+      message: '批量删除任务已创建，等待处理',
+    });
+    expect(await repository.read(task.taskId)).toMatchObject({
+      message: '批量删除任务已创建，等待处理',
+      status: 'pending',
+      progress: 0,
+      startedAt: null,
+      revision: 0,
+    });
+  });
   it.each(['userId', 'taskType', 'createdAt'] as const)(
     'refuses replacement %s before any transition',
     async (field) => {

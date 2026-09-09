@@ -1,6 +1,6 @@
 # P2-T2a：Neo 队列策略与接入边界
 
-当前仅完成 Queue 策略和处理器注册预检；入口仍为 queue-scaffold，注册处理器数为 0。不能据此切换生产任务，也不能把看门狗健康等同于任务正常消费。后续域需提供验证 payload 的真实 Processor，调用 `buildWorkerPlans` 先校验全部选择再创建 Worker；缺少任一处理器会失败，不允许用空回调完成任务。
+八类 Queue 策略已完成；PostgreSQL 权威源下，入口现已注册认证维护及[主营批量删除](./phase-2-asin-batch-delete.md)的真实 Processor。其余七类业务队列仍只创建 Queue 资源，不消费任务，不能将看门狗健康等同于业务迁移完成。已注册业务入口显示 `mode=business-worker` 和实际处理器数；纯骨架选择仍显示 queue-scaffold。后续域需验证 payload 后接入实际 Processor，不允许用空回调完成任务。
 
 ## 八类队列基线
 
@@ -26,7 +26,7 @@ BullMQ 的 `limiter` 配置属于 Worker，跨同队列多个 Worker 共用；`d
 - Legacy 保持 `BULL_PREFIX`，Neo 固定使用 `${BULL_PREFIX}:neo`，例如 `bull:neo:export-task-queue:*`。API Producer 与 Worker 必须通过相同配置函数构造 key，不得各自拼接。
 - 切换前暂停旧调度和生产者，等待旧队列活跃/等待/延迟任务处理完毕，记录失败任务处置；不得复制 Redis 旧 Bull job/hash/list 到 BullMQ。
 - 再验收迁移后的 Processor、task meta/用户索引/7d TTL、取消、调度单实例、幂等和新旧 fixture 产物等价；验收完成后才能按域启动 Neo 生产者/消费者。
-- 目前这些业务能力未完成。`WORKER_ENABLED_QUEUES` 的 none/off 不创建资源，空串/只有逗号视为 all；旧选择器别名继续可用。
+- 仅已验收的域可启用实际消费，剩余业务能力继续迁移。`WORKER_ENABLED_QUEUES` 的 none/off 不创建资源，空串/只有逗号视为 all；旧选择器别名继续可用。
 - 回滚先停 Neo 生产者/调度，处理或明确记录 Neo 在途任务，然后切回 Legacy。不能把 Neo 等待任务当作旧 Bull 队列继续消费；不要删除任何生产 Redis key。
 
 ## 验证

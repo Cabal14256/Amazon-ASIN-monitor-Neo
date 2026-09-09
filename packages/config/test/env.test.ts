@@ -19,6 +19,31 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('keeps batch deletion defaults, Legacy fallback/flooring and a nonzero bounded chunk size', () => {
+    const defaults = loadEnv(validEnv);
+    expect(defaults.BATCH_DELETE_SYNC_MAX_ITEMS).toBe(50);
+    expect(defaults.BATCH_DELETE_SYNC_MAX_ASINS).toBe(500);
+    expect(defaults.BATCH_DELETE_CHUNK_SIZE).toBe(50);
+    for (const field of [
+      'BATCH_DELETE_SYNC_MAX_ITEMS',
+      'BATCH_DELETE_SYNC_MAX_ASINS',
+      'BATCH_DELETE_CHUNK_SIZE',
+    ] as const) {
+      for (const value of ['', '0', '-1', 'NaN', 'Infinity'])
+        expect(loadEnv({ ...validEnv, [field]: value })[field]).toBe(
+          defaults[field],
+        );
+      expect(loadEnv({ ...validEnv, [field]: '3.9' })[field]).toBe(3);
+      expect(loadEnv({ ...validEnv, [field]: '0.5' })[field]).toBe(1);
+    }
+    expect(() =>
+      loadEnv({ ...validEnv, BATCH_DELETE_CHUNK_SIZE: '501' }),
+    ).toThrow(EnvValidationError);
+    expect(
+      loadEnv({ ...validEnv, BATCH_DELETE_CHUNK_SIZE: '500' })
+        .BATCH_DELETE_CHUNK_SIZE,
+    ).toBe(500);
+  });
   it('密码到期默认90天，拒绝非整数、非正值和超过十年的设置', () => {
     expect(loadEnv(validEnv).PASSWORD_EXPIRE_DAYS).toBe(90);
     expect(
