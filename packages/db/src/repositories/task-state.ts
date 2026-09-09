@@ -38,6 +38,7 @@ export const createTaskInputSchema = taskStateSchema
   .extend({
     title: taskStateSchema.shape.title.optional(),
     taskSubType: taskStateSchema.shape.taskSubType.optional(),
+    message: taskStateSchema.shape.message.optional(),
   });
 export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 

@@ -4,8 +4,10 @@ import { AsinModule } from '../../src/asin/asin.module';
 import { spApiConfigApp } from './sp-api-config-app';
 
 /** The write fixture includes real constraints AND triggers. LIKE alone does not. */
-export async function asinWriteApp() {
-  const f = await spApiConfigApp({ imports: [AsinModule] });
+export async function asinWriteApp(
+  configure?: NonNullable<Parameters<typeof spApiConfigApp>[0]>['configure'],
+) {
+  const f = await spApiConfigApp({ imports: [AsinModule], configure });
   try {
     const pool = f.pools.primaryPool;
     await pool.query(

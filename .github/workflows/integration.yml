@@ -228,6 +228,9 @@ jobs:
           pnpm --filter @asin-monitor/worker build
           pnpm --filter @asin-monitor/worker exec vitest run test/auth-maintenance.integration.test.ts test/auth-maintenance-entry.integration.test.ts --no-file-parallelism
 
+      - name: Run ASIN batch deletion from HTTP through the compiled BullMQ Worker
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-delete.integration.test.ts
+
       - name: Run shared SP-API quota compatibility on Redis
         run: pnpm --filter @asin-monitor/sp-api exec vitest run test/quota.integration.test.ts
 

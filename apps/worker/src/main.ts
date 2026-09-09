@@ -4,6 +4,7 @@ import { loadEnv, loadEnvironmentFiles } from '@asin-monitor/config';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
+import { startAsinBatchDeleteRuntime } from './asin-batch-delete-runtime';
 import { startAuthMaintenanceRuntime } from './auth-maintenance-runtime';
 import {
   AUTH_MAINTENANCE_QUEUE,
@@ -21,7 +22,7 @@ import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
 
 /**
  * Worker 进程入口（PROCESS_ROLE=worker 角色）。
- * D4 认证维护已注册 Processor；八个业务队列仍在 P2-T2 逐域平移。
+ * D4 认证维护和主营批量删除已注册 Processor；其余业务队列继续逐域平移。
  * BullMQ 自管连接（传 ConnectionOptions），看门狗使用独立 ioredis 实例。
  */
 async function bootstrap(): Promise<void> {
@@ -55,23 +56,31 @@ async function bootstrap(): Promise<void> {
   const maintenance = enableMaintenance
     ? await startAuthMaintenanceRuntime(env, () => process.exit(1))
     : undefined;
+  const batchDelete =
+    enabled.includes('batch-delete') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startAsinBatchDeleteRuntime(env, () => process.exit(1))
+      : undefined;
 
-  const queues = enabled.map((name) => {
-    const physicalName = getPhysicalQueueName(name);
-    const queue = new Queue(
-      physicalName,
-      getQueueOptions(name, env, connection),
-    );
-    attachQueueErrorLogger(queue, physicalName);
-    return queue;
-  });
+  const queues = enabled
+    .filter((name) => !(batchDelete && name === 'batch-delete'))
+    .map((name) => {
+      const physicalName = getPhysicalQueueName(name);
+      const queue = new Queue(
+        physicalName,
+        getQueueOptions(name, env, connection),
+      );
+      attachQueueErrorLogger(queue, physicalName);
+      return queue;
+    });
 
   const watchdogRedis = new Redis(getWatchdogRedisOptions(connection));
   attachRedisErrorLogger(watchdogRedis, 'watchdog');
   const watchdog = new RedisWatchdog(watchdogRedis, {
-    checks: [...queues, ...(maintenance ? [maintenance.queue] : [])].map(
-      (queue) => createSingleFlightCheck(() => queue.getJobCounts()),
-    ),
+    checks: [
+      ...queues,
+      ...(maintenance ? [maintenance.queue] : []),
+      ...(batchDelete ? [batchDelete.queue] : []),
+    ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
   watchdog.start(() => {
     logger.error('Redis 连续 60s 不健康，退出进程');
@@ -82,7 +91,11 @@ async function bootstrap(): Promise<void> {
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= shutdownWorker({
       watchdog,
-      queues: [...queues, ...(maintenance ? [maintenance] : [])],
+      queues: [
+        ...queues,
+        ...(maintenance ? [maintenance] : []),
+        ...(batchDelete ? [batchDelete] : []),
+      ],
       watchdogRedis,
     });
     return shutdownPromise;
@@ -92,15 +105,19 @@ async function bootstrap(): Promise<void> {
 
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
-    mode: maintenance ? 'auth-maintenance' : 'queue-scaffold',
-    registeredProcessors: maintenance ? 1 : 0,
+    mode: batchDelete
+      ? 'business-worker'
+      : maintenance
+      ? 'auth-maintenance'
+      : 'queue-scaffold',
+    registeredProcessors: Number(!!maintenance) + Number(!!batchDelete),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
     physicalQueues: [
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
     ],
-    queueCount: queues.length + (maintenance ? 1 : 0),
+    queueCount: queues.length + Number(!!maintenance) + Number(!!batchDelete),
     schedulerEnabled: !!maintenance && env.SCHEDULER_ENABLED,
   });
 }

@@ -11,5 +11,6 @@ import { TaskQueryService } from './task-query.service';
   imports: [AuthModule, WebSocketModule],
   controllers: [TaskQueryController, TaskCancellationController],
   providers: [TaskQueryRuntime, TaskQueryService, TaskCancellationService],
+  exports: [TaskQueryRuntime],
 })
 export class TaskQueryModule {}

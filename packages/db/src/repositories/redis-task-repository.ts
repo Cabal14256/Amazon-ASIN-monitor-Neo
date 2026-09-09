@@ -140,7 +140,7 @@ export class RedisTaskRepository {
       taskSubType: data.taskSubType ?? null,
       status: 'pending',
       progress: 0,
-      message: '任务已创建，等待处理',
+      message: data.message ?? '任务已创建，等待处理',
       error: null,
       result: null,
       createdAt: timestamp,

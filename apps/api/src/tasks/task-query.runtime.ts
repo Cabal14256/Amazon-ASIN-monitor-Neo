@@ -1,16 +1,18 @@
 import {
   getNeoQueuePrefix,
   getPhysicalQueueName,
+  getQueuePolicy,
   type Env,
   type QueueName,
 } from '@asin-monitor/config';
 import {
   RedisTaskRepository,
+  type AsinBatchDeleteTaskData,
   type TaskRedisPort,
   type TaskState,
 } from '@asin-monitor/db';
 import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
-import { QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
+import { Queue, QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
@@ -35,6 +37,10 @@ export interface TaskQueryPort {
 export interface TaskCancellationPort {
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>;
   cancelJob(task: TaskState): Promise<CancellationOutcome>;
+}
+export interface BatchDeleteProducerPort {
+  store: Pick<RedisTaskRepository, 'create'>;
+  enqueue(data: AsinBatchDeleteTaskData): Promise<void>;
 }
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
@@ -88,6 +94,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
 export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly redis: Redis;
   private readonly queues = new Map<string, QueueGetters>();
+  private batchDeleteQueue?: Queue;
   private connecting?: Promise<void>;
   private closed = false;
   constructor(
@@ -152,7 +159,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         command(() => cancelQueuedTask(this.redis, this.env, task)),
     };
   }
-  open(ensureOpen: () => void): TaskQueryPort {
+  private createStore(ensureOpen: () => void): RedisTaskRepository {
     const command = this.command(ensureOpen);
     // This is the exact four-command subset used by RedisTaskRepository, never an unrestricted client.
     const redis: TaskRedisPort = {
@@ -163,8 +170,46 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         command(() => this.redis.zrevrange(key, start, end)),
       mget: (...keys: string[]) => command(() => this.redis.mget(...keys)),
     } as TaskRedisPort;
+    return new RedisTaskRepository(redis, this.env);
+  }
+  openBatchDelete(ensureOpen: () => void): BatchDeleteProducerPort {
+    const command = this.command(ensureOpen);
     return {
-      store: new RedisTaskRepository(redis, this.env),
+      store: this.createStore(ensureOpen),
+      enqueue: (data) =>
+        command(async () => {
+          const queue = (this.batchDeleteQueue ??= new Queue(
+            getPhysicalQueueName('batch-delete'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('batch-delete', this.env)
+                .defaultJobOptions,
+            },
+          ));
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('批量删除队列连接异常', 'TaskQueryRuntime', {
+                reason: 'batch_delete_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.batchDeleteQueue === queue)
+              this.batchDeleteQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          await queue.add('asin-batch-delete', data, { jobId: data.taskId });
+        }),
+    };
+  }
+  open(ensureOpen: () => void): TaskQueryPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.createStore(ensureOpen),
       findJob: async (id, type) => {
         const names = TASK_QUERY_QUEUES.filter(
           (name) => type === undefined || name === type,
@@ -215,7 +260,10 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   async onModuleDestroy() {
     this.closed = true;
     await Promise.allSettled(
-      [...this.queues.values()].map((queue) => queue.close()),
+      [
+        ...this.queues.values(),
+        ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
+      ].map((queue) => queue.close()),
     );
     this.redis.disconnect(false);
   }

@@ -5,6 +5,7 @@ import { config as loadDotenv } from 'dotenv';
 import { parse as parsePostgresConnectionString } from 'pg-connection-string';
 import { z } from 'zod';
 
+export * from './queue-policy';
 export * from './queues';
 
 /**
@@ -41,6 +42,18 @@ const queueLimiterSchema = (fallback: number) =>
     (value) => Number(value) || fallback,
     z.number().int().positive(),
   );
+
+const batchDeleteThresholdSchema = (
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+) =>
+  z.preprocess((value) => {
+    const parsed = Number(value);
+    // Preserve Legacy invalid-value fallback/flooring while avoiding zero-sized chunks.
+    return Number.isFinite(parsed) && parsed > 0
+      ? Math.max(1, Math.floor(parsed))
+      : fallback;
+  }, z.number().int().positive().max(maximum));
 
 const cookieNameSchema = z
   .string()
@@ -258,6 +271,9 @@ const envObjectSchema = z.object({
   EXPORT_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   BATCH_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   BATCH_DELETE_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  BATCH_DELETE_SYNC_MAX_ITEMS: batchDeleteThresholdSchema(50),
+  BATCH_DELETE_SYNC_MAX_ASINS: batchDeleteThresholdSchema(500),
+  BATCH_DELETE_CHUNK_SIZE: batchDeleteThresholdSchema(50, 500),
   BACKUP_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   VARIANT_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   MONITOR_QUEUE_LIMITER_MAX: queueLimiterSchema(1),
