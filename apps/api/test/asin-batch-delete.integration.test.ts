@@ -205,7 +205,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       for (let i = 0; i < children; i++)
         await f.pools.primaryPool.query(
-          "INSERT INTO asins(id,asin,country,variant_group_id) VALUES($1,$2,'US',$3)",
+          "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES($1,$2,'US','amazon.com','Fixture',$3)",
           [`${id}-a${i}`, `${id}-${i}`, id],
         );
     }
