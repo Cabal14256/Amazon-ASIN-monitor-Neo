@@ -1,8 +1,10 @@
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
   EnvValidationError,
   getDefaultEnvironmentFiles,
+  getImportStorageDirectory,
   LEGACY_RECOMMENDED_ENV_VARS,
   LEGACY_REQUIRED_ENV_VARS,
   loadEnv,
@@ -19,6 +21,27 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('uses one persistent import directory for API/Worker and rejects relative configuration', () => {
+    const env = loadEnv(validEnv);
+    const root = resolve(__dirname, '../../..');
+    const expected = resolve(root, 'var/neo/imports');
+    expect(getImportStorageDirectory(env, resolve(root, 'apps/api'))).toBe(
+      expected,
+    );
+    expect(getImportStorageDirectory(env, resolve(root, 'apps/worker'))).toBe(
+      expected,
+    );
+    const configured = resolve(root, 'artifacts/import-storage-test');
+    expect(
+      getImportStorageDirectory(
+        loadEnv({ ...validEnv, IMPORT_STORAGE_DIRECTORY: configured }),
+      ),
+    ).toBe(configured);
+    for (const value of ['imports', '../imports', 'x\0y'])
+      expect(() =>
+        loadEnv({ ...validEnv, IMPORT_STORAGE_DIRECTORY: value }),
+      ).toThrow(EnvValidationError);
+  });
   it('keeps batch deletion defaults, Legacy fallback/flooring and a nonzero bounded chunk size', () => {
     const defaults = loadEnv(validEnv);
     expect(defaults.BATCH_DELETE_SYNC_MAX_ITEMS).toBe(50);

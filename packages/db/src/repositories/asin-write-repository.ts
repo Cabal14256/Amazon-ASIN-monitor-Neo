@@ -12,6 +12,7 @@ import {
   batchDuplicateMessage,
   prepareBatchAsins,
   type BatchAsinItem,
+  type BatchAsinPlan,
 } from '../domain/asin-batch-create';
 import {
   asinManualHistory,
@@ -126,7 +127,7 @@ const asinFields = (value: AsinWriteFields) => ({
   brand: value.brand,
 });
 
-class DrizzleAsinWriteUnit
+export class DrizzleAsinWriteUnit
   extends DrizzleAsinQueryUnit
   implements AsinWriteUnit
 {
@@ -182,7 +183,20 @@ class DrizzleAsinWriteUnit
     return result;
   }
   async batchCreateAsins(raw: unknown[]): Promise<BatchCreateAsinsData> {
-    const { result, items } = prepareBatchAsins(raw);
+    return this.writePreparedAsins(prepareBatchAsins(raw));
+  }
+  protected async writePreparedAsins(
+    { result, items }: BatchAsinPlan,
+    onFailure?: (index: number, phase: 'group' | 'existing' | 'write') => void,
+  ): Promise<BatchCreateAsinsData> {
+    const fail = (
+      item: BatchAsinItem,
+      message: string,
+      phase: 'group' | 'existing' | 'write',
+    ) => {
+      addBatchAsinFailure(result, item, message);
+      onFailure?.(item.index, phase);
+    };
     if (!items.length) return result;
     const parentIds = items
       .map((item) => item.parentId!)
@@ -193,12 +207,12 @@ class DrizzleAsinWriteUnit
     const groupValid: BatchAsinItem[] = [];
     for (const item of items) {
       const group = groups.get(item.parentId!);
-      if (!group) addBatchAsinFailure(result, item, '所属变体组不存在');
+      if (!group) fail(item, '所属变体组不存在', 'group');
       else if (batchCountry(group.country) !== item.country)
-        addBatchAsinFailure(
-          result,
+        fail(
           item,
           `ASIN国家必须与所属变体组一致（${batchCountry(group.country)}）`,
+          'group',
         );
       else groupValid.push(item);
     }
@@ -236,7 +250,7 @@ class DrizzleAsinWriteUnit
     const candidates: BatchAsinItem[] = [];
     for (const item of groupValid) {
       if (existing.has(batchAsinKey(item)))
-        addBatchAsinFailure(result, item, batchDuplicateMessage(item));
+        fail(item, batchDuplicateMessage(item), 'existing');
       else candidates.push(item);
     }
     // Stable unique-key order also serializes overlapping batches in different
@@ -294,7 +308,7 @@ class DrizzleAsinWriteUnit
     this.ensureOpen();
     for (const item of candidates) {
       const message = failed.get(item.id);
-      if (message) addBatchAsinFailure(result, item, message);
+      if (message) fail(item, message, 'write');
     }
     createdItems.forEach((item) => addBatchAsinSuccess(result, item));
     return result;

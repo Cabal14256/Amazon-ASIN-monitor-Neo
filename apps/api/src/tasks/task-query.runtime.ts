@@ -11,6 +11,7 @@ import {
   type TaskRedisPort,
   type TaskState,
 } from '@asin-monitor/db';
+import type { AsinImportTaskData } from '@asin-monitor/import';
 import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
 import { Queue, QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -41,6 +42,10 @@ export interface TaskCancellationPort {
 export interface BatchDeleteProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: AsinBatchDeleteTaskData): Promise<void>;
+}
+export interface ImportProducerPort {
+  store: Pick<RedisTaskRepository, 'create'>;
+  enqueue(data: AsinImportTaskData): Promise<void>;
 }
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
@@ -95,6 +100,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly redis: Redis;
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
+  private importQueue?: Queue;
   private connecting?: Promise<void>;
   private closed = false;
   constructor(
@@ -257,12 +263,46 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openImport(ensureOpen: () => void): ImportProducerPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.createStore(ensureOpen),
+      enqueue: (data) =>
+        command(async () => {
+          const queue = (this.importQueue ??= new Queue(
+            getPhysicalQueueName('import'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('import', this.env)
+                .defaultJobOptions,
+            },
+          ));
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('导入队列连接异常', 'TaskQueryRuntime', {
+                reason: 'import_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.importQueue === queue) this.importQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          await queue.add('asin-import', data, { jobId: data.taskId });
+        }),
+    };
+  }
   async onModuleDestroy() {
     this.closed = true;
     await Promise.allSettled(
       [
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
+        ...(this.importQueue ? [this.importQueue] : []),
       ].map((queue) => queue.close()),
     );
     this.redis.disconnect(false);

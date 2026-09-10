@@ -69,7 +69,24 @@ export function prepareBatchAsins(
   items: unknown[],
   idFactory: () => string = randomUUID,
 ): BatchAsinPlan {
-  if (!items.length || items.length > MAX_ASIN_BATCH_CREATE_ITEMS)
+  return prepareAsins(items, idFactory, MAX_ASIN_BATCH_CREATE_ITEMS);
+}
+
+/** File imports normalize/deduplicate the entire file before bounded writes.
+ * Splitting first would lose duplicate detection across transaction boundaries. */
+export function prepareImportAsins(
+  items: unknown[],
+  idFactory: () => string = randomUUID,
+): BatchAsinPlan {
+  return prepareAsins(items, idFactory, 100_000);
+}
+
+function prepareAsins(
+  items: unknown[],
+  idFactory: () => string,
+  maximum: number,
+): BatchAsinPlan {
+  if (!items.length || items.length > maximum)
     throw new Error('Invalid ASIN batch size');
   const result: BatchCreateAsinsData = {
     total: items.length,

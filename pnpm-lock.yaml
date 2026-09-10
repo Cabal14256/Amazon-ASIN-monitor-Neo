@@ -77,12 +77,18 @@ importers:
       '@asin-monitor/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@asin-monitor/import':
+        specifier: workspace:*
+        version: link:../../packages/import
       '@asin-monitor/sp-api':
         specifier: workspace:*
         version: link:../../packages/sp-api
       '@fastify/cookie':
         specifier: 10.0.1
         version: 10.0.1
+      '@fastify/multipart':
+        specifier: 10.1.1
+        version: 10.1.1
       '@nestjs/common':
         specifier: ^11.1.3
         version: 11.2.1(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -247,6 +253,9 @@ importers:
       '@asin-monitor/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@asin-monitor/import':
+        specifier: workspace:*
+        version: link:../../packages/import
       bullmq:
         specifier: ^5.58.0
         version: 5.81.3
@@ -344,6 +353,46 @@ importers:
       drizzle-kit:
         specifier: ^0.31.4
         version: 0.31.10
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(jiti@2.7.0)(less@4.9.0)(lightningcss@1.32.0)(sass@1.54.0)(terser@5.50.0)(tsx@4.23.12)
+
+  packages/import:
+    dependencies:
+      '@asin-monitor/db':
+        specifier: workspace:*
+        version: link:../db
+      dayjs:
+        specifier: 1.11.19
+        version: 1.11.19
+      exceljs:
+        specifier: 4.4.0
+        version: 4.4.0
+      fast-csv:
+        specifier: 4.3.6
+        version: 4.3.6
+      iconv-lite:
+        specifier: 0.4.24
+        version: 0.4.24
+      saxes:
+        specifier: 5.0.1
+        version: 5.0.1
+      yauzl:
+        specifier: 3.4.0
+        version: 3.4.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.20.1
+      '@types/yauzl':
+        specifier: 3.4.0
+        version: 3.4.0
+      jszip:
+        specifier: 3.10.1
+        version: 3.10.1
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -2201,6 +2250,12 @@ packages:
         integrity: sha512-NtuzM0SfaMJbGlnjr9LWQUN5LzgSrbB8tf/wRZNas+4E1O/Nmzl53e7ruT61HDZyRCJGC6FxIogmNZO1c5ETBA==,
       }
 
+  '@fastify/busboy@3.2.2':
+    resolution:
+      {
+        integrity: sha512-yXSS27qPExaXeuLvMRMXOLtpipzfQYNjG3FkunDWKGfMYjKuhFXko9CVzqxm8jcF+lmtS9Fd89QNdh9XDjnbNg==,
+      }
+
   '@fastify/cookie@10.0.1':
     resolution:
       {
@@ -2211,6 +2266,12 @@ packages:
     resolution:
       {
         integrity: sha512-ggQGua+xHv1MvePbPr0v//xLYEsCXbWspquXCJS9Ot5YoRXq8J8ZWzHnxDBVnbtXosvistXo6LtNzOJswf64Fw==,
+      }
+
+  '@fastify/deepmerge@3.2.1':
+    resolution:
+      {
+        integrity: sha512-N5Oqvltoa2r9z1tbx4xjky0oRR60v+T47Ic4J1ukoVQcptLOrIdRnCSdTGmOmajZuHVKlTnfcmrjyqsGEW1ztA==,
       }
 
   '@fastify/error@4.2.0':
@@ -2241,6 +2302,12 @@ packages:
     resolution:
       {
         integrity: sha512-OA3KGBCy6KtIvLf8DINC5880o5iBlDX4SxzLQS8HorJAbqluzLRn80UXU0bxZn7UOFhFgpRJDasfwn9nG4FG4A==,
+      }
+
+  '@fastify/multipart@10.1.1':
+    resolution:
+      {
+        integrity: sha512-jyRHgnFVdchZRKjJRf6kGPEiDp3Bg4MLo4d6/krt8Z4RutLrqL5IYWihx8a4tnv7Tu7JfuHcyC+dU9zPzTxiSg==,
       }
 
   '@fastify/proxy-addr@5.1.0':
@@ -3872,6 +3939,12 @@ packages:
     resolution:
       {
         integrity: sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg==,
+      }
+
+  '@types/yauzl@3.4.0':
+    resolution:
+      {
+        integrity: sha512-NRPn5w6h8dhcnmx3YIRQcqMywY/+nND/uOkJessedcrowO3C0AssHp3tMJpxKAwOhFOo0OV1y9VtsC5hbKKBAw==,
       }
 
   '@typescript-eslint/eslint-plugin@5.62.0':
@@ -10632,6 +10705,12 @@ packages:
       }
     engines: { node: '>= 0.10' }
 
+  pend@1.2.0:
+    resolution:
+      {
+        integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==,
+      }
+
   pg-cloudflare@1.4.0:
     resolution:
       {
@@ -14558,6 +14637,13 @@ packages:
       }
     engines: { node: '>=12' }
 
+  yauzl@3.4.0:
+    resolution:
+      {
+        integrity: sha512-jIH9yLR9wqr0wOS0TpBvo/g/2UgZH5qePVbjgRliiF0BYvOZyaBknKsF+x9Iht0O6sqgnB93rCICdOZFecJuDw==,
+      }
+    engines: { node: '>=12' }
+
   yocto-queue@0.1.0:
     resolution:
       {
@@ -15852,6 +15938,8 @@ snapshots:
       ajv-formats: 3.0.1(ajv@8.20.0)
       fast-uri: 4.1.3
 
+  '@fastify/busboy@3.2.2': {}
+
   '@fastify/cookie@10.0.1':
     dependencies:
       cookie-signature: 1.2.2
@@ -15861,6 +15949,8 @@ snapshots:
     dependencies:
       fastify-plugin: 6.0.0
       toad-cache: 3.7.4
+
+  '@fastify/deepmerge@3.2.1': {}
 
   '@fastify/error@4.2.0': {}
 
@@ -15878,6 +15968,14 @@ snapshots:
   '@fastify/merge-json-schemas@0.2.1':
     dependencies:
       dequal: 2.0.3
+
+  '@fastify/multipart@10.1.1':
+    dependencies:
+      '@fastify/busboy': 3.2.2
+      '@fastify/deepmerge': 3.2.1
+      '@fastify/error': 4.2.0
+      fastify-plugin: 6.0.0
+      secure-json-parse: 4.1.0
 
   '@fastify/proxy-addr@5.1.0':
     dependencies:
@@ -16815,6 +16913,10 @@ snapshots:
   '@types/yargs@17.0.35':
     dependencies:
       '@types/yargs-parser': 21.0.3
+
+  '@types/yauzl@3.4.0':
+    dependencies:
+      '@types/node': 22.20.1
 
   '@typescript-eslint/eslint-plugin@5.62.0(@typescript-eslint/parser@5.62.0(eslint@8.35.0)(typescript@5.9.3))(eslint@8.35.0)(typescript@5.9.3)':
     dependencies:
@@ -21667,6 +21769,8 @@ snapshots:
       sha.js: 2.4.12
       to-buffer: 1.2.2
 
+  pend@1.2.0: {}
+
   pg-cloudflare@1.4.0:
     optional: true
 
@@ -24439,6 +24543,10 @@ snapshots:
       string-width: 4.2.3
       y18n: 5.0.8
       yargs-parser: 21.1.1
+
+  yauzl@3.4.0:
+    dependencies:
+      pend: 1.2.0
 
   yocto-queue@0.1.0: {}
 

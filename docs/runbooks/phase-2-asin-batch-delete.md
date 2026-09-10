@@ -4,7 +4,7 @@
 
 `POST /api/v1/variant-groups/batch-delete` 已迁移同步删除和异步任务。需要 `asin:delete`，带 Origin 时必须匹配 `CORS_ORIGIN`；当前账号、密码有效期、会话与权限在 PostgreSQL 事务中再次复核。要求 `AUTH_DATA_AUTHORITY=postgresql`，按最终 Legacy 导入 →0003→0004 顺序完成存储升级。Legacy 入口保留，当前没有切换生产流量。
 
-API 和 Worker 必须使用同一 PostgreSQL 主库、Redis、`BULL_PREFIX`；Neo 命名空间固定为 `${BULL_PREFIX}:neo`。启动已构建的 `apps/worker/dist/main.js`，将 `WORKER_ENABLED_QUEUES` 包含 `batch-delete`，即可注册主营实际消费者。可同时选择 `maintenance`；日志以 `mode=business-worker` 和准确的 `registeredProcessors`/`queueCount` 表示已注册资源。剩余七类业务消费者与竞品批量删除仍待迁移，队列健康不代表这些业务可执行。
+API 和 Worker 必须使用同一 PostgreSQL 主库、Redis、`BULL_PREFIX`；Neo 命名空间固定为 `${BULL_PREFIX}:neo`。启动已构建的 `apps/worker/dist/main.js`，将 `WORKER_ENABLED_QUEUES` 包含 `batch-delete`，即可注册主营实际消费者。可同时选择 `maintenance`；日志以 `mode=business-worker` 和准确的 `registeredProcessors`/`queueCount` 表示已注册资源。主营导入消费者见[文件导入运行说明](./phase-2-asin-import.md)；剩余六类业务消费者与竞品批量删除仍待迁移，队列健康不代表这些业务可执行。
 
 ## 输入与兼容行为
 

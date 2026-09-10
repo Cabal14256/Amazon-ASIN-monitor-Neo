@@ -497,7 +497,7 @@ Neo API 的 `/ws` 保留旧系统 9 种服务端消息与 `broadcastToUser`，�
 
 八类队列的 attempts/backoff、成功/失败保留时间、限速与并发已与 Legacy 注册代码自动对照。Neo 使用独立的 `${BULL_PREFIX}:neo` 命名空间；`BULL_PREFIX` 本身仍保留旧系统含义，禁止混用两种 job 数据格式。处理器预检 `buildWorkerPlans` 要求所有选中队列都有真实回调，payload 在业务域验证之前保持 `unknown`。
 
-PostgreSQL 权威源下已注册认证维护及主营批量删除的真实 Processor；选择 `batch-delete` 后主入口显示 `mode=business-worker` 与实际注册数。主营 `POST /api/v1/variant-groups/batch-delete` 支持同步事务、异步分块删除、任务查询及取消，详见[批量删除运行说明](./docs/runbooks/phase-2-asin-batch-delete.md)。其余七类业务消费者和竞品删除继续迁移，未切换生产任务。共享队列策略、变量和新旧命名空间纪律见 [P2-T2a 运行说明](./docs/runbooks/phase-2-bullmq-queues.md)。
+PostgreSQL 权威源下已注册认证维护、主营批量删除和导入的真实 Processor；选择 `batch-delete` 或 `import` 后主入口显示 `mode=business-worker` 与实际注册数。主营批量删除支持同步事务、异步分块、任务查询及取消，详见[批量删除运行说明](./docs/runbooks/phase-2-asin-batch-delete.md)。主营 CSV/XLSX 导入使用共享持久化文件目录、流式解析及分块写入，完整结果可由任务所有者下载；启用前需完成主库 0005 升级，详见[文件导入运行说明](./docs/runbooks/phase-2-asin-import.md)。其余六类业务消费者、竞品处理和跨进程 WS 事件桥继续迁移，未切换生产任务。共享队列策略、变量和新旧命名空间纪律见 [P2-T2a 运行说明](./docs/runbooks/phase-2-bullmq-queues.md)。
 
 ## 项目结构
 
