@@ -279,14 +279,14 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           b = await connect(1),
           foreign = await connect(1, await login());
         const groupIds = Array.from({ length: 5 }, () => randomUUID());
-        for (const id of groupIds) {
+        for (const [index, id] of groupIds.entries()) {
           await f.pools.primaryPool.query(
             "INSERT INTO variant_groups(id,name,country,site,brand) VALUES($1,$1,'US','amazon.com','fixture')",
             [id],
           );
           await f.pools.primaryPool.query(
-            "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES($1,$1,'US','amazon.com','fixture',$2)",
-            [randomUUID(), id],
+            "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES($1,$2,'US','amazon.com','fixture',$3)",
+            [randomUUID(), `B${String(index).padStart(9, '0')}`, id],
           );
         }
         const child = spawn(
