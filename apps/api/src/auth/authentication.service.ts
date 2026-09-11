@@ -175,6 +175,7 @@ export class AuthenticationService {
   async authenticateToken(
     token: string | undefined,
     signal?: AbortSignal,
+    options: { readOnly?: boolean } = {},
   ): Promise<AuthPrincipal> {
     if (!token) throw unauthorized('未提供认证令牌');
     try {
@@ -189,11 +190,11 @@ export class AuthenticationService {
         throw forbidden('会话已失效');
       }
       if (session.expiresAt !== null && session.expiresAt <= new Date()) {
-        await this.repository.revokeSession(session.id);
+        if (!options.readOnly) await this.repository.revokeSession(session.id);
         throw unauthorized('会话已过期');
       }
 
-      await this.repository.touchSession(session.id);
+      if (!options.readOnly) await this.repository.touchSession(session.id);
       signal?.throwIfAborted();
       const user = await this.repository.findUserById(claims.userId);
       signal?.throwIfAborted();

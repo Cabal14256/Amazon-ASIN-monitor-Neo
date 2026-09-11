@@ -26,13 +26,25 @@ import {
 const MAX_CONNECTIONS = 1000;
 const MAX_AUTH_PENDING = 64;
 const MAX_BUFFER_BYTES = 1024 * 1024;
+const MAX_DELIVERY_AUTH = 8;
+const MAX_PENDING_MESSAGES = 32;
+interface Connection {
+  userId: string;
+  token: string;
+  pending: string[];
+  bytes: number;
+  checking: boolean;
+  cancellation?: AbortController;
+}
 const timestamp = () =>
   new Date(Date.now() + 8 * 3600_000).toISOString().replace('Z', '+08:00');
 
 @Injectable()
 export class WebSocketService implements OnModuleDestroy {
   private wss?: WebSocketServer;
-  private readonly users = new Map<WebSocket, string>();
+  private readonly users = new Map<WebSocket, Connection>();
+  private readonly deliveryReady = new Set<WebSocket>();
+  private deliveryActive = 0;
   private authPending = 0;
   private closing = false;
   private heartbeat?: ReturnType<typeof setInterval>;
@@ -69,11 +81,11 @@ export class WebSocketService implements OnModuleDestroy {
       alive.add(socket);
       socket.on('pong', () => alive.add(socket));
       socket.on('error', () => {
-        this.users.delete(socket);
+        this.forget(socket);
         this.warn('connection_error');
         socket.terminate();
       });
-      socket.once('close', () => this.users.delete(socket));
+      socket.once('close', () => this.forget(socket));
       let windowStart = Date.now();
       let count = 0;
       socket.on('message', (raw, binary) => {
@@ -125,13 +137,16 @@ export class WebSocketService implements OnModuleDestroy {
           continue;
         }
         alive.delete(socket);
-        if (socket.readyState === WebSocket.OPEN) socket.ping();
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.ping();
+          this.queueDelivery(socket);
+        }
       }
     }, 30_000);
     this.heartbeat.unref();
     this.logger.info('WebSocket 网关已启动', 'WebSocketService', {
       path: '/ws',
-      transport: 'local',
+      transport: 'task-redis-pubsub',
     });
   }
 
@@ -177,7 +192,13 @@ export class WebSocketService implements OnModuleDestroy {
         cancellation.signal,
       );
       if (this.closing || socket.readyState !== WebSocket.OPEN) return;
-      this.users.set(socket, principal.userId);
+      this.users.set(socket, {
+        userId: principal.userId,
+        token: token!,
+        pending: [],
+        bytes: 0,
+        checking: false,
+      });
       this.send(
         socket,
         JSON.stringify({ type: 'connected', message: 'WebSocket连接成功' }),
@@ -232,7 +253,7 @@ export class WebSocketService implements OnModuleDestroy {
   private send(socket: WebSocket, message: string): void {
     if (socket.readyState !== WebSocket.OPEN) return;
     if (socket.bufferedAmount + Buffer.byteLength(message) > MAX_BUFFER_BYTES) {
-      this.users.delete(socket);
+      this.forget(socket);
       socket.close(1013, '客户端处理过慢');
       return;
     }
@@ -249,11 +270,115 @@ export class WebSocketService implements OnModuleDestroy {
     }
   }
 
+  private forget(socket: WebSocket): void {
+    this.users.get(socket)?.cancellation?.abort();
+    this.users.delete(socket);
+    this.deliveryReady.delete(socket);
+  }
+
+  private queueDelivery(socket: WebSocket, message?: string): void {
+    const state = this.users.get(socket);
+    if (!state || this.closing || socket.readyState !== WebSocket.OPEN) return;
+    if (message !== undefined) {
+      const bytes = Buffer.byteLength(message);
+      if (
+        state.pending.length >= MAX_PENDING_MESSAGES ||
+        state.bytes + bytes + socket.bufferedAmount > MAX_BUFFER_BYTES
+      ) {
+        this.forget(socket);
+        socket.close(1013, '客户端处理过慢');
+        return;
+      }
+      state.pending.push(message);
+      state.bytes += bytes;
+    }
+    this.deliveryReady.add(socket);
+    this.pumpDeliveries();
+  }
+
+  private pumpDeliveries(): void {
+    if (this.closing) return;
+    for (const socket of this.deliveryReady) {
+      if (this.deliveryActive >= MAX_DELIVERY_AUTH) break;
+      const state = this.users.get(socket);
+      if (!state) {
+        this.deliveryReady.delete(socket);
+        continue;
+      }
+      if (state.checking) continue;
+      this.deliveryReady.delete(socket);
+      state.checking = true;
+      this.deliveryActive++;
+      void this.flushDelivery(socket, state).finally(() => {
+        state.checking = false;
+        this.deliveryActive--;
+        this.pumpDeliveries();
+      });
+    }
+  }
+
+  private async flushDelivery(
+    socket: WebSocket,
+    state: Connection,
+  ): Promise<void> {
+    const batch = state.pending.splice(0);
+    const cancellation = new AbortController();
+    state.cancellation = cancellation;
+    const timeout = setTimeout(() => {
+      cancellation.abort();
+      this.forget(socket);
+      socket.close(1013, '鉴权服务暂时不可用');
+    }, 2000);
+    timeout.unref();
+    try {
+      const principal = await this.auth.authenticateToken(
+        state.token,
+        cancellation.signal,
+        { readOnly: true },
+      );
+      if (
+        this.closing ||
+        cancellation.signal.aborted ||
+        this.users.get(socket) !== state
+      )
+        return;
+      if (principal.userId !== state.userId) {
+        this.forget(socket);
+        socket.close(WS_CLOSE_CODES.FORBIDDEN, '会话已失效');
+        return;
+      }
+      for (const message of batch) this.send(socket, message);
+    } catch (error) {
+      if (cancellation.signal.aborted) return;
+      const status = error instanceof HttpException ? error.getStatus() : 503;
+      this.forget(socket);
+      socket.close(
+        status === 401
+          ? WS_CLOSE_CODES.UNAUTHORIZED
+          : status === 403
+          ? WS_CLOSE_CODES.FORBIDDEN
+          : 1013,
+        status < 500 ? '会话已失效' : '鉴权服务暂时不可用',
+      );
+      this.warn(status < 500 ? 'session_rejected' : 'auth_dependency_error');
+    } finally {
+      clearTimeout(timeout);
+      state.bytes -= batch.reduce(
+        (sum, value) => sum + Buffer.byteLength(value),
+        0,
+      );
+      if (state.cancellation === cancellation) state.cancellation = undefined;
+    }
+  }
+
   private deliver(event: WebSocketEvent): void {
     const result = wsMessageSchema.safeParse(event.message);
     if (
       !result.success ||
-      (event.audience !== 'all' && event.audience !== 'user')
+      (event.audience !== 'all' && event.audience !== 'user') ||
+      (result.success &&
+        result.data.type.startsWith('task_') &&
+        (event.audience !== 'user' || !event.userId))
     ) {
       this.warn('invalid_event');
       return;
@@ -269,12 +394,12 @@ export class WebSocketService implements OnModuleDestroy {
       this.warn('oversized_event');
       return;
     }
-    for (const [socket, userId] of this.users) {
+    for (const [socket, state] of this.users) {
       if (
         event.audience === 'all' ||
-        (typeof event.userId === 'string' && event.userId === userId)
+        (typeof event.userId === 'string' && event.userId === state.userId)
       )
-        this.send(socket, message);
+        this.queueDelivery(socket, message);
     }
   }
 
@@ -305,7 +430,7 @@ export class WebSocketService implements OnModuleDestroy {
   }
   private task(message: WsMessage, userId?: string | null): void {
     if (userId) this.broadcastToUser(userId, message);
-    else this.broadcast(message);
+    else this.warn('task_owner_missing');
   }
   sendTaskProgress(
     taskId: string,
@@ -362,7 +487,7 @@ export class WebSocketService implements OnModuleDestroy {
     this.closing = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.unsubscribe?.();
-    this.users.clear();
+    for (const socket of this.users.keys()) this.forget(socket);
     const wss = this.wss;
     if (!wss) return;
     const force = setTimeout(() => {

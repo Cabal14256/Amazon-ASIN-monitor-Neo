@@ -152,11 +152,7 @@ describe('owned task cancellation HTTP', () => {
         },
       );
       expect(auth.repository.getPermissionCodes).not.toHaveBeenCalled();
-      expect(ws.sendTaskCancelled).toHaveBeenCalledWith(
-        'task-95',
-        task!.message,
-        taskUserId,
-      );
+      expect(ws.sendTaskCancelled).not.toHaveBeenCalled();
     },
   );
   it.each(['foreign', 'ownerless'])(
@@ -205,17 +201,13 @@ describe('owned task cancellation HTTP', () => {
       expect(ws.sendTaskCancelled).not.toHaveBeenCalled();
     },
   );
-  it('cancels an absent job with durable metadata and owner-only notification', async () => {
+  it('cancels an absent job through durable metadata without a duplicate local notification', async () => {
     outcome = 'absent';
     expect((await cancel()).json().data).toMatchObject({
       status: 'cancelled',
       message: '任务已取消',
     });
-    expect(ws.sendTaskCancelled).toHaveBeenCalledWith(
-      'task-95',
-      '任务已取消',
-      taskUserId,
-    );
+    expect(ws.sendTaskCancelled).not.toHaveBeenCalled();
   });
   it('keeps running cancellation sticky and waits for the Worker to acknowledge', async () => {
     outcome = 'running';
@@ -245,15 +237,13 @@ describe('owned task cancellation HTTP', () => {
     expect((await cancel()).statusCode).toBe(404);
     expect(ws.sendTaskCancelled).not.toHaveBeenCalled();
   });
-  it('keeps durable success if WS notification fails, with sanitized warning', async () => {
+  it('does not call the local WS helper after durable success', async () => {
     ws.sendTaskCancelled.mockImplementation(() => {
       throw new Error('private-token-fixture');
     });
     expect((await cancel()).statusCode).toBe(200);
-    expect(app.logger.warn).toHaveBeenCalledOnce();
-    expect(JSON.stringify(app.logger.warn.mock.calls)).not.toContain(
-      'private-token-fixture',
-    );
+    expect(ws.sendTaskCancelled).not.toHaveBeenCalled();
+    expect(app.logger.warn).not.toHaveBeenCalled();
   });
   it.each(['read', 'queue', 'mutate'])(
     'returns fixed safe errors for %s failure',

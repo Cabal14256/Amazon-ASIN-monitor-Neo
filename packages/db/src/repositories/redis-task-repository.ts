@@ -1,6 +1,10 @@
 import type { Env } from '@asin-monitor/config';
 import type { Redis } from 'ioredis';
 import {
+  encodeTaskNotification,
+  taskNotificationChannel,
+} from './task-notification';
+import {
   createTaskInputSchema,
   taskStateSchema,
   transitionTask,
@@ -30,6 +34,9 @@ local count = redis.call('ZCARD', KEYS[2])
 if count > tonumber(ARGV[6]) then
   redis.call('ZREMRANGEBYRANK', KEYS[2], 0, count - tonumber(ARGV[6]) - 1)
 end
+-- Notification is advisory: publication failure must not fail a committed task.
+local published = redis.pcall('PUBLISH', ARGV[7], ARGV[8])
+if type(published) == 'table' and published.err then return 2 end
 return 1
 `;
 
@@ -59,6 +66,7 @@ export class RedisTaskRepository {
     private readonly redis: TaskRedisPort,
     private readonly config: TaskRegistryConfig,
     private readonly now: () => Date = () => new Date(),
+    private readonly onNotificationFailure?: () => void,
   ) {
     if (
       !config.BULL_PREFIX.trim() ||
@@ -115,20 +123,28 @@ export class RedisTaskRepository {
       throw new TaskRegistryError('TASK_RECORD_TOO_LARGE');
     // Round-trip validation catches unsupported JSON values before issuing Redis writes.
     this.parse(raw, task.taskId);
-    return (
-      (await this.redis.eval(
-        COMPARE_AND_SET,
-        2,
-        this.key('meta', task.taskId),
-        this.key('user', task.userId),
-        expected ?? '',
-        raw,
-        this.config.TASK_META_TTL_SECONDS,
-        Date.parse(task.updatedAt),
-        task.taskId,
-        this.config.TASK_USER_MAX_ITEMS,
-      )) === 1
+    const saved = await this.redis.eval(
+      COMPARE_AND_SET,
+      2,
+      this.key('meta', task.taskId),
+      this.key('user', task.userId),
+      expected ?? '',
+      raw,
+      this.config.TASK_META_TTL_SECONDS,
+      Date.parse(task.updatedAt),
+      task.taskId,
+      this.config.TASK_USER_MAX_ITEMS,
+      taskNotificationChannel(this.config.BULL_PREFIX),
+      encodeTaskNotification(task),
     );
+    if (saved === 2) {
+      try {
+        this.onNotificationFailure?.();
+      } catch {
+        // Diagnostics cannot change the outcome of an already committed mutation.
+      }
+    }
+    return saved === 1 || saved === 2;
   }
 
   async create(input: CreateTaskInput): Promise<TaskState> {

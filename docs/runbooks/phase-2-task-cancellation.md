@@ -20,7 +20,7 @@
 
 队列删除与注册表 CAS 是两个操作：中途失败可能留下非终态元数据而 job 已移除，重试取消会恢复为 cancelled。已过期记录不会复活，身份被复用返回 409。超时不代表撤销已完成写入，不能通过换 ID 重试制造重复任务。
 
-仅在持久化 cancelled 后使用 WebSocketService 通知明确的当前 owner；cancelling 不发送 task_cancelled。通知失败固定 warn，保留持久化成功；并发重试可能重复通知，客户端按 taskId 更新。当前 WS 总线仍为 API 进程内，跨 API/Worker 通知另验。
+注册表 CAS 提交后统一发布最小变更通知，由各 API 重新读取当前状态并发送给明确的 owner；cancelling 不发送 task_cancelled。取消接口不再额外调用进程内 helper，以免重复推送。通知失败节流 warn 并保留持久化成功；去重、实时会话复核和断线 HTTP 恢复见[跨进程任务 WS](phase-2-task-websocket.md)。
 
 ## 验证与回滚
 
