@@ -1,4 +1,5 @@
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import { RequestMethod } from '@nestjs/common';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 
@@ -29,6 +30,16 @@ export function configureHttpApp(
   app.enableShutdownHooks();
   if (options.audit) registerAuditHooks(app, options.audit);
   app.register(fastifyCookie);
+  app.register(fastifyMultipart, {
+    limits: {
+      files: 1,
+      fileSize: 10 * 1024 * 1024,
+      fields: 16,
+      parts: 17,
+      fieldNameSize: 100,
+      fieldSize: 1024,
+    },
+  });
   app.setGlobalPrefix('api/v1', {
     exclude: [
       { path: 'health', method: RequestMethod.GET },

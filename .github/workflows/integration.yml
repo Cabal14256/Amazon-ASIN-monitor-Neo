@@ -158,6 +158,12 @@ jobs:
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-asin-timestamp-policy.sh /tmp/0004_asin_timestamp_policy.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-asin-timestamp-policy.sh /tmp/0004_asin_timestamp_policy.sql
 
+      - name: Apply import group collation twice after the timestamp policy
+        run: |
+          docker cp packages/db/migrations/0005_import_group_collation.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0005_import_group_collation.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0005_import_group_collation.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0005_import_group_collation.sql
+
       - name: Run ASIN timestamp policy upgrade, transactions and rollback on PostgreSQL
         run: pnpm --filter @asin-monitor/db exec vitest run test/asin-timestamp-policy.integration.test.ts
 
@@ -230,6 +236,9 @@ jobs:
 
       - name: Run ASIN batch deletion from HTTP through the compiled BullMQ Worker
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-delete.integration.test.ts
+
+      - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
 
       - name: Run shared SP-API quota compatibility on Redis
         run: pnpm --filter @asin-monitor/sp-api exec vitest run test/quota.integration.test.ts

@@ -7,6 +7,7 @@ export * from './domain/variant-status';
 export * from './migration';
 export * from './repositories/account-repository';
 export * from './repositories/asin-batch-delete-repository';
+export * from './repositories/asin-import-repository';
 export * from './repositories/asin-query-repository';
 export * from './repositories/asin-timestamp-policy';
 export * from './repositories/asin-write-repository';

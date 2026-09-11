@@ -5,6 +5,7 @@ import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
 import { startAsinBatchDeleteRuntime } from './asin-batch-delete-runtime';
+import { startAsinImportRuntime } from './asin-import-runtime';
 import { startAuthMaintenanceRuntime } from './auth-maintenance-runtime';
 import {
   AUTH_MAINTENANCE_QUEUE,
@@ -22,7 +23,7 @@ import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
 
 /**
  * Worker 进程入口（PROCESS_ROLE=worker 角色）。
- * D4 认证维护和主营批量删除已注册 Processor；其余业务队列继续逐域平移。
+ * D4 认证维护、主营批量删除和导入已注册 Processor；其余业务队列继续逐域平移。
  * BullMQ 自管连接（传 ConnectionOptions），看门狗使用独立 ioredis 实例。
  */
 async function bootstrap(): Promise<void> {
@@ -60,9 +61,14 @@ async function bootstrap(): Promise<void> {
     enabled.includes('batch-delete') && env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startAsinBatchDeleteRuntime(env, () => process.exit(1))
       : undefined;
+  const asinImport =
+    enabled.includes('import') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startAsinImportRuntime(env, () => process.exit(1))
+      : undefined;
 
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
+    .filter((name) => !(asinImport && name === 'import'))
     .map((name) => {
       const physicalName = getPhysicalQueueName(name);
       const queue = new Queue(
@@ -80,6 +86,7 @@ async function bootstrap(): Promise<void> {
       ...queues,
       ...(maintenance ? [maintenance.queue] : []),
       ...(batchDelete ? [batchDelete.queue] : []),
+      ...(asinImport ? [asinImport.queue] : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
   watchdog.start(() => {
@@ -95,6 +102,7 @@ async function bootstrap(): Promise<void> {
         ...queues,
         ...(maintenance ? [maintenance] : []),
         ...(batchDelete ? [batchDelete] : []),
+        ...(asinImport ? [asinImport] : []),
       ],
       watchdogRedis,
     });
@@ -105,19 +113,25 @@ async function bootstrap(): Promise<void> {
 
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
-    mode: batchDelete
-      ? 'business-worker'
-      : maintenance
-      ? 'auth-maintenance'
-      : 'queue-scaffold',
-    registeredProcessors: Number(!!maintenance) + Number(!!batchDelete),
+    mode:
+      batchDelete || asinImport
+        ? 'business-worker'
+        : maintenance
+        ? 'auth-maintenance'
+        : 'queue-scaffold',
+    registeredProcessors:
+      Number(!!maintenance) + Number(!!batchDelete) + Number(!!asinImport),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
     physicalQueues: [
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
     ],
-    queueCount: queues.length + Number(!!maintenance) + Number(!!batchDelete),
+    queueCount:
+      queues.length +
+      Number(!!maintenance) +
+      Number(!!batchDelete) +
+      Number(!!asinImport),
     schedulerEnabled: !!maintenance && env.SCHEDULER_ENABLED,
   });
 }

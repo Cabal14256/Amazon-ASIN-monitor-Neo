@@ -26,6 +26,9 @@ services:
       # ASIN write policy is also an explicit post-import primary upgrade.
       - ./packages/db/docker/apply-asin-timestamp-policy.sh:/opt/asin-monitor/apply-asin-timestamp-policy.sh:ro
       - ./packages/db/migrations/0004_asin_timestamp_policy.sql:/opt/asin-monitor/0004_asin_timestamp_policy.sql:ro
+      # Import group comparisons require this explicit primary-only upgrade.
+      - ./packages/db/migrations/0005_import_group_collation.sql:/opt/asin-monitor/0005_import_group_collation.sql:ro
+      - ./packages/db/migrations/0005_import_group_collation.rollback.sql:/opt/asin-monitor/0005_import_group_collation.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

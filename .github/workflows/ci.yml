@@ -80,6 +80,11 @@ jobs:
       - name: Test new api
         run: pnpm --filter @asin-monitor/api test
 
+      - name: Test and typecheck streaming import package
+        run: |
+          pnpm --filter @asin-monitor/import test
+          pnpm --filter @asin-monitor/import typecheck
+
       - name: Test new worker
         run: pnpm --filter @asin-monitor/worker test
 

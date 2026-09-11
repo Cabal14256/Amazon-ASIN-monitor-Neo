@@ -26,6 +26,7 @@ nginx.conf
 dist/
 coverage/
 /artifacts/
+/var/neo/
 /.mfsu
 .swc
 

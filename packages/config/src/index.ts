@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { config as loadDotenv } from 'dotenv';
 import { parse as parsePostgresConnectionString } from 'pg-connection-string';
@@ -199,6 +199,11 @@ const envObjectSchema = z.object({
     .max(31_536_000)
     .default(604_800),
   TASK_USER_MAX_ITEMS: z.coerce.number().int().min(1).max(1000).default(200),
+  IMPORT_STORAGE_DIRECTORY: optionalNonEmptyStringSchema.refine(
+    (value) =>
+      value === undefined || (isAbsolute(value) && !value.includes('\0')),
+    'IMPORT_STORAGE_DIRECTORY 必须是共享存储的绝对路径',
+  ),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
   PASSWORD_EXPIRE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
@@ -407,6 +412,17 @@ export function getDefaultEnvironmentFiles(cwd = process.cwd()): string[] {
     return [join(workspaceRoot, '.env.neo'), join(workspaceRoot, '.env')];
   }
   return [join(cwd, '.env.neo'), join(cwd, '.env')];
+}
+
+/** API and Worker use the same root even when launched from their package directories. */
+export function getImportStorageDirectory(
+  env: Pick<Env, 'IMPORT_STORAGE_DIRECTORY'>,
+  cwd = process.cwd(),
+): string {
+  if (env.IMPORT_STORAGE_DIRECTORY) return env.IMPORT_STORAGE_DIRECTORY;
+  const workspaceRoot = findWorkspaceRoot(cwd);
+  if (!workspaceRoot) throw new Error('IMPORT_STORAGE_DIRECTORY_REQUIRED');
+  return join(workspaceRoot, 'var', 'neo', 'imports');
 }
 
 /** Neo 专用配置优先，根前端配置作为补充；已有进程环境变量始终优先。 */
