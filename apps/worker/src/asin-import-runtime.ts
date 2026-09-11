@@ -16,6 +16,7 @@ import { createAsinImportProcessor } from './asin-import-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
+import { taskNotificationWarning } from './task-notification-warning';
 
 export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
   if (env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -49,7 +50,12 @@ export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
   const files = new ImportFileStore(directory);
   const reports = new ImportResultStore(directory);
   const shutdown = new AbortController();
-  const store = new RedisTaskRepository(control, env);
+  const store = new RedisTaskRepository(
+    control,
+    env,
+    undefined,
+    taskNotificationWarning(),
+  );
   let queue: Queue | undefined, worker: Worker | undefined;
   let closing = false;
   let timer: ReturnType<typeof setTimeout> | undefined;

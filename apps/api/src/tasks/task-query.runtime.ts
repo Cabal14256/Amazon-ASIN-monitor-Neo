@@ -103,6 +103,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private importQueue?: Queue;
   private connecting?: Promise<void>;
   private closed = false;
+  private lastNotificationWarning = -Infinity;
   constructor(
     @Inject(ENV) private readonly env: Env,
     @Inject(AppLogger) private readonly logger: AppLogger,
@@ -176,7 +177,13 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         command(() => this.redis.zrevrange(key, start, end)),
       mget: (...keys: string[]) => command(() => this.redis.mget(...keys)),
     } as TaskRedisPort;
-    return new RedisTaskRepository(redis, this.env);
+    return new RedisTaskRepository(redis, this.env, undefined, () => {
+      if (Date.now() - this.lastNotificationWarning < 60_000) return;
+      this.lastNotificationWarning = Date.now();
+      this.logger.warn('任务已保存，实时通知发布失败', 'TaskQueryRuntime', {
+        reason: 'task_notification_publish_failed',
+      });
+    });
   }
   openBatchDelete(ensureOpen: () => void): BatchDeleteProducerPort {
     const command = this.command(ensureOpen);

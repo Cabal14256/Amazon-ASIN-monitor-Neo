@@ -173,7 +173,7 @@ describe('Redis task registry behavior', () => {
       'fixture:neo:task:user:owner-a',
       '',
     ]);
-    expect(call.slice(6)).toEqual([
+    expect(call.slice(6, 10)).toEqual([
       604800,
       Date.parse(task.updatedAt),
       'task-a',

@@ -10,6 +10,7 @@ import { createAsinBatchDeleteProcessor } from './asin-batch-delete-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
+import { taskNotificationWarning } from './task-notification-warning';
 
 export async function startAsinBatchDeleteRuntime(
   env: Env,
@@ -84,7 +85,12 @@ export async function startAsinBatchDeleteRuntime(
           getPhysicalQueueName('batch-delete'),
           createAsinBatchDeleteProcessor(
             repository,
-            new RedisTaskRepository(control, env),
+            new RedisTaskRepository(
+              control,
+              env,
+              undefined,
+              taskNotificationWarning(),
+            ),
             {
               chunkSize: env.BATCH_DELETE_CHUNK_SIZE,
               isClosing: () => closing,

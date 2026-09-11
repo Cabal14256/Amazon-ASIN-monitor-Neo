@@ -2,7 +2,7 @@
 
 ## 已实现范围
 
-`packages/db` 导出 `RedisTaskRepository` 供 API/Worker 共享数据访问。仓储本身只提供持久化和状态转换，不拥有 Redis 连接，也不消费或创建 BullMQ 业务任务。[任务查询入口](phase-2-task-queries.md) 已接线本人列表/状态与终态对账；仓储 `read`/`mutate` 是受信服务端内部接口，不是授权边界，调用方必须先鉴权并检查 `userId`。
+`packages/db` 导出 `RedisTaskRepository` 供 API/Worker 共享数据访问。仓储提供持久化、状态转换和提交后的最小变更通知，不拥有 Redis 连接，也不消费或创建 BullMQ 业务任务。[任务查询入口](phase-2-task-queries.md) 已接线本人列表/状态与终态对账；仓储 `read`/`mutate` 是受信服务端内部接口，不是授权边界，调用方必须先鉴权并检查 `userId`。
 
 - `create`：要求可信 `userId`、`taskId`、`taskType`；不接受客户端指定初始状态、时间、结果或 owner 更新。
 - `read`/`listUser`：实时读取共享 Redis，无进程内缓存。列表按更新时间倒序，支持 `all`、`active` 与具体状态，limit 为 1–200；在完整有界索引内过滤，不使用 `limit*3` 截断。
@@ -34,4 +34,4 @@ Lua 提供无其他客户端插入的比较/写入，不提供任意运行错误
 - 单测对照 Legacy 顺序状态行为，并覆盖取消竞争、终态不可逆、配置/JSON 限制、缺失/过期无复活、错误明确传播和索引过滤。
 - 显式 `RUN_INTEGRATION_TESTS=true` 加测试 `REDIS_URL` 运行 `corepack pnpm --filter db exec vitest run test/task-registry.integration.test.ts`：两真实客户端竞争 20 轮、TTL/索引裁剪、owner/命名空间隔离、类型错误写前校验。仅使用随机 `fixture-task-registry-*` 前缀并按确切 key 清理，无 FLUSHDB。
 - 没有数据库 schema 迁移，不读取/写入真实生产任务。回滚仓储接线即可停止新元数据写入；现有键按 TTL 自然过期，不主动删除历史。
-- 本人查询/序列化与终态对账已接线；尚待取消与 BullMQ job 协调、导出创建/下载流、跨进程 WS 发布、实际 Processor/调度和新旧产物对拍。只有这些完成且旧队列 drain 门槛通过后，才能切换生产。
+- 本人查询、终态对账、取消、主 ASIN 批量删除/导入 Worker、导入报告下载和[跨进程任务 WS](phase-2-task-websocket.md)已接线；导出等其余业务 Processor、完整调度和各自新旧产物对拍仍待完成。只有业务验收和旧队列 drain 门槛通过后，才能切换生产。

@@ -1,7 +1,11 @@
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { RedisTaskRepository } from '../src/repositories/redis-task-repository';
+import {
+  parseTaskNotification,
+  taskNotificationChannel,
+} from '../src/repositories/task-notification';
 
 const enabled = process.env.RUN_INTEGRATION_TESTS === 'true';
 describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
@@ -149,5 +153,112 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
       disconnected.disconnect();
     }
     expect(await redis.exists(metaKey('offline'))).toBe(0);
+  });
+  it('publishes committed revisions exactly once across concurrent writers and terminal retries', async () => {
+    const subscriber = new Redis(
+      process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/15',
+      connectionOptions,
+    );
+    const notices: { raw: string; persisted: Promise<unknown> }[] = [];
+    subscriber.on('error', () => undefined);
+    subscriber.on('message', (_channel, raw: string) => {
+      const notice = parseTaskNotification(raw);
+      if (notice?.taskId === 'published')
+        notices.push({ raw, persisted: other.read(notice.taskId) });
+    });
+    try {
+      await subscriber.connect();
+      await subscriber.subscribe(taskNotificationChannel(prefix));
+      await create('published', 'published-owner');
+      await Promise.all([
+        repository.mutate('published', { kind: 'progress', progress: 40 }),
+        other.mutate('published', { kind: 'cancel-request' }),
+      ]);
+      await repository.mutate('published', { kind: 'cancelled' });
+      await repository.mutate('published', { kind: 'completed' });
+      await expect(
+        create('published', 'published-owner'),
+      ).rejects.toMatchObject({ code: 'TASK_EXISTS' });
+      // Same publisher connection: this barrier is processed after all earlier PUBLISH calls.
+      const barrier = new Promise<void>((resolve) =>
+        subscriber.on('message', (_channel, raw) => {
+          if (raw === 'fixture-barrier') resolve();
+        }),
+      );
+      await redis.publish(taskNotificationChannel(prefix), 'fixture-barrier');
+      await barrier;
+      expect(
+        notices.map(({ raw }) => parseTaskNotification(raw)?.revision),
+      ).toEqual([0, 1, 2, 3]);
+      for (const { raw, persisted } of notices) {
+        const notice = parseTaskNotification(raw)!;
+        const task = await persisted;
+        expect(task).toMatchObject({
+          taskId: notice.taskId,
+          userId: notice.userId,
+          createdAt: notice.createdAt,
+        });
+        expect((task as { revision: number }).revision).toBeGreaterThanOrEqual(
+          notice.revision,
+        );
+        expect(Object.keys(JSON.parse(raw)).sort()).toEqual([
+          'createdAt',
+          'revision',
+          'taskId',
+          'taskType',
+          'type',
+          'userId',
+          'version',
+        ]);
+      }
+    } finally {
+      subscriber.disconnect();
+    }
+  });
+  it('keeps real committed state and reports safely when Redis ACL denies PUBLISH', async () => {
+    const username = `fixture-task-publish-${randomUUID()}`,
+      password = randomUUID();
+    const restrictedUrl = new URL(
+      process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/15',
+    );
+    restrictedUrl.username = username;
+    restrictedUrl.password = password;
+    const restricted = new Redis(restrictedUrl.toString(), connectionOptions);
+    restricted.on('error', () => undefined);
+    const warning = vi.fn();
+    try {
+      await redis.acl(
+        'SETUSER',
+        username,
+        'on',
+        `>${password}`,
+        '~' + prefix + ':*',
+        'resetchannels',
+        '+@all',
+        '-publish',
+      );
+      await restricted.connect();
+      const isolated = new RedisTaskRepository(
+        restricted,
+        config,
+        undefined,
+        warning,
+      );
+      await create('publish-denied', 'denied-owner', isolated);
+      await isolated.mutate('publish-denied', {
+        kind: 'completed',
+        result: { total: 1 },
+      });
+      expect(await other.read('publish-denied')).toMatchObject({
+        status: 'completed',
+        result: { total: 1 },
+        revision: 1,
+      });
+      expect(warning).toHaveBeenCalledTimes(2);
+      expect(warning.mock.calls).toEqual([[], []]);
+    } finally {
+      restricted.disconnect();
+      await redis.acl('DELUSER', username);
+    }
   });
 });

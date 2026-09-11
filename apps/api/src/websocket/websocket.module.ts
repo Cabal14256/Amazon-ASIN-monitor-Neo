@@ -1,13 +1,14 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
-import { LocalWebSocketEventBus, WS_EVENT_BUS } from './websocket-events';
+import { RedisWebSocketEventBus } from './redis-websocket-events';
+import { WS_EVENT_BUS } from './websocket-events';
 import { WebSocketService } from './websocket.service';
 
 @Module({
   imports: [AuthModule],
   providers: [
     WebSocketService,
-    { provide: WS_EVENT_BUS, useClass: LocalWebSocketEventBus },
+    { provide: WS_EVENT_BUS, useClass: RedisWebSocketEventBus },
   ],
   exports: [WebSocketService],
 })

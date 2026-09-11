@@ -5,7 +5,11 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import { taskInfoResultSchema } from '@asin-monitor/contracts';
-import { RedisTaskRepository, type TaskState } from '@asin-monitor/db';
+import {
+  RedisTaskRepository,
+  taskNotificationChannel,
+  type TaskState,
+} from '@asin-monitor/db';
 import { FlowProducer, Queue, Worker, type JobsOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
@@ -24,6 +28,7 @@ import { AppLogger } from '../src/logger/app-logger.service';
 import { CANCELLABLE_TASK_TYPES } from '../src/tasks/task-cancellation-script';
 import { TaskQueryModule } from '../src/tasks/task-query.module';
 import { TaskQueryRuntime } from '../src/tasks/task-query.runtime';
+import { RedisWebSocketEventBus } from '../src/websocket/redis-websocket-events';
 import {
   WS_EVENT_BUS,
   type WebSocketEvent,
@@ -56,18 +61,31 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       f = await spApiConfigApp({
         imports: [TaskQueryModule],
         configure: (builder) =>
-          builder.overrideProvider(TaskQueryRuntime).useFactory({
-            inject: [ENV, AppLogger],
-            factory: (source: Env, logger: AppLogger) => {
-              env = { ...source, BULL_PREFIX: prefix };
-              return new TaskQueryRuntime(env, logger);
-            },
-          }),
+          builder
+            .overrideProvider(WS_EVENT_BUS)
+            .useFactory({
+              inject: [ENV, AppLogger],
+              factory: (source: Env, logger: AppLogger) =>
+                new RedisWebSocketEventBus(
+                  { ...source, BULL_PREFIX: prefix },
+                  logger,
+                ),
+            })
+            .overrideProvider(TaskQueryRuntime)
+            .useFactory({
+              inject: [ENV, AppLogger],
+              factory: (source: Env, logger: AppLogger) => {
+                env = { ...source, BULL_PREFIX: prefix };
+                return new TaskQueryRuntime(env, logger);
+              },
+            }),
       });
       runtime = f.app.get(TaskQueryRuntime);
       unsubscribe = f.app
         .get<WebSocketEventBus>(WS_EVENT_BUS)
-        .subscribe((event) => events.push(event));
+        .subscribe((event) => {
+          if (event.message.type === 'task_cancelled') events.push(event);
+        });
       redis = new Redis(env.REDIS_URL, {
         lazyConnect: true,
         commandTimeout: 2000,
@@ -78,6 +96,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       });
       redis.on('error', () => undefined);
       await redis.connect();
+      await vi.waitFor(async () =>
+        expect(
+          await redis.pubsub('NUMSUB', taskNotificationChannel(prefix)),
+        ).toEqual([taskNotificationChannel(prefix), 1]),
+      );
       store = new RedisTaskRepository(redis, env);
     });
     async function closeWorkers() {
@@ -302,16 +325,18 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           status: 'cancelled',
           revision: 1,
         });
-        expect(events).toEqual([
-          expect.objectContaining({
-            audience: 'user',
-            userId: owner.userId,
-            message: expect.objectContaining({
-              type: 'task_cancelled',
-              taskId: task.taskId,
+        await vi.waitFor(() =>
+          expect(events).toEqual([
+            expect.objectContaining({
+              audience: 'user',
+              userId: owner.userId,
+              message: expect.objectContaining({
+                type: 'task_cancelled',
+                taskId: task.taskId,
+              }),
             }),
-          }),
-        ]);
+          ]),
+        );
         const stream = await redis.xrange(queue.keys.events, '-', '+');
         expect(JSON.stringify(stream)).toContain('removed');
       },

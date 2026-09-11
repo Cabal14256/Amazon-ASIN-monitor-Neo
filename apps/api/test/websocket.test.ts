@@ -297,7 +297,11 @@ describe('Neo /ws real network gateway', () => {
     gateway.sendTaskError('task-2', '失败', 'u-25');
     gateway.sendTaskCancelled('task-3', undefined, 'u-25');
     gateway.sendStatsUpdate({ data: { groups: 1 } });
-    await vi.waitFor(() => expect(other.messages).toHaveLength(2));
+    await vi.waitFor(() => {
+      expect(other.messages).toHaveLength(2);
+      expect(one.messages).toHaveLength(6);
+      expect(two.messages).toHaveLength(6);
+    });
     expect(one.messages.map((message) => message.type)).toEqual([
       'connected',
       'task_progress',
@@ -319,7 +323,7 @@ describe('Neo /ws real network gateway', () => {
     await vi.waitFor(() => expect(gateway.getClientCount()).toBe(2));
   });
 
-  it('broadcasts monitor and task helper payloads through the shared message contracts', async () => {
+  it('broadcasts monitor payloads but rejects ownerless task helpers', async () => {
     const client = connect();
     await client.first;
     gateway.sendMonitorProgress({
@@ -345,18 +349,17 @@ describe('Neo /ws real network gateway', () => {
       timestamp: 'now',
     });
     gateway.sendStatsUpdate({});
-    await vi.waitFor(() => expect(client.messages).toHaveLength(5));
+    await vi.waitFor(() => expect(client.messages).toHaveLength(4));
     expect(client.messages.map((message) => message.type)).toEqual([
       'connected',
       'monitor_progress',
       'monitor_complete',
-      'task_cancelled',
       'stats_update',
     ]);
     expect(logger.warn).toHaveBeenCalledWith(
       'WebSocket 可恢复连接异常',
       'WebSocketService',
-      { reason: 'invalid_event' },
+      { reason: 'task_owner_missing' },
     );
   });
 
@@ -602,6 +605,90 @@ describe('Neo /ws real network gateway', () => {
     gateway.sendStatsUpdate({ data: 'some data' });
     expect((await client.closed).code).toBe(1013);
     expect(gateway.getClientCount()).toBe(0);
+  });
+
+  it.each(['session', 'account', 'session-expiry', 'session-owner'])(
+    'revalidates %s before delivering queued messages and does not refresh activity',
+    async (kind) => {
+      const client = connect();
+      await client.first;
+      vi.mocked(repository.touchSession).mockClear();
+      if (kind === 'account')
+        vi.mocked(repository.findUserById).mockResolvedValue({
+          ...user(),
+          status: 'SUSPENDED',
+        });
+      else
+        vi.mocked(repository.findSessionById).mockResolvedValue({
+          ...session(),
+          ...(kind === 'session'
+            ? { status: 'REVOKED' }
+            : kind === 'session-owner'
+            ? { userId: 'other' }
+            : { expiresAt: new Date(0) }),
+        });
+      gateway.sendTaskProgress('task', 20, 'private-progress', 'u-25');
+      expect((await client.closed).code).toBe(
+        kind === 'session-expiry' ? 4401 : 4403,
+      );
+      expect(client.messages).toHaveLength(1);
+      expect(repository.touchSession).not.toHaveBeenCalled();
+      expect(repository.revokeSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('never converts passive successful delivery into session activity', async () => {
+    const client = connect();
+    await client.first;
+    vi.mocked(repository.touchSession).mockClear();
+    vi.mocked(repository.findSessionById).mockClear();
+    gateway.sendTaskComplete('task', null, null, 'u-25');
+    await vi.waitFor(() => expect(client.messages).toHaveLength(2));
+    expect(repository.findSessionById).toHaveBeenCalledOnce();
+    expect(repository.touchSession).not.toHaveBeenCalled();
+  });
+
+  it('limits concurrent delivery authentication and rejects oversized pending output', async () => {
+    const connected = Array.from({ length: 10 }, () => connect());
+    await Promise.all(connected.map((client) => client.first));
+    vi.mocked(repository.findSessionById).mockClear();
+    let release!: (value: AuthSessionRecord) => void;
+    vi.mocked(repository.findSessionById).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    gateway.sendTaskProgress('task', 10, 'first', 'u-25');
+    expect(repository.findSessionById).toHaveBeenCalledTimes(8);
+    for (let i = 0; i < 33; i++)
+      gateway.sendTaskProgress('task', 20, 'queued', 'u-25');
+    expect(
+      (await Promise.all(connected.map((client) => client.closed))).every(
+        (result) => result.code === 1013,
+      ),
+    ).toBe(true);
+    expect(connected.every((client) => client.messages.length === 1)).toBe(
+      true,
+    );
+    release(session());
+    await vi.waitFor(() => expect(gateway['deliveryActive']).toBe(0));
+    expect(gateway['deliveryReady'].size).toBe(0);
+  });
+
+  it('closes stalled delivery authentication and discards a late successful check', async () => {
+    const client = connect();
+    await client.first;
+    let release!: (value: AuthSessionRecord) => void;
+    vi.mocked(repository.findSessionById).mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    gateway.sendTaskError('task', 'private', 'u-25');
+    expect((await client.closed).code).toBe(1013);
+    release(session());
+    await vi.waitFor(() => expect(gateway['deliveryActive']).toBe(0));
+    expect(client.messages).toHaveLength(1);
   });
 
   it('shuts down established connections and releases the HTTP server', async () => {

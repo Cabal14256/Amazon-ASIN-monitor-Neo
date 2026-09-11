@@ -240,6 +240,9 @@ jobs:
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
 
+      - name: Run task notifications across a compiled Worker and two API WebSocket gateways
+        run: pnpm --filter @asin-monitor/api exec vitest run test/task-websocket.integration.test.ts
+
       - name: Run shared SP-API quota compatibility on Redis
         run: pnpm --filter @asin-monitor/sp-api exec vitest run test/quota.integration.test.ts
 
