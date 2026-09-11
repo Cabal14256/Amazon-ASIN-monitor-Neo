@@ -110,6 +110,9 @@ export class ImportFileStore {
       flags: 'wx',
       mode: 0o600,
     });
+    const closed = new Promise<void>((resolve) =>
+      destination.once('close', resolve),
+    );
     destination.once('open', () => {
       created = true;
     });
@@ -133,6 +136,10 @@ export class ImportFileStore {
       await link(temporary, path);
       return { taskId, ...type, sha256: hash.digest('hex'), bytes };
     } finally {
+      // pipeline can reject before fs.open completes. Wait for the actual
+      // descriptor close before checking ownership and unlinking the part file.
+      destination.destroy();
+      await closed;
       if (created)
         await unlink(temporary).catch((error: unknown) => {
           if (!missing(error)) throw error;

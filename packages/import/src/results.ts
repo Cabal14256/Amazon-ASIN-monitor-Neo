@@ -195,6 +195,9 @@ export class ImportResultStore {
     let bytes = 0;
     let created = false;
     const output = createWriteStream(temporary, { flags: 'wx', mode: 0o600 });
+    const closed = new Promise<void>((resolve) =>
+      output.once('close', resolve),
+    );
     output.once('open', () => {
       created = true;
     });
@@ -220,6 +223,10 @@ export class ImportResultStore {
         bytes,
       };
     } finally {
+      // An aborted pipeline can settle while the asynchronous open is pending.
+      // Closing first prevents a late open from creating an orphan after cleanup.
+      output.destroy();
+      await closed;
       if (created)
         await unlink(temporary).catch((error: unknown) => {
           if (!missing(error)) throw error;
