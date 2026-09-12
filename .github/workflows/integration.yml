@@ -249,6 +249,11 @@ jobs:
       - name: Run shared catalog cache fencing and deferred coordination on Redis
         run: pnpm --filter @asin-monitor/sp-api exec vitest run test/catalog-check-store.integration.test.ts
 
+      - name: Run variant-check atomic state and history writes on PostgreSQL
+        run: |
+          pnpm --filter @asin-monitor/variant-check... build
+          pnpm --filter @asin-monitor/variant-check exec vitest run test/repository.integration.test.ts
+
       - name: Run Neo audit persistence integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit.integration.test.ts
 
