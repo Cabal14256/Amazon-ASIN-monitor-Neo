@@ -83,6 +83,9 @@ importers:
       '@asin-monitor/sp-api':
         specifier: workspace:*
         version: link:../../packages/sp-api
+      '@asin-monitor/variant-check':
+        specifier: workspace:*
+        version: link:../../packages/variant-check
       '@fastify/cookie':
         specifier: 10.0.1
         version: 10.0.1
