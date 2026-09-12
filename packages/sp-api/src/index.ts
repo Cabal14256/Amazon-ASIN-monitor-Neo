@@ -1,5 +1,6 @@
 export * from './catalog-check-store';
 export * from './catalog-checker';
+export * from './catalog-hybrid-result';
 export * from './catalog-variants';
 export * from './client';
 export * from './config';

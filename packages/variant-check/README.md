@@ -2,6 +2,8 @@
 
 API 和 Worker 共用的主 ASIN 检查业务。Catalog 抓取、配额、回退、缓存和父体查询在 `@asin-monitor/sp-api`；本包负责当前权限检查、PostgreSQL 状态/历史事务及完整业务结果。
 
+SQL 实现统一位于 `packages/db/src/repositories/variant-check-repository.ts`，数据库业务类型位于 `packages/db/src/domain/variant-check.ts`。本包的对应入口仅作重导出，编排层不包含 SQL。批量 Catalog 结果编解码在 `packages/sp-api/src/catalog-hybrid-result.ts`，数据库包使用它校验结果，依赖方向不形成环。
+
 `VariantCheckRuntime` 统一组装检查管线和父体查询，接收应用已有的 `SpApiRuntime`、数据库仓库以及禁止离线排队/自动重发的 Redis 连接。它负责关闭本包创建的组件，应用继续负责基础连接的生命周期。应用应将共享环境的 `MONITOR_BATCH_ASIN_THRESHOLD` 传入 `batchThreshold`；默认 0，正小数向上取整以保持 Legacy 的数量比较语义，超过组上限 5000 会在启动校验时报错。
 
 `VariantCheckPipeline` 先授权并读取快照，在事务外调用 Catalog，再按组 → ASIN 顺序锁定并核对商品身份与检查时间。提交时保留最新的手工标记、组继承和排除设置，响应反映已提交记录的时间及有效状态。单 ASIN 检查原子写入完整历史；组检查本身不额外创建历史。空组保留 Legacy 的读取结果。
