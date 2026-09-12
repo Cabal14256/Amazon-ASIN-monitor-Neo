@@ -246,6 +246,9 @@ jobs:
       - name: Run shared SP-API quota compatibility on Redis
         run: pnpm --filter @asin-monitor/sp-api exec vitest run test/quota.integration.test.ts
 
+      - name: Run shared catalog cache fencing and deferred coordination on Redis
+        run: pnpm --filter @asin-monitor/sp-api exec vitest run test/catalog-check-store.integration.test.ts
+
       - name: Run Neo audit persistence integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit.integration.test.ts
 
