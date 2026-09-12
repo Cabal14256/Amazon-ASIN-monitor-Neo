@@ -18,7 +18,10 @@ import {
 } from '../src/types';
 import { asin, checkedAt, deferred, flush, group, product } from './fixtures';
 
-function fixture(count = 1) {
+function fixture(
+  count = 1,
+  options?: ConstructorParameters<typeof VariantCheckPipeline>[4],
+) {
   const state: GroupCheckSnapshot = {
     group: group(),
     asins: Array.from({ length: count }, (_, i) => asin(i + 1)),
@@ -125,6 +128,7 @@ function fixture(count = 1) {
     { check },
     cache,
     logger,
+    options,
   );
   return {
     pipeline,
@@ -139,8 +143,11 @@ function fixture(count = 1) {
   };
 }
 const live: VariantCheckPipeline[] = [];
-const setup = (count = 1) => {
-  const f = fixture(count);
+const setup = (
+  count = 1,
+  options?: ConstructorParameters<typeof VariantCheckPipeline>[4],
+) => {
+  const f = fixture(count, options);
   live.push(f.pipeline);
   return f;
 };
@@ -150,6 +157,50 @@ afterEach(() => {
 });
 
 describe('Primary variant business pipeline', () => {
+  it.each([
+    { threshold: 0, force: false, expected: false },
+    { threshold: 3, force: false, expected: false },
+    { threshold: 2, force: false, expected: true },
+    { threshold: 2, force: true, expected: false },
+  ])(
+    'uses hybrid only for enabled thresholds and non-forced groups: $threshold / $force',
+    async ({ threshold, force, expected }) => {
+      const check = vi.fn(async () => [product(1), product(2)]);
+      const f = setup(2, { hybrid: { check }, batchThreshold: threshold });
+      await f.pipeline.checkGroup('g1', { ...f.context, forceRefresh: force });
+      expect(check).toHaveBeenCalledTimes(expected ? 1 : 0);
+      expect(f.check).toHaveBeenCalledTimes(expected ? 0 : 2);
+      expect(f.unit.commitGroup).toHaveBeenCalledOnce();
+      if (expected)
+        expect(check).toHaveBeenCalledWith(
+          ['B000000001', 'B000000002'],
+          'US',
+          expect.objectContaining({
+            signal: expect.any(AbortSignal),
+            checkpoint: expect.any(Function),
+          }),
+        );
+    },
+  );
+
+  it('refuses an enabled batch threshold without its real hybrid dependency', () => {
+    expect(() => setup(2, { batchThreshold: 2 })).toThrow(SpApiError);
+  });
+
+  it('does not persist a partial hybrid array or continue individual checks after a hybrid lifecycle failure', async () => {
+    const check = vi.fn(async () => [product(1)]);
+    const f = setup(2, { hybrid: { check }, batchThreshold: 2 });
+    await expect(f.pipeline.checkGroup('g1', f.context)).rejects.toMatchObject({
+      code: 'invalid-result',
+    });
+    check.mockRejectedValueOnce(new SpApiError('CANCELLED'));
+    await expect(f.pipeline.checkGroup('g1', f.context)).rejects.toMatchObject({
+      code: 'CANCELLED',
+    });
+    expect(f.check).not.toHaveBeenCalled();
+    expect(f.unit.commitGroup).not.toHaveBeenCalled();
+  });
+
   it('checks outside transactions, reauthorizes locked writes, and returns the complete result only after commit', async () => {
     const f = setup();
     f.cache.invalidate.mockImplementation(async () => {

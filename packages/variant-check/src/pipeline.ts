@@ -12,6 +12,7 @@ import {
   type Logger,
   type RedisCatalogCheckStore,
 } from '@asin-monitor/sp-api';
+import type { CatalogHybridChecker } from './hybrid';
 import { groupCheckResult, singleCheckResult } from './result-mapper';
 import {
   VariantCheckError,
@@ -61,6 +62,8 @@ function boundedResult<T>(value: T): T {
 export class VariantCheckPipeline {
   private readonly active = new Set<AbortController>();
   private readonly cleanups = new Set<AbortController>();
+  private readonly batchThreshold: number;
+  private readonly hybrid?: Pick<CatalogHybridChecker, 'check'>;
   private closed = false;
   constructor(
     private readonly repository: VariantCheckRepositoryPort,
@@ -70,7 +73,21 @@ export class VariantCheckPipeline {
       'invalidate' | 'clearDeferred'
     >,
     private readonly logger: Pick<Logger, 'info' | 'warn'>,
-  ) {}
+    options: {
+      batchThreshold?: number;
+      hybrid?: Pick<CatalogHybridChecker, 'check'>;
+    } = {},
+  ) {
+    this.batchThreshold = options.batchThreshold ?? 0;
+    this.hybrid = options.hybrid;
+    if (
+      !Number.isInteger(this.batchThreshold) ||
+      this.batchThreshold < 0 ||
+      this.batchThreshold > 5000 ||
+      (this.batchThreshold > 0 && !this.hybrid)
+    )
+      throw new SpApiError('INVALID_CONFIG');
+  }
   private async run<T>(
     context: VariantCheckContext,
     execute: (scope: CheckScope) => Promise<T>,
@@ -268,7 +285,12 @@ export class VariantCheckPipeline {
         return unit.loadGroup(groupId);
       });
       await scope.guard();
-      const observations = await this.observeGroup(snapshot, context, scope);
+      const observations =
+        this.batchThreshold > 0 &&
+        !context.forceRefresh &&
+        snapshot.asins.length >= this.batchThreshold
+          ? await this.observeHybrid(snapshot, context, scope)
+          : await this.observeGroup(snapshot, context, scope);
       const output = await this.persist(scope, async (unit) => {
         const committed = await unit.commitGroup(snapshot, observations, () =>
           scope.guard(unit),
@@ -288,6 +310,29 @@ export class VariantCheckPipeline {
       this.logger.info('变体组检查完成', { count: observations.length });
       return output;
     });
+  }
+  private async observeHybrid(
+    snapshot: GroupCheckSnapshot,
+    context: VariantCheckContext,
+    scope: CheckScope,
+  ): Promise<AsinCheckObservation[]> {
+    const results = await this.hybrid!.check(
+      snapshot.asins.map((row) => row.asin),
+      snapshot.group.country,
+      {
+        signal: scope.signal,
+        checkpoint: () => scope.guard(),
+        onProgress: context.onProgress,
+      },
+    );
+    await scope.guard();
+    if (results.length !== snapshot.asins.length)
+      throw new VariantCheckError('invalid-result');
+    return results.map((result, index) => ({
+      asinId: snapshot.asins[index].id,
+      kind: 'checked',
+      result,
+    }));
   }
   private async observeGroup(
     snapshot: GroupCheckSnapshot,

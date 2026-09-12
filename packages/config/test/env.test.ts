@@ -21,6 +21,27 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('preserves the effective Legacy batch-ASIN threshold and bounds it to a complete group', () => {
+    expect(loadEnv(validEnv).MONITOR_BATCH_ASIN_THRESHOLD).toBe(0);
+    for (const value of ['', '0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: value })
+          .MONITOR_BATCH_ASIN_THRESHOLD,
+      ).toBe(0);
+    for (const [value, expected] of [
+      ['0.5', 1],
+      ['2.5', 3],
+      ['20', 20],
+      ['5000', 5000],
+    ] as const)
+      expect(
+        loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: value })
+          .MONITOR_BATCH_ASIN_THRESHOLD,
+      ).toBe(expected);
+    expect(() =>
+      loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: '5001' }),
+    ).toThrow(EnvValidationError);
+  });
   it('uses one persistent import directory for API/Worker and rejects relative configuration', () => {
     const env = loadEnv(validEnv);
     const root = resolve(__dirname, '../../..');

@@ -277,6 +277,62 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).rejects.toMatchObject({ code: 'snapshot-changed' });
       expect((await load()).asin.lastCheckTime).toBeNull();
     });
+    it('persists the real hybrid result union without treating missing search items as confirmed NOT_FOUND', async () => {
+      const before = await group();
+      const result = await repository.transaction((unit) =>
+        unit.commitGroup(
+          before,
+          [
+            {
+              asinId: 'a1',
+              kind: 'checked',
+              result: {
+                asin: 'B000000001',
+                hasVariants: false,
+                variantCount: 0,
+                errorType: 'NO_VARIANTS',
+                details: {
+                  asin: 'B000000001',
+                  parentAsin: null,
+                  source: 'batch_search',
+                },
+              },
+            },
+            {
+              asinId: 'a2',
+              kind: 'checked',
+              result: {
+                asin: 'B000000002',
+                hasVariants: true,
+                variantCount: 0,
+                errorType: 'SP_API_ERROR',
+                details: {
+                  asin: 'B000000002',
+                  parentAsin: 'B000000099',
+                  source: 'batch_search_fallback',
+                  error: '详细查询失败',
+                  errorMessage: 'SP-API检查失败',
+                },
+              },
+            },
+          ],
+          guard,
+        ),
+      );
+      expect(result.asins.find((row) => row.id === 'a1')).toMatchObject({
+        isBroken: true,
+        variantStatus: 'BROKEN',
+      });
+      expect(result.asins.find((row) => row.id === 'a2')).toMatchObject({
+        isBroken: false,
+        variantStatus: 'NORMAL',
+      });
+      expect(result.observations).toMatchObject([
+        { result: { errorType: 'NO_VARIANTS' } },
+        { result: { hasVariants: true, errorType: 'SP_API_ERROR' } },
+      ]);
+      expect(await history()).toEqual([]);
+    });
     it('keeps empty group checks read-only and requires the installed timestamp policy for writes', async () => {
       await pool.query("DELETE FROM asins WHERE variant_group_id='g1'");
       const before = await group();

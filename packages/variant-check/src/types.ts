@@ -1,5 +1,6 @@
 import type { Asin, AsinQueryUnit, VariantGroup } from '@asin-monitor/db';
 import type { CatalogVariantResult } from '@asin-monitor/sp-api';
+import type { GroupCatalogResult } from './hybrid-result';
 
 export interface GroupCheckSnapshot {
   group: VariantGroup;
@@ -10,7 +11,7 @@ export interface SingleCheckSnapshot {
   asin: Asin;
 }
 export type AsinCheckObservation = { asinId: string } & (
-  | { kind: 'checked'; result: CatalogVariantResult }
+  | { kind: 'checked'; result: GroupCatalogResult }
   | { kind: 'deferred'; error: string }
   | { kind: 'failed'; error: string }
 );

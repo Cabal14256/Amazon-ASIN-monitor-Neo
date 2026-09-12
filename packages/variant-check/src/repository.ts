@@ -17,6 +17,7 @@ import {
 } from '@asin-monitor/sp-api';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { Pool } from 'pg';
+import { decodeGroupCatalogResult } from './hybrid-result';
 import {
   VariantCheckError,
   type AsinCheckObservation,
@@ -215,7 +216,7 @@ export class DrizzleVariantCheckUnit
         return {
           asinId: row.id,
           kind: 'checked',
-          result: decodeCatalogVariantResult(value.result, row.asin, country),
+          result: decodeGroupCatalogResult(value.result, row.asin, country),
         };
       if (
         !['failed', 'deferred'].includes(value.kind) ||

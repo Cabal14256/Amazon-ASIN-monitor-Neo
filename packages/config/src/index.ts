@@ -183,6 +183,13 @@ const envObjectSchema = z.object({
     .trim()
     .transform((value) => value || 'bull')
     .default('bull'),
+  // Legacy compares an integer ASIN count with this numeric threshold. Rounding
+  // positive fractions up preserves that comparison; nonpositive/invalid input
+  // keeps the optimization disabled. Groups themselves are capped at 5000.
+  MONITOR_BATCH_ASIN_THRESHOLD: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.ceil(number) : 0;
+  }, z.number().int().min(0).max(5000)),
   RATE_LIMITER_KEY_PREFIX: z
     .string()
     .trim()
