@@ -4,6 +4,7 @@ export * from './domain/asin-batch-create';
 export * from './domain/asin-batch-delete';
 export * from './domain/asin-manual-history';
 export * from './domain/monitor-abnormal-duration';
+export * from './domain/monitor-analytics-query';
 export * from './domain/monitor-calendar';
 export * from './domain/monitor-duration';
 export * from './domain/monitor-duration-groups';
