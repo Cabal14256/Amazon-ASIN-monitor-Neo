@@ -68,6 +68,8 @@ describe('audit mapping and data', () => {
     ['POST', '/roles', 'POST', 'role'],
     ['POST', '/permissions', 'POST', 'permission'],
     ['POST', '/feishu-configs', 'UPDATE', 'feishu_config'],
+    ['PATCH', '/feishu-configs/:country/toggle', 'UPDATE', 'feishu_config'],
+    ['DELETE', '/feishu-configs/:country', 'DELETE', 'feishu_config'],
     ['PUT', '/sp-api-configs', 'UPDATE', 'sp_api_config'],
     ['GET', '/export/asin', 'EXPORT', 'asin'],
     ['GET', '/export/monitor-history', 'EXPORT', 'monitor_history'],

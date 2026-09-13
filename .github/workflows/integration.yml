@@ -227,6 +227,9 @@ jobs:
       - name: Run Neo SP-API configuration authorization and committed credential rotation
         run: pnpm --filter @asin-monitor/api exec vitest run test/sp-api-config.integration.test.ts
 
+      - name: Run Feishu configuration Legacy SQL equivalence and authorized transactions
+        run: pnpm --filter @asin-monitor/api exec vitest run test/feishu-config.integration.test.ts
+
       - name: Run API SP-API singleton status and Redis recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/sp-api-runtime.integration.test.ts
 
