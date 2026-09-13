@@ -259,6 +259,12 @@ importers:
       '@asin-monitor/import':
         specifier: workspace:*
         version: link:../../packages/import
+      '@asin-monitor/sp-api':
+        specifier: workspace:*
+        version: link:../../packages/sp-api
+      '@asin-monitor/variant-check':
+        specifier: workspace:*
+        version: link:../../packages/variant-check
       bullmq:
         specifier: ^5.58.0
         version: 5.81.3

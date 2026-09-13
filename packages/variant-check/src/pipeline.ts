@@ -38,6 +38,9 @@ export interface VariantCheckContext {
   authorize(unit: VariantCheckUnit): Promise<void>;
   /** Task identity, lease, expiry and cancellation. Never log an upstream error. */
   checkpoint(): Promise<void>;
+  /** Synchronous aggregate budget reservation, while a new write can roll back.
+   * Also called for recovered receipts. Must not perform external I/O. */
+  validateResult?(result: VariantView | VariantGroupCheckData): void;
   onProgress?(completed: number, total: number): Promise<void> | void;
 }
 /** A stopped waiter is not proof that a COMMIT already sent to PostgreSQL failed.
@@ -55,6 +58,7 @@ interface CheckScope {
   stop(error: unknown): void;
   beginPersistence(): void;
   confirm(value: unknown): void;
+  validate(value: unknown): void;
 }
 function boundedResult<T>(value: T): T {
   const json = JSON.stringify(value);
@@ -134,6 +138,9 @@ export class VariantCheckPipeline {
       confirm(value) {
         confirmed = { value: value as T };
       },
+      validate(value) {
+        context.validateResult?.(value as VariantView | VariantGroupCheckData);
+      },
       async guard(unit) {
         ensure();
         await context.checkpoint();
@@ -179,10 +186,14 @@ export class VariantCheckPipeline {
         if (operation) {
           const existing = await unit.readReceipt(operation, true);
           await scope.guard(unit);
-          if (existing !== undefined) return boundedResult(existing) as T;
+          if (existing !== undefined) {
+            scope.validate(existing);
+            return boundedResult(existing) as T;
+          }
         }
         scope.beginPersistence();
         const value = boundedResult(await action(unit));
+        scope.validate(value);
         if (operation) await unit.saveReceipt(operation, value);
         await scope.guard(unit);
         readyToCommit = true;
@@ -207,8 +218,10 @@ export class VariantCheckPipeline {
       if (operation) {
         const result = await unit.readReceipt(operation);
         await scope.guard(unit);
-        if (result !== undefined)
+        if (result !== undefined) {
+          scope.validate(result);
           return { completed: boundedResult(result) as R };
+        }
       }
       return { snapshot: await action(unit) };
     });

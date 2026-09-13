@@ -723,6 +723,21 @@ describe('Primary variant business pipeline', () => {
     expect(f.cache.invalidate).toHaveBeenCalledTimes(8);
   });
 
+  it('rolls back group writes when the enclosing batch cannot retain the full result', async () => {
+    const f = setup();
+    const validateResult = vi.fn(() => {
+      throw new VariantCheckError('capacity');
+    });
+    await expect(
+      f.pipeline.checkGroup('g1', { ...f.context, validateResult }),
+    ).rejects.toMatchObject({ code: 'capacity' });
+    expect(validateResult).toHaveBeenCalledWith(
+      expect.objectContaining({ groupSnapshot: expect.any(Object) }),
+    );
+    expect(f.commits).toEqual([]);
+    expect(f.cache.invalidate).not.toHaveBeenCalled();
+  });
+
   it('closes pending operations and rejects future checks without allowing late writes', async () => {
     const f = setup();
     const gate = deferred<ReturnType<typeof product>>();

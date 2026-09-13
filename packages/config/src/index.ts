@@ -190,6 +190,14 @@ const envObjectSchema = z.object({
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? Math.ceil(number) : 0;
   }, z.number().int().min(0).max(5000)),
+  // Legacy floors positive values and otherwise uses two groups. Bound actual
+  // parallel writes to the shared pipeline's eight-operation capacity.
+  BATCH_CHECK_GROUP_CONCURRENCY: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0
+      ? Math.min(8, Math.max(1, Math.floor(number)))
+      : 2;
+  }, z.number().int().min(1).max(8)),
   RATE_LIMITER_KEY_PREFIX: z
     .string()
     .trim()

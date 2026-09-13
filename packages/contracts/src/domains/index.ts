@@ -15,4 +15,5 @@ export * from './spApiConfig';
 export * from './system';
 export * from './tasks';
 export * from './users';
+export * from './variant-check-job';
 export * from './variantCheck';

@@ -244,6 +244,9 @@ jobs:
       - name: Run ASIN batch deletion from HTTP through the compiled BullMQ Worker
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-delete.integration.test.ts
 
+      - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
+
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
 

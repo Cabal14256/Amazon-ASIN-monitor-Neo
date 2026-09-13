@@ -21,6 +21,24 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('preserves Legacy batch-check concurrency defaults and floors positive values within runtime capacity', () => {
+    expect(loadEnv(validEnv).BATCH_CHECK_GROUP_CONCURRENCY).toBe(2);
+    for (const value of ['', '0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, BATCH_CHECK_GROUP_CONCURRENCY: value })
+          .BATCH_CHECK_GROUP_CONCURRENCY,
+      ).toBe(2);
+    for (const [value, expected] of [
+      ['0.5', 1],
+      ['3.9', 3],
+      ['8', 8],
+      ['1000', 8],
+    ] as const)
+      expect(
+        loadEnv({ ...validEnv, BATCH_CHECK_GROUP_CONCURRENCY: value })
+          .BATCH_CHECK_GROUP_CONCURRENCY,
+      ).toBe(expected);
+  });
   it('preserves the effective Legacy batch-ASIN threshold and bounds it to a complete group', () => {
     expect(loadEnv(validEnv).MONITOR_BATCH_ASIN_THRESHOLD).toBe(0);
     for (const value of ['', '0', '-1', 'NaN', 'Infinity'])

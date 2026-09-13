@@ -9,6 +9,25 @@ import { z } from 'zod';
 import { VariantCheckError } from './variant-check';
 
 export const VARIANT_CHECK_RECEIPT_MAX_BYTES = 32 * 1024 * 1024;
+/** Upper bound for PostgreSQL JSONB text: it adds spaces after punctuation and
+ * expands exponent-form JSON numbers. Count outside strings only. */
+export function variantCheckReceiptStorageBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  if (!json) throw new VariantCheckError('invalid-result');
+  let bytes = Buffer.byteLength(json),
+    quoted = false,
+    escaped = false;
+  for (const character of json) {
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') quoted = false;
+    } else if (character === '"') quoted = true;
+    else if (character === ':' || character === ',') bytes++;
+    else if (character === 'e' || character === 'E') bytes += 320;
+  }
+  return bytes;
+}
 const operationSchema = z
   .object({
     operationKey: z.string().regex(/^[a-f0-9]{64}$/),
@@ -135,7 +154,10 @@ export function decodeVariantCheckReceiptResult(
 ): unknown {
   try {
     const raw = JSON.stringify(value);
-    if (!raw || Buffer.byteLength(raw) > VARIANT_CHECK_RECEIPT_MAX_BYTES)
+    if (
+      !raw ||
+      variantCheckReceiptStorageBytes(value) > VARIANT_CHECK_RECEIPT_MAX_BYTES
+    )
       throw new VariantCheckError('capacity');
     const detached: unknown = JSON.parse(raw);
     const schema =

@@ -19,11 +19,12 @@ import { getPhysicalQueueName } from './queues';
 import { getWatchdogRedisOptions, parseRedisUrl } from './redis-options';
 import { runWorker } from './runner';
 import { shutdownWorker } from './shutdown';
+import { startVariantCheckRuntime } from './variant-check-runtime';
 import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
 
 /**
  * Worker 进程入口（PROCESS_ROLE=worker 角色）。
- * D4 认证维护、主营批量删除和导入已注册 Processor；其余业务队列继续逐域平移。
+ * D4 认证维护、主营批量删除、导入及变体检查已注册 Processor。
  * BullMQ 自管连接（传 ConnectionOptions），看门狗使用独立 ioredis 实例。
  */
 async function bootstrap(): Promise<void> {
@@ -65,10 +66,25 @@ async function bootstrap(): Promise<void> {
     enabled.includes('import') && env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startAsinImportRuntime(env, () => process.exit(1))
       : undefined;
+  const checkQueues = enabled.filter(
+    (name): name is 'variant-check' | 'batch-check' =>
+      name === 'variant-check' || name === 'batch-check',
+  );
+  const variantChecks =
+    checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startVariantCheckRuntime(env, checkQueues, () => process.exit(1))
+      : undefined;
 
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
     .filter((name) => !(asinImport && name === 'import'))
+    .filter(
+      (name) =>
+        !(
+          variantChecks &&
+          (name === 'variant-check' || name === 'batch-check')
+        ),
+    )
     .map((name) => {
       const physicalName = getPhysicalQueueName(name);
       const queue = new Queue(
@@ -87,6 +103,7 @@ async function bootstrap(): Promise<void> {
       ...(maintenance ? [maintenance.queue] : []),
       ...(batchDelete ? [batchDelete.queue] : []),
       ...(asinImport ? [asinImport.queue] : []),
+      ...(variantChecks ? variantChecks.queues : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
   watchdog.start(() => {
@@ -103,6 +120,7 @@ async function bootstrap(): Promise<void> {
         ...(maintenance ? [maintenance] : []),
         ...(batchDelete ? [batchDelete] : []),
         ...(asinImport ? [asinImport] : []),
+        ...(variantChecks ? [variantChecks] : []),
       ],
       watchdogRedis,
     });
@@ -114,13 +132,16 @@ async function bootstrap(): Promise<void> {
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode:
-      batchDelete || asinImport
+      batchDelete || asinImport || variantChecks
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
         : 'queue-scaffold',
     registeredProcessors:
-      Number(!!maintenance) + Number(!!batchDelete) + Number(!!asinImport),
+      Number(!!maintenance) +
+      Number(!!batchDelete) +
+      Number(!!asinImport) +
+      (variantChecks?.workers.length ?? 0),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
     physicalQueues: [
@@ -131,7 +152,8 @@ async function bootstrap(): Promise<void> {
       queues.length +
       Number(!!maintenance) +
       Number(!!batchDelete) +
-      Number(!!asinImport),
+      Number(!!asinImport) +
+      (variantChecks?.queues.length ?? 0),
     schedulerEnabled: !!maintenance && env.SCHEDULER_ENABLED,
   });
 }

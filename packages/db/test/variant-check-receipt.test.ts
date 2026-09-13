@@ -5,6 +5,7 @@ import {
   createVariantCheckOperation,
   decodeVariantCheckReceiptResult,
   parseVariantCheckOperation,
+  variantCheckReceiptStorageBytes,
   type VariantCheckOperation,
 } from '../src/domain/variant-check-receipt';
 
@@ -36,6 +37,15 @@ const view = {
 };
 
 describe('Variant check operation identity and complete receipt payload', () => {
+  it('reserves JSONB punctuation and expanded numeric text without counting punctuation inside strings', () => {
+    const value = { text: 'escaped" : , e', values: [1, 2, 3] };
+    expect(variantCheckReceiptStorageBytes(value)).toBe(
+      Buffer.byteLength(JSON.stringify(value)) + 5,
+    );
+    expect(variantCheckReceiptStorageBytes({ number: 1e308 })).toBeGreaterThan(
+      310,
+    );
+  });
   it('keeps the same operation for reordered request fields, but detects changed request content', () => {
     const first = createVariantCheckOperation(identity, request);
     expect(

@@ -6,6 +6,7 @@ import {
   type QuotaRedisPort,
   type SpApiRuntime,
 } from '@asin-monitor/sp-api';
+import { VariantCheckExecutor } from './executor';
 import { CatalogHybridChecker } from './hybrid';
 import { VariantCheckPipeline } from './pipeline';
 import type { VariantCheckRepositoryPort } from './types';
@@ -20,6 +21,7 @@ export interface VariantCheckRuntimeOptions {
   logger: Logger;
   prefix: string;
   batchThreshold?: number;
+  batchConcurrency?: number;
   redisTimeoutMs?: number;
 }
 
@@ -29,6 +31,7 @@ export interface VariantCheckRuntimeOptions {
 export class VariantCheckRuntime {
   readonly pipeline: VariantCheckPipeline;
   readonly parents: CatalogParentQuery;
+  readonly executor: VariantCheckExecutor;
   private readonly store: RedisCatalogCheckStore;
   private readonly checker: CatalogVariantChecker;
   private readonly hybrid: CatalogHybridChecker;
@@ -61,8 +64,15 @@ export class VariantCheckRuntime {
       { hybrid: this.hybrid, batchThreshold: options.batchThreshold },
     );
     this.parents = new CatalogParentQuery(this.checker);
+    this.executor = new VariantCheckExecutor(
+      options.repository,
+      this.pipeline,
+      this.parents,
+      options.batchConcurrency,
+    );
   }
   close(): void {
+    this.executor.close();
     this.pipeline.close();
     this.parents.close();
     this.hybrid.close();

@@ -1,3 +1,4 @@
+export * from './executor';
 export * from './hybrid';
 export * from './hybrid-result';
 export * from './pipeline';
@@ -5,4 +6,5 @@ export * from './record-mapper';
 export * from './repository';
 export * from './result-mapper';
 export * from './runtime';
+export * from './task';
 export * from './types';
