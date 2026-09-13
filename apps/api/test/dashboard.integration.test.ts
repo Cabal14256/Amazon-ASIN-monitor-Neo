@@ -385,7 +385,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             [sessionId],
           );
         const response = await get();
-        expect(response.statusCode, response.body).toBe(403);
+        // The existing authentication guard checks authoritative session expiry
+        // before the transactional dashboard check and uses 401 for expiry.
+        expect(response.statusCode, response.body).toBe(
+          state === 'session-expiry' ? 401 : 403,
+        );
         expect(response.json().data).toBeUndefined();
       },
     );
@@ -471,9 +475,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     });
     it('refuses PG-only ambiguous current IDs before duplicate joins can change totals', async () => {
       await group('g1');
-      await f.pools.primaryPool.query(
-        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('G1 ','Duplicate','US','12','Fixture')",
+      const duplicate =
+        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('G1 ','Duplicate','US','12','Fixture')";
+      await expect(f.pools.primaryPool.query(duplicate)).rejects.toMatchObject({
+        code: '23505',
+      });
+      // The normal schema already enforces this invariant. Simulate a missing
+      // index only inside the verified private fixture to exercise read defense.
+      const indexes = await f.pools.primaryPool.query(
+        "SELECT quote_ident(n.nspname)||'.'||quote_ident(c.relname) AS name FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE i.indrelid='variant_groups'::regclass AND i.indisunique AND pg_get_indexdef(i.indexrelid) LIKE '%neo_import_group_ci%' AND n.nspname=$1",
+        [f.schema],
       );
+      expect(indexes.rows).toHaveLength(1);
+      await f.pools.primaryPool.query(`DROP INDEX ${indexes.rows[0].name}`);
+      await f.pools.primaryPool.query(duplicate);
       const response = await get();
       expect(response.statusCode, response.body).toBe(500);
       expect(response.json().data).toBeUndefined();
@@ -487,6 +502,106 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(response.json().data).toBeUndefined();
       await f.pools.primaryPool.query('DELETE FROM monitor_history');
       await compare();
+    });
+    it('defines a stable binary-minimum label when Legacy selects another CI-equivalent spelling', async () => {
+      await group('g1', { country: 'us ' });
+      await group('g2', { country: 'US' });
+      // This is an explicit compatibility boundary, not an oracle normalization:
+      // Legacy groups equivalent spellings but then does a strict JS lookup.
+      const expected = await legacyDashboard(legacy.query, Date.now());
+      expect(expected.statusCode).toBe(200);
+      expect(expected.body).toMatchObject({
+        data: {
+          overview: {
+            totalGroups: 2,
+            overviewByCountry: { US: { totalGroups: 0 } },
+          },
+          distribution: {
+            byCountry: [{ country: 'us ', total: 2, broken: '0', normal: 2 }],
+          },
+        },
+      });
+      const response = await get();
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json().data).toMatchObject({
+        overview: {
+          totalGroups: 2,
+          overviewByCountry: { US: { totalGroups: 2 } },
+        },
+        distribution: {
+          byCountry: [{ country: 'US', total: 2, broken: '0', normal: 2 }],
+        },
+      });
+    });
+    it('uses explicit ID tie breakers for equal alert and activity times', async () => {
+      for (const id of ['2', '1']) {
+        await group('g' + id, { manual_broken: 1 });
+        await asin('a' + id, 'g' + id);
+        await history(Number(id), {
+          variant_group_id: 'g' + id,
+          asin_id: 'a' + id,
+        });
+      }
+      const response = await get();
+      expect(response.statusCode, response.body).toBe(200);
+      const result = response.json().data;
+      expect(
+        result.realtimeAlerts.brokenGroups.map((row: { id: string }) => row.id),
+      ).toEqual(['g1', 'g2']);
+      expect(
+        result.realtimeAlerts.brokenASINs.map((row: { id: string }) => row.id),
+      ).toEqual(['a1', 'a2']);
+      expect(
+        result.recentActivities.map((row: { id: number }) => row.id),
+      ).toEqual([2, 1]);
+    });
+    it('returns all totals and lists from one snapshot around a concurrent multi-table commit', async () => {
+      await group('g1');
+      await asin('a1', 'g1');
+      const before = await legacyDashboard(legacy.query, Date.now());
+      await legacy.query(
+        "UPDATE variant_groups SET manual_broken=1,update_time='2026-09-13 08:00:00' WHERE id='g1'",
+      );
+      // Explicit timestamps prevent unrelated MySQL ON UPDATE behavior entering
+      // this data-snapshot comparison. No API read has populated the cache yet.
+      await legacy.query(
+        "INSERT INTO monitor_history(id,country,check_time,create_time,check_type,asin_id) VALUES(1,'US','2026-09-13 08:00:00','2026-09-13 08:00:01','ASIN','a1')",
+      );
+      const after = await legacyDashboard(legacy.query, Date.now());
+      const blocker = await f.pools.primaryPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof get>>> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          'LOCK TABLE monitor_history IN ACCESS EXCLUSIVE MODE',
+        );
+        await blocker.query(
+          "UPDATE variant_groups SET manual_broken=true,update_time='2026-09-13 08:00:00' WHERE id='g1'",
+        );
+        await blocker.query(
+          "INSERT INTO monitor_history(id,country,check_time,create_time,check_type,asin_id) OVERRIDING SYSTEM VALUE VALUES(1,'US','2026-09-13 08:00:00','2026-09-13 08:00:01','ASIN','a1')",
+        );
+        pending = get().then((value) => value);
+        await vi.waitFor(
+          async () => {
+            const result = await blocker.query(
+              "SELECT count(*)::int AS n FROM pg_locks WHERE locktype='relation' AND relation='monitor_history'::regclass AND NOT granted",
+            );
+            expect(result.rows[0].n).toBe(1);
+          },
+          { timeout: 1000, interval: 10 },
+        );
+        await blocker.query('COMMIT');
+        const response = await pending;
+        expect(response.statusCode, response.body).toBe(200);
+        expect([canonical(before.body), canonical(after.body)]).toContainEqual(
+          canonical(response.json()),
+        );
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        if (pending) await pending;
+      }
     });
   },
 );
