@@ -13,8 +13,12 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "corepack pnpm --filter @asin-monitor/notify... build && vitest run",
     "typecheck": "tsc -p tsconfig.test.json --noEmit"
+  },
+  "dependencies": {
+    "@asin-monitor/db": "workspace:*",
+    "@asin-monitor/sp-api": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

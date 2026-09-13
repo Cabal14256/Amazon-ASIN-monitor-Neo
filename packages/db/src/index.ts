@@ -30,6 +30,7 @@ export * from './repositories/auth-repository';
 export * from './repositories/bounded-auth-repository';
 export * from './repositories/dashboard-query-repository';
 export * from './repositories/feishu-configuration-repository';
+export * from './repositories/feishu-notification-config-reader';
 export * from './repositories/legacy-mysql-auth-repository';
 export * from './repositories/monitor-analytics-query-repository';
 export * from './repositories/monitor-history-query-repository';

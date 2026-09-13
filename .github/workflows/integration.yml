@@ -230,6 +230,18 @@ jobs:
       - name: Run Feishu configuration Legacy SQL equivalence and authorized transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/feishu-config.integration.test.ts
 
+      - name: Apply notification country collation twice to both databases
+        run: |
+          docker cp packages/db/docker/apply-notification-country-collation.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-notification-country-collation.sh"
+          docker cp packages/db/migrations/0009_notification_country_collation.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0009_notification_country_collation.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-notification-country-collation.sh /tmp/0009_notification_country_collation.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-notification-country-collation.sh /tmp/0009_notification_country_collation.sql
+
+      - name: Verify notification delivery with real PostgreSQL configuration and loopback HTTP
+        run: |
+          pnpm --filter @asin-monitor/notify... build
+          pnpm --filter @asin-monitor/notify exec vitest run test/pg-config.integration.test.ts
+
       - name: Run API SP-API singleton status and Redis recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/sp-api-runtime.integration.test.ts
 
@@ -333,6 +345,12 @@ jobs:
         run: |
           docker cp packages/db/migrations/0002_timescale_storage_policies.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0002_timescale_storage_policies.rollback.sql"
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0002_timescale_storage_policies.rollback.sql
+
+      - name: Smoke test notification collation rollback twice in both databases
+        run: |
+          docker cp packages/db/migrations/0009_notification_country_collation.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0009_notification_country_collation.rollback.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-notification-country-collation.sh /tmp/0009_notification_country_collation.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-notification-country-collation.sh /tmp/0009_notification_country_collation.rollback.sql
 
       - name: Upload sanitized Timescale performance evidence
         if: always()

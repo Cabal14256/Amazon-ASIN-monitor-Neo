@@ -170,16 +170,18 @@ export function buildFeishuCard(data: NotificationData): FeishuCard {
         buckets.set(key, { groupName: name, detail: null, asins: [] });
       buckets.get(key)!.asins.push(item);
     }
+    const names = new Set(
+      [...buckets.values()].map((bucket) => bucket.groupName),
+    );
     for (const name of brokenGroupNames) {
-      if (
-        name &&
-        ![...buckets.values()].some((bucket) => bucket.groupName === name)
-      )
+      if (name && !names.has(name)) {
+        names.add(name);
         buckets.set(`name:${name}`, {
           groupName: name,
           detail: null,
           asins: [],
         });
+      }
     }
     for (const { groupName, detail, asins } of buckets.values()) {
       content += `\n⚠️ ${groupName}\n`;
@@ -226,12 +228,12 @@ export function buildCompetitorFeishuCard(data: NotificationData): FeishuCard {
       if (!buckets.has(key)) buckets.set(key, { groupName: name, asins: [] });
       buckets.get(key)!.asins.push(item);
     }
-    const order: string[] = [];
+    const order = new Set<string>();
     for (const item of brokenGroupDetails) {
       const key = groupKey(item, item?.groupName);
-      if (buckets.has(key) && !order.includes(key)) order.push(key);
+      if (buckets.has(key)) order.add(key);
     }
-    for (const key of buckets.keys()) if (!order.includes(key)) order.push(key);
+    for (const key of buckets.keys()) order.add(key);
     for (const key of order) {
       const { groupName, asins } = buckets.get(key)!;
       content += `\n⚠️ ${groupName}\n`;
