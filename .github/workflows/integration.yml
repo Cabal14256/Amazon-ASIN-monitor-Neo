@@ -171,6 +171,12 @@ jobs:
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-variant-check-receipts.sh /tmp/0006_variant_check_receipts.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-variant-check-receipts.sh /tmp/0006_variant_check_receipts.sql
 
+      - name: Apply monitor history matching upgrade twice
+        run: |
+          docker cp packages/db/migrations/0007_monitor_history_matching.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0007_monitor_history_matching.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0007_monitor_history_matching.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0007_monitor_history_matching.sql
+
       - name: Run ASIN timestamp policy upgrade, transactions and rollback on PostgreSQL
         run: pnpm --filter @asin-monitor/db exec vitest run test/asin-timestamp-policy.integration.test.ts
 
@@ -214,6 +220,9 @@ jobs:
 
       - name: Run ASIN group queries and shared authorization locks
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-query.integration.test.ts
+
+      - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
+        run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
       - name: Run ASIN writes with real constraints, timestamp policy and PostgreSQL transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-write.integration.test.ts

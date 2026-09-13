@@ -20,37 +20,47 @@ const sqlNumericAggregateSchema = z.union([
   z.string().regex(/^\d+(?:\.\d+)?$/),
 ]);
 
-/** 监控历史记录（findAll / findById 归一化后，含驼峰别名） */
+/** 监控历史记录（findAll / findById 归一化后，含驼峰别名）。
+ * Legacy init.sql 的 check_type/is_broken/notification_sent/create_time 可为
+ * SQL NULL；实际模型直接返回，Neo 保留这些值，不以默认值覆盖历史。 */
 export const monitorHistoryRecordSchema = z
   .object({
     id: z.number(),
     variant_group_id: z.string().nullable().optional(),
     asin_id: z.string().nullable().optional(),
     asin: z.string().nullable().optional(),
-    check_type: z.string().optional(), // 'GROUP' | 'ASIN' | ...
+    check_type: z.string().nullable().optional(), // 'GROUP' | 'ASIN' | ...
     country: z.string().optional(),
-    is_broken: z.union([z.literal(0), z.literal(1), z.boolean()]).optional(),
+    is_broken: z
+      .union([z.literal(0), z.literal(1), z.boolean()])
+      .nullable()
+      .optional(),
     check_time: dateTimeString.optional(),
     check_result: z.string().nullable().optional(),
     notification_sent: z
       .union([z.literal(0), z.literal(1), z.boolean()])
+      .nullable()
       .optional(),
-    create_time: dateTimeString.optional(),
+    create_time: dateTimeString.nullable().optional(),
     variant_group_name: z.string().nullable().optional(),
     asin_name: z.string().nullable().optional(),
     asin_type: z.union([z.string(), z.number()]).nullable().optional(),
     // ── 驼峰别名 ──
     checkTime: dateTimeString.optional(),
-    checkType: z.string().optional(),
-    isBroken: z.union([z.literal(0), z.literal(1), z.boolean()]).optional(),
+    checkType: z.string().nullable().optional(),
+    isBroken: z
+      .union([z.literal(0), z.literal(1), z.boolean()])
+      .nullable()
+      .optional(),
     checkResult: z.string().nullable().optional(),
     notificationSent: z
       .union([z.literal(0), z.literal(1), z.boolean()])
+      .nullable()
       .optional(),
     variantGroupName: z.string().nullable().optional(),
     asinName: z.string().nullable().optional(),
     asinType: z.union([z.string(), z.number()]).nullable().optional(),
-    createTime: dateTimeString.optional(),
+    createTime: dateTimeString.nullable().optional(),
   })
   .passthrough();
 export type MonitorHistoryRecord = z.infer<typeof monitorHistoryRecordSchema>;

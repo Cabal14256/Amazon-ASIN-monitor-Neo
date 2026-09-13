@@ -33,6 +33,9 @@ services:
       - ./packages/db/docker/apply-variant-check-receipts.sh:/opt/asin-monitor/apply-variant-check-receipts.sh:ro
       - ./packages/db/migrations/0006_variant_check_receipts.sql:/opt/asin-monitor/0006_variant_check_receipts.sql:ro
       - ./packages/db/migrations/0006_variant_check_receipts.rollback.sql:/opt/asin-monitor/0006_variant_check_receipts.rollback.sql:ro
+      # History text matching follows the verified 0005 comparison collation.
+      - ./packages/db/migrations/0007_monitor_history_matching.sql:/opt/asin-monitor/0007_monitor_history_matching.sql:ro
+      - ./packages/db/migrations/0007_monitor_history_matching.rollback.sql:/opt/asin-monitor/0007_monitor_history_matching.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

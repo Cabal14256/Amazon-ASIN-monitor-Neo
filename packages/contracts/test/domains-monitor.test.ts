@@ -61,6 +61,27 @@ describe('monitor 域', () => {
     expect(parsed.data?.total).toBeNull();
   });
 
+  it('保留旧数据库允许的空类型、状态、通知与创建时间及其别名', () => {
+    const row = {
+      id: 107,
+      check_type: null,
+      checkType: null,
+      is_broken: null,
+      isBroken: null,
+      notification_sent: null,
+      notificationSent: null,
+      create_time: null,
+      createTime: null,
+      check_time: '2026-09-12T16:30:00.000Z',
+      checkTime: '2026-09-12T16:30:00.000Z',
+    };
+    const parsed = monitorHistoryListResultSchema.parse({
+      success: true,
+      data: { list: [row], total: 1, current: 1, pageSize: 10 },
+    });
+    expect(parsed.data?.list).toEqual([row]);
+  });
+
   it('总体统计 data 含五基数与时长字段', () => {
     const parsed = monitorStatisticsResultSchema.parse({
       success: true,
