@@ -236,6 +236,9 @@ jobs:
       - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
+      - name: Compare complete dashboard with Legacy MySQL and verify current authorization, cache and PostgreSQL bounds
+        run: pnpm --filter @asin-monitor/api exec vitest run test/dashboard.integration.test.ts
+
       - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
 

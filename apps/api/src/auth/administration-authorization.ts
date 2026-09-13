@@ -32,6 +32,18 @@ export async function authorizeAdministrationAny(
   principal: AuthPrincipal,
   permissions: readonly PermissionCode[],
 ) {
+  await authorizeCurrentSession(unit, principal);
+  const current = await unit.operatorPermissionCodes(principal.userId);
+  if (!permissions.some((permission) => current.includes(permission)))
+    deny('没有权限执行此操作');
+}
+
+/** Authenticated-only reads still recheck account/password/session state under
+ * the transaction lock. This does not treat an empty permission list as a grant. */
+export async function authorizeCurrentSession(
+  unit: Pick<AdministrationAuthorizationUnit, 'lockOperator' | 'lockSession'>,
+  principal: AuthPrincipal,
+) {
   const user = await unit.lockOperator(principal.userId);
   if (!user || normalizeUserStatus(user.status, user.lockedUntil) !== 'ACTIVE')
     deny('账户不可用');
@@ -47,7 +59,4 @@ export async function authorizeAdministrationAny(
     (session.expiresAt && session.expiresAt <= new Date())
   )
     deny('会话已失效');
-  const current = await unit.operatorPermissionCodes(principal.userId);
-  if (!permissions.some((permission) => current.includes(permission)))
-    deny('没有权限执行此操作');
 }
