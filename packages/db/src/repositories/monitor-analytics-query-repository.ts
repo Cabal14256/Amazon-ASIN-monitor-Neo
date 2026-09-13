@@ -2,6 +2,10 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { Pool } from 'pg';
 import type { MonitorAnalyticsQuery } from '../domain/monitor-analytics-query';
 import { sessions, users } from '../schema';
+import {
+  readMonitorAbnormalQuery,
+  type MonitorAbnormalQueryOptions,
+} from './monitor-abnormal-query';
 import { MonitorAnalyticsDeadline } from './monitor-analytics-deadline';
 import {
   readMonitorCountQuery,
@@ -26,7 +30,12 @@ export interface MonitorAnalyticsQueryUnit
   ): ReturnType<typeof readMonitorCountQuery>;
   peak(query: MonitorAnalyticsQuery): ReturnType<typeof readMonitorPeakQuery>;
   period(query: MonitorAnalyticsQuery): Promise<MonitorDurationQueryResult>;
+  abnormal(
+    query: MonitorAnalyticsQuery,
+  ): ReturnType<typeof readMonitorAbnormalQuery>;
 }
+export type MonitorAnalyticsRepositoryOptions = MonitorDurationQueryOptions &
+  MonitorAbnormalQueryOptions;
 export interface MonitorAnalyticsQueryRepositoryPort {
   read<T>(action: (unit: MonitorAnalyticsQueryUnit) => Promise<T>): Promise<T>;
 }
@@ -37,7 +46,7 @@ class DrizzleMonitorAnalyticsQueryUnit
   constructor(
     db: ConstructorParameters<typeof DrizzleRoleUnit>[0],
     ensureOpen: () => void,
-    private readonly options: MonitorDurationQueryOptions,
+    private readonly options: MonitorAnalyticsRepositoryOptions,
   ) {
     super(db, ensureOpen);
   }
@@ -98,6 +107,15 @@ class DrizzleMonitorAnalyticsQueryUnit
       this.options,
     );
   }
+  async abnormal(query: MonitorAnalyticsQuery) {
+    await this.dataPhase();
+    return readMonitorAbnormalQuery(
+      this.db,
+      query,
+      this.ensureOpen,
+      this.options,
+    );
+  }
 }
 export class PgMonitorAnalyticsQueryRepository
   implements MonitorAnalyticsQueryRepositoryPort
@@ -105,7 +123,7 @@ export class PgMonitorAnalyticsQueryRepository
   private readonly deadline: MonitorAnalyticsDeadline;
   constructor(
     pool: Pool,
-    private readonly options: MonitorDurationQueryOptions,
+    private readonly options: MonitorAnalyticsRepositoryOptions,
   ) {
     this.deadline = new MonitorAnalyticsDeadline(pool);
   }

@@ -167,6 +167,16 @@ export async function legacyAnalyticsFixture() {
       close,
       refreshIntervals: (options?: object) =>
         intervalService.refreshMonitorHistoryStatusIntervals(options),
+      async abnormal(params: object, interval: boolean) {
+        const model = loaded.model as unknown as Record<string, unknown>;
+        const previous = model.canUseStatusIntervalForRange;
+        model.canUseStatusIntervalForRange = async () => interval;
+        try {
+          return await loaded.model.getAbnormalDurationStatistics(params);
+        } finally {
+          model.canUseStatusIntervalForRange = previous;
+        }
+      },
       /** Only the source-selection guard is forced for arithmetic comparisons
        * on explicitly seeded aggregate tables. The actual leaf SQL and mapping
        * remain untouched; Timescale coverage is tested independently. */

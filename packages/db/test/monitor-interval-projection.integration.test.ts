@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, createPgPool } from '../src/client';
 import { parseMonitorAnalyticsQuery } from '../src/domain/monitor-analytics-query';
+import { readMonitorAbnormalQuery } from '../src/repositories/monitor-abnormal-query';
 import { monitorIntervalCoverageSelect } from '../src/repositories/monitor-interval-coverage';
 import { reconcileMonitorInterval } from '../src/repositories/monitor-interval-projection';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
@@ -170,6 +171,83 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         hour: 1,
         name: 'Ignored while unchanged',
         group: 'Ignored group',
+      });
+
+      it('returns complete Legacy interval and bucket responses with filters, clipped bounds and summary-only reads', async () => {
+        await seed();
+        await seed({ hour: 1, broken: true });
+        await seed({ hour: 2, broken: true, name: '' });
+        await seed({ hour: 4, broken: false });
+        await seed({ code: null, id: 'interval-109-orphan', broken: true });
+        await seed({ code: null, id: 'interval-109-orphan', hour: 4 });
+        await seed({
+          code: 'I109-GROUP',
+          id: 'interval-109-group',
+          type: 'GROUP',
+          broken: true,
+        });
+        await drain();
+        await replayLegacy();
+        const cases = [
+          {},
+          { includeSeries: '0' },
+          { asinIds: ['interval-109-a'] },
+          { asinCodes: ['I109-A'] },
+          { asinCodes: ['missing'] },
+          { asinName: 'First' },
+          { asinName: '%' },
+          { variantGroupName: 'First' },
+          { variantGroupId: 'interval-109' },
+          { asinType: '1' },
+          { asinType: 'SUB_REVIEW' },
+          { startTime: '1998-01-01 00:30:00', endTime: '1998-01-01 03:15:00' },
+          { startTime: '1997-12-31 23:00:00' },
+          { endTime: '1998-01-01 07:00:00' },
+          { startTime: '', includeSeries: '0' },
+          { endTime: '', includeSeries: '0' },
+        ];
+        for (const filter of cases) {
+          const query = parseMonitorAnalyticsQuery(
+            'abnormal-duration-statistics',
+            { ...range, ...filter },
+          );
+          for (const intervalEnabled of [true, false]) {
+            const actual = await createDb(pool).transaction((tx) =>
+              readMonitorAbnormalQuery(tx, query, () => {}, {
+                intervalEnabled,
+                onIntervalFallback() {},
+              }),
+            );
+            if (!Object.keys(filter).length)
+              expect(actual.source).toBe(intervalEnabled ? 'interval' : 'raw');
+            expect(
+              actual.data,
+              JSON.stringify({ query, source: actual.source }),
+            ).toEqual(
+              await legacy.abnormal(query, actual.source === 'interval'),
+            );
+          }
+        }
+        // A late mutation makes the maintained intervals stale immediately. The
+        // reader falls back even though their previous time watermark still covers.
+        await pool.query(
+          `UPDATE public.monitor_history SET is_broken = true WHERE ${predicate} AND check_time = '1998-01-01 00:00:00'`,
+        );
+        await legacy.query(
+          "UPDATE monitor_history SET is_broken = 1 WHERE check_time = '1998-01-01 00:00:00'",
+        );
+        const query = parseMonitorAnalyticsQuery(
+          'abnormal-duration-statistics',
+          range,
+        );
+        const fallback = await createDb(pool).transaction((tx) =>
+          readMonitorAbnormalQuery(tx, query, () => {}, {
+            intervalEnabled: true,
+            onIntervalFallback() {},
+          }),
+        );
+        expect(fallback.source).toBe('raw');
+        expect(fallback.data).toEqual(await legacy.abnormal(query, false));
       });
       await seed({ hour: 2, broken: true, name: 'Broken snapshot', group: '' });
       await seed({ hour: 2, broken: false, name: 'Middle zero-length' });
