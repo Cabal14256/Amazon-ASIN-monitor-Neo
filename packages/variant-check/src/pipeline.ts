@@ -3,6 +3,11 @@ import type {
   VariantView,
 } from '@asin-monitor/contracts';
 import {
+  assertVariantCheckOperationRequest,
+  parseVariantCheckOperation,
+  type VariantCheckOperation,
+} from '@asin-monitor/db';
+import {
   abortError,
   CatalogDeferredError,
   normalizeCountry,
@@ -26,6 +31,8 @@ export const MAX_VARIANT_CHECK_RESULT_BYTES = 32 * 1024 * 1024;
 export interface VariantCheckContext {
   forceRefresh?: boolean;
   signal?: AbortSignal;
+  /** Immutable accepted job identity. Sync HTTP checks intentionally omit it. */
+  operation?: VariantCheckOperation;
   /** HTTP authenticates the current session; accepted jobs verify current owner
    * authority according to their task policy. Anonymous compatibility is explicit. */
   authorize(unit: VariantCheckUnit): Promise<void>;
@@ -163,13 +170,20 @@ export class VariantCheckPipeline {
   private async persist<T>(
     scope: CheckScope,
     action: (unit: VariantCheckUnit) => Promise<T>,
+    operation?: VariantCheckOperation,
   ): Promise<T> {
     let readyToCommit = false;
     try {
       const output = await this.repository.transaction(async (unit) => {
         await scope.guard(unit);
+        if (operation) {
+          const existing = await unit.readReceipt(operation, true);
+          await scope.guard(unit);
+          if (existing !== undefined) return boundedResult(existing) as T;
+        }
         scope.beginPersistence();
         const value = boundedResult(await action(unit));
+        if (operation) await unit.saveReceipt(operation, value);
         await scope.guard(unit);
         readyToCommit = true;
         return value;
@@ -182,6 +196,22 @@ export class VariantCheckPipeline {
       if (readyToCommit) throw new VariantCheckCommitUncertainError();
       throw error;
     }
+  }
+  private async read<T, R>(
+    scope: CheckScope,
+    operation: VariantCheckOperation | undefined,
+    action: (unit: VariantCheckUnit) => Promise<T>,
+  ): Promise<{ snapshot: T } | { completed: R }> {
+    return this.repository.transaction(async (unit) => {
+      await scope.guard(unit);
+      if (operation) {
+        const result = await unit.readReceipt(operation);
+        await scope.guard(unit);
+        if (result !== undefined)
+          return { completed: boundedResult(result) as R };
+      }
+      return { snapshot: await action(unit) };
+    });
   }
   private async invalidate(
     entries: { asin: string; country: string; notFound: boolean }[],
@@ -239,12 +269,27 @@ export class VariantCheckPipeline {
     asinId: string,
     context: VariantCheckContext,
   ): Promise<VariantView> {
-    context = { ...context };
+    context = {
+      ...context,
+      operation: context.operation ? { ...context.operation } : undefined,
+    };
     return this.run(context, async (scope) => {
-      const snapshot = await this.repository.transaction(async (unit) => {
-        await scope.guard(unit);
-        return unit.loadSingle(asinId);
-      });
+      const operation = context.operation
+        ? parseVariantCheckOperation(context.operation)
+        : undefined;
+      if (operation && operation.resultKind !== 'asin')
+        throw new VariantCheckError('invalid-input');
+      if (operation)
+        assertVariantCheckOperationRequest(operation, {
+          asinId,
+          forceRefresh: context.forceRefresh ?? false,
+        });
+      const initial = await this.read<
+        Awaited<ReturnType<VariantCheckUnit['loadSingle']>>,
+        VariantView
+      >(scope, operation, (unit) => unit.loadSingle(asinId));
+      if ('completed' in initial) return initial.completed;
+      const snapshot = initial.snapshot;
       await scope.guard();
       const result = await this.checker.check(
         snapshot.asin.asin,
@@ -256,13 +301,17 @@ export class VariantCheckPipeline {
         },
       );
       await scope.guard();
-      const output = await this.persist(scope, async (unit) => {
-        const committed = await unit.commitSingle(snapshot, result, () =>
-          scope.guard(unit),
-        );
-        // Full serialization bound is checked while rollback remains possible.
-        return singleCheckResult(committed);
-      });
+      const output = await this.persist(
+        scope,
+        async (unit) => {
+          const committed = await unit.commitSingle(snapshot, result, () =>
+            scope.guard(unit),
+          );
+          // Full serialization bound is checked while rollback remains possible.
+          return singleCheckResult(committed);
+        },
+        operation,
+      );
       await this.invalidate([
         {
           asin: snapshot.asin.asin,
@@ -278,12 +327,27 @@ export class VariantCheckPipeline {
     groupId: string,
     context: VariantCheckContext,
   ): Promise<VariantGroupCheckData> {
-    context = { ...context };
+    context = {
+      ...context,
+      operation: context.operation ? { ...context.operation } : undefined,
+    };
     return this.run(context, async (scope) => {
-      const snapshot = await this.repository.transaction(async (unit) => {
-        await scope.guard(unit);
-        return unit.loadGroup(groupId);
-      });
+      const operation = context.operation
+        ? parseVariantCheckOperation(context.operation)
+        : undefined;
+      if (operation && operation.resultKind !== 'group')
+        throw new VariantCheckError('invalid-input');
+      if (operation)
+        assertVariantCheckOperationRequest(operation, {
+          groupId,
+          forceRefresh: context.forceRefresh ?? false,
+        });
+      const initial = await this.read<
+        GroupCheckSnapshot,
+        VariantGroupCheckData
+      >(scope, operation, (unit) => unit.loadGroup(groupId));
+      if ('completed' in initial) return initial.completed;
+      const snapshot = initial.snapshot;
       await scope.guard();
       const observations =
         this.batchThreshold > 0 &&
@@ -291,12 +355,16 @@ export class VariantCheckPipeline {
         snapshot.asins.length >= this.batchThreshold
           ? await this.observeHybrid(snapshot, context, scope)
           : await this.observeGroup(snapshot, context, scope);
-      const output = await this.persist(scope, async (unit) => {
-        const committed = await unit.commitGroup(snapshot, observations, () =>
-          scope.guard(unit),
-        );
-        return groupCheckResult(committed);
-      });
+      const output = await this.persist(
+        scope,
+        async (unit) => {
+          const committed = await unit.commitGroup(snapshot, observations, () =>
+            scope.guard(unit),
+          );
+          return groupCheckResult(committed);
+        },
+        operation,
+      );
       const byId = new Map(snapshot.asins.map((row) => [row.id, row]));
       await this.invalidate(
         observations.map((observation) => ({

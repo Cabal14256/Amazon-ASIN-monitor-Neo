@@ -1,3 +1,4 @@
+import { createVariantCheckOperation } from '@asin-monitor/db';
 import {
   CatalogDeferredError,
   SpApiError,
@@ -28,7 +29,12 @@ function fixture(
   };
   let inTransaction = 0;
   const commits: unknown[] = [];
+  const receipts = new Map<string, unknown>();
   const unit = {
+    readReceipt: vi.fn<VariantCheckUnit['readReceipt']>(async (operation) =>
+      structuredClone(receipts.get(operation.operationKey)),
+    ),
+    saveReceipt: vi.fn<VariantCheckUnit['saveReceipt']>(async () => undefined),
     loadSingle: vi.fn(async () =>
       structuredClone({ group: state.group, asin: state.asins[0] }),
     ),
@@ -89,15 +95,34 @@ function fixture(
     ),
   };
   let transactionNumber = 0;
-  const hooks: { afterAction?(number: number): Promise<void> } = {};
+  const hooks: {
+    afterAction?(number: number, commit: () => void): Promise<void>;
+  } = {};
   const repository: VariantCheckRepositoryPort = {
     async transaction(action) {
       const number = ++transactionNumber;
       inTransaction++;
       try {
-        const value = await action(unit as unknown as VariantCheckUnit);
-        await hooks.afterAction?.(number);
-        if (number % 2 === 0) commits.push(value);
+        const staged = new Map<string, unknown>();
+        const value = await action({
+          ...unit,
+          saveReceipt: async (
+            operation: Parameters<VariantCheckUnit['saveReceipt']>[0],
+            result: unknown,
+          ) => {
+            await unit.saveReceipt(operation, result);
+            staged.set(operation.operationKey, structuredClone(result));
+          },
+        } as unknown as VariantCheckUnit);
+        let committed = false;
+        const commit = () => {
+          if (committed) return;
+          committed = true;
+          for (const [key, result] of staged) receipts.set(key, result);
+          if (number % 2 === 0) commits.push(value);
+        };
+        await hooks.afterAction?.(number, commit);
+        commit();
         return value;
       } finally {
         inTransaction--;
@@ -140,6 +165,7 @@ function fixture(
     state,
     hooks,
     commits,
+    receipts,
   };
 }
 const live: VariantCheckPipeline[] = [];
@@ -157,6 +183,108 @@ afterEach(() => {
 });
 
 describe('Primary variant business pipeline', () => {
+  const operation = () =>
+    createVariantCheckOperation(
+      {
+        taskId: '10000000-0000-4000-8000-000000000001',
+        userId: 'fixture-owner',
+        taskType: 'variant-check',
+        taskSubType: 'asin-check',
+        resultKind: 'asin',
+        step: 'result',
+        taskCreatedAt: '2026-09-13T00:00:00.000Z',
+        expiresAt: '2026-09-20T00:00:00.000Z',
+      },
+      { asinId: 'a1', forceRefresh: false },
+    );
+
+  it('restores an immutable completed result before reading changed/deleted business records or calling Amazon', async () => {
+    const f = setup();
+    const context = { ...f.context, operation: operation() };
+    const first = await f.pipeline.checkSingle('a1', context);
+    f.unit.loadSingle.mockRejectedValue(
+      new VariantCheckError('asin-not-found'),
+    );
+    expect(await f.pipeline.checkSingle('a1', context)).toEqual(first);
+    expect(f.unit.loadSingle).toHaveBeenCalledOnce();
+    expect(f.check).toHaveBeenCalledOnce();
+    expect(f.unit.commitSingle).toHaveBeenCalledOnce();
+    expect(f.unit.saveReceipt).toHaveBeenCalledOnce();
+  });
+
+  it('recovers a lost COMMIT acknowledgement from the receipt without repeating a status/history write', async () => {
+    const f = setup();
+    const context = { ...f.context, operation: operation() };
+    f.hooks.afterAction = async (number, commit) => {
+      if (number === 2) {
+        commit();
+        throw new Error('Lost acknowledgement');
+      }
+    };
+    await expect(f.pipeline.checkSingle('a1', context)).rejects.toBeInstanceOf(
+      VariantCheckCommitUncertainError,
+    );
+    await expect(f.pipeline.checkSingle('a1', context)).resolves.toMatchObject({
+      raw: { details: product() },
+    });
+    expect(f.unit.commitSingle).toHaveBeenCalledOnce();
+    expect(f.check).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the receipt and the business write in one rollback boundary', async () => {
+    const f = setup();
+    f.unit.saveReceipt.mockRejectedValue(new Error('Receipt insert failed'));
+    await expect(
+      f.pipeline.checkSingle('a1', { ...f.context, operation: operation() }),
+    ).rejects.toThrow('Receipt insert failed');
+    expect(f.receipts.size).toBe(0);
+    expect(f.commits).toEqual([]);
+    expect(f.cache.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('uses a receipt found after waiting for the operation lock instead of committing an already fetched replacement', async () => {
+    const f = setup();
+    const op = operation();
+    const completed = {
+      asin: '',
+      title: '',
+      hasVariation: false,
+      isBroken: false,
+      parentAsin: null,
+      brotherAsins: [],
+      brand: null,
+      raw: { details: product() },
+    };
+    f.check.mockImplementation(async () => {
+      f.receipts.set(op.operationKey, completed);
+      return product(1, false);
+    });
+    expect(
+      await f.pipeline.checkSingle('a1', { ...f.context, operation: op }),
+    ).toEqual(completed);
+    expect(f.unit.readReceipt.mock.calls[1][1]).toBe(true);
+    expect(f.unit.commitSingle).not.toHaveBeenCalled();
+    expect(f.unit.saveReceipt).not.toHaveBeenCalled();
+  });
+
+  it('rejects mismatched actual parameters and checks current authority even when a receipt exists', async () => {
+    const f = setup();
+    const context = { ...f.context, operation: operation() };
+    await expect(f.pipeline.checkSingle('a2', context)).rejects.toMatchObject({
+      code: 'operation-mismatch',
+    });
+    expect(f.unit.readReceipt).not.toHaveBeenCalled();
+    await f.pipeline.checkSingle('a1', context);
+    await expect(
+      f.pipeline.checkSingle('a1', {
+        ...context,
+        authorize: async () => {
+          throw new Error('Current authority revoked');
+        },
+      }),
+    ).rejects.toThrow('Current authority revoked');
+    expect(f.check).toHaveBeenCalledOnce();
+  });
   it.each([
     { threshold: 0, force: false, expected: false },
     { threshold: 3, force: false, expected: false },

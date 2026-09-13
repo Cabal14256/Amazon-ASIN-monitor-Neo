@@ -46,7 +46,8 @@ async function publicTableNames(
     FROM information_schema.tables
     WHERE table_schema = 'public'
       AND table_type = 'BASE TABLE'
-      AND table_name <> 'audit_logs_archive'
+      -- Neo-only upgrades are verified by their own integration fixtures.
+      AND table_name NOT IN ('audit_logs_archive', 'variant_check_receipts')
       AND NOT EXISTS (
         SELECT 1 FROM pg_inherits inheritance
         WHERE inheritance.inhrelid = format('%I.%I', table_schema, table_name)::regclass

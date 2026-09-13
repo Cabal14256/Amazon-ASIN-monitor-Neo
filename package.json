@@ -21,6 +21,7 @@
     "db:upgrade:auth-maintenance": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-auth-maintenance.sh",
     "db:upgrade:timescale": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /docker-entrypoint-initdb.d/030-apply-timescale-aggregates.sh",
     "db:upgrade:timescale-storage": "docker compose --env-file .env.neo -f compose.neo.yml exec -e TIMESCALE_RETENTION_DAYS -T timescaledb sh /docker-entrypoint-initdb.d/040-apply-timescale-storage-policies.sh",
+    "db:upgrade:variant-check-receipts": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-variant-check-receipts.sh",
     "dev": "max dev",
     "dev:api": "corepack pnpm --filter @asin-monitor/api^... build && corepack pnpm --filter @asin-monitor/api start:dev",
     "dev:web": "corepack pnpm --filter @asin-monitor/web dev",

@@ -17,6 +17,7 @@ import {
   type VariantCheckRepositoryPort,
   type VariantCheckUnit,
 } from '../domain/variant-check';
+import type { VariantCheckOperation } from '../domain/variant-check-receipt';
 import { resolveAsinVariantStatus } from '../domain/variant-status';
 import {
   asins,
@@ -31,6 +32,11 @@ import {
   withAsinDatabaseTransaction,
 } from './asin-query-repository';
 import { prepareAsinTimestampWrites } from './asin-timestamp-policy';
+import {
+  purgeVariantCheckReceipts,
+  readVariantCheckReceipt,
+  saveVariantCheckReceipt,
+} from './variant-check-receipt-repository';
 
 const equalTime = (a: Date | null, b: Date | null) =>
   a === null ? b === null : b !== null && a.getTime() === b.getTime();
@@ -65,6 +71,15 @@ export class DrizzleVariantCheckUnit
   extends DrizzleAsinQueryUnit
   implements VariantCheckUnit
 {
+  readReceipt(operation: VariantCheckOperation, lock = false) {
+    return readVariantCheckReceipt(this.db, this.ensureOpen, operation, lock);
+  }
+  saveReceipt(operation: VariantCheckOperation, result: unknown) {
+    return saveVariantCheckReceipt(this.db, this.ensureOpen, operation, result);
+  }
+  purgeExpiredReceipts() {
+    return purgeVariantCheckReceipts(this.db, this.ensureOpen);
+  }
   async loadGroup(groupId: string): Promise<GroupCheckSnapshot> {
     id(groupId);
     const snapshot = await this.detail(groupId);

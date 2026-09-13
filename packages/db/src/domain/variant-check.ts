@@ -4,6 +4,7 @@ import type {
 } from '@asin-monitor/sp-api';
 import type { AsinQueryUnit } from '../repositories/asin-query-repository';
 import type { Asin, VariantGroup } from '../schema';
+import type { VariantCheckOperation } from './variant-check-receipt';
 
 export interface GroupCheckSnapshot {
   group: VariantGroup;
@@ -26,6 +27,12 @@ export interface CommittedSingleCheck extends SingleCheckSnapshot {
 }
 export type CheckCommitGuard = () => Promise<void>;
 export interface VariantCheckUnit extends AsinQueryUnit {
+  readReceipt(
+    operation: VariantCheckOperation,
+    lock?: boolean,
+  ): Promise<unknown | undefined>;
+  saveReceipt(operation: VariantCheckOperation, result: unknown): Promise<void>;
+  purgeExpiredReceipts(): Promise<number>;
   loadGroup(groupId: string): Promise<GroupCheckSnapshot>;
   loadSingle(asinId: string): Promise<SingleCheckSnapshot>;
   commitGroup(
@@ -50,7 +57,9 @@ export class VariantCheckError extends Error {
       | 'invalid-result'
       | 'group-not-found'
       | 'asin-not-found'
-      | 'snapshot-changed',
+      | 'snapshot-changed'
+      | 'operation-expired'
+      | 'operation-mismatch',
   ) {
     super(
       {
@@ -60,6 +69,8 @@ export class VariantCheckError extends Error {
         'group-not-found': '变体组不存在',
         'asin-not-found': 'ASIN记录不存在',
         'snapshot-changed': '检查期间商品或检查状态已变化，请重新检查',
+        'operation-expired': '检查任务已过期，请重新发起检查',
+        'operation-mismatch': '检查任务身份或参数已变化，无法恢复结果',
       }[code],
     );
     this.name = 'VariantCheckError';

@@ -164,6 +164,13 @@ jobs:
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0005_import_group_collation.sql
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0005_import_group_collation.sql
 
+      - name: Apply variant-check completion receipts twice after final snapshot migration
+        run: |
+          docker cp packages/db/migrations/0006_variant_check_receipts.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0006_variant_check_receipts.sql"
+          docker cp packages/db/docker/apply-variant-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-variant-check-receipts.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-variant-check-receipts.sh /tmp/0006_variant_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-variant-check-receipts.sh /tmp/0006_variant_check_receipts.sql
+
       - name: Run ASIN timestamp policy upgrade, transactions and rollback on PostgreSQL
         run: pnpm --filter @asin-monitor/db exec vitest run test/asin-timestamp-policy.integration.test.ts
 

@@ -4,6 +4,7 @@ export * from './domain/asin-batch-create';
 export * from './domain/asin-batch-delete';
 export * from './domain/asin-manual-history';
 export * from './domain/variant-check';
+export * from './domain/variant-check-receipt';
 export * from './domain/variant-status';
 export * from './migration';
 export * from './repositories/account-repository';
