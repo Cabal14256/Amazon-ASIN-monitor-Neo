@@ -39,6 +39,8 @@ const definitions = {
  * Timescale 2.29.2 starts with an infinite materialization invalidation and cuts
  * refreshed windows out of it. Check both invalidation logs, the raw threshold,
  * and the CAGG watermark over every requested bucket, including partial edges.
+ * Group names must come from nonempty history snapshots: changes to the joined
+ * variant_groups table do not participate in Timescale's invalidation logs.
  * Catalog/permission errors must roll back to a savepoint before raw fallback.
  * See upstream 2.29.2/tsl/src/continuous_aggs/README.md and sql/pre_install/tables.sql.
  */
@@ -83,6 +85,18 @@ export function monitorAggregateCoverageSelect(
       CROSS JOIN requested AS r
       WHERE c.user_view_schema='public' AND c.user_view_name=${name}
         AND h.schema_name='public' AND h.table_name='monitor_history'
+        ${
+          family === 'variant_group'
+            ? sql`AND NOT EXISTS (
+          SELECT 1 FROM public.monitor_history history
+          WHERE history.check_time >= ${startText}::timestamp AND history.check_time < ${endText}::timestamp
+            AND history.variant_group_id IS NOT NULL
+            AND rtrim(history.check_type) COLLATE public.legacy_utf8mb4_unicode_ci = 'ASIN'
+            AND (history.asin_id IS NOT NULL OR nullif(rtrim(history.asin_code), '') IS NOT NULL)
+            AND nullif(rtrim(history.variant_group_name), '') IS NULL
+        )`
+            : sql``
+        }
         AND c.materialized_only AND v.materialized_only
         AND (SELECT extversion FROM pg_extension WHERE extname='timescaledb')='2.29.2'
         AND md5(regexp_replace(v.view_definition,'[[:space:]]+',' ','g'))=${digest}

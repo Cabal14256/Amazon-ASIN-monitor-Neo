@@ -195,5 +195,21 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         }),
       ).toBe(false);
     });
+
+    it('requires independent group-name snapshots because dimension-table changes do not invalidate a CAGG', async () => {
+      await pool.query(
+        "UPDATE public.monitor_history SET variant_group_name=NULL WHERE asin_code='B109COV001'",
+      );
+      await refreshAll();
+      for (const granularity of granularities)
+        expect(await coverage('variant_group', granularity)).toBe(false);
+      expect(await coverage('asin')).toBe(true);
+      await pool.query(
+        "UPDATE public.monitor_history SET variant_group_name='Coverage 109' WHERE asin_code='B109COV001'",
+      );
+      await refreshAll();
+      for (const granularity of granularities)
+        expect(await coverage('variant_group', granularity)).toBe(true);
+    });
   },
 );

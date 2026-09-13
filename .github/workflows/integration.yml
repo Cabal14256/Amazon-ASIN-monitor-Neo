@@ -227,6 +227,18 @@ jobs:
       - name: Verify monitor continuous aggregate freshness after late writes and historical corrections
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
 
+      - name: Compare monitor statistics SQL with actual Legacy MySQL and refreshed Timescale projections
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-analytics-sql.integration.test.ts
+
+      - name: Upload monitor SQL decimal evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: monitor-sql-decimal-${{ github.run_id }}
+          path: artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Run ASIN writes with real constraints, timestamp policy and PostgreSQL transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-write.integration.test.ts
 
