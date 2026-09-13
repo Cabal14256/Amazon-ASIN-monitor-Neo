@@ -15,6 +15,7 @@ import { authorizeAdministrationAny } from '../auth/administration-authorization
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { MonitorAnalyticsAdmission } from './monitor-analytics-admission';
 import { MonitorAnalyticsCache } from './monitor-analytics-cache';
 import {
   encodeMonitorAnalyticsResult,
@@ -63,7 +64,7 @@ function timedOut(error: unknown): boolean {
 
 @Injectable()
 export class MonitorAnalyticsService {
-  private active = 0;
+  private readonly admission = new MonitorAnalyticsAdmission();
   constructor(
     @Inject(ENV) private readonly env: Env,
     @Inject(MONITOR_ANALYTICS_REPOSITORY)
@@ -126,6 +127,9 @@ export class MonitorAnalyticsService {
         return unit.duration(query);
     }
   }
+  admit<T>(reply: FastifyReply, action: () => Promise<T>) {
+    return this.admission.run(reply, action);
+  }
   async read(
     principal: AuthPrincipal,
     reply: FastifyReply,
@@ -135,119 +139,97 @@ export class MonitorAnalyticsService {
   ): Promise<string> {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有统计入口');
-    if (this.active >= 2) fail(429, '统计查询繁忙，请稍后再试');
-    this.active++;
-    const expires = Date.now() + 10000;
-    let settled = false,
-      finished = false,
-      released = false;
-    const release = () => {
-      if (!settled || !finished || released) return;
-      released = true;
-      this.active--;
-      clearTimeout(timer);
-      reply.raw.off('finish', finish);
-      reply.raw.off('close', finish);
-    };
-    const finish = () => {
-      finished = true;
-      release();
-    };
-    reply.raw.once('finish', finish);
-    reply.raw.once('close', finish);
-    const timer = setTimeout(() => reply.raw.destroy(), 60000);
-    timer.unref();
-    const ensureOpen = () => {
-      if (finished || reply.raw.destroyed || Date.now() >= expires)
-        throw new MonitorAnalyticsQueryError('timeout');
-    };
-    try {
-      const response = await this.repository.read(async (unit) => {
-        await authorizeAdministrationAny(
-          unit,
-          principal,
-          monitorAnalyticsPermissions(operation),
-        );
-        ensureOpen();
-        let query = parseMonitorAnalyticsQuery(operation, raw);
-        if (operation === 'analytics-monthly-breakdown') {
-          const range = resolveMonitorMonthlyRange(query);
-          query = {
-            ...query,
-            month: range.month,
-            startTime: range.startTime,
-            endTime: range.endTime,
-          };
-          // Resolve Legacy fallback month before cache key construction; never
-          // cache an implicit "current month" under an unchanging key.
-        }
-        const bypass = this.bypass(operation, bypassHeader);
-        const cached = bypass ? null : await this.cache.get(query);
-        ensureOpen();
-        if (cached)
-          return encodeMonitorAnalyticsResult(
+    return this.admission.run(reply, async (assertOpen) => {
+      const expires = Date.now() + 10000;
+      const ensureOpen = () => {
+        assertOpen();
+        if (Date.now() >= expires)
+          throw new MonitorAnalyticsQueryError('timeout');
+      };
+      try {
+        const response = await this.repository.read(async (unit) => {
+          await authorizeAdministrationAny(
+            unit,
+            principal,
+            monitorAnalyticsPermissions(operation),
+          );
+          ensureOpen();
+          let query = parseMonitorAnalyticsQuery(operation, raw);
+          if (operation === 'analytics-monthly-breakdown') {
+            const range = resolveMonitorMonthlyRange(query);
+            query = {
+              ...query,
+              month: range.month,
+              startTime: range.startTime,
+              endTime: range.endTime,
+            };
+            // Resolve Legacy fallback month before cache key construction; never
+            // cache an implicit "current month" under an unchanging key.
+          }
+          const bypass = this.bypass(operation, bypassHeader);
+          const cached = bypass ? null : await this.cache.get(query);
+          ensureOpen();
+          if (cached)
+            return encodeMonitorAnalyticsResult(
+              operation,
+              cached,
+              cached.generatedAt,
+              true,
+              ensureOpen,
+            );
+          const result = await this.execute(unit, query);
+          ensureOpen();
+          const generatedAt = Date.now();
+          const encoded = encodeMonitorAnalyticsResult(
             operation,
-            cached,
-            cached.generatedAt,
-            true,
+            result,
+            generatedAt,
+            false,
             ensureOpen,
           );
-        const result = await this.execute(unit, query);
-        ensureOpen();
-        const generatedAt = Date.now();
-        const encoded = encodeMonitorAnalyticsResult(
-          operation,
-          result,
-          generatedAt,
-          false,
-          ensureOpen,
-        );
-        if (!bypass) await this.cache.set(query, result, generatedAt);
-        ensureOpen();
-        return encoded;
-      });
-      ensureOpen();
-      return response;
-    } catch (error) {
-      finished = true;
-      if (error instanceof HttpException) throw error;
-      if (error instanceof MonitorAnalyticsQueryError) {
-        if (error.code === 'input') {
-          const query =
-            raw && typeof raw === 'object'
-              ? (raw as Record<string, unknown>)
-              : {};
-          if (operation === 'peak-hours' && !query.country)
-            fail(400, '高峰期统计需要指定国家');
-          if (
-            operation === 'peak-mark-areas' &&
-            (!query.startTime || !query.endTime)
-          )
-            fail(400, '请提供开始时间和结束时间');
-          fail(400, '统计查询参数无效');
-        }
-        if (error.code === 'capacity') fail(429, '统计查询繁忙，请稍后再试');
-      }
-      if (
-        error instanceof MonitorAnalyticsResultLimitError ||
-        (operation === 'peak-mark-areas' && error instanceof RangeError)
-      )
-        fail(413, '统计结果过大，请缩小查询范围');
-      if (timedOut(error)) {
-        this.logger.warn('统计查询超时', 'MonitorAnalyticsService', {
-          operation,
-          reason: 'analytics_query_timeout',
+          if (!bypass) await this.cache.set(query, result, generatedAt);
+          ensureOpen();
+          return encoded;
         });
-        fail(504, '查询超时，请尝试缩小时间范围或稍后重试');
+        ensureOpen();
+        return response;
+      } catch (error) {
+        if (error instanceof HttpException) throw error;
+        if (error instanceof MonitorAnalyticsQueryError) {
+          if (error.code === 'input') {
+            const query =
+              raw && typeof raw === 'object'
+                ? (raw as Record<string, unknown>)
+                : {};
+            if (operation === 'peak-hours' && !query.country)
+              fail(400, '高峰期统计需要指定国家');
+            if (
+              operation === 'peak-mark-areas' &&
+              (!query.startTime || !query.endTime)
+            )
+              fail(400, '请提供开始时间和结束时间');
+            fail(400, '统计查询参数无效');
+          }
+          if (error.code === 'capacity') fail(429, '统计查询繁忙，请稍后再试');
+        }
+        if (
+          error instanceof MonitorAnalyticsResultLimitError ||
+          (operation === 'peak-mark-areas' && error instanceof RangeError)
+        )
+          fail(413, '统计结果过大，请缩小查询范围');
+        if (timedOut(error)) {
+          this.logger.warn('统计查询超时', 'MonitorAnalyticsService', {
+            operation,
+            reason: 'analytics_query_timeout',
+          });
+          fail(504, '查询超时，请尝试缩小时间范围或稍后重试');
+        }
+        this.logger.error('统计查询失败', 'MonitorAnalyticsService', {
+          operation,
+          reason: 'analytics_query_failed',
+        });
+        return fail(500, '查询统计失败');
       }
-      this.logger.error('统计查询失败', 'MonitorAnalyticsService', {
-        operation,
-        reason: 'analytics_query_failed',
-      });
-      return fail(500, '查询统计失败');
-    } finally {
-      settled = true;
-      release();
-    }
+    });
   }
 }

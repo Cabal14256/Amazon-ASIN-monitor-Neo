@@ -465,10 +465,34 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
       }
       await clearCache();
+      // The API auth fixture deliberately has a private-only search_path. The
+      // same immutable Timescale definition deparses differently in that scope;
+      // analytics must establish its canonical data scope after authorization.
+      const inspector = await f.pools.primaryPool.connect();
+      try {
+        const digestSql =
+          "SELECT md5(regexp_replace(view_definition,'[[:space:]]+',' ','g')) AS digest FROM timescaledb_information.continuous_aggregates WHERE view_schema='public' AND view_name='monitor_history_cagg_asin_hour'";
+        const scoped = (await inspector.query(digestSql)).rows[0].digest;
+        await inspector.query('BEGIN');
+        await inspector.query('SET LOCAL search_path TO pg_catalog, public');
+        const canonical = (await inspector.query(digestSql)).rows[0].digest;
+        expect(canonical).toBe('c8fbca31141d9ff2fd87bb2bc27a23da');
+        expect(scoped).not.toBe(canonical);
+      } finally {
+        await inspector.query('ROLLBACK');
+        inspector.release();
+      }
       const fast = (await get('by-time', raw)).json();
       expect(fast.meta.source).toBe('agg');
       expect(fast.data).toEqual(before.data);
       expect((await get('by-time', raw)).json().meta.source).toBe('cache+agg');
+      expect(
+        (
+          await f.pools.primaryPool.query(
+            "SELECT current_setting('search_path') AS path",
+          )
+        ).rows[0].path,
+      ).toBe(f.schema);
       await f.pools.primaryPool.query(
         "UPDATE public.monitor_history SET is_broken=false WHERE variant_group_id=$1 AND check_time='1996-02-01 01:10:00'",
         [group],

@@ -183,8 +183,9 @@ jobs:
       - name: Apply monitor interval maintenance upgrade twice
         run: |
           docker cp packages/db/migrations/0008_monitor_interval_projection.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0008_monitor_interval_projection.sql"
-          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0008_monitor_interval_projection.sql
-          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0008_monitor_interval_projection.sql
+          docker cp packages/db/docker/apply-monitor-intervals.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-monitor-intervals.sh"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-monitor-intervals.sh /tmp/0008_monitor_interval_projection.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-monitor-intervals.sh /tmp/0008_monitor_interval_projection.sql
 
       - name: Compare observed interval maintenance with Legacy and verify mutation receipts
         env:

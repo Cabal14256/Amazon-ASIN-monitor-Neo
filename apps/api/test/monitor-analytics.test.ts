@@ -290,4 +290,28 @@ describe('monitor analytics / all fourteen HTTP routes and current authorization
     expect((await get()).statusCode).toBe(500);
     expect(f.values.size).toBe(0);
   });
+  it('reserves admission before session activity writes and shares the same slot with the data query', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.auth.touchSession.mockImplementation(() => gate);
+    const pending = Promise.all([get(), get()]);
+    try {
+      await vi.waitFor(() =>
+        expect(f.auth.touchSession).toHaveBeenCalledTimes(2),
+      );
+      const overloaded = await get();
+      expect(overloaded.statusCode).toBe(429);
+      expect(overloaded.headers['cache-control']).toBe('no-store');
+      expect(f.auth.touchSession).toHaveBeenCalledTimes(2);
+      expect(f.repository.read).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    expect((await pending).map((response) => response.statusCode)).toEqual([
+      200, 200,
+    ]);
+    expect((await get()).statusCode).toBe(200);
+  });
 });

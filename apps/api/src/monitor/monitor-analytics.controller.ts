@@ -1,11 +1,11 @@
 import type { MonitorAnalyticsOperation } from '@asin-monitor/db';
 import { Controller, Get, Inject, Req, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { AuthenticationGuard } from '../auth/authentication.guard';
+import { MonitorAnalyticsGuard } from './monitor-analytics.guard';
 import { MonitorAnalyticsService } from './monitor-analytics.service';
 
 @Controller('monitor-history')
-@UseGuards(AuthenticationGuard)
+@UseGuards(MonitorAnalyticsGuard)
 export class MonitorAnalyticsController {
   constructor(
     @Inject(MonitorAnalyticsService)

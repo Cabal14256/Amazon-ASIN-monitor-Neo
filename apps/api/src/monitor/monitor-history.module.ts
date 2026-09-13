@@ -11,6 +11,7 @@ import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
 import { MonitorAnalyticsCache } from './monitor-analytics-cache';
 import { MonitorAnalyticsController } from './monitor-analytics.controller';
+import { MonitorAnalyticsGuard } from './monitor-analytics.guard';
 import {
   MONITOR_ANALYTICS_REPOSITORY,
   MonitorAnalyticsService,
@@ -27,6 +28,7 @@ import {
   providers: [
     MonitorHistoryService,
     MonitorAnalyticsService,
+    MonitorAnalyticsGuard,
     MonitorAnalyticsCache,
     {
       provide: MONITOR_ANALYTICS_REPOSITORY,

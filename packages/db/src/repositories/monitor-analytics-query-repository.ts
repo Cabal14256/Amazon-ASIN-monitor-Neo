@@ -78,6 +78,12 @@ class DrizzleMonitorAnalyticsQueryUnit
   }
   private async dataPhase() {
     this.ensureOpen();
+    // Authentication already ran under the caller's schema and its locks stay
+    // held. All analytics relations live explicitly in public. Canonicalize only
+    // this phase so Timescale's deparsed definition hashes do not depend on the
+    // connection's search_path. SET LOCAL resets at transaction completion.
+    await this.db.execute(sql`SET LOCAL search_path TO pg_catalog, public`);
+    this.ensureOpen();
     await this.db.execute(sql`SET LOCAL statement_timeout = 5000`);
     this.ensureOpen();
   }

@@ -6,6 +6,14 @@
 
 `0008_monitor_interval_projection.sql` 必须在最终 Legacy 快照导入以及 `0007` 之后执行。快照导入继续严格检查冻结基线中的 `varchar(50)`；运行时将区间键扩为 `varchar(53)`，容纳 `ID#` 加完整的 50 字符 ASIN ID。
 
+Compose 将升级脚本及升级/回滚 SQL 以只读方式挂载在 `/opt/asin-monitor`，不放入首次初始化目录。确认迁移与切换门槛后，从仓库根目录运行：
+
+```sh
+corepack pnpm db:upgrade:monitor-intervals
+```
+
+该命令读取 `.env.neo` 对应的主数据库，不升级竞品库；升级失败立即停止。Integration CI 使用同一脚本连续执行两次，验证重复升级。
+
 - 历史记录的插入、删除，以及状态、时间、ASIN、国家、名称或变体组快照的修改，在同一事务内递增对应键的待处理版本。
 - 只修改通知标记不会触发重建。变更 ASIN 或国家时，旧键和新键都需要重建。
 - 首次升级登记已有历史和导入区间的全部键。重复执行升级保留已处理版本及未完成任务。
@@ -45,6 +53,14 @@
 启用统计 API 前，需要完成维护消费者的真实依赖与进程入口验收、权限和缓存验证、实际规模的积压恢复与延迟验收。单元测试和小型数据库对照不代表这些上线条件已经满足。
 
 回滚顺序：停止区间维护生产者和消费者，回滚统计 API，再执行 `0008_monitor_interval_projection.rollback.sql`。回滚移除维护索引、函数、触发器和版本表，保留区间数据及兼容的 53 字符列宽，避免截断已经写入的合法 ID。再次升级会重新登记所有键。
+
+完成上述停机步骤后，使用挂载的回滚文件：
+
+```sh
+docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-monitor-intervals.sh /opt/asin-monitor/0008_monitor_interval_projection.rollback.sql
+```
+
+如果同时回滚 `0002` 存储策略，先撤销 `0008`，再执行原有 `0002` 回滚及其索引校验。
 
 如果运维曾禁用触发器、使用复制模式绕过触发器或手工替换来源表，必须在恢复查询前重新登记全部键。仅重新启用触发器不能证明绕过期间的数据已经被处理。
 

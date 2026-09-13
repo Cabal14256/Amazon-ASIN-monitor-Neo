@@ -61,6 +61,30 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('monitor analytics response/cache resource bounds', () => {
+  it('retains a disconnected authentication action until it settles without allocating another data slot', async () => {
+    const f = fixture(),
+      a = response(),
+      b = response();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = f.service
+      .admit(a, () => gate)
+      .catch((error: unknown) => error);
+    a.raw.emit('close');
+    await f.service.admit(b, async () => true);
+    await expect(
+      f.service.admit(response(), async () => true),
+    ).rejects.toMatchObject({ status: 429 });
+    release();
+    expect(await pending).toMatchObject({ status: 504 });
+    const c = response();
+    await f.service.admit(c, async () => true);
+    await expect(
+      f.service.read(f.principal, c, 'statistics', {}),
+    ).resolves.toContain('"success":true');
+  });
   it('measures escaped UTF-8 JSON before serialization, rejects cycles and excessive nesting', () => {
     const data = { 键: ['😀', '\n', null, true, 1.25] };
     const bytes = Buffer.byteLength(JSON.stringify(data));
