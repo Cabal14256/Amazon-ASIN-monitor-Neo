@@ -366,6 +366,30 @@ describe('notification lifetime, bounds and secrecy', () => {
     expect(getter).not.toHaveBeenCalled();
     expect(source.read).not.toHaveBeenCalled();
   });
+  it('copies only bounded array elements without invoking a custom iterator', async () => {
+    const brokenASINs = [{ asin: 'B000000001', groupName: 'original' }];
+    const iterator = vi.fn(() => {
+      throw new Error('custom iterator must not run');
+    });
+    Object.defineProperty(brokenASINs, Symbol.iterator, { value: iterator });
+    expect(
+      await service.sendOnce('primary', 'US', { brokenGroups: 1, brokenASINs }),
+    ).toEqual({ success: true });
+    expect(iterator).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(transport.send).mock.calls)).toContain(
+      'B000000001',
+    );
+  });
+  it('rejects array element accessors before reading credentials without invoking them', async () => {
+    const brokenASINs = [{}];
+    const getter = vi.fn(() => ({ asin: 'private-text' }));
+    Object.defineProperty(brokenASINs, '0', { get: getter });
+    await expect(
+      service.sendOnce('primary', 'US', { brokenASINs }),
+    ).rejects.toMatchObject({ reason: 'invalid-input' });
+    expect(getter).not.toHaveBeenCalled();
+    expect(source.read).not.toHaveBeenCalled();
+  });
   it('keeps credentials, raw upstream text, driver errors and abort reasons out of logs/results', async () => {
     source.read = vi.fn(async () => {
       throw new Error(webhook);

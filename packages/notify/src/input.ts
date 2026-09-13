@@ -7,6 +7,7 @@ const fail = (): never => {
 export function notificationCountry(value: unknown): string {
   return typeof value === 'string' &&
     value.length > 0 &&
+    value.length <= 20 &&
     [...value].length <= 10 &&
     !value.includes('\0')
     ? value
@@ -51,7 +52,15 @@ export function snapshotNotification(value: unknown): NotificationData {
   ): T[] | undefined => {
     if (v === undefined) return undefined;
     if (!Array.isArray(v) || (items += v.length) > 10_000) return fail();
-    return Array.from(v, convert);
+    // Read the bounded own elements directly. Array.from would execute a
+    // caller's custom iterator, which can yield more than the checked length.
+    const result: T[] = [];
+    for (let index = 0; index < v.length; index++) {
+      const field = Object.getOwnPropertyDescriptor(v, String(index));
+      if (!field || !Object.hasOwn(field, 'value')) return fail();
+      result.push(convert(field.value));
+    }
+    return result;
   };
   const group = (v: unknown) => {
     const row = record(v);

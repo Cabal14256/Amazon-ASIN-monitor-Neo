@@ -40,6 +40,7 @@ export class PgFeishuNotificationConfigReader {
     if (
       typeof region !== 'string' ||
       !region ||
+      region.length > 20 ||
       [...region].length > 10 ||
       region.includes('\0')
     )

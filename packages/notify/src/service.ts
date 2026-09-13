@@ -161,6 +161,7 @@ export class FeishuNotifications {
       }
       if (
         typeof config.webhookUrl !== 'string' ||
+        config.webhookUrl.length > 1000 ||
         [...config.webhookUrl].length > 500 ||
         /[\r\n\0]/.test(config.webhookUrl)
       )
