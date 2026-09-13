@@ -12,6 +12,7 @@ import {
   monitorAggregateCoverageSelect,
   type MonitorAggregateFamily,
 } from '../src/repositories/monitor-aggregate-coverage';
+import { consumeMonitorAnalyticsRows } from '../src/repositories/monitor-analytics-cursor';
 import {
   monitorAggregateBucketHoursSql,
   monitorAggregateMetricsSelect,
@@ -602,6 +603,130 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         raw.rows.reduce((sum, row) => sum + Number(row.total_checks), 0),
       ).toBe(10);
       await pool.query('RESET search_path');
+    });
+
+    it('streams bounded batches from one cursor snapshot while another connection changes the history row', async () => {
+      const client = await pool.connect(),
+        db = createDb(client);
+      const writer = createPgPool(process.env.DATABASE_URL!, {
+        max: 1,
+        connectionTimeoutMillis: 3000,
+      });
+      try {
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+        const sizes: number[] = [];
+        const count = await consumeMonitorAnalyticsRows(
+          db,
+          sql`
+          SELECT n, mh.is_broken FROM generate_series(1,2501) n
+          CROSS JOIN public.monitor_history mh
+          WHERE mh.asin_code='B109SQL001' AND mh.country='US' AND mh.check_time='1997-10-01 03:10:00'::timestamp
+          ORDER BY n`,
+          async (rows) => {
+            sizes.push(rows.length);
+            expect(rows.every((row) => row.is_broken === true)).toBe(true);
+            if (sizes.length === 1)
+              await writer.query(
+                "UPDATE public.monitor_history SET is_broken=false WHERE asin_code='B109SQL001' AND country='US' AND check_time='1997-10-01 03:10:00'::timestamp",
+              );
+          },
+          () => {},
+        );
+        expect(count).toBe(2501);
+        expect(sizes).toEqual([1000, 1000, 501]);
+        expect(
+          (
+            await client.query(
+              "SELECT is_broken FROM public.monitor_history WHERE asin_code='B109SQL001' AND country='US' AND check_time='1997-10-01 03:10:00'::timestamp",
+            )
+          ).rows[0].is_broken,
+        ).toBe(false);
+        expect(
+          (
+            await client.query(
+              "SELECT count(*)::int AS total FROM pg_cursors WHERE name='monitor_analytics_rows_cursor'",
+            )
+          ).rows[0].total,
+        ).toBe(0);
+      } finally {
+        try {
+          await client.query('ROLLBACK');
+        } finally {
+          client.release();
+        }
+        try {
+          await writer.query(
+            "UPDATE public.monitor_history SET is_broken=true WHERE asin_code='B109SQL001' AND country='US' AND check_time='1997-10-01 03:10:00'::timestamp",
+          );
+        } finally {
+          await writer.end();
+        }
+      }
+    });
+
+    it('recovers the transaction after a mid-stream SQL error or row limit, and supports early termination', async () => {
+      const client = await pool.connect(),
+        db = createDb(client);
+      try {
+        await client.query('BEGIN');
+        let seen = 0;
+        await expect(
+          consumeMonitorAnalyticsRows(
+            db,
+            sql`SELECT n,1/(2001-n) AS quotient FROM generate_series(1,3000) n`,
+            (rows) => {
+              seen += rows.length;
+            },
+            () => {},
+          ),
+        ).rejects.toThrow();
+        expect(seen).toBe(2000);
+        await expect(
+          consumeMonitorAnalyticsRows(
+            db,
+            sql`SELECT n FROM generate_series(1,1001) n`,
+            () => {},
+            () => {},
+            1000,
+          ),
+        ).rejects.toMatchObject({ code: 'capacity' });
+        let batches = 0;
+        expect(
+          await consumeMonitorAnalyticsRows(
+            db,
+            sql`SELECT n FROM generate_series(1,3000) n`,
+            () => {
+              batches++;
+              return false;
+            },
+            () => {},
+          ),
+        ).toBe(1000);
+        expect(batches).toBe(1);
+        const values: unknown[] = [];
+        await consumeMonitorAnalyticsRows(
+          db,
+          sql`SELECT 42 AS value`,
+          (rows) => {
+            values.push(...rows.map((row) => row.value));
+          },
+          () => {},
+        );
+        expect(values).toEqual([42]);
+        expect(
+          (
+            await client.query(
+              "SELECT count(*)::int AS total FROM pg_cursors WHERE name='monitor_analytics_rows_cursor'",
+            )
+          ).rows[0].total,
+        ).toBe(0);
+      } finally {
+        try {
+          await client.query('ROLLBACK');
+        } finally {
+          client.release();
+        }
+      }
     });
 
     it('matches all SQL metrics against real Legacy aggregate columns across partial buckets, per-ASIN averages and zero denominators', async () => {
