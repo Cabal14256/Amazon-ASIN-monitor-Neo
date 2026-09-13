@@ -102,14 +102,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         defaultJobOptions: MONITOR_INTERVAL_JOB_OPTIONS,
       });
       events = new QueueEvents(MONITOR_INTERVAL_QUEUE, { connection, prefix });
-      redis = new Redis(getWatchdogRedisOptions(connection));
+      redis = new Redis({
+        ...getWatchdogRedisOptions(connection),
+        lazyConnect: true,
+        connectTimeout: 2000,
+        retryStrategy: () => null,
+      });
       const connectionError = () => {
         failures.push('fixture connection error');
       };
       queue.on('error', connectionError);
       events.on('error', connectionError);
       redis.on('error', connectionError);
-      await Promise.all([queue.waitUntilReady(), events.waitUntilReady()]);
+      await Promise.all([
+        queue.waitUntilReady(),
+        events.waitUntilReady(),
+        redis.connect(),
+      ]);
       await redis.set(
         `${env.BULL_PREFIX}:${MONITOR_INTERVAL_QUEUE}:legacy-sentinel`,
         'untouched',
