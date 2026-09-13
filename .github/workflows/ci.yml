@@ -82,6 +82,11 @@ jobs:
           pnpm --filter @asin-monitor/variant-check test
           pnpm --filter @asin-monitor/variant-check typecheck
 
+      - name: Test, build and typecheck shared Feishu notifications
+        run: |
+          pnpm --filter @asin-monitor/notify test
+          pnpm --filter @asin-monitor/notify typecheck
+
       - name: Test new api
         run: pnpm --filter @asin-monitor/api test
 
