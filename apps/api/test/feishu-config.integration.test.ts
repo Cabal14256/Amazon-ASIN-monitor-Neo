@@ -32,6 +32,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     const webhook = 'https://example.invalid/private-feishu-115';
     beforeAll(async () => {
       legacy = await legacyAnalyticsFixture();
+      // mysql2's timezone only controls value conversion. NOW()/DATETIME defaults
+      // also need the D8 wall-clock session; CI's MySQL container defaults to UTC.
+      await legacy.query("SET SESSION time_zone = '+08:00'");
+      expect(
+        (
+          await legacy.query(
+            'SELECT TIMESTAMPDIFF(SECOND,UTC_TIMESTAMP(),NOW()) AS offset_seconds',
+          )
+        )[0]?.offset_seconds,
+      ).toBe(8 * 60 * 60);
       const ddl = readFileSync(
         resolve(__dirname, '../../../server/database/init.sql'),
         'utf8',

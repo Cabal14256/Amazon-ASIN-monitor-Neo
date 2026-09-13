@@ -39,4 +39,6 @@ API 服务每进程限制 8 个正在执行的配置操作，仓库限制 16 个
 
 单元与 HTTP 测试覆盖完整字段、国家映射、NULL、输入上限、当前权限、Origin、并发容量和脱敏。Integration 工作流在一次性 MySQL 数据库和 PostgreSQL 私有 schema 中执行实际旧模型/控制器与 Neo HTTP，比较完整响应、状态码及存储副作用，另验证真实锁等待、并发 upsert、撤权、回滚和审计。
 
-测试显式安装 PostgreSQL 基线的更新时间触发器，因为 `LIKE INCLUDING ALL` 不复制触发器。历史时间与 NULL 逐值精确比较；新写入时间分别要求为正确 ISO 且处于实际操作的当前时间范围，然后进行语义比较，允许 MySQL DATETIME 秒精度和 PostgreSQL 毫秒输出及两次写入时刻的差异。国家、ID、Webhook、标记及其他字段不做归一化。该验证不能替代生产数据对拍与后续阶段切流门槛。
+测试显式安装 PostgreSQL 基线的更新时间触发器，因为 `LIKE INCLUDING ALL` 不复制触发器。MySQL 测试连接明确设置并检查 `time_zone=+08:00`，使 NOW()/DATETIME 默认值符合 D8 墙上时间；仅设置 mysql2 驱动的 timezone 不会改变数据库会话时区，CI 默认 UTC 会使旧响应的新时间偏移八小时。生产对拍前也必须核查旧库实际会话时区，不能假设驱动配置已完成这一步。
+
+历史时间与 NULL 逐值精确比较；新写入时间分别要求为正确 ISO 且处于实际操作的当前时间范围，然后进行语义比较，允许 MySQL DATETIME 秒精度和 PostgreSQL 毫秒输出及两次写入时刻的差异。国家、ID、Webhook、标记及其他字段不做归一化。该验证不能替代生产数据对拍与后续阶段切流门槛。
