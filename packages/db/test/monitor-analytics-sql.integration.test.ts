@@ -31,6 +31,7 @@ import {
   readMonitorPeakQuery,
 } from '../src/repositories/monitor-count-query';
 import { readMonitorDurationQuery } from '../src/repositories/monitor-duration-query';
+import { readMonitorPeriodQuery } from '../src/repositories/monitor-period-query';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
 
 // Only numeric SQL representation and PAD SPACE trailing blanks are normalized.
@@ -546,6 +547,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await pool.query(
         "UPDATE public.monitor_history SET variant_group_name='Group B snapshot' WHERE variant_group_id='analytics-109-b'",
       );
+      await legacy.query(
+        "UPDATE monitor_history SET variant_group_name='Group B snapshot' WHERE variant_group_id='analytics-109-b'",
+      );
       await refreshAll();
       for (const tz of ['UTC', 'Asia/Shanghai', 'America/New_York']) {
         await pool.query("SELECT set_config('TimeZone',$1,false)", [tz]);
@@ -614,14 +618,18 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     it('matches complete aggregate leaf queries, including regional UNION precision and group-wide ASIN deduplication', async () => {
       // These tests isolate the query/mapping contract. Actual projection
       // construction and raw parity are checked above and by the 0001 gate.
-      for (const family of ['asin', 'variant_group'] as const) {
+      for (const family of ['asin', 'variant_group', 'dim'] as const) {
         const target =
           family === 'asin'
             ? 'monitor_history_agg'
+            : family === 'dim'
+            ? 'monitor_history_agg_dim'
             : 'monitor_history_agg_variant_group';
         const relation =
           family === 'asin'
             ? sql`public.monitor_history_agg_v2`
+            : family === 'dim'
+            ? sql`public.monitor_history_agg_dim_v2`
             : sql`public.monitor_history_agg_variant_group_v2`;
         const columns = [
           'granularity',
@@ -636,6 +644,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           'last_check_time',
           ...(family === 'variant_group'
             ? ['variant_group_id', 'variant_group_name']
+            : family === 'dim'
+            ? ['site', 'brand']
             : []),
         ];
         const selected = await createDb(pool).execute(sql`SELECT granularity,
@@ -646,6 +656,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ${
             family === 'variant_group'
               ? sql`,variant_group_id,variant_group_name`
+              : family === 'dim'
+              ? sql`,site,brand`
               : sql``
           }
           FROM ${relation} WHERE time_slot>='1997-10-01'::timestamp AND time_slot<'1997-11-01'::timestamp`);
@@ -839,7 +851,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               startTime: '1997-10-01 03:00:00.123',
               endTime: '1997-10-01 03:00:01.900',
             },
-            { startTime: '1997-10-02 03:00:00' },
+            // The shared PG database contains later performance fixtures that
+            // are absent from this private MySQL schema. A sole upper bound
+            // preserves the missing-bound contract with identical source data.
+            { endTime: '1997-10-02 03:00:00' },
             {
               startTime: '1997-10-03 01:00:00',
               endTime: '1997-10-01 00:00:00',
@@ -875,7 +890,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             ...fields,
           });
           const neo = await readMonitorDurationQuery(db, query, () => {}, {
-            aggregateEnabled: true,
+            aggregateEnabled: false,
             onAggregateFallback() {},
           });
           expect
@@ -981,6 +996,58 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                 .soft(
                   neo,
                   `${country}/${JSON.stringify(times)}/${aggregateEnabled}`,
+                )
+                .toEqual(old);
+            }
+          }
+        }
+        await client.query('COMMIT');
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    }, 20_000);
+
+    it('reads period counts, pages and their exact group buckets together, including empty pages and literal EU details', async () => {
+      const client = await pool.connect();
+      const db = createDb(client);
+      try {
+        await client.query('BEGIN');
+        for (const params of [
+          {},
+          { current: '2', pageSize: '2' },
+          { current: '100', pageSize: '2' },
+          { country: 'EU' },
+          { country: 'US', site: 'store', brand: 'Cafe' },
+          { site: ' ' },
+          { country: 'CA' },
+          { timeSlotGranularity: 'week' },
+          {
+            startTime: '1997-10-01 03:10:00.123',
+            endTime: '1997-10-01 03:10:01.900',
+          },
+        ]) {
+          for (const [operation, method] of [
+            ['period-summary', 'getPeriodSummary'],
+            ['period-summary/details', 'getPeriodSummaryTimeSlotDetails'],
+          ] as const) {
+            const query = parseMonitorAnalyticsQuery(operation, {
+              startTime,
+              endTime: '1997-10-03 12:59:59',
+              ...params,
+            });
+            for (const aggregateEnabled of [false, true]) {
+              const neo = await readMonitorPeriodQuery(db, query, () => {}, {
+                aggregateEnabled,
+                onAggregateFallback() {},
+              });
+              const old = aggregateEnabled
+                ? await legacy.aggregate(method, query)
+                : await legacy.model[method](query);
+              expect
+                .soft(
+                  neo.data,
+                  `${operation}/${JSON.stringify(params)}/${aggregateEnabled}`,
                 )
                 .toEqual(old);
             }

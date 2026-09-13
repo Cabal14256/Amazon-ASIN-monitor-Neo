@@ -12,6 +12,7 @@ import {
   type MonitorDurationQueryOptions,
   type MonitorDurationQueryResult,
 } from './monitor-duration-query';
+import { readMonitorPeriodQuery } from './monitor-period-query';
 import { DrizzleRoleUnit, type RoleWriteUnit } from './role-repository';
 
 export interface MonitorAnalyticsQueryUnit
@@ -24,6 +25,7 @@ export interface MonitorAnalyticsQueryUnit
     query: MonitorAnalyticsQuery,
   ): ReturnType<typeof readMonitorCountQuery>;
   peak(query: MonitorAnalyticsQuery): ReturnType<typeof readMonitorPeakQuery>;
+  period(query: MonitorAnalyticsQuery): Promise<MonitorDurationQueryResult>;
 }
 export interface MonitorAnalyticsQueryRepositoryPort {
   read<T>(action: (unit: MonitorAnalyticsQueryUnit) => Promise<T>): Promise<T>;
@@ -86,6 +88,15 @@ class DrizzleMonitorAnalyticsQueryUnit
   async peak(query: MonitorAnalyticsQuery) {
     await this.dataPhase();
     return readMonitorPeakQuery(this.db, query, this.ensureOpen, this.options);
+  }
+  async period(query: MonitorAnalyticsQuery) {
+    await this.dataPhase();
+    return readMonitorPeriodQuery(
+      this.db,
+      query,
+      this.ensureOpen,
+      this.options,
+    );
   }
 }
 export class PgMonitorAnalyticsQueryRepository

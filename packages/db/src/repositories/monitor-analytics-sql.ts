@@ -99,10 +99,12 @@ export function monitorRawDurationSourceSelect(
   query: MonitorAnalyticsQuery,
   family: MonitorAggregateFamily,
   granularity: MonitorSourceGranularity,
+  scope?: SQL,
 ): SQL {
   validateMonitorAnalyticsQuery(query);
   validateSource(family, granularity);
   const where = [...rawWhere(query), asinFilter];
+  if (scope) where.push(scope);
   const slot = rawSlots[granularity],
     country = ci(sql`mh.country`);
   const select: SQL[] = [],
@@ -146,10 +148,12 @@ export function monitorAggregateSourceSelect(
   query: MonitorAnalyticsQuery,
   family: MonitorAggregateFamily,
   granularity: MonitorSourceGranularity,
+  scope?: SQL,
 ): SQL {
   validateMonitorAnalyticsQuery(query);
   validateSource(family, granularity);
   const where = [sql`agg.granularity = ${granularity}`];
+  if (scope) where.push(scope);
   if (query.country)
     where.push(countryCondition(sql`agg.country`, query.country));
   if (query.startTime)

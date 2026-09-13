@@ -148,6 +148,8 @@ export async function legacyAnalyticsFixture() {
             'getRegionSummary',
             'getASINStatisticsByCountry',
             'getASINStatisticsByVariantGroup',
+            'getPeriodSummary',
+            'getPeriodSummaryTimeSlotDetails',
           ].includes(method)
         )
           throw new Error('Unexpected Legacy aggregate fixture operation');
