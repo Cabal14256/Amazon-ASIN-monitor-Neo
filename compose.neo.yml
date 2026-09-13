@@ -36,6 +36,10 @@ services:
       # History text matching follows the verified 0005 comparison collation.
       - ./packages/db/migrations/0007_monitor_history_matching.sql:/opt/asin-monitor/0007_monitor_history_matching.sql:ro
       - ./packages/db/migrations/0007_monitor_history_matching.rollback.sql:/opt/asin-monitor/0007_monitor_history_matching.rollback.sql:ro
+      # Status intervals are an explicit upgrade after the final snapshot and 0007.
+      - ./packages/db/docker/apply-monitor-intervals.sh:/opt/asin-monitor/apply-monitor-intervals.sh:ro
+      - ./packages/db/migrations/0008_monitor_interval_projection.sql:/opt/asin-monitor/0008_monitor_interval_projection.sql:ro
+      - ./packages/db/migrations/0008_monitor_interval_projection.rollback.sql:/opt/asin-monitor/0008_monitor_interval_projection.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

@@ -180,6 +180,18 @@ jobs:
       - name: Run ASIN timestamp policy upgrade, transactions and rollback on PostgreSQL
         run: pnpm --filter @asin-monitor/db exec vitest run test/asin-timestamp-policy.integration.test.ts
 
+      - name: Apply monitor interval maintenance upgrade twice
+        run: |
+          docker cp packages/db/migrations/0008_monitor_interval_projection.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0008_monitor_interval_projection.sql"
+          docker cp packages/db/docker/apply-monitor-intervals.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-monitor-intervals.sh"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-monitor-intervals.sh /tmp/0008_monitor_interval_projection.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-monitor-intervals.sh /tmp/0008_monitor_interval_projection.sql
+
+      - name: Compare observed interval maintenance with Legacy and verify mutation receipts
+        env:
+          TZ: Asia/Shanghai
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-interval-projection.integration.test.ts
+
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
 
@@ -224,6 +236,26 @@ jobs:
       - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
+      - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
+        run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
+
+      - name: Verify monitor continuous aggregate freshness after late writes and historical corrections
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
+
+      - name: Compare monitor statistics SQL with actual Legacy MySQL and refreshed Timescale projections
+        env:
+          TZ: Asia/Shanghai
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-analytics-sql.integration.test.ts
+
+      - name: Upload monitor SQL decimal evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: monitor-sql-decimal-${{ github.run_id }}
+          path: artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Run ASIN writes with real constraints, timestamp policy and PostgreSQL transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-write.integration.test.ts
 
@@ -249,6 +281,9 @@ jobs:
         run: |
           pnpm --filter @asin-monitor/worker build
           pnpm --filter @asin-monitor/worker exec vitest run test/auth-maintenance.integration.test.ts test/auth-maintenance-entry.integration.test.ts --no-file-parallelism
+
+      - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts
 
       - name: Run ASIN batch deletion from HTTP through the compiled BullMQ Worker
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-delete.integration.test.ts
@@ -281,6 +316,12 @@ jobs:
 
       - name: Run Neo audit query PostgreSQL and HTTP integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
+
+      - name: Smoke test status interval maintenance rollback twice
+        run: |
+          docker cp packages/db/migrations/0008_monitor_interval_projection.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0008_monitor_interval_projection.rollback.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0008_monitor_interval_projection.rollback.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0008_monitor_interval_projection.rollback.sql
 
       - name: Smoke test Timescale storage-policy rollback
         run: |

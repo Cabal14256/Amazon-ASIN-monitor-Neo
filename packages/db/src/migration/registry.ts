@@ -507,6 +507,14 @@ function targetHypertableDimensions(
 function tableSpec(table: PgTable): TableMigrationSpec {
   const tableName = getTableName(table);
   const columns = Object.values(getTableColumns(table));
+  // Snapshot import validates Legacy and the frozen 0000/0001 target BEFORE
+  // runtime upgrades. 0008 widens ID# keys only after this final import gate;
+  // the current application's Drizzle length must not rewrite that contract.
+  const snapshotSqlType = (column: (typeof columns)[number]) =>
+    tableName === 'monitor_history_status_interval' &&
+    column.name === 'asin_key'
+      ? 'varchar(50)'
+      : column.getSQLType();
   const tableConfig = getTableConfig(table);
   const inlinePrimaryKeys = columns
     .filter((column) => column.primary)
@@ -544,7 +552,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
   const sourceColumnTypeSignatures = columns.map((column) =>
     [
       column.name,
-      sourceColumnType(tableName, column.name, column.getSQLType()),
+      sourceColumnType(tableName, column.name, snapshotSqlType(column)),
     ].join('|'),
   );
   const targetColumnSignatures = columns.map((column) => {
@@ -564,7 +572,7 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     );
     return [
       column.name,
-      postgresCatalogType(column.getSQLType()),
+      postgresCatalogType(snapshotSqlType(column)),
       column.notNull ? 'not-null' : 'nullable',
       identityKind,
       column.generated ? 's' : '',

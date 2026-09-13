@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { resultSchema } from '../envelope';
 
 /**
- * monitor 域契约（17 端点：监控历史查询 + 12 个统计 + 手动触发）。
+ * monitor 域契约（17 端点：2 个监控历史查询 + 14 个统计 + 手动触发）。
  * 来源：server/src/controllers/monitorController.js、models/MonitorHistory.js
  * 实读（2026-08-24）。
  * 注意：

@@ -293,6 +293,46 @@ const envObjectSchema = z.object({
     .pipe(z.enum(['api', 'worker', 'all']))
     .default('api'),
   SCHEDULER_ENABLED: booleanFlagSchema(false),
+  ANALYTICS_STATUS_INTERVAL_ENABLED: booleanFlagSchema(true),
+  ANALYTICS_AGG_ENABLED: booleanFlagSchema(true),
+  ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED: booleanFlagSchema(false),
+  // Keep Legacy TTL names/units. Zero explicitly disables this Neo cache family.
+  ANALYTICS_STATISTICS_BY_TIME_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(300_000),
+  ANALYTICS_ALL_COUNTRIES_SUMMARY_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(300_000),
+  ANALYTICS_REGION_SUMMARY_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(300_000),
+  ANALYTICS_PERIOD_SUMMARY_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(300_000),
+  ANALYTICS_ASIN_COUNTRY_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(300_000),
+  ANALYTICS_ASIN_VARIANT_GROUP_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(300_000),
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),

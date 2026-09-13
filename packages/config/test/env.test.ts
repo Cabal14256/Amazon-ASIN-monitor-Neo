@@ -21,6 +21,59 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('bounds all analytics cache TTLs and validates aggregate/bypass flags', () => {
+    const ttlKeys = [
+      'ANALYTICS_STATISTICS_BY_TIME_TTL_MS',
+      'ANALYTICS_ALL_COUNTRIES_SUMMARY_TTL_MS',
+      'ANALYTICS_REGION_SUMMARY_TTL_MS',
+      'ANALYTICS_PERIOD_SUMMARY_TTL_MS',
+      'ANALYTICS_ASIN_COUNTRY_TTL_MS',
+      'ANALYTICS_ASIN_VARIANT_GROUP_TTL_MS',
+    ] as const;
+    for (const key of ttlKeys) {
+      expect(loadEnv(validEnv)[key]).toBe(300000);
+      expect(loadEnv({ ...validEnv, [key]: '0' })[key]).toBe(0);
+      for (const value of ['-1', '1.5', '3600001', 'Infinity', 'invalid'])
+        expect(() => loadEnv({ ...validEnv, [key]: value })).toThrow(
+          EnvValidationError,
+        );
+    }
+    expect(loadEnv(validEnv).ANALYTICS_AGG_ENABLED).toBe(true);
+    expect(loadEnv(validEnv).ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED).toBe(
+      false,
+    );
+    expect(
+      loadEnv({ ...validEnv, ANALYTICS_AGG_ENABLED: '0' })
+        .ANALYTICS_AGG_ENABLED,
+    ).toBe(false);
+    expect(
+      loadEnv({ ...validEnv, ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED: '1' })
+        .ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED,
+    ).toBe(true);
+    expect(() =>
+      loadEnv({ ...validEnv, ANALYTICS_AGG_ENABLED: 'invalid' }),
+    ).toThrow(EnvValidationError);
+    expect(() =>
+      loadEnv({
+        ...validEnv,
+        ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED: 'invalid',
+      }),
+    ).toThrow(EnvValidationError);
+  });
+  it('validates the status interval maintenance switch', () => {
+    expect(loadEnv(validEnv).ANALYTICS_STATUS_INTERVAL_ENABLED).toBe(true);
+    expect(
+      loadEnv({ ...validEnv, ANALYTICS_STATUS_INTERVAL_ENABLED: '0' })
+        .ANALYTICS_STATUS_INTERVAL_ENABLED,
+    ).toBe(false);
+    expect(
+      loadEnv({ ...validEnv, ANALYTICS_STATUS_INTERVAL_ENABLED: 'on' })
+        .ANALYTICS_STATUS_INTERVAL_ENABLED,
+    ).toBe(true);
+    expect(() =>
+      loadEnv({ ...validEnv, ANALYTICS_STATUS_INTERVAL_ENABLED: 'invalid' }),
+    ).toThrow(EnvValidationError);
+  });
   it('preserves Legacy sync batch thresholds, including a positive fraction forcing asynchronous submission', () => {
     expect(loadEnv(validEnv).BATCH_CHECK_SYNC_MAX_GROUPS).toBe(20);
     expect(loadEnv(validEnv).BATCH_CHECK_SYNC_CONCURRENCY).toBe(3);
