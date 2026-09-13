@@ -1,4 +1,7 @@
-import { monitorAnalyticsDataSchemas } from '@asin-monitor/contracts';
+import {
+  monitorAnalyticsDataSchemas,
+  timescaleAggregateEvidenceManifest,
+} from '@asin-monitor/contracts';
 import {
   MONITOR_ANALYTICS_OPERATIONS,
   parseMonitorAnalyticsQuery,
@@ -50,7 +53,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         imports: [MonitorHistoryModule],
         env: {
           BULL_PREFIX: prefix,
-          ANALYTICS_AGG_ENABLED: false,
+          ANALYTICS_AGG_ENABLED: true,
           ANALYTICS_STATUS_INTERVAL_ENABLED: false,
         },
       });
@@ -247,7 +250,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       },
     );
     it('preserves grouping, pagination, exact filters, fractional ranges and abnormal summary-only data', async () => {
-      for (const groupBy of ['hour', 'day', 'week', 'month'])
+      for (const groupBy of ['hour', 'day', 'week'])
         await compare('by-time', { ...range, groupBy });
       await compare('statistics', {
         ...range,
@@ -285,6 +288,27 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         groupBy: 'hour',
       });
     });
+    it('preserves monthly metrics while recording the frozen Legacy strict-grouping defect', async () => {
+      const [{ mode }] = await legacy.query(
+        'SELECT @@SESSION.sql_mode AS mode',
+      );
+      expect(String(mode)).toContain('ONLY_FULL_GROUP_BY');
+      const query = { ...range, groupBy: 'month' };
+      const strict = await legacy.http('by-time', query);
+      expect(strict.statusCode).toBe(500);
+      expect(strict.body.errorMessage).toContain('only_full_group_by');
+      // The existing SQL differential suite records the same frozen defect.
+      // Only this private MySQL oracle session relaxes grouping; production
+      // Legacy SQL and every PostgreSQL query remain unchanged and strict.
+      try {
+        await legacy.query(
+          "SET SESSION sql_mode=REPLACE(@@SESSION.sql_mode,'ONLY_FULL_GROUP_BY','')",
+        );
+        await compare('by-time', query);
+      } finally {
+        await legacy.query('SET SESSION sql_mode=?', [mode]);
+      }
+    });
     it('uses real Redis cache with original timestamps, per-range keys and current permission revocation', async () => {
       const raw = { ...range, country: 'US', groupBy: 'day' };
       await clearCache();
@@ -316,6 +340,56 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
       }
       expect((await get('by-time', raw)).json().meta.cacheHit).toBe(true);
+    });
+    it('expires real Redis entries and rejects corrupted or oversized cached responses', async () => {
+      const raw = { ...range, country: 'US', groupBy: 'day' };
+      const key = cache.key(parseMonitorAnalyticsQuery('by-time', raw));
+      await clearCache();
+      expect((await get('by-time', raw)).json().meta.cacheHit).toBe(false);
+      await f.redis.client.pexpire(key, 1);
+      await vi.waitFor(async () =>
+        expect(await f.redis.client.exists(key)).toBe(0),
+      );
+      expect((await get('by-time', raw)).json().meta.cacheHit).toBe(false);
+      for (const corrupt of ['{', 'x'.repeat(3 * 1024 * 1024)]) {
+        await f.redis.client.psetex(key, 300000, corrupt);
+        const response = await get('by-time', raw);
+        expect(response.statusCode).toBe(200);
+        expect(response.json().meta.cacheHit).toBe(false);
+      }
+    });
+    it('bounds concurrent real SQL requests to two and restores admission when they finish', async () => {
+      const blocker = await f.pools.primaryPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof get>>[]> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          'LOCK TABLE public.monitor_history IN ACCESS EXCLUSIVE MODE',
+        );
+        pending = Promise.all([
+          get('statistics', range),
+          get('statistics', range),
+        ]);
+        await vi.waitFor(
+          async () => {
+            const waiting = await blocker.query(
+              "SELECT count(*)::int AS n FROM pg_locks WHERE relation='public.monitor_history'::regclass AND mode='AccessShareLock' AND NOT granted",
+            );
+            expect(waiting.rows[0].n).toBe(2);
+          },
+          { timeout: 1000, interval: 20 },
+        );
+        expect((await get('statistics', range)).statusCode).toBe(429);
+        await blocker.query('ROLLBACK');
+        expect((await pending).map((response) => response.statusCode)).toEqual([
+          200, 200,
+        ]);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        if (pending) await pending;
+      }
+      expect((await get('statistics', range)).statusCode).toBe(200);
     });
     it('checks a committed revocation after waiting on the shared authorization lock', async () => {
       const blocker = await f.pools.primaryPool.connect();
@@ -370,6 +444,42 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(
         (await get('statistics', { ...range, country: 'US' })).statusCode,
       ).toBe(200);
+    });
+    it('serves refreshed Timescale results and invalidates the fast path after a historical correction', async () => {
+      const raw = {
+        startTime: '1996-02-01 00:00:00',
+        endTime: '1996-02-01 23:59:59',
+        groupBy: 'hour',
+      };
+      await clearCache();
+      const before = (await get('by-time', raw)).json();
+      expect(before.meta.source).toBe('raw');
+      for (const item of timescaleAggregateEvidenceManifest) {
+        await f.pools.primaryPool.query(
+          'CALL public.refresh_continuous_aggregate($1::regclass,$2::timestamp,$3::timestamp,force=>true)',
+          [
+            `public.${item.caggRelation}`,
+            range.startTime,
+            '1996-03-01 00:00:00',
+          ],
+        );
+      }
+      await clearCache();
+      const fast = (await get('by-time', raw)).json();
+      expect(fast.meta.source).toBe('agg');
+      expect(fast.data).toEqual(before.data);
+      expect((await get('by-time', raw)).json().meta.source).toBe('cache+agg');
+      await f.pools.primaryPool.query(
+        "UPDATE public.monitor_history SET is_broken=false WHERE variant_group_id=$1 AND check_time='1996-02-01 01:10:00'",
+        [group],
+      );
+      await legacy.query(
+        "UPDATE monitor_history SET is_broken=0 WHERE variant_group_id=? AND check_time='1996-02-01 01:10:00'",
+        [group],
+      );
+      const corrected = await compare('by-time', raw);
+      expect(corrected.meta.source).toBe('raw');
+      expect(corrected.data).not.toEqual(before.data);
     });
   },
 );
