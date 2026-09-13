@@ -932,9 +932,35 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                 : {}),
             },
           );
-          expect
-            .soft(result.data, `${operation}/complete-aggregate`)
-            .toEqual(old);
+          if (operation === 'asin-by-country') {
+            // Legacy SQL specifies only these two rank keys. Countries with
+            // identical scores have no defined relative order across engines.
+            const rank = (
+              a: Record<string, unknown>,
+              b: Record<string, unknown>,
+            ) =>
+              Number(b.abnormalDurationHours) -
+                Number(a.abnormalDurationHours) ||
+              Number(b.ratioAllTime) - Number(a.ratioAllTime);
+            const rows = result.data as Record<string, unknown>[];
+            expect(
+              rows.every(
+                (row, index) => index === 0 || rank(rows[index - 1], row) <= 0,
+              ),
+            ).toBe(true);
+            const tied = (
+              a: Record<string, unknown>,
+              b: Record<string, unknown>,
+            ) =>
+              rank(a, b) || String(a.country).localeCompare(String(b.country));
+            expect
+              .soft([...rows].sort(tied), `${operation}/complete-aggregate`)
+              .toEqual([...old].sort(tied));
+          } else {
+            expect
+              .soft(result.data, `${operation}/complete-aggregate`)
+              .toEqual(old);
+          }
         }
         await client.query('COMMIT');
       } finally {
