@@ -1,3 +1,4 @@
+import { MonitorAnalyticsQueryError } from './monitor-analytics-query';
 import {
   addMonitorGranularity,
   floorMonitorDate,
@@ -193,98 +194,137 @@ export function buildMonitorAbnormalFromBuckets(
   query: MonitorAbnormalQueryRange = {},
 ) {
   checkSize(rows.length);
-  const timeGranularity = getMonitorAbnormalGranularity(query);
-  const start = parseMonitorDate(query.startTime),
-    end = parseMonitorDate(query.endTime);
-  const summaryMap = new Map<string, SummaryAccumulator>();
-  const data = rows.map((row) => {
-    const brokenCount = Number(row.broken_count || 0),
-      totalChecks = Number(row.total_checks || 0);
-    const bucket = getMonitorBucketRange(row.time_period, timeGranularity);
-    const hours =
-      bucket.bucketStart && bucket.bucketEnd
-        ? getMonitorDurationBucketHours(
-            row.time_period,
-            timeGranularity,
-            start,
-            end,
-          )
-        : timeGranularity === 'hour'
-        ? 1
-        : timeGranularity === 'week'
-        ? 168
-        : 24;
-    const ratio = totalChecks > 0 ? clamp(brokenCount / totalChecks, 1) : 0;
-    const item: MonitorAbnormalSeriesRow = {
-      timePeriod: row.time_period,
-      asinId: row.asin_id,
-      asin: row.asin,
-      country: row.country,
-      abnormalDuration: round(clamp(hours * ratio, hours), 4),
-      totalDuration: round(hours, 4),
-      abnormalRatio: round(ratio * 100, 2),
-      brokenCount,
-      totalChecks,
-    };
-    if (item.asin || item.asinId)
-      addSummary(
-        summaryMap,
-        {
-          id: item.asinId,
-          asin: item.asin || `ASIN-${item.asinId}`,
-          country: item.country || '',
-        },
-        query,
-        item.abnormalDuration,
-        brokenCount,
-        item.timePeriod,
-      );
-    return item;
-  });
-  const summary = finishSummary(summaryMap);
-  if (query.includeSeries === '0')
-    return { timeGranularity, data: [] as MonitorAbnormalSeriesRow[], summary };
-  if (!start || !end) return { timeGranularity, data, summary };
-  const timePeriods = periods(start, end, timeGranularity);
-  // Legacy differentiates metadata by ASIN text but finds existing buckets by ID
-  // and country. Keep that behavior when snapshots changed names/code casing.
-  const metas = new Map<
-    string,
-    Pick<MonitorAbnormalSeriesRow, 'asinId' | 'asin' | 'country'>
-  >();
-  const existing = new Map<string, MonitorAbnormalSeriesRow>();
-  for (const row of data) {
-    const meta = {
-      asinId: row.asinId,
-      asin: row.asin,
-      country: row.country || '',
-    };
-    if (row.asinId) metas.set(JSON.stringify(meta), meta);
-    existing.set(`${row.timePeriod}|${row.asinId}|${row.country || ''}`, row);
+  const stream = new MonitorAbnormalBucketStream(query);
+  stream.add(rows);
+  return stream.finish();
+}
+
+/** The response and live summary state are bounded independently from input
+ * bucket count. Summary-only requests can consume a normal month for 10k ASINs
+ * without retaining the hundreds of thousands of input buckets. */
+export class MonitorAbnormalBucketStream {
+  private readonly timeGranularity: ReturnType<
+    typeof getMonitorAbnormalGranularity
+  >;
+  private readonly start: Date | null;
+  private readonly end: Date | null;
+  private readonly summaryMap = new Map<string, SummaryAccumulator>();
+  private readonly data: MonitorAbnormalSeriesRow[] = [];
+  private finished = false;
+  constructor(private readonly query: MonitorAbnormalQueryRange = {}) {
+    this.timeGranularity = getMonitorAbnormalGranularity(query);
+    this.start = parseMonitorDate(query.startTime);
+    this.end = parseMonitorDate(query.endTime);
   }
-  checkSize(Math.max(1, metas.size) * timePeriods.length);
-  const filled: MonitorAbnormalSeriesRow[] = [];
-  for (const meta of metas.values())
-    for (const period of timePeriods) {
-      filled.push(
-        existing.get(`${period}|${meta.asinId}|${meta.country || ''}`) ||
+  add(rows: readonly MonitorAbnormalBucketRow[]) {
+    if (this.finished) throw new MonitorAnalyticsQueryError('invalid-result');
+    const { start, end, timeGranularity, query, summaryMap } = this;
+    for (const row of rows) {
+      const brokenCount = Number(row.broken_count || 0),
+        totalChecks = Number(row.total_checks || 0);
+      const bucket = getMonitorBucketRange(row.time_period, timeGranularity);
+      const hours =
+        bucket.bucketStart && bucket.bucketEnd
+          ? getMonitorDurationBucketHours(
+              row.time_period,
+              timeGranularity,
+              start,
+              end,
+            )
+          : timeGranularity === 'hour'
+          ? 1
+          : timeGranularity === 'week'
+          ? 168
+          : 24;
+      const ratio = totalChecks > 0 ? clamp(brokenCount / totalChecks, 1) : 0;
+      const item: MonitorAbnormalSeriesRow = {
+        timePeriod: row.time_period,
+        asinId: row.asin_id,
+        asin: row.asin,
+        country: row.country,
+        abnormalDuration: round(clamp(hours * ratio, hours), 4),
+        totalDuration: round(hours, 4),
+        abnormalRatio: round(ratio * 100, 2),
+        brokenCount,
+        totalChecks,
+      };
+      if (item.asin || item.asinId)
+        addSummary(
+          summaryMap,
+          {
+            id: item.asinId,
+            asin: item.asin || `ASIN-${item.asinId}`,
+            country: item.country || '',
+          },
+          query,
+          item.abnormalDuration,
+          brokenCount,
+          item.timePeriod,
+        );
+      checkSize(summaryMap.size);
+      if (query.includeSeries !== '0') {
+        checkSize(this.data.length + 1);
+        this.data.push(item);
+      }
+    }
+  }
+  finish() {
+    this.finished = true;
+    const { start, end, timeGranularity, query, data } = this;
+    const summary = finishSummary(this.summaryMap);
+    if (query.includeSeries === '0')
+      return {
+        timeGranularity,
+        data: [] as MonitorAbnormalSeriesRow[],
+        summary,
+      };
+    if (!start || !end) return { timeGranularity, data, summary };
+    const timePeriods = periods(start, end, timeGranularity);
+    // Legacy differentiates metadata by ASIN text but finds existing buckets by ID
+    // and country. Keep that behavior when snapshots changed names/code casing.
+    const metas = new Map<
+      string,
+      Pick<MonitorAbnormalSeriesRow, 'asinId' | 'asin' | 'country'>
+    >();
+    const existing = new Map<string, MonitorAbnormalSeriesRow>();
+    for (const row of data) {
+      const meta = {
+        asinId: row.asinId,
+        asin: row.asin,
+        country: row.country || '',
+      };
+      if (row.asinId) metas.set(JSON.stringify(meta), meta);
+      existing.set(`${row.timePeriod}|${row.asinId}|${row.country || ''}`, row);
+    }
+    checkSize(Math.max(1, metas.size) * timePeriods.length);
+    const filled: MonitorAbnormalSeriesRow[] = [];
+    for (const meta of metas.values())
+      for (const period of timePeriods) {
+        filled.push(
+          existing.get(`${period}|${meta.asinId}|${meta.country || ''}`) ||
+            emptyRow(
+              period,
+              meta,
+              getMonitorDurationBucketHours(
+                period,
+                timeGranularity,
+                start,
+                end,
+              ),
+            ),
+        );
+      }
+    if (!filled.length)
+      for (const period of timePeriods)
+        filled.push(
           emptyRow(
             period,
-            meta,
+            { asinId: null, asin: null, country: null },
             getMonitorDurationBucketHours(period, timeGranularity, start, end),
           ),
-      );
-    }
-  if (!filled.length)
-    for (const period of timePeriods)
-      filled.push(
-        emptyRow(
-          period,
-          { asinId: null, asin: null, country: null },
-          getMonitorDurationBucketHours(period, timeGranularity, start, end),
-        ),
-      );
-  return { timeGranularity, data: filled, summary };
+        );
+    return { timeGranularity, data: filled, summary };
+  }
 }
 
 /** The interval path counts observed broken intervals, including clipped/open
@@ -295,111 +335,176 @@ export function buildMonitorAbnormalFromIntervals(
   now = new Date(),
 ) {
   checkSize(rows.length);
-  const timeGranularity = getMonitorAbnormalGranularity(query);
-  const start = parseMonitorDate(query.startTime),
-    end = parseMonitorDate(query.endTime);
-  const includeSeries = query.includeSeries !== '0';
-  const timePeriods = includeSeries ? periods(start, end, timeGranularity) : [];
-  const metas = new Map<
+  const stream = new MonitorStatusIntervalStream(query, now);
+  stream.add(rows);
+  return stream.finish();
+}
+
+/** Observed intervals keep their distinct count/metadata semantics while
+ * summary-only reads retain no interval array or unused series metadata. */
+export class MonitorStatusIntervalStream {
+  private readonly timeGranularity: ReturnType<
+    typeof getMonitorAbnormalGranularity
+  >;
+  private readonly start: Date | null;
+  private readonly end: Date | null;
+  private readonly includeSeries: boolean;
+  private readonly timePeriods: string[];
+  private readonly metas = new Map<
     string,
     Pick<MonitorAbnormalSeriesRow, 'asinId' | 'asin' | 'country'>
   >();
-  for (const row of rows) {
-    const asin = row.asin || row.asin_key || `ASIN-${row.asin_id || '-'}`;
-    const key = `${row.asin_id || asin}|${row.country || ''}`;
-    if (!metas.has(key))
-      metas.set(key, { asinId: row.asin_id, asin, country: row.country || '' });
+  private readonly summaryMap = new Map<string, SummaryAccumulator>();
+  private readonly series = new Map<string, MonitorAbnormalSeriesRow>();
+  private work = 0;
+  private finished = false;
+  constructor(
+    private readonly query: MonitorAbnormalQueryRange = {},
+    private readonly now = new Date(),
+  ) {
+    this.timeGranularity = getMonitorAbnormalGranularity(query);
+    this.start = parseMonitorDate(query.startTime);
+    this.end = parseMonitorDate(query.endTime);
+    this.includeSeries = query.includeSeries !== '0';
+    this.timePeriods = this.includeSeries
+      ? periods(this.start, this.end, this.timeGranularity)
+      : [];
   }
-  checkSize(metas.size * timePeriods.length);
-  const summaryMap = new Map<string, SummaryAccumulator>();
-  const series = new Map<string, MonitorAbnormalSeriesRow>();
-  let work = 0;
-  for (const row of rows) {
-    const intervalStart = parseMonitorDate(row.interval_start),
-      intervalEnd = parseMonitorDate(row.interval_end) || end || now;
-    if (!intervalStart || !Number.isFinite(intervalEnd.getTime())) continue;
-    const effectiveStart = new Date(
-      Math.max(
-        intervalStart.getTime(),
-        start?.getTime() ?? intervalStart.getTime(),
+  add(rows: readonly MonitorStatusIntervalRow[]) {
+    if (this.finished) throw new MonitorAnalyticsQueryError('invalid-result');
+    const {
+      start,
+      end,
+      now,
+      query,
+      timeGranularity,
+      timePeriods,
+      includeSeries,
+      metas,
+      summaryMap,
+      series,
+    } = this;
+    for (const row of rows) {
+      if (includeSeries) {
+        const asin = row.asin || row.asin_key || `ASIN-${row.asin_id || '-'}`;
+        const key = `${row.asin_id || asin}|${row.country || ''}`;
+        if (!metas.has(key))
+          metas.set(key, {
+            asinId: row.asin_id,
+            asin,
+            country: row.country || '',
+          });
+        checkSize(metas.size);
+        checkSize(metas.size * timePeriods.length);
+      }
+      const intervalStart = parseMonitorDate(row.interval_start),
+        intervalEnd = parseMonitorDate(row.interval_end) || end || now;
+      if (!intervalStart || !Number.isFinite(intervalEnd.getTime())) continue;
+      const effectiveStart = new Date(
+        Math.max(
+          intervalStart.getTime(),
+          start?.getTime() ?? intervalStart.getTime(),
+        ),
+      );
+      const effectiveEnd = new Date(
+        Math.min(
+          intervalEnd.getTime(),
+          end?.getTime() ?? intervalEnd.getTime(),
+        ),
+      );
+      if (effectiveEnd <= effectiveStart) continue;
+      const asin = row.asin || row.asin_key || `ASIN-${row.asin_id || '-'}`;
+      const country = row.country || '';
+      const key = `${row.asin_id || asin}|${country}`;
+      const broken = Number(row.is_broken) === 1;
+      if (broken)
+        addSummary(
+          summaryMap,
+          { id: row.asin_id, asin, country },
+          query,
+          (effectiveEnd.getTime() - effectiveStart.getTime()) / HOUR,
+          1,
+          formatMonitorSqlDate(effectiveStart),
+        );
+      checkSize(summaryMap.size);
+      if (!includeSeries) continue;
+      let cursor = floorMonitorDate(effectiveStart, timeGranularity);
+      while (cursor && cursor < effectiveEnd) {
+        if (++this.work > WORK_LIMIT)
+          throw new MonitorAnalyticsResultLimitError();
+        const next = addMonitorGranularity(cursor, timeGranularity);
+        if (!next) break;
+        const hours = Math.max(
+          0,
+          (Math.min(next.getTime(), effectiveEnd.getTime()) -
+            Math.max(cursor.getTime(), effectiveStart.getTime())) /
+            HOUR,
+        );
+        const period = formatMonitorPeriod(cursor, timeGranularity);
+        const seriesKey = `${period}|${key}`;
+        let item = series.get(seriesKey);
+        if (!item) {
+          checkSize(series.size + 1);
+          item = emptyRow(period, { asinId: row.asin_id, asin, country }, 0);
+          series.set(seriesKey, item);
+        }
+        item.totalDuration += hours;
+        item.totalChecks++;
+        if (broken) {
+          item.abnormalDuration += hours;
+          item.brokenCount++;
+        }
+        cursor = next;
+      }
+    }
+  }
+  finish() {
+    this.finished = true;
+    const {
+      start,
+      end,
+      timeGranularity,
+      timePeriods,
+      metas,
+      summaryMap,
+      series,
+    } = this;
+    const data: MonitorAbnormalSeriesRow[] = [];
+    for (const [key, meta] of metas)
+      for (const period of timePeriods) {
+        const current = series.get(`${period}|${key}`);
+        if (!current) {
+          data.push(
+            emptyRow(
+              period,
+              meta,
+              getMonitorDurationBucketHours(
+                period,
+                timeGranularity,
+                start,
+                end,
+              ),
+            ),
+          );
+          continue;
+        }
+        const totalDuration = round(current.totalDuration, 4),
+          abnormalDuration = round(current.abnormalDuration, 4);
+        data.push({
+          ...current,
+          totalDuration,
+          abnormalDuration,
+          abnormalRatio:
+            totalDuration > 0
+              ? round((abnormalDuration / totalDuration) * 100, 2)
+              : 0,
+        });
+      }
+    data.sort((a, b) =>
+      `${a.timePeriod}|${a.country}|${a.asinId || a.asin}`.localeCompare(
+        `${b.timePeriod}|${b.country}|${b.asinId || b.asin}`,
       ),
     );
-    const effectiveEnd = new Date(
-      Math.min(intervalEnd.getTime(), end?.getTime() ?? intervalEnd.getTime()),
-    );
-    if (effectiveEnd <= effectiveStart) continue;
-    const asin = row.asin || row.asin_key || `ASIN-${row.asin_id || '-'}`;
-    const country = row.country || '';
-    const key = `${row.asin_id || asin}|${country}`;
-    const broken = Number(row.is_broken) === 1;
-    if (broken)
-      addSummary(
-        summaryMap,
-        { id: row.asin_id, asin, country },
-        query,
-        (effectiveEnd.getTime() - effectiveStart.getTime()) / HOUR,
-        1,
-        formatMonitorSqlDate(effectiveStart),
-      );
-    if (!includeSeries) continue;
-    let cursor = floorMonitorDate(effectiveStart, timeGranularity);
-    while (cursor && cursor < effectiveEnd) {
-      if (++work > WORK_LIMIT) throw new MonitorAnalyticsResultLimitError();
-      const next = addMonitorGranularity(cursor, timeGranularity);
-      if (!next) break;
-      const hours = Math.max(
-        0,
-        (Math.min(next.getTime(), effectiveEnd.getTime()) -
-          Math.max(cursor.getTime(), effectiveStart.getTime())) /
-          HOUR,
-      );
-      const period = formatMonitorPeriod(cursor, timeGranularity);
-      const seriesKey = `${period}|${key}`;
-      let item = series.get(seriesKey);
-      if (!item) {
-        checkSize(series.size + 1);
-        item = emptyRow(period, { asinId: row.asin_id, asin, country }, 0);
-        series.set(seriesKey, item);
-      }
-      item.totalDuration += hours;
-      item.totalChecks++;
-      if (broken) {
-        item.abnormalDuration += hours;
-        item.brokenCount++;
-      }
-      cursor = next;
-    }
+    return { timeGranularity, data, summary: finishSummary(summaryMap) };
   }
-  const data: MonitorAbnormalSeriesRow[] = [];
-  for (const [key, meta] of metas)
-    for (const period of timePeriods) {
-      const current = series.get(`${period}|${key}`);
-      if (!current) {
-        data.push(
-          emptyRow(
-            period,
-            meta,
-            getMonitorDurationBucketHours(period, timeGranularity, start, end),
-          ),
-        );
-        continue;
-      }
-      const totalDuration = round(current.totalDuration, 4),
-        abnormalDuration = round(current.abnormalDuration, 4);
-      data.push({
-        ...current,
-        totalDuration,
-        abnormalDuration,
-        abnormalRatio:
-          totalDuration > 0
-            ? round((abnormalDuration / totalDuration) * 100, 2)
-            : 0,
-      });
-    }
-  data.sort((a, b) =>
-    `${a.timePeriod}|${a.country}|${a.asinId || a.asin}`.localeCompare(
-      `${b.timePeriod}|${b.country}|${b.asinId || b.asin}`,
-    ),
-  );
-  return { timeGranularity, data, summary: finishSummary(summaryMap) };
 }

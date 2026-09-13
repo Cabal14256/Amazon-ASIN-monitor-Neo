@@ -5,7 +5,9 @@ import {
   buildMonitorAbnormalFromBuckets,
   buildMonitorAbnormalFromIntervals,
   getMonitorAbnormalGranularity,
+  MonitorAbnormalBucketStream,
   MonitorAnalyticsResultLimitError,
+  MonitorStatusIntervalStream,
   type MonitorAbnormalBucketRow,
   type MonitorAbnormalQueryRange,
   type MonitorStatusIntervalRow,
@@ -373,6 +375,82 @@ describe('monitor abnormal duration / actual Legacy oracle', () => {
       }
     },
   );
+
+  it('streams summary-only daily buckets for 10k ASINs over 30 days with exact Legacy summaries', () => {
+    const query = {
+      startTime: '2024-04-01 03:00:00',
+      endTime: '2024-04-30 22:00:00',
+      includeSeries: '0' as const,
+    };
+    const rows = Array.from({ length: 300_000 }, (_, index) => ({
+      time_period: `2024-04-${String(1 + Math.floor(index / 10_000)).padStart(
+        2,
+        '0',
+      )}`,
+      asin_id: `id-${index % 10_000}`,
+      asin: `A${index % 10_000}`,
+      country: index % 2 ? 'US' : 'UK',
+      total_checks: 7,
+      broken_count: index % 5,
+    }));
+    const stream = new MonitorAbnormalBucketStream(query);
+    for (let offset = 0; offset < rows.length; offset += 997)
+      stream.add(rows.slice(offset, offset + 997));
+    const result = stream.finish();
+    expect(result.data).toEqual([]);
+    expect(result.summary).toHaveLength(10_000);
+    expect(result).toEqual(legacy([{ kind: 'buckets', rows, query }])[0]);
+  }, 20_000);
+
+  it('retains gap filling and snapshot metadata across batches while bounding summary state and output', () => {
+    const stream = new MonitorAbnormalBucketStream(shortRange);
+    for (const row of bucketRows) stream.add([row]);
+    expect(stream.finish()).toEqual(
+      legacy([{ kind: 'buckets', rows: bucketRows, query: shortRange }])[0],
+    );
+    expect(() => stream.add([])).toThrow();
+    const summary = new MonitorAbnormalBucketStream({ includeSeries: '0' });
+    expect(() =>
+      summary.add(
+        Array.from({ length: 50_001 }, (_, index) => ({
+          ...bucketRows[0],
+          asin_id: `unique-${index}`,
+        })),
+      ),
+    ).toThrow(MonitorAnalyticsResultLimitError);
+    const series = new MonitorAbnormalBucketStream();
+    expect(() => series.add(Array(50_001).fill(bucketRows[0]))).toThrow(
+      MonitorAnalyticsResultLimitError,
+    );
+  });
+
+  it('streams observed intervals with exact clipping, open intervals and first metadata across batches', () => {
+    const stream = new MonitorStatusIntervalStream(shortRange, now);
+    for (const row of intervalRows) stream.add([row]);
+    expect(stream.finish()).toEqual(
+      legacy([{ kind: 'intervals', rows: intervalRows, query: shortRange }])[0],
+    );
+    const query = {
+      startTime: '2024-04-01 00:00:00',
+      endTime: '2024-04-06 23:59:59',
+      includeSeries: '0' as const,
+    };
+    const rows = Array.from({ length: 60_000 }, (_, index) => ({
+      asin_id: `id-${index % 10_000}`,
+      asin: `A${index % 10_000}`,
+      country: index % 2 ? 'US' : 'UK',
+      interval_start: `2024-04-0${1 + Math.floor(index / 10_000)} 00:00:00`,
+      interval_end: `2024-04-0${1 + Math.floor(index / 10_000)} 01:00:00`,
+      is_broken: Math.floor(index / 10_000) % 2,
+    }));
+    const summary = new MonitorStatusIntervalStream(query, now);
+    for (let offset = 0; offset < rows.length; offset += 887)
+      summary.add(rows.slice(offset, offset + 887));
+    const result = summary.finish();
+    expect(result.summary).toHaveLength(10_000);
+    expect(result).toEqual(legacy([{ kind: 'intervals', rows, query }])[0]);
+    expect(() => summary.add([])).toThrow();
+  }, 20_000);
 
   it('rejects source/series expansion beyond the bounded response and work budgets', () => {
     expect(() =>
