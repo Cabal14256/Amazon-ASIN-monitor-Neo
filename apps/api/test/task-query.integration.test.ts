@@ -9,6 +9,7 @@ import {
   taskListResultSchema,
 } from '@asin-monitor/contracts';
 import { RedisTaskRepository, type TaskState } from '@asin-monitor/db';
+import { parseVariantCheckJob } from '@asin-monitor/variant-check';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
@@ -189,6 +190,30 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       type: QueueName = 'export',
       userId: string | null = owner.userId,
     ) {
+      if (type === 'variant-check' || type === 'batch-check') {
+        const createdAt = new Date().toISOString();
+        const data = parseVariantCheckJob({
+          taskId: id,
+          userId,
+          taskType: type,
+          createdAt,
+          expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+          ...(type === 'variant-check'
+            ? {
+                taskSubType: 'asin-check',
+                params: { asinId: 'fixture-asin', forceRefresh: true },
+              }
+            : {
+                taskSubType: 'variant-group',
+                params: { groupIds: ['fixture-group'], forceRefresh: true },
+              }),
+        });
+        return (await queueFor(type)).add(type, data, {
+          jobId: id,
+          removeOnComplete: false,
+          removeOnFail: false,
+        });
+      }
       return (await queueFor(type)).add(
         'fixture',
         {
@@ -262,7 +287,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     it.each(TASK_QUERY_QUEUES)(
       'reads an owned %s job when registry is absent without recreating metadata',
       async (type) => {
-        const id = `fallback-${type}`;
+        const id = randomUUID();
         await queued(id, type);
         const response = await get(id);
         expect(response.statusCode).toBe(200);
@@ -273,6 +298,24 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           status: 'pending',
         });
         expect(await store.read(id)).toBeNull();
+      },
+    );
+    it.each(['variant-check', 'batch-check'] as const)(
+      'rejects an incomplete %s queue payload without recreating metadata',
+      async (type) => {
+        const id = randomUUID();
+        const queue = await queueFor(type);
+        await queue.add(
+          'fixture',
+          { userId: owner.userId, createdAt: new Date().toISOString() },
+          { jobId: id },
+        );
+        const before = (await queue.getJob(id))!.data;
+        const response = await get(id);
+        expect(response.statusCode).toBe(500);
+        expect(await store.read(id)).toBeNull();
+        expect((await queue.getJob(id))!.data).toEqual(before);
+        expect(await (await queue.getJob(id))!.getState()).toBe('waiting');
       },
     );
     it('denies foreign/ownerless queue jobs and foreign metadata without mutation', async () => {

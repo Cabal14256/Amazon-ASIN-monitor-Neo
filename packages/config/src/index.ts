@@ -183,6 +183,31 @@ const envObjectSchema = z.object({
     .trim()
     .transform((value) => value || 'bull')
     .default('bull'),
+  // Legacy compares an integer ASIN count with this numeric threshold. Rounding
+  // positive fractions up preserves that comparison; nonpositive/invalid input
+  // keeps the optimization disabled. Groups themselves are capped at 5000.
+  MONITOR_BATCH_ASIN_THRESHOLD: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.ceil(number) : 0;
+  }, z.number().int().min(0).max(5000)),
+  // Legacy floors positive values and otherwise uses two groups. Bound actual
+  // parallel writes to the shared pipeline's eight-operation capacity.
+  BATCH_CHECK_GROUP_CONCURRENCY: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0
+      ? Math.min(8, Math.max(1, Math.floor(number)))
+      : 2;
+  }, z.number().int().min(1).max(8)),
+  BATCH_CHECK_SYNC_MAX_GROUPS: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 20;
+  }, z.number().int().min(0).max(1000)),
+  BATCH_CHECK_SYNC_CONCURRENCY: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0
+      ? Math.min(8, Math.max(1, Math.floor(number)))
+      : 3;
+  }, z.number().int().min(1).max(8)),
   RATE_LIMITER_KEY_PREFIX: z
     .string()
     .trim()

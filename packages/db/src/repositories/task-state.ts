@@ -1,4 +1,6 @@
+import { variantCheckResultReferenceSchema } from '@asin-monitor/contracts';
 import { z } from 'zod';
+import { parseVariantCheckOperation } from '../domain/variant-check-receipt';
 
 const identifier = z.string().min(1).max(200);
 const timestamp = z.string().datetime();
@@ -58,6 +60,12 @@ const mutationSchema = z.discriminatedUnion('kind', [
     message,
   }),
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
+  // Only callers that confirmed the immutable PostgreSQL receipt may use this.
+  z.object({
+    kind: z.literal('check-completed'),
+    result: variantCheckResultReferenceSchema,
+    message,
+  }),
 ]);
 export type TaskMutation = z.infer<typeof mutationSchema>;
 
@@ -72,7 +80,25 @@ export function transitionTask(
   now: Date,
 ): TaskState {
   const change = mutationSchema.parse(mutation);
-  if (isTerminalTaskStatus(task.status)) return task;
+  if (change.kind === 'check-completed') {
+    const { kind: _kind, version: _version, ...reference } = change.result;
+    parseVariantCheckOperation({
+      ...reference,
+      taskId: task.taskId,
+      userId: task.userId,
+      taskCreatedAt: task.createdAt,
+      taskType: task.taskType,
+      taskSubType: task.taskSubType,
+      step: 'result',
+    });
+    // A receipt can correct a lost completion acknowledgement, including a
+    // failed queue attempt, but cannot override cancellation or task ID reuse.
+    if (
+      task.cancelRequestedAt ||
+      ['cancelling', 'cancelled', 'completed'].includes(task.status)
+    )
+      return task;
+  } else if (isTerminalTaskStatus(task.status)) return task;
   const timestamp = new Date(
     Math.max(now.getTime(), Date.parse(task.updatedAt) + 1),
   ).toISOString();
@@ -98,6 +124,7 @@ export function transitionTask(
       next.message = change.message ?? '任务已取消';
       break;
     case 'completed':
+    case 'check-completed':
       next.status = 'completed';
       next.progress = 100;
       next.completedAt = timestamp;
@@ -106,6 +133,17 @@ export function transitionTask(
       next.message = change.message ?? '任务已完成';
       break;
     case 'failed':
+      if (
+        ['variant-check', 'batch-check'].includes(task.taskType) &&
+        (task.cancelRequestedAt || task.status === 'cancelling')
+      ) {
+        next.status = 'cancelled';
+        next.cancelledAt = timestamp;
+        next.completedAt = timestamp;
+        next.error = null;
+        next.message = '检查任务已取消，已提交的检查结果保留';
+        break;
+      }
       next.status = 'failed';
       next.completedAt = timestamp;
       next.error = change.message;

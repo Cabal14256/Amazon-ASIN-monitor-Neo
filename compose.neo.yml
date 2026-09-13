@@ -29,6 +29,10 @@ services:
       # Import group comparisons require this explicit primary-only upgrade.
       - ./packages/db/migrations/0005_import_group_collation.sql:/opt/asin-monitor/0005_import_group_collation.sql:ro
       - ./packages/db/migrations/0005_import_group_collation.rollback.sql:/opt/asin-monitor/0005_import_group_collation.rollback.sql:ro
+      # Completed check operations must survive worker retries and Redis outages.
+      - ./packages/db/docker/apply-variant-check-receipts.sh:/opt/asin-monitor/apply-variant-check-receipts.sh:ro
+      - ./packages/db/migrations/0006_variant_check_receipts.sql:/opt/asin-monitor/0006_variant_check_receipts.sql:ro
+      - ./packages/db/migrations/0006_variant_check_receipts.rollback.sql:/opt/asin-monitor/0006_variant_check_receipts.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

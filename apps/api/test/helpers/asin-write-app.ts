@@ -6,8 +6,16 @@ import { spApiConfigApp } from './sp-api-config-app';
 /** The write fixture includes real constraints AND triggers. LIKE alone does not. */
 export async function asinWriteApp(
   configure?: NonNullable<Parameters<typeof spApiConfigApp>[0]>['configure'],
+  options: Omit<
+    NonNullable<Parameters<typeof spApiConfigApp>[0]>,
+    'configure'
+  > = {},
 ) {
-  const f = await spApiConfigApp({ imports: [AsinModule], configure });
+  const f = await spApiConfigApp({
+    ...options,
+    imports: [AsinModule, ...(options.imports ?? [])],
+    configure,
+  });
   try {
     const pool = f.pools.primaryPool;
     await pool.query(

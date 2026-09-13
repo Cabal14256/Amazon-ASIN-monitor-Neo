@@ -21,6 +21,66 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('preserves Legacy sync batch thresholds, including a positive fraction forcing asynchronous submission', () => {
+    expect(loadEnv(validEnv).BATCH_CHECK_SYNC_MAX_GROUPS).toBe(20);
+    expect(loadEnv(validEnv).BATCH_CHECK_SYNC_CONCURRENCY).toBe(3);
+    expect(
+      loadEnv({ ...validEnv, BATCH_CHECK_SYNC_MAX_GROUPS: '0.5' })
+        .BATCH_CHECK_SYNC_MAX_GROUPS,
+    ).toBe(0);
+    expect(
+      loadEnv({ ...validEnv, BATCH_CHECK_SYNC_CONCURRENCY: '0.5' })
+        .BATCH_CHECK_SYNC_CONCURRENCY,
+    ).toBe(1);
+    expect(
+      loadEnv({ ...validEnv, BATCH_CHECK_SYNC_CONCURRENCY: '1000' })
+        .BATCH_CHECK_SYNC_CONCURRENCY,
+    ).toBe(8);
+    for (const value of ['0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, BATCH_CHECK_SYNC_MAX_GROUPS: value })
+          .BATCH_CHECK_SYNC_MAX_GROUPS,
+      ).toBe(20);
+  });
+  it('preserves Legacy batch-check concurrency defaults and floors positive values within runtime capacity', () => {
+    expect(loadEnv(validEnv).BATCH_CHECK_GROUP_CONCURRENCY).toBe(2);
+    for (const value of ['', '0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, BATCH_CHECK_GROUP_CONCURRENCY: value })
+          .BATCH_CHECK_GROUP_CONCURRENCY,
+      ).toBe(2);
+    for (const [value, expected] of [
+      ['0.5', 1],
+      ['3.9', 3],
+      ['8', 8],
+      ['1000', 8],
+    ] as const)
+      expect(
+        loadEnv({ ...validEnv, BATCH_CHECK_GROUP_CONCURRENCY: value })
+          .BATCH_CHECK_GROUP_CONCURRENCY,
+      ).toBe(expected);
+  });
+  it('preserves the effective Legacy batch-ASIN threshold and bounds it to a complete group', () => {
+    expect(loadEnv(validEnv).MONITOR_BATCH_ASIN_THRESHOLD).toBe(0);
+    for (const value of ['', '0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: value })
+          .MONITOR_BATCH_ASIN_THRESHOLD,
+      ).toBe(0);
+    for (const [value, expected] of [
+      ['0.5', 1],
+      ['2.5', 3],
+      ['20', 20],
+      ['5000', 5000],
+    ] as const)
+      expect(
+        loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: value })
+          .MONITOR_BATCH_ASIN_THRESHOLD,
+      ).toBe(expected);
+    expect(() =>
+      loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: '5001' }),
+    ).toThrow(EnvValidationError);
+  });
   it('uses one persistent import directory for API/Worker and rejects relative configuration', () => {
     const env = loadEnv(validEnv);
     const root = resolve(__dirname, '../../..');

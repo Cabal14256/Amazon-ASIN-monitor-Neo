@@ -3,6 +3,8 @@ export * from './client';
 export * from './domain/asin-batch-create';
 export * from './domain/asin-batch-delete';
 export * from './domain/asin-manual-history';
+export * from './domain/variant-check';
+export * from './domain/variant-check-receipt';
 export * from './domain/variant-status';
 export * from './migration';
 export * from './repositories/account-repository';
@@ -26,6 +28,7 @@ export * from './repositories/task-state';
 export * from './repositories/user-administration-repository';
 export * from './repositories/user-password-repository';
 export * from './repositories/user-query-repository';
+export * from './repositories/variant-check-repository';
 
 export * from './repositories/login-repository';
 export * from './schema';

@@ -16,7 +16,7 @@
 - 共用 `packages/config` 的纯队列目录与 `getNeoQueuePrefix`；Worker 现有选择器、别名和策略保持不变。API 使用只读 `QueueGetters`，不创建业务任务、不注册调度、不改写 Queue 元数据。
 - 元数据前缀 `${BULL_PREFIX}:neo:task`，队列前缀 `${BULL_PREFIX}:neo`；不访问裸 `task:*` 或旧 Bull4 `${BULL_PREFIX}:<queue>` 数据。默认分别为 `bull:neo:task` 和 `bull:neo`。
 - 查询队列与 Legacy 一致：export、batch-check、batch-delete、import、backup、variant-check。已有元数据只查询其对应队列；无元数据按以上顺序回退，owner 必须明确且等于当前用户。monitor/competitor-monitor 不作为任务中心回退源。BullMQ 目录中的保留键（如 completed/meta/events）不当作任务读取；实际 producer 应使用 UUID 等不与内部键冲突的任务 ID。
-- 注册表终态不回退，不再依赖队列可用。非终态仅吸收 BullMQ completed/failed；读取到终态后重新读取 job hash，避免使用完成前已读取的空 returnvalue。非终态 progress 不覆盖注册表。
+- 通用注册表终态不回退，不再依赖队列可用。非终态吸收 BullMQ completed/failed；读取到终态后重新读取 job hash，避免使用完成前已读取的空 returnvalue。非终态 progress 不覆盖注册表。Issue #105 的检查任务有受限例外：按原始队列请求摘要及独立 owner/type/subtype/createdAt 核对 PostgreSQL 完成凭据后，可以纠正丢失完成确认导致的失败；不会覆盖取消状态，详见[检查业务](phase-2-variant-check.md)。
 - 完成与取消等通过既有 Redis CAS 状态转换处理，第一个终态获胜。新增可选身份条件 owner/type/createdAt，每次 CAS 重试都验证，拒绝过期 ID 复用后污染另一条任务。已过期元数据不会隐式复活。
 - 列表先按注册表筛选/limit，再对账，保持旧顺序；对账后可能出现已完成任务仍在本次 active 查询结果中，下次查询会重新筛选。
 
@@ -27,6 +27,8 @@ API 使用专用懒连接：连接与命令各 1 秒、无离线队列、无未�
 最多 8 个查询同时执行；每个列表最多 4 项对账并发，3 秒后停止启动新的依赖命令，并等待已启动的有界命令结束（不在后台继续写状态）。一次对账失败后停止后续对账，返回已读的本人元数据并记录一条固定 warn。注册表读取失败或详情对账失败返回固定 500，不把故障伪装成空列表/404。网络写入超时可能已提交，后续请求以同一 taskId 重读。
 
 公共 result 保留业务统计、失败条目与摘要，递归移除路径/目录、凭据与堆栈等内部字段，不返回 owner/revision。结果最大 256 KiB，最多 20 层/20,000 节点；文件名只返回 basename，下载 URL 只生成当前任务的受鉴权路径，避免携带任意外站链接或本地文件地址。队列 failedReason 使用固定错误文本，原始驱动错误和 payload 不进入客户端或日志。各业务 Processor 后续必须继续只写可公开的业务摘要，不能将秘密嵌入普通 message/summary 文本。
+
+检查任务的完整结果由 PostgreSQL 保存，单条最多 32 MiB；Redis 中只放小于 1 KiB 的引用。本人详情与下载会额外核对当前会话和 `asin:read`，返回敏感字段过滤后的完整结果，不使用上述小元数据的截断边界。完整数据库读取全局最多并发 2 项；普通已完成任务的列表和 WS 无需打开大结果。内部队列操作身份不进入公开响应。
 
 ## 验证与回滚
 

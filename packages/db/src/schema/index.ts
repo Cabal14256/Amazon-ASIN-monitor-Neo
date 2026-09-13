@@ -17,6 +17,7 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import { shanghaiTimestamp as timestampColumn } from '../timestamps';
+export { variantCheckReceipts } from './variant-check-receipts';
 
 const localTimestamp = sql`LOCALTIMESTAMP`;
 

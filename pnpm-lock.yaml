@@ -83,6 +83,9 @@ importers:
       '@asin-monitor/sp-api':
         specifier: workspace:*
         version: link:../../packages/sp-api
+      '@asin-monitor/variant-check':
+        specifier: workspace:*
+        version: link:../../packages/variant-check
       '@fastify/cookie':
         specifier: 10.0.1
         version: 10.0.1
@@ -256,6 +259,12 @@ importers:
       '@asin-monitor/import':
         specifier: workspace:*
         version: link:../../packages/import
+      '@asin-monitor/sp-api':
+        specifier: workspace:*
+        version: link:../../packages/sp-api
+      '@asin-monitor/variant-check':
+        specifier: workspace:*
+        version: link:../../packages/variant-check
       bullmq:
         specifier: ^5.58.0
         version: 5.81.3
@@ -325,6 +334,9 @@ importers:
       '@asin-monitor/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@asin-monitor/sp-api':
+        specifier: workspace:*
+        version: link:../sp-api
       drizzle-orm:
         specifier: ^0.44.2
         version: 0.44.7(@opentelemetry/api@1.9.0)(@types/pg@8.23.1)(mysql2@3.15.3)(pg@8.23.0)
@@ -408,6 +420,31 @@ importers:
       ioredis:
         specifier: ^5.8.2
         version: 5.8.2
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(jiti@2.7.0)(less@4.9.0)(lightningcss@1.32.0)(sass@1.54.0)(terser@5.50.0)(tsx@4.23.12)
+
+  packages/variant-check:
+    dependencies:
+      '@asin-monitor/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@asin-monitor/db':
+        specifier: workspace:*
+        version: link:../db
+      '@asin-monitor/sp-api':
+        specifier: workspace:*
+        version: link:../sp-api
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.15.4
+        version: 8.23.1
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
