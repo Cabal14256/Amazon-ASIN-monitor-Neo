@@ -512,5 +512,66 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).toEqual([]);
       expect(await history(g.children[0].id)).toEqual([]);
     }, 20_000);
+    it('cancels a running batch after the first group commits and retains only that completed group', async () => {
+      const first = await group(),
+        next = await group();
+      const original = transport.request.getMockImplementation()!;
+      let waiting = false,
+        release!: () => void;
+      const gate = new Promise<void>((yes) => {
+        release = yes;
+      });
+      transport.request.mockImplementation(async (input) => {
+        if (input.url.pathname.endsWith(next.children[0].asin)) {
+          waiting = true;
+          await gate;
+        }
+        return original(input);
+      });
+      try {
+        await start();
+        const id = await submitted('/variant-groups/batch-check', {
+          groupIds: [first.id, next.id],
+          forceRefresh: true,
+        });
+        await vi.waitFor(() => expect(waiting).toBe(true), {
+          timeout: 10_000,
+          interval: 20,
+        });
+        const cancel = await post(`/tasks/${id}/cancel`);
+        expect(cancel.statusCode).toBe(200);
+        release();
+        await vi.waitFor(
+          async () => expect((await store.read(id))?.status).toBe('cancelled'),
+          { timeout: 5000, interval: 20 },
+        );
+        expect((await get(id, '/download')).statusCode).toBe(409);
+        expect(
+          (
+            await f.pools.primaryPool.query(
+              'SELECT step FROM variant_check_receipts WHERE task_id=$1 ORDER BY step',
+              [id],
+            )
+          ).rows,
+        ).toEqual([{ step: 'group-0' }]);
+        const rows = (
+          await f.pools.primaryPool.query(
+            'SELECT id,last_check_time FROM asins WHERE id=ANY($1::varchar[])',
+            [[first.children[0].id, next.children[0].id]],
+          )
+        ).rows;
+        expect(
+          rows.find((row) => row.id === first.children[0].id).last_check_time,
+        ).not.toBeNull();
+        expect(
+          rows.find((row) => row.id === next.children[0].id).last_check_time,
+        ).toBeNull();
+        expect(await history(first.children[0].id)).toEqual([]);
+        expect(await history(next.children[0].id)).toEqual([]);
+      } finally {
+        release();
+        transport.request.mockImplementation(original);
+      }
+    }, 20_000);
   },
 );
