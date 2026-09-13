@@ -7,10 +7,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, createPgPool } from '../src/client';
 import { parseMonitorAnalyticsQuery } from '../src/domain/monitor-analytics-query';
 import type { MonitorSourceGranularity } from '../src/domain/monitor-calendar';
+import { normalizeSqlDurationMetricRow } from '../src/domain/monitor-duration';
 import {
   monitorAggregateCoverageSelect,
   type MonitorAggregateFamily,
 } from '../src/repositories/monitor-aggregate-coverage';
+import {
+  monitorAggregateBucketHoursSql,
+  monitorAggregateMetricsSelect,
+} from '../src/repositories/monitor-analytics-metrics-sql';
 import {
   monitorAbnormalBucketsSelect,
   monitorAggregateSourceSelect,
@@ -599,7 +604,96 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await pool.query('RESET search_path');
     });
 
-    it('records actual Legacy decimal intermediates and complete SQL metrics for the subsequent metric adapter', async () => {
+    it('matches all SQL metrics against real Legacy aggregate columns across partial buckets, per-ASIN averages and zero denominators', async () => {
+      for (const granularity of granularities) {
+        await legacy.query('DELETE FROM monitor_history_agg');
+        const input = Array.from({ length: 12 }, (_, index) => {
+          const date = new Date(Date.UTC(1997, 9, 1));
+          if (granularity === 'hour') date.setUTCHours(index);
+          if (granularity === 'day') date.setUTCDate(index + 1);
+          if (granularity === 'month') date.setUTCMonth(9 + index);
+          const slot = date.toISOString().slice(0, 19).replace('T', ' ');
+          const checks = [3, 7, 0, 19, 99991, 113][index % 6];
+          return {
+            slot,
+            country: index % 2 ? 'US' : 'UK',
+            asin: `A${index % 3}`,
+            checks,
+            broken: checks ? Math.min(checks, 1 + index * 17) : 0,
+            peak: index % 2,
+          };
+        });
+        await legacy.query(
+          'INSERT INTO monitor_history_agg(granularity,time_slot,country,asin_key,check_count,broken_count,has_peak,has_broken,first_check_time,last_check_time) VALUES ?',
+          [
+            input.map((row) => [
+              granularity,
+              row.slot,
+              row.country,
+              row.asin,
+              row.checks,
+              row.broken,
+              row.peak,
+              row.broken > 0 ? 1 : 0,
+              row.slot,
+              row.slot,
+            ]),
+          ],
+        );
+        const source = sql`(VALUES ${sql.join(
+          input.map(
+            (row) => sql`(${row.slot}::timestamp,
+          ${row.country}::text COLLATE public.legacy_utf8mb4_unicode_ci, ${row.asin}::text COLLATE public.legacy_utf8mb4_unicode_ci,
+          ${row.checks}::bigint, ${row.broken}::bigint, ${row.peak}::int)`,
+          ),
+          sql`, `,
+        )}) AS agg(time_slot,country,asin_key,check_count,broken_count,has_peak)`;
+        for (const [start, end] of [
+          ['1997-10-01 00:00:00.123', '1997-10-01 00:00:01.900'],
+          ['1997-10-01 00:00:00', '1997-10-02 23:59:59'],
+          ['1997-10-01 00:00:59.600', '1998-10-01 02:34:56.999'],
+          ['1997-10-02 23:59:59', '1997-10-01 00:00:00'],
+        ]) {
+          const query = parseMonitorAnalyticsQuery('by-time', {
+            startTime: start,
+            endTime: end,
+          });
+          const oldBase = `SELECT agg.country AS group_key,agg.country AS group_label,agg.asin_key,
+            agg.check_count,agg.broken_count,agg.has_peak,${legacy.getAggBucketHoursSqlExpr(
+              granularity,
+            )} AS bucket_hours
+            FROM monitor_history_agg agg WHERE agg.granularity=?`;
+          const old = await legacy.query(
+            `${legacy.getAggDurationCtesSql(oldBase)}
+            SELECT group_key,group_label,${legacy.getDurationMetricsSqlSelect(
+              'asin_metrics',
+            )}
+            FROM asin_metrics GROUP BY group_key,group_label ORDER BY group_key,group_label`,
+            [start, end, granularity],
+          );
+          const neo = await createDb(pool).execute(
+            monitorAggregateMetricsSelect(sql`
+            SELECT agg.country AS group_key,agg.country AS group_label,agg.asin_key,
+              agg.check_count,agg.broken_count,agg.has_peak,${monitorAggregateBucketHoursSql(
+                query,
+                granularity,
+                sql`agg.time_slot`,
+              )} AS bucket_hours
+              FROM ${source}`),
+          );
+          const normalize = (row: Record<string, unknown>) => ({
+            group: row.group_key,
+            ...normalizeSqlDurationMetricRow(row),
+          });
+          expect(
+            neo.rows.map(normalize),
+            `${granularity}/${start}/${end}`,
+          ).toEqual(old.map(normalize));
+        }
+      }
+    });
+
+    it('matches Legacy decimal intermediates and preserves the small-duration ratio edge case', async () => {
       const arithmetic = await legacy.query(
         'SELECT @@div_precision_increment AS division_scale, 1/3 AS fraction, (1/3)*1.0000 AS product, 86399/3600 AS hours, (86399/3600)*(1/3) AS duration',
       );
@@ -627,6 +721,25 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             )} FROM asin_metrics GROUP BY group_key`,
             [start, end],
           );
+          const neoQuery = parseMonitorAnalyticsQuery('by-time', {
+            startTime: start,
+            endTime: end,
+          });
+          const neo = await createDb(pool).execute(
+            monitorAggregateMetricsSelect(sql`
+            SELECT 'ALL'::text AS group_key,'ALL'::text AS group_label,'A'::text AS asin_key,
+              3 AS check_count,1 AS broken_count,1 AS has_peak,
+              ${monitorAggregateBucketHoursSql(
+                neoQuery,
+                granularity,
+                sql`agg.time_slot`,
+              )} AS bucket_hours
+              FROM (SELECT '1997-10-01 00:00:00'::timestamp AS time_slot) agg`),
+          );
+          expect(
+            neo.rows.map((row) => normalizeSqlDurationMetricRow(row)),
+            `${granularity}/${start}/${end}`,
+          ).toEqual(metrics.map((row) => normalizeSqlDurationMetricRow(row)));
           buckets.push({ granularity, start, end, rows, metrics });
           expect(metrics).toHaveLength(1);
         }
