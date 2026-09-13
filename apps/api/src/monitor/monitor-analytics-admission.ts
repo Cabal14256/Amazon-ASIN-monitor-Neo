@@ -21,12 +21,17 @@ const fail = (status: number, message: string): never => {
 export class MonitorAnalyticsAdmission {
   private active = 0;
   private readonly requests = new WeakMap<FastifyReply, Admission>();
+  constructor(
+    private readonly messages = {
+      capacity: '统计查询繁忙，请稍后再试',
+      timeout: '查询超时，请尝试缩小时间范围或稍后重试',
+    },
+  ) {}
   private reserve(reply: FastifyReply) {
     const existing = this.requests.get(reply);
     if (existing) return existing;
-    if (reply.raw.destroyed)
-      fail(504, '查询超时，请尝试缩小时间范围或稍后重试');
-    if (this.active >= 2) fail(429, '统计查询繁忙，请稍后再试');
+    if (reply.raw.destroyed) fail(504, this.messages.timeout);
+    if (this.active >= 2) fail(429, this.messages.capacity);
     this.active++;
     const admission: Admission = {
       pending: 0,
@@ -43,7 +48,7 @@ export class MonitorAnalyticsAdmission {
       },
       ensureOpen: () => {
         if (admission.finished || admission.released || reply.raw.destroyed)
-          fail(504, '查询超时，请尝试缩小时间范围或稍后重试');
+          fail(504, this.messages.timeout);
       },
     };
     const finish = () => {

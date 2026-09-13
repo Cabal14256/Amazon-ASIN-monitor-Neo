@@ -4,6 +4,7 @@ import { AsinModule } from './asin/asin.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { ConfigModule } from './config/config.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { LoggerModule } from './logger/logger.module';
@@ -26,6 +27,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     ConfigModule,
     LoggerModule,
     DatabaseModule,
+    DashboardModule,
     RedisModule,
     AuthModule,
     RoleModule,
