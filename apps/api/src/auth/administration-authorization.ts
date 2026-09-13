@@ -11,11 +11,26 @@ function deny(message: string): never {
   );
 }
 
-/** Called after the shared administration lock, inside the write transaction. */
-export async function authorizeAdministration(
-  unit: RoleWriteUnit,
+type AdministrationAuthorizationUnit = Pick<
+  RoleWriteUnit,
+  'lockOperator' | 'lockSession' | 'operatorPermissionCodes'
+>;
+
+/** Called after the shared administration lock, inside the transaction. */
+export function authorizeAdministration(
+  unit: AdministrationAuthorizationUnit,
   principal: AuthPrincipal,
   permission: PermissionCode,
+) {
+  return authorizeAdministrationAny(unit, principal, [permission]);
+}
+
+/** A current permission grant must satisfy at least one explicitly allowed code.
+ * Cached token/guard permissions cannot authorize a cached analytics response. */
+export async function authorizeAdministrationAny(
+  unit: AdministrationAuthorizationUnit,
+  principal: AuthPrincipal,
+  permissions: readonly PermissionCode[],
 ) {
   const user = await unit.lockOperator(principal.userId);
   if (!user || normalizeUserStatus(user.status, user.lockedUntil) !== 'ACTIVE')
@@ -32,8 +47,7 @@ export async function authorizeAdministration(
     (session.expiresAt && session.expiresAt <= new Date())
   )
     deny('会话已失效');
-  if (
-    !(await unit.operatorPermissionCodes(principal.userId)).includes(permission)
-  )
+  const current = await unit.operatorPermissionCodes(principal.userId);
+  if (!permissions.some((permission) => current.includes(permission)))
     deny('没有权限执行此操作');
 }
