@@ -293,6 +293,7 @@ const envObjectSchema = z.object({
     .pipe(z.enum(['api', 'worker', 'all']))
     .default('api'),
   SCHEDULER_ENABLED: booleanFlagSchema(false),
+  ANALYTICS_STATUS_INTERVAL_ENABLED: booleanFlagSchema(true),
 
   // Worker 队列选择语义（对齐旧 WORKER_ENABLED_QUEUES）
   WORKER_ENABLED_QUEUES: z.string().optional(),

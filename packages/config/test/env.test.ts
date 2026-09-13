@@ -21,6 +21,20 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('validates the status interval maintenance switch', () => {
+    expect(loadEnv(validEnv).ANALYTICS_STATUS_INTERVAL_ENABLED).toBe(true);
+    expect(
+      loadEnv({ ...validEnv, ANALYTICS_STATUS_INTERVAL_ENABLED: '0' })
+        .ANALYTICS_STATUS_INTERVAL_ENABLED,
+    ).toBe(false);
+    expect(
+      loadEnv({ ...validEnv, ANALYTICS_STATUS_INTERVAL_ENABLED: 'on' })
+        .ANALYTICS_STATUS_INTERVAL_ENABLED,
+    ).toBe(true);
+    expect(() =>
+      loadEnv({ ...validEnv, ANALYTICS_STATUS_INTERVAL_ENABLED: 'invalid' }),
+    ).toThrow(EnvValidationError);
+  });
   it('preserves Legacy sync batch thresholds, including a positive fraction forcing asynchronous submission', () => {
     expect(loadEnv(validEnv).BATCH_CHECK_SYNC_MAX_GROUPS).toBe(20);
     expect(loadEnv(validEnv).BATCH_CHECK_SYNC_CONCURRENCY).toBe(3);

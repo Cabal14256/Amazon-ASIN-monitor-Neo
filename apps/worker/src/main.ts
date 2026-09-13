@@ -13,6 +13,8 @@ import {
 } from './auth-maintenance-schedules';
 import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
+import { startMonitorIntervalRuntime } from './monitor-interval-runtime';
+import { MONITOR_INTERVAL_QUEUE } from './monitor-interval-schedules';
 import { attachQueueErrorLogger, attachRedisErrorLogger } from './queue-events';
 import { getNeoQueuePrefix, getQueueOptions } from './queue-policy';
 import { getPhysicalQueueName } from './queues';
@@ -34,9 +36,14 @@ async function bootstrap(): Promise<void> {
     enabledQueues: enabled,
     unknownQueues,
     maintenance: selectedMaintenance,
+    intervalMaintenance: selectedIntervals,
   } = resolveWorkerSelection(env.WORKER_ENABLED_QUEUES);
   const enableMaintenance =
     selectedMaintenance && env.AUTH_DATA_AUTHORITY === 'postgresql';
+  const enableIntervals =
+    selectedIntervals &&
+    env.AUTH_DATA_AUTHORITY === 'postgresql' &&
+    env.ANALYTICS_STATUS_INTERVAL_ENABLED;
   if (selectedMaintenance && !enableMaintenance)
     logger.info('认证维护未启用，当前认证权威源为 Legacy');
 
@@ -46,7 +53,7 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  if (enabled.length === 0 && !enableMaintenance) {
+  if (enabled.length === 0 && !enableMaintenance && !enableIntervals) {
     const stopped = waitForShutdownSignal();
     logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
     const signal = await stopped;
@@ -57,6 +64,9 @@ async function bootstrap(): Promise<void> {
   const connection = parseRedisUrl(env.REDIS_URL);
   const maintenance = enableMaintenance
     ? await startAuthMaintenanceRuntime(env, () => process.exit(1))
+    : undefined;
+  const intervals = enableIntervals
+    ? await startMonitorIntervalRuntime(env, () => process.exit(1))
     : undefined;
   const batchDelete =
     enabled.includes('batch-delete') && env.AUTH_DATA_AUTHORITY === 'postgresql'
@@ -101,6 +111,7 @@ async function bootstrap(): Promise<void> {
     checks: [
       ...queues,
       ...(maintenance ? [maintenance.queue] : []),
+      ...(intervals ? [intervals.queue] : []),
       ...(batchDelete ? [batchDelete.queue] : []),
       ...(asinImport ? [asinImport.queue] : []),
       ...(variantChecks ? variantChecks.queues : []),
@@ -118,6 +129,7 @@ async function bootstrap(): Promise<void> {
       queues: [
         ...queues,
         ...(maintenance ? [maintenance] : []),
+        ...(intervals ? [intervals] : []),
         ...(batchDelete ? [batchDelete] : []),
         ...(asinImport ? [asinImport] : []),
         ...(variantChecks ? [variantChecks] : []),
@@ -136,9 +148,12 @@ async function bootstrap(): Promise<void> {
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
+        : intervals
+        ? 'monitor-interval-maintenance'
         : 'queue-scaffold',
     registeredProcessors:
       Number(!!maintenance) +
+      Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
       (variantChecks?.workers.length ?? 0),
@@ -147,14 +162,16 @@ async function bootstrap(): Promise<void> {
     physicalQueues: [
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
+      ...(intervals ? [MONITOR_INTERVAL_QUEUE] : []),
     ],
     queueCount:
       queues.length +
       Number(!!maintenance) +
+      Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
       (variantChecks?.queues.length ?? 0),
-    schedulerEnabled: !!maintenance && env.SCHEDULER_ENABLED,
+    schedulerEnabled: !!(maintenance || intervals) && env.SCHEDULER_ENABLED,
   });
 }
 

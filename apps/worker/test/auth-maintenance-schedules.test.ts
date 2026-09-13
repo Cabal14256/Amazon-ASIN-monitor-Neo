@@ -15,6 +15,7 @@ describe('Authentication maintenance schedule selection', () => {
         enabledQueues: [...QUEUE_NAMES],
         unknownQueues: [],
         maintenance: true,
+        intervalMaintenance: true,
       });
     },
   );
@@ -25,6 +26,7 @@ describe('Authentication maintenance schedule selection', () => {
         enabledQueues: [],
         unknownQueues: [],
         maintenance: false,
+        intervalMaintenance: false,
       });
     },
   );
@@ -35,6 +37,7 @@ describe('Authentication maintenance schedule selection', () => {
         enabledQueues: [],
         unknownQueues: [],
         maintenance: true,
+        intervalMaintenance: false,
       });
     },
   );
@@ -45,11 +48,13 @@ describe('Authentication maintenance schedule selection', () => {
       enabledQueues: ['competitor-monitor', 'batch-check'],
       unknownQueues: ['bogus'],
       maintenance: true,
+      intervalMaintenance: false,
     });
     expect(resolveWorkerSelection('monitor')).toEqual({
       enabledQueues: ['monitor'],
       unknownQueues: [],
       maintenance: false,
+      intervalMaintenance: false,
     });
   });
   it('installs only the two stable Beijing cron schedules with bounded retries and retention', async () => {
@@ -72,6 +77,25 @@ describe('Authentication maintenance schedule selection', () => {
       ]),
     );
   });
+  it.each(['interval-maintenance', 'MONITOR_INTERVALS'])(
+    'selects interval maintenance independently: %s',
+    (selector) => {
+      expect(resolveWorkerSelection(selector)).toEqual({
+        enabledQueues: [],
+        unknownQueues: [],
+        maintenance: false,
+        intervalMaintenance: true,
+      });
+      expect(resolveWorkerSelection(`${selector},maintenance,monitor`)).toEqual(
+        {
+          enabledQueues: ['monitor'],
+          unknownQueues: [],
+          maintenance: true,
+          intervalMaintenance: true,
+        },
+      );
+    },
+  );
   it('removes exactly the two owned schedules during an explicit stop', async () => {
     const removeJobScheduler = vi.fn();
     await removeAuthMaintenanceSchedules({ removeJobScheduler });

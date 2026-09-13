@@ -25,16 +25,23 @@ export function resolveWorkerSelection(raw: string | undefined) {
     ['maintenance', 'auth-maintenance'].includes(
       token.toLowerCase().replace(/[_\s]+/g, '-'),
     );
+  const intervals = (token: string) =>
+    ['interval-maintenance', 'monitor-intervals'].includes(
+      token.toLowerCase().replace(/[_\s]+/g, '-'),
+    );
   const all =
     tokens.length === 0 ||
     tokens.some((token) => ['all', '*'].includes(token.toLowerCase()));
   const selected = all || tokens.some(maintenance);
-  const business = tokens.filter((token) => !maintenance(token));
+  const business = tokens.filter(
+    (token) => !maintenance(token) && !intervals(token),
+  );
   return {
     ...resolveQueueSelection(
       all ? 'all' : business.length ? business.join(',') : 'none',
     ),
     maintenance: selected,
+    intervalMaintenance: all || tokens.some(intervals),
   };
 }
 
