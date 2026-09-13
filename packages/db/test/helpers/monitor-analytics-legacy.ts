@@ -77,6 +77,7 @@ export async function legacyAnalyticsFixture() {
     let captured: Rows[] = [];
     const dependencies: Record<string, unknown> = {
       '../config/database': {
+        getPoolStatus: () => ({}),
         query: async (statement: string, params: unknown[]) => {
           const rows = await query(statement, params);
           captured.push(rows);
@@ -89,8 +90,17 @@ export async function legacyAnalyticsFixture() {
         },
         async setAsync() {},
       },
-      '../services/analyticsCacheService': {},
-      '../services/analyticsAggService': {},
+      '../services/analyticsCacheService': {
+        async get() {
+          return null;
+        },
+        async getLatest() {
+          return null;
+        },
+        async set() {},
+        async rememberLatest() {},
+      },
+      '../services/analyticsAggService': { getAggStatus: () => ({}) },
       '../utils/logger': { debug() {}, info() {}, warn() {}, error() {} },
     };
     const filename = resolve(root, 'server/src/models/MonitorHistory.js');

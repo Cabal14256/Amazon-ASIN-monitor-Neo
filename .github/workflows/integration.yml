@@ -228,6 +228,8 @@ jobs:
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
 
       - name: Compare monitor statistics SQL with actual Legacy MySQL and refreshed Timescale projections
+        env:
+          TZ: Asia/Shanghai
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-analytics-sql.integration.test.ts
 
       - name: Upload monitor SQL decimal evidence

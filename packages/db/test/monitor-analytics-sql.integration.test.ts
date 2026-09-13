@@ -26,6 +26,7 @@ import {
   monitorPeriodPageSelect,
   monitorRawDurationSourceSelect,
 } from '../src/repositories/monitor-analytics-sql';
+import { readMonitorDurationQuery } from '../src/repositories/monitor-duration-query';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
 
 // Only numeric SQL representation and PAD SPACE trailing blanks are normalized.
@@ -803,6 +804,96 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           covered: false,
           group_key: null,
         });
+      }
+    }, 20_000);
+
+    it('executes the streamed duration reader against actual Legacy raw queries and preserves complete result fields', async () => {
+      expect(new Date('2000-01-01T00:00:00Z').getTimezoneOffset()).toBe(-480);
+      await refreshAll();
+      const client = await pool.connect();
+      const db = createDb(client);
+      try {
+        await client.query('BEGIN');
+        const cases = [
+          ['statistics', 'getStatistics'],
+          ['by-time', 'getStatisticsByTime'],
+          ['analytics-monthly-breakdown', 'getStatisticsByTimeFromRaw'],
+          ['all-countries-summary', 'getAllCountriesSummary'],
+          ['region-summary', 'getRegionSummary'],
+          ['asin-by-country', 'getASINStatisticsByCountry'],
+          ['asin-by-variant-group', 'getASINStatisticsByVariantGroup'],
+        ] as const;
+        for (const [operation, method] of cases) {
+          for (const params of [
+            { ...range },
+            {
+              startTime: '1997-10-01 03:11:12',
+              endTime: '1997-10-02 15:14:15',
+              country: 'EU',
+            },
+            {
+              startTime: '1997-10-01 03:00:00.123',
+              endTime: '1997-10-01 03:00:01.900',
+            },
+            { startTime: '1997-10-02 03:00:00' },
+            {
+              startTime: '1997-10-03 01:00:00',
+              endTime: '1997-10-01 00:00:00',
+            },
+          ]) {
+            const query = parseMonitorAnalyticsQuery(operation, params);
+            const neo = await readMonitorDurationQuery(db, query, () => {}, {
+              aggregateEnabled: false,
+              onAggregateFallback: () => {
+                throw new Error('Unexpected aggregate attempt');
+              },
+            });
+            const old = await legacy.model[method]({
+              ...query,
+              ...(operation === 'analytics-monthly-breakdown'
+                ? { groupBy: 'day', sourceGranularityOverride: 'day' }
+                : {}),
+            });
+            expect
+              .soft(neo.data, `${operation}/${JSON.stringify(params)}`)
+              .toEqual(old);
+            expect(neo.source).toBe('raw');
+          }
+        }
+        for (const fields of [
+          { checkType: 'GROUP' },
+          { asinId: 'analytics-109-id-a' },
+          { variantGroupId: 'analytics-109-a' },
+          { checkType: 'ASIN' },
+        ]) {
+          const query = parseMonitorAnalyticsQuery('statistics', {
+            ...range,
+            ...fields,
+          });
+          const neo = await readMonitorDurationQuery(db, query, () => {}, {
+            aggregateEnabled: true,
+            onAggregateFallback() {},
+          });
+          expect
+            .soft(neo.data, JSON.stringify(fields))
+            .toEqual(await legacy.model.getStatistics(query));
+        }
+        const query = parseMonitorAnalyticsQuery('by-time', {
+          ...range,
+          endTime: '1997-10-03 12:59:59',
+        });
+        const fast = await readMonitorDurationQuery(db, query, () => {}, {
+          aggregateEnabled: true,
+          onAggregateFallback() {},
+        });
+        expect(fast.source).toBe('agg');
+        expect(fast.data).toEqual(
+          await legacy.aggregate('getStatisticsByTimeFromAgg', query),
+        );
+        await client.query('COMMIT');
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
       }
     }, 20_000);
 
