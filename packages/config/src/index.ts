@@ -161,6 +161,12 @@ const envObjectSchema = z.object({
     .min(1, 'CORS_ORIGIN 不能为空')
     .default('http://localhost:8000'),
   TRUST_PROXY: trustProxySchema,
+  // Public announcement: preserve Legacy text and custom severity verbatim.
+  GLOBAL_ALERT_MESSAGE: z.string().default(''),
+  GLOBAL_ALERT_TYPE: z
+    .string()
+    .default('info')
+    .transform((value) => value || 'info'),
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),

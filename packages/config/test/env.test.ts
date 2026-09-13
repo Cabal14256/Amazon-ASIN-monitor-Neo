@@ -21,6 +21,25 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('preserves public announcement text and Legacy empty-type fallback', () => {
+    expect(loadEnv(validEnv)).toMatchObject({
+      GLOBAL_ALERT_MESSAGE: '',
+      GLOBAL_ALERT_TYPE: 'info',
+    });
+    expect(
+      loadEnv({
+        ...validEnv,
+        GLOBAL_ALERT_MESSAGE: '  公告😀\n第二行  ',
+        GLOBAL_ALERT_TYPE: ' custom ',
+      }),
+    ).toMatchObject({
+      GLOBAL_ALERT_MESSAGE: '  公告😀\n第二行  ',
+      GLOBAL_ALERT_TYPE: ' custom ',
+    });
+    expect(
+      loadEnv({ ...validEnv, GLOBAL_ALERT_TYPE: '' }).GLOBAL_ALERT_TYPE,
+    ).toBe('info');
+  });
   it('bounds all analytics cache TTLs and validates aggregate/bypass flags', () => {
     const ttlKeys = [
       'ANALYTICS_STATISTICS_BY_TIME_TTL_MS',
