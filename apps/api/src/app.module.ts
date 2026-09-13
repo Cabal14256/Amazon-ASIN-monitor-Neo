@@ -14,6 +14,7 @@ import { RedisModule } from './redis/redis.module';
 import { RoleModule } from './roles/role.module';
 import { SpApiConfigModule } from './sp-api-config/sp-api-config.module';
 import { SpApiRuntimeModule } from './sp-api-runtime/sp-api-runtime.module';
+import { SystemModule } from './system/system.module';
 import { TaskQueryModule } from './tasks/task-query.module';
 import { UserAdministrationModule } from './users/user-administration.module';
 import { UserQueryModule } from './users/user-query.module';
@@ -33,6 +34,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     AsinModule,
     VariantCheckModule,
     MonitorHistoryModule,
+    SystemModule,
     TaskQueryModule,
     UserAdministrationModule,
     UserQueryModule,
