@@ -17,7 +17,21 @@ export async function reconcileMonitorInterval(
     ORDER BY queued_at, asin_key, country LIMIT 1 FOR UPDATE SKIP LOCKED
   `);
   ensureOpen();
-  const key = claimed.rows[0];
+  // Retention drops whole Timescale chunks without row DELETE triggers. Keep
+  // each completed key's source relations, so a missing chunk also queues work.
+  // First use the partial pending index; inspect old receipts only when empty.
+  const key =
+    claimed.rows[0] ??
+    (
+      await db.execute(sql`
+    SELECT asin_key, country FROM public.monitor_interval_dirty d
+    WHERE EXISTS (
+      SELECT 1 FROM unnest(d.source_relation_ids) relation_id
+      WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = relation_id::oid)
+    ) ORDER BY queued_at, asin_key, country LIMIT 1 FOR UPDATE SKIP LOCKED
+  `)
+    ).rows[0];
+  ensureOpen();
   if (!key) return false;
   const asinKey = String(key.asin_key),
     country = String(key.country);
@@ -59,8 +73,9 @@ export async function reconcileMonitorInterval(
   // replacement; a concurrent source writer remains blocked until our commit.
   await db.execute(sql`UPDATE public.monitor_interval_dirty
     SET completed_revision = revision, active = ${(inserted.rowCount ?? 0) > 0},
-      (first_check_time, last_check_time) = (
-        SELECT date_trunc('second', min(check_time)), date_trunc('second', max(check_time))
+      (first_check_time, last_check_time, source_relation_ids) = (
+        SELECT date_trunc('second', min(check_time)), date_trunc('second', max(check_time)),
+          coalesce(array_agg(DISTINCT tableoid::bigint), '{}'::bigint[])
         FROM public.monitor_history
         WHERE country = ${country}
           AND public.neo_monitor_interval_key(asin_code, asin_id) = ${asinKey}

@@ -41,6 +41,10 @@ export function monitorIntervalCoverageSelect(
         )
       )
       AND NOT EXISTS (SELECT 1 FROM receipts WHERE completed_revision <> revision)
+      AND NOT EXISTS (
+        SELECT 1 FROM receipts CROSS JOIN LATERAL unnest(source_relation_ids) relation_id
+        WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = relation_id::oid)
+      )
       AND EXISTS (SELECT 1 FROM receipts WHERE active AND first_check_time IS NOT NULL AND last_check_time IS NOT NULL)
       AND ${
         query.startTime

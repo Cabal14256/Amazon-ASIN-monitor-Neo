@@ -386,6 +386,84 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     });
 
+    it('rejects disabled tracking triggers and source or projection truncation, with rollback restoring coverage', async () => {
+      await seed();
+      await seed({ hour: 4, broken: true });
+      await drain();
+      const client = await pool.connect();
+      // All destructive statements below roll back in the verified disposable
+      // database. Release test-only claims because TRUNCATE dirties every key.
+      await unrelated.query('ROLLBACK');
+      try {
+        for (const statement of [
+          'ALTER TABLE public.monitor_history DISABLE TRIGGER trg_monitor_interval_source_dirty',
+          'TRUNCATE public.monitor_history_status_interval',
+          'TRUNCATE public.monitor_history',
+        ]) {
+          await client.query('BEGIN');
+          await client.query("SET LOCAL statement_timeout = '5s'");
+          await client.query(statement);
+          expect(await covered(client), statement).toBe(false);
+          await client.query('ROLLBACK');
+          expect(await covered(), statement).toBe(true);
+        }
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+        await unrelated.query('BEGIN');
+        await unrelated.query(
+          `SELECT 1 FROM public.monitor_interval_dirty WHERE NOT (${predicate}) FOR UPDATE`,
+        );
+      }
+    });
+
+    it('detects source chunks removed by retention and rebuilds their keys without row DELETE triggers', async () => {
+      await seed();
+      await seed({ hour: 4, broken: true });
+      await drain();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SET LOCAL statement_timeout = '5s'");
+        const before = await client.query(
+          `SELECT revision, completed_revision FROM public.monitor_interval_dirty WHERE ${predicate}`,
+        );
+        const chunks =
+          await client.query(`SELECT range_start, range_end FROM timescaledb_information.chunks
+          WHERE hypertable_schema = 'public' AND hypertable_name = 'monitor_history'
+            AND range_start <= '1998-01-01 00:00:00+08'::timestamptz AND range_end > '1998-01-01 00:00:00+08'::timestamptz`);
+        expect(chunks.rows).toHaveLength(1);
+        const { range_start: start, range_end: end } = chunks.rows[0];
+        await client.query(
+          "SELECT public.drop_chunks('public.monitor_history', newer_than => $1::timestamptz, older_than => $2::timestamptz)",
+          [start, end],
+        );
+        expect(
+          (
+            await client.query(
+              `SELECT revision, completed_revision FROM public.monitor_interval_dirty WHERE ${predicate}`,
+            )
+          ).rows,
+        ).toEqual(before.rows);
+        expect(await covered(client)).toBe(false);
+        expect(await reconcileMonitorInterval(createDb(client), () => {})).toBe(
+          true,
+        );
+        expect((await client.query(selectPg)).rows).toEqual([]);
+        expect(
+          (
+            await client.query(
+              `SELECT active, source_relation_ids FROM public.monitor_interval_dirty WHERE ${predicate}`,
+            )
+          ).rows,
+        ).toEqual([{ active: false, source_relation_ids: [] }]);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+      expect(await covered()).toBe(true);
+    });
+
     it('keeps full 50-character fallback identifiers and rejects ambiguous case-insensitive identities', async () => {
       await seed({ code: null, id: 'x'.repeat(50), hour: 4 });
       await seed();

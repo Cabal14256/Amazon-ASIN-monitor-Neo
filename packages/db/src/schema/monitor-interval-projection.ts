@@ -25,6 +25,10 @@ export const monitorIntervalDirty = pgTable(
     active: boolean('active').notNull().default(false),
     firstCheckTime: timestamp('first_check_time'),
     lastCheckTime: timestamp('last_check_time'),
+    sourceRelationIds: bigint('source_relation_ids', { mode: 'number' })
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
     queuedAt: timestamp('queued_at', { withTimezone: true })
       .notNull()
       .default(sql`clock_timestamp()`),

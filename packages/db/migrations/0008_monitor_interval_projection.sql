@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS public.monitor_interval_dirty (
   active boolean NOT NULL DEFAULT false,
   first_check_time timestamp without time zone,
   last_check_time timestamp without time zone,
+  source_relation_ids bigint[] NOT NULL DEFAULT '{}',
   queued_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (asin_key, country)
 );
@@ -83,7 +84,7 @@ AS $$
 BEGIN
   IF TG_TABLE_NAME = 'monitor_history' THEN
     INSERT INTO public.monitor_interval_dirty(asin_key, country)
-      SELECT DISTINCT asin_key, country FROM public.monitor_history_status_interval
+      SELECT DISTINCT asin_key, country FROM public.monitor_history_status_interval WHERE true
       ON CONFLICT (asin_key, country) DO UPDATE SET revision = monitor_interval_dirty.revision + 1, queued_at = CASE WHEN monitor_interval_dirty.completed_revision = monitor_interval_dirty.revision THEN clock_timestamp() ELSE monitor_interval_dirty.queued_at END;
   ELSE
     INSERT INTO public.monitor_interval_dirty(asin_key, country)
@@ -116,7 +117,7 @@ DO $$ BEGIN
       SELECT public.neo_monitor_interval_key(asin_code, asin_id), country FROM public.monitor_history
         WHERE rtrim(check_type) COLLATE public.neo_import_group_ci = 'ASIN'
           AND (asin_id IS NOT NULL OR nullif(rtrim(asin_code), '') IS NOT NULL)
-      UNION SELECT asin_key, country FROM public.monitor_history_status_interval
+      UNION SELECT asin_key, country FROM public.monitor_history_status_interval WHERE true
       ON CONFLICT (asin_key, country) DO UPDATE SET revision = monitor_interval_dirty.revision + 1, queued_at = CASE WHEN monitor_interval_dirty.completed_revision = monitor_interval_dirty.revision THEN clock_timestamp() ELSE monitor_interval_dirty.queued_at END;
     INSERT INTO public.monitor_interval_projection(singleton, version) VALUES(true, 1)
       ON CONFLICT (singleton) DO UPDATE SET version = 1, initialized_at = clock_timestamp();
