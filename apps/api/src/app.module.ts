@@ -8,6 +8,7 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { LoggerModule } from './logger/logger.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { MonitorHistoryModule } from './monitor/monitor-history.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { RedisModule } from './redis/redis.module';
 import { RoleModule } from './roles/role.module';
@@ -31,6 +32,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     SpApiRuntimeModule,
     AsinModule,
     VariantCheckModule,
+    MonitorHistoryModule,
     TaskQueryModule,
     UserAdministrationModule,
     UserQueryModule,
