@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
+import { createVariantCheckOperation } from '../src/domain/variant-check-receipt';
 import {
   RedisTaskRepository,
   TASK_RECORD_MAX_BYTES,
@@ -16,6 +17,34 @@ const config = {
   TASK_USER_MAX_ITEMS: 200,
 };
 const input = { taskId: 'task-a', userId: 'owner-a', taskType: 'export' };
+const checkInput = {
+  taskId: '10000000-0000-4000-8000-000000000105',
+  userId: 'owner-a',
+  taskType: 'variant-check',
+  taskSubType: 'asin-check',
+};
+function checkReference(createdAt: string) {
+  const operation = createVariantCheckOperation(
+    {
+      ...checkInput,
+      taskType: 'variant-check',
+      taskSubType: 'asin-check',
+      taskCreatedAt: createdAt,
+      expiresAt: '2026-10-01T00:00:00.000Z',
+      step: 'result',
+      resultKind: 'asin',
+    },
+    { asinId: 'a1', forceRefresh: true },
+  );
+  return {
+    kind: 'variant-check-receipt' as const,
+    version: 1 as const,
+    operationKey: operation.operationKey,
+    requestHash: operation.requestHash,
+    expiresAt: operation.expiresAt,
+    resultKind: operation.resultKind,
+  };
+}
 function fixture() {
   const rows = new Map<string, string>();
   const redis = {
@@ -47,6 +76,110 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it('preserves a check cancellation when an exhausted queue failure is reconciled', async () => {
+    const { repository } = fixture();
+    const task = await repository.create(checkInput);
+    await repository.mutate(task.taskId, { kind: 'cancel-request' }, task);
+    await expect(
+      repository.mutate(
+        task.taskId,
+        { kind: 'failed', message: 'Queue exhausted' },
+        task,
+      ),
+    ).resolves.toMatchObject({
+      status: 'cancelled',
+      error: null,
+      result: null,
+    });
+  });
+  it('recovers a failed check only with a reference bound to its immutable identity', async () => {
+    const { repository } = fixture();
+    const task = await repository.create(checkInput);
+    await repository.mutate(
+      task.taskId,
+      { kind: 'failed', message: 'Lost completion acknowledgement' },
+      task,
+    );
+    const reference = checkReference(task.createdAt);
+    await expect(
+      repository.mutate(
+        task.taskId,
+        { kind: 'check-completed', result: reference },
+        task,
+      ),
+    ).resolves.toMatchObject({
+      status: 'completed',
+      progress: 100,
+      error: null,
+      result: reference,
+      revision: 2,
+    });
+  });
+  it.each(['cancelled', 'cancelling', 'requested'] as const)(
+    'preserves %s when a receipt is confirmed',
+    async (status) => {
+      const { repository, rows } = fixture();
+      const task = await repository.create(checkInput);
+      const current = {
+        ...task,
+        status: status === 'requested' ? 'processing' : status,
+        cancelRequestedAt: '2026-09-01T00:00:01.000Z',
+      };
+      rows.set(`fixture:neo:task:meta:${task.taskId}`, JSON.stringify(current));
+      expect(
+        await repository.mutate(
+          task.taskId,
+          { kind: 'check-completed', result: checkReference(task.createdAt) },
+          task,
+        ),
+      ).toEqual(current);
+    },
+  );
+  it('does not allow the receipt transition for another task, subtype or non-check module', async () => {
+    const { repository } = fixture();
+    const task = await repository.create(checkInput);
+    const reference = checkReference(task.createdAt);
+    for (const patch of [
+      { taskId: '20000000-0000-4000-8000-000000000105' },
+      { taskSubType: 'parent-asin-query' },
+      { taskType: 'export' },
+    ]) {
+      expect(() =>
+        transitionTask(
+          { ...task, ...patch },
+          { kind: 'check-completed', result: reference },
+          new Date(),
+        ),
+      ).toThrow();
+    }
+  });
+  it('re-evaluates cancellation after a lost completion CAS and never resurrects an expired record', async () => {
+    const { repository, redis, rows } = fixture();
+    const task = await repository.create(checkInput);
+    const key = `fixture:neo:task:meta:${task.taskId}`;
+    redis.eval.mockImplementationOnce(async () => {
+      rows.set(
+        key,
+        JSON.stringify({ ...task, status: 'cancelled', revision: 1 }),
+      );
+      return 0;
+    });
+    await expect(
+      repository.mutate(
+        task.taskId,
+        { kind: 'check-completed', result: checkReference(task.createdAt) },
+        task,
+      ),
+    ).resolves.toMatchObject({ status: 'cancelled', revision: 1 });
+    rows.delete(key);
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'check-completed', result: checkReference(task.createdAt) },
+        task,
+      ),
+    ).toBeNull();
+  });
   it('persists a producer message without changing the pending state', async () => {
     const { repository } = fixture();
     const task = await repository.create({
@@ -61,7 +194,7 @@ describe('Redis task registry behavior', () => {
       revision: 0,
     });
   });
-  it.each(['userId', 'taskType', 'createdAt'] as const)(
+  it.each(['userId', 'taskType', 'createdAt', 'taskSubType'] as const)(
     'refuses replacement %s before any transition',
     async (field) => {
       const { repository, redis } = fixture();

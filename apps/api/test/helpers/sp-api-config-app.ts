@@ -1,4 +1,4 @@
-import { loadEnv } from '@asin-monitor/config';
+import { loadEnv, type Env } from '@asin-monitor/config';
 import { createPgPool } from '@asin-monitor/db';
 import type { ModuleMetadata } from '@nestjs/common';
 import {
@@ -23,6 +23,7 @@ export async function spApiConfigApp(
   options: {
     imports?: ModuleMetadata['imports'];
     configure?: (builder: TestingModuleBuilder) => TestingModuleBuilder;
+    env?: Partial<Env>;
   } = {},
 ) {
   const baseEnv = loadEnv(process.env);
@@ -120,6 +121,7 @@ export async function spApiConfigApp(
     databaseUrl.searchParams.set('options', `-c search_path=${schema}`);
     const env = {
       ...baseEnv,
+      ...options.env,
       DATABASE_URL: databaseUrl.toString(),
       AUTH_DATA_AUTHORITY: 'postgresql' as const,
     };

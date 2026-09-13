@@ -1,5 +1,9 @@
 import type { Env } from '@asin-monitor/config';
 import { isTerminalTaskStatus, type TaskState } from '@asin-monitor/db';
+import {
+  variantCheckResultOperation,
+  variantCheckResultReference,
+} from '@asin-monitor/variant-check';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
@@ -12,6 +16,7 @@ import {
   type QueueTaskSnapshot,
 } from './task-query-values';
 import { TaskQueryRuntime, type TaskQueryPort } from './task-query.runtime';
+import { VariantCheckTaskResults } from './variant-check-task-results';
 
 function fail(status: number, message: string): never {
   throw new HttpException(
@@ -19,6 +24,11 @@ function fail(status: number, message: string): never {
     status,
   );
 }
+const checkTask = (task: { taskType: string }) =>
+  ['variant-check', 'batch-check'].includes(task.taskType);
+const needsReconciliation = (task: TaskState) =>
+  !isTerminalTaskStatus(task.status) ||
+  (checkTask(task) && task.status === 'failed');
 @Injectable()
 export class TaskQueryService {
   private active = 0;
@@ -26,6 +36,8 @@ export class TaskQueryService {
     @Inject(ENV) private readonly env: Env,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(VariantCheckTaskResults)
+    private readonly checkResults: VariantCheckTaskResults,
   ) {}
   private owner(task: TaskState | QueueTaskSnapshot, userId: string) {
     if (!task.userId || task.userId !== userId) fail(403, '无权访问此任务');
@@ -63,22 +75,76 @@ export class TaskQueryService {
   private async reconcile(
     port: TaskQueryPort,
     task: TaskState,
-    userId: string,
+    principal: AuthPrincipal,
+    ensureOpen: () => void,
+    onRecovered?: (result: unknown) => void,
   ): Promise<TaskState> {
+    const userId = principal.userId;
     this.owner(task, userId);
-    if (isTerminalTaskStatus(task.status)) return task;
+    if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
     if (!queued) return task;
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
+    if (checkTask(task)) {
+      if (
+        queued.createdAt !== task.createdAt ||
+        queued.taskSubType !== task.taskSubType
+      )
+        throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+    }
     let current: TaskState | null = task;
     const identity = {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
+      ...(checkTask(task) ? { taskSubType: task.taskSubType } : {}),
     };
-    if (queued.status === 'completed')
+    if (
+      checkTask(task) &&
+      (queued.status === 'cancelled' ||
+        ((task.cancelRequestedAt || task.status === 'cancelling') &&
+          isTerminalTaskStatus(queued.status)))
+    ) {
+      current = await port.store.mutate(
+        task.taskId,
+        { kind: 'cancelled', message: '检查任务已取消，已提交的检查结果保留' },
+        identity,
+      );
+      if (!current) fail(404, '任务不存在');
+      this.owner(current, userId);
+      return current;
+    }
+    if (
+      checkTask(task) &&
+      !task.cancelRequestedAt &&
+      task.status !== 'cancelling'
+    ) {
+      const recovered = await this.recoverCheck(
+        task,
+        queued,
+        principal,
+        ensureOpen,
+      );
+      if (recovered) {
+        ensureOpen();
+        current = await port.store.mutate(
+          task.taskId,
+          {
+            kind: 'check-completed',
+            result: recovered.reference,
+            message: '检查完成',
+          },
+          identity,
+        );
+        if (!current) fail(404, '任务不存在');
+        this.owner(current, userId);
+        if (current.status === 'completed') onRecovered?.(recovered.result);
+        return current;
+      }
+    }
+    if (queued.status === 'completed' && !checkTask(task))
       current = await port.store.mutate(
         task.taskId,
         {
@@ -101,6 +167,38 @@ export class TaskQueryService {
     this.owner(current, userId);
     return current;
   }
+  private async recoverCheck(
+    task: TaskState | QueueTaskSnapshot,
+    queued: QueueTaskSnapshot,
+    principal: AuthPrincipal,
+    ensureOpen: () => void,
+  ) {
+    if (!['completed', 'failed'].includes(queued.status)) return undefined;
+    const operation =
+      queued.status === 'completed'
+        ? variantCheckResultOperation(task, queued.result)
+        : queued.checkOperation;
+    if (!operation) return undefined;
+    const reference = variantCheckResultReference(operation);
+    // Bind the original request digest to the independent registry identity.
+    variantCheckResultOperation(task, reference);
+    if (
+      queued.checkOperation &&
+      JSON.stringify(operation) !== JSON.stringify(queued.checkOperation)
+    )
+      throw new Error('TASK_QUEUE_OPERATION_MISMATCH');
+    const result = await this.checkResults.read(
+      { ...task, result: reference },
+      principal,
+      ensureOpen,
+      true,
+    );
+    if (result === undefined) {
+      if (queued.status === 'completed') fail(404, '检查结果不存在或已过期');
+      return undefined;
+    }
+    return { reference, result };
+  }
   list(principal: AuthPrincipal, raw: unknown) {
     return this.read(principal, 'list', async (port, ensureOpen) => {
       const tasks = await port.store.listUser(
@@ -117,13 +215,14 @@ export class TaskQueryService {
           while (next < tasks.length) {
             const index = next++,
               task = tasks[index];
-            if (degraded || isTerminalTaskStatus(task.status)) continue;
+            if (degraded || !needsReconciliation(task)) continue;
             try {
               ensureOpen();
               results[index] = await this.reconcile(
                 port,
                 task,
-                principal.userId,
+                principal,
+                ensureOpen,
               );
             } catch {
               degraded = true;
@@ -139,17 +238,66 @@ export class TaskQueryService {
     });
   }
   detail(principal: AuthPrincipal, raw: unknown) {
-    return this.read(principal, 'detail', async (port) => {
+    return this.read(principal, 'detail', async (port, ensureOpen) => {
       const id = parseTaskId(raw);
       const task = await port.store.read(id);
-      if (task)
-        return serializeTask(
-          await this.reconcile(port, task, principal.userId),
+      if (task) {
+        let recovered: unknown;
+        const current = await this.reconcile(
+          port,
+          task,
+          principal,
+          ensureOpen,
+          (value) => {
+            recovered = value;
+          },
         );
+        const response = serializeTask(current);
+        if (
+          current.status === 'completed' &&
+          this.checkResults.isReference(current.result)
+        )
+          response.result =
+            recovered ??
+            (await this.checkResults.read(current, principal, ensureOpen));
+        return response;
+      }
       const queued = await port.findJob(id);
       if (!queued) fail(404, '任务不存在');
       this.owner(queued, principal.userId);
-      return serializeTask(queued);
+      if (checkTask(queued) && queued.status === 'failed') {
+        const recovered = await this.recoverCheck(
+          queued,
+          queued,
+          principal,
+          ensureOpen,
+        );
+        if (recovered) {
+          // Missing metadata is never recreated. The owned queue still identifies
+          // the original operation for its retained result/download lifetime.
+          const response = serializeTask({
+            ...queued,
+            status: 'completed',
+            progress: 100,
+            error: null,
+            message: '检查完成',
+            result: recovered.reference,
+          });
+          response.result = recovered.result;
+          return response;
+        }
+      }
+      const response = serializeTask(queued);
+      if (
+        queued.status === 'completed' &&
+        this.checkResults.isReference(queued.result)
+      )
+        response.result = await this.checkResults.read(
+          queued,
+          principal,
+          ensureOpen,
+        );
+      return response;
     });
   }
 }

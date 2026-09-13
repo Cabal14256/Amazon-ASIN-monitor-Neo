@@ -65,7 +65,7 @@ describe.skipIf(
       connection.release();
     }
     await f.pool.query(
-      "INSERT INTO variant_groups(id,name,country) VALUES('g1','Empty one','US'),('g2','Empty two','US')",
+      "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g1','Empty one','US','amazon.com','Fixture'),('g2','Empty two','US','amazon.com','Fixture')",
     );
     store = new RedisTaskRepository(f.redis, f.env);
     repository = new PgVariantCheckRepository(f.pool);

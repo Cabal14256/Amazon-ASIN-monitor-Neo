@@ -16,7 +16,7 @@ export function parseVariantCheckJob(raw: unknown): VariantCheckJobData {
   const parsed = variantCheckJobSchema.safeParse(raw);
   if (!parsed.success) throw new VariantCheckError('invalid-input');
   const data = parsed.data;
-  if ('country' in data.params && data.params.country)
+  if (data.taskSubType === 'parent-asin-query')
     data.params.country = normalizeCountry(data.params.country);
   variantCheckJobOperation(data);
   return data;

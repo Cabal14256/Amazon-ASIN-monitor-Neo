@@ -51,6 +51,24 @@ export class TaskDownloadService implements OnModuleDestroy {
       const task = await this.tasks.detail(request.auth!, taskId);
       controller.signal.throwIfAborted();
       if (task.status !== 'completed') fail(409, '任务尚未完成，无法下载结果');
+      if (
+        ['variant-check', 'batch-check'].includes(task.taskType) &&
+        task.result !== null &&
+        task.filename === `check-result-${task.taskId}.json`
+      ) {
+        const payload = JSON.stringify(task.result);
+        controller.signal.throwIfAborted();
+        reply.header('Cache-Control', 'no-store');
+        reply.header('Content-Type', 'application/json; charset=utf-8');
+        reply.header('X-Content-Type-Options', 'nosniff');
+        reply.header(
+          'Content-Disposition',
+          `attachment; filename="check-result-${task.taskId}.json"`,
+        );
+        reply.header('Content-Length', Buffer.byteLength(payload));
+        await reply.send(payload);
+        return;
+      }
       const result =
         task.result &&
         typeof task.result === 'object' &&

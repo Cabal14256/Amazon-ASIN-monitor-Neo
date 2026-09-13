@@ -16,6 +16,7 @@ import { SpApiRuntimeModule } from './sp-api-runtime/sp-api-runtime.module';
 import { TaskQueryModule } from './tasks/task-query.module';
 import { UserAdministrationModule } from './users/user-administration.module';
 import { UserQueryModule } from './users/user-query.module';
+import { VariantCheckModule } from './variant-check/variant-check.module';
 import { WebSocketModule } from './websocket/websocket.module';
 
 @Module({
@@ -29,6 +30,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     SpApiConfigModule,
     SpApiRuntimeModule,
     AsinModule,
+    VariantCheckModule,
     TaskQueryModule,
     UserAdministrationModule,
     UserQueryModule,

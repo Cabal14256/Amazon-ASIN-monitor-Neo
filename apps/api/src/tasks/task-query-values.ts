@@ -1,19 +1,25 @@
 import {
   taskInfoSchema,
   taskListQuerySchema,
+  variantCheckResultReferenceSchema,
   type TaskInfo,
 } from '@asin-monitor/contracts';
 import {
   isTerminalTaskStatus,
   TASK_RECORD_MAX_BYTES,
   type TaskState,
+  type VariantCheckOperation,
 } from '@asin-monitor/db';
 import { z } from 'zod';
 
 export type QueueTaskSnapshot = Omit<
   TaskInfo,
   'canCancel' | 'filename' | 'downloadUrl'
-> & { userId: string | null };
+> & {
+  userId: string | null;
+  /** Internal only: derived from validated immutable BullMQ data, never serialized. */
+  checkOperation?: VariantCheckOperation;
+};
 export class TaskQueryInputError extends Error {}
 export function parseTaskId(raw: unknown): string {
   const value = z
@@ -74,10 +80,15 @@ export function serializeTask(task: TaskState | QueueTaskSnapshot): TaskInfo {
       ? (task.result as Record<string, unknown>)
       : {};
   const result = publicTaskResult(task.result);
-  const publicFilename = filename(raw.filename) ?? filename(raw.filepath);
+  const isCheckResult =
+    ['variant-check', 'batch-check'].includes(task.taskType) &&
+    variantCheckResultReferenceSchema.safeParse(task.result).success;
+  const publicFilename = isCheckResult
+    ? `check-result-${task.taskId}.json`
+    : filename(raw.filename) ?? filename(raw.filepath);
   // Only this authenticated task's own download endpoint may be advertised.
   const downloadUrl =
-    raw.downloadUrl || raw.filepath
+    raw.downloadUrl || raw.filepath || isCheckResult
       ? `/api/v1/tasks/${encodeURIComponent(task.taskId)}/download`
       : null;
   if (result && typeof result === 'object' && !Array.isArray(result)) {

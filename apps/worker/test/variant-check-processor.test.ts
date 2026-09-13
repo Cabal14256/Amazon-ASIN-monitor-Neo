@@ -125,7 +125,7 @@ describe('variant and batch BullMQ processor lifecycle', () => {
       expect(f.options.updateProgress).toHaveBeenCalledWith(f.job, 50);
       expect(f.store.mutate).toHaveBeenCalledWith(
         f.data.taskId,
-        expect.objectContaining({ kind: 'completed' }),
+        expect.objectContaining({ kind: 'check-completed' }),
         f.data,
       );
     },
@@ -155,7 +155,8 @@ describe('variant and batch BullMQ processor lifecycle', () => {
     const f = fixture();
     const original = f.store.mutate.getMockImplementation()!;
     f.store.mutate.mockImplementation(async (id, mutation) => {
-      if (mutation.kind === 'completed') throw new Error('uncertain Redis ack');
+      if (mutation.kind === 'check-completed')
+        throw new Error('uncertain Redis ack');
       return original(id, mutation);
     });
     await expect(f.run()).rejects.toThrow('检查结果已保存');
@@ -223,7 +224,7 @@ describe('variant and batch BullMQ processor lifecycle', () => {
     expect(f.state()?.status).toBe('processing');
     expect(
       f.store.mutate.mock.calls.some(
-        ([, mutation]) => mutation.kind === 'completed',
+        ([, mutation]) => mutation.kind === 'check-completed',
       ),
     ).toBe(false);
   });
@@ -273,5 +274,31 @@ describe('variant and batch BullMQ processor lifecycle', () => {
     f.execute.mockRejectedValue(new VariantCheckError('operation-mismatch'));
     await expect(f.run()).rejects.toBeInstanceOf(UnrecoverableError);
     expect(f.state()?.status).toBe('failed');
+  });
+  it('keeps the final lost Redis acknowledgement recoverable through the receipt', async () => {
+    const f = fixture();
+    f.job.attemptsMade = 1;
+    const original = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, mutation) => {
+      if (mutation.kind === 'check-completed')
+        throw new Error('lost acknowledgement');
+      return original(id, mutation);
+    });
+    await expect(f.run()).rejects.toThrow('检查结果已保存');
+    expect(f.state()?.status).toBe('processing');
+  });
+  it('does not overwrite a cancellation racing with the completion CAS', async () => {
+    const f = fixture();
+    const original = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, mutation) => {
+      if (mutation.kind === 'check-completed')
+        f.patch({
+          status: 'cancelling',
+          cancelRequestedAt: new Date().toISOString(),
+        });
+      return original(id, mutation);
+    });
+    expect(await f.run()).toMatchObject({ cancelled: true });
+    expect(f.state()?.status).toBe('cancelled');
   });
 });

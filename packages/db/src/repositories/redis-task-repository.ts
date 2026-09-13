@@ -180,7 +180,8 @@ export class RedisTaskRepository {
   async mutate(
     taskId: string,
     change: TaskMutation,
-    expectedIdentity?: Pick<TaskState, 'userId' | 'taskType' | 'createdAt'>,
+    expectedIdentity?: Pick<TaskState, 'userId' | 'taskType' | 'createdAt'> &
+      Partial<Pick<TaskState, 'taskSubType'>>,
   ): Promise<TaskState | null> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const raw = await this.redis.get(this.key('meta', taskId));
@@ -191,7 +192,9 @@ export class RedisTaskRepository {
         expectedIdentity &&
         (task.userId !== expectedIdentity.userId ||
           task.taskType !== expectedIdentity.taskType ||
-          task.createdAt !== expectedIdentity.createdAt)
+          task.createdAt !== expectedIdentity.createdAt ||
+          (expectedIdentity.taskSubType !== undefined &&
+            task.taskSubType !== expectedIdentity.taskSubType))
       ) {
         throw new TaskRegistryError('TASK_IDENTITY_CHANGED');
       }

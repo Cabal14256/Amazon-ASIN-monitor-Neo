@@ -5,6 +5,7 @@ import {
   type Env,
   type QueueName,
 } from '@asin-monitor/config';
+import type { VariantCheckJobData } from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
   type AsinBatchDeleteTaskData,
@@ -12,6 +13,10 @@ import {
   type TaskState,
 } from '@asin-monitor/db';
 import type { AsinImportTaskData } from '@asin-monitor/import';
+import {
+  parseVariantCheckJob,
+  variantCheckJobOperation,
+} from '@asin-monitor/variant-check';
 import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
 import { Queue, QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -47,6 +52,10 @@ export interface ImportProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: AsinImportTaskData): Promise<void>;
 }
+export interface CheckProducerPort {
+  store: Pick<RedisTaskRepository, 'create'>;
+  enqueue(data: VariantCheckJobData): Promise<void>;
+}
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
 function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
@@ -56,14 +65,26 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       ? (result as Record<string, unknown>)
       : {};
   const status =
-    state === 'completed' || state === 'failed'
+    state === 'completed' &&
+    ['variant-check', 'batch-check'].includes(type) &&
+    resultObject.cancelled === true
+      ? 'cancelled'
+      : state === 'completed' || state === 'failed'
       ? state
       : state === 'active'
       ? 'processing'
       : 'pending';
   const failure = status === 'failed' ? '任务执行失败' : null;
   const owner = job.data?.userId;
+  let checkOperation: QueueTaskSnapshot['checkOperation'];
+  if (['variant-check', 'batch-check'].includes(type)) {
+    const data = parseVariantCheckJob(job.data);
+    if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+    checkOperation = variantCheckJobOperation(data);
+  }
   return {
+    ...(checkOperation ? { checkOperation } : {}),
     taskId: job.id!,
     taskType: type,
     userId:
@@ -101,6 +122,10 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private readonly checkQueues = new Map<
+    'variant-check' | 'batch-check',
+    Queue
+  >();
   private connecting?: Promise<void>;
   private closed = false;
   private lastNotificationWarning = -Infinity;
@@ -303,6 +328,43 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         }),
     };
   }
+  openCheck(ensureOpen: () => void): CheckProducerPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.createStore(ensureOpen),
+      enqueue: async (input) => {
+        const data = parseVariantCheckJob(input);
+        await command(async () => {
+          const type = data.taskType;
+          let queue = this.checkQueues.get(type);
+          if (!queue) {
+            queue = new Queue(getPhysicalQueueName(type), {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy(type, this.env)
+                .defaultJobOptions,
+            });
+            queue.on('error', () =>
+              this.logger.warn('检查队列连接异常', 'TaskQueryRuntime', {
+                reason: 'variant_check_queue_error',
+              }),
+            );
+            this.checkQueues.set(type, queue);
+          }
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.checkQueues.get(type) === queue)
+              this.checkQueues.delete(type);
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          await queue.add(type, data, { jobId: data.taskId });
+        });
+      },
+    };
+  }
   async onModuleDestroy() {
     this.closed = true;
     await Promise.allSettled(
@@ -310,6 +372,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...this.checkQueues.values(),
       ].map((queue) => queue.close()),
     );
     this.redis.disconnect(false);

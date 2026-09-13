@@ -354,6 +354,21 @@ describe('complete check task execution and replay', () => {
   });
 });
 describe('owned task result reference', () => {
+  it('retains unused batch country metadata while normalizing the parent-query country', () => {
+    const data = parseVariantCheckJob({
+      ...batch,
+      params: { ...batch.params, country: 'zz' },
+    });
+    expect(data.params).toMatchObject({ country: 'zz' });
+    expect(
+      parseVariantCheckJob({
+        ...identity,
+        taskType: 'variant-check',
+        taskSubType: 'parent-asin-query',
+        params: { asins: ['B000000001'], country: 'uk' },
+      }).params,
+    ).toMatchObject({ country: 'UK' });
+  });
   it('reconstructs the receipt from independently authenticated task identity', () => {
     const operation = variantCheckJobOperation(batch);
     const reference = variantCheckResultReference(operation);

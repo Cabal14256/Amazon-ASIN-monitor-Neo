@@ -247,6 +247,9 @@ jobs:
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
 
+      - name: Run variant check HTTP, full results, retry recovery and two API gateways
+        run: pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts
+
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
 

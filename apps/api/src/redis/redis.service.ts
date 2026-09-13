@@ -17,6 +17,7 @@ export class ApplicationRedisClient implements OnModuleDestroy {
       connectTimeout: env.HEALTH_PROBE_TIMEOUT_MS,
       commandTimeout: env.HEALTH_PROBE_TIMEOUT_MS,
       enableOfflineQueue: false,
+      autoResendUnfulfilledCommands: false,
       maxRetriesPerRequest: 1,
       retryStrategy: () => null,
     });

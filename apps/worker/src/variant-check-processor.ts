@@ -153,7 +153,7 @@ export function createVariantCheckProcessor(
       published = true;
       await check();
       const state = await mutate({
-        kind: 'completed',
+        kind: 'check-completed',
         result,
         message: '检查完成',
       });

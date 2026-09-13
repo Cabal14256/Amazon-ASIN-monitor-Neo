@@ -21,6 +21,27 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('preserves Legacy sync batch thresholds, including a positive fraction forcing asynchronous submission', () => {
+    expect(loadEnv(validEnv).BATCH_CHECK_SYNC_MAX_GROUPS).toBe(20);
+    expect(loadEnv(validEnv).BATCH_CHECK_SYNC_CONCURRENCY).toBe(3);
+    expect(
+      loadEnv({ ...validEnv, BATCH_CHECK_SYNC_MAX_GROUPS: '0.5' })
+        .BATCH_CHECK_SYNC_MAX_GROUPS,
+    ).toBe(0);
+    expect(
+      loadEnv({ ...validEnv, BATCH_CHECK_SYNC_CONCURRENCY: '0.5' })
+        .BATCH_CHECK_SYNC_CONCURRENCY,
+    ).toBe(1);
+    expect(
+      loadEnv({ ...validEnv, BATCH_CHECK_SYNC_CONCURRENCY: '1000' })
+        .BATCH_CHECK_SYNC_CONCURRENCY,
+    ).toBe(8);
+    for (const value of ['0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, BATCH_CHECK_SYNC_MAX_GROUPS: value })
+          .BATCH_CHECK_SYNC_MAX_GROUPS,
+      ).toBe(20);
+  });
   it('preserves Legacy batch-check concurrency defaults and floors positive values within runtime capacity', () => {
     expect(loadEnv(validEnv).BATCH_CHECK_GROUP_CONCURRENCY).toBe(2);
     for (const value of ['', '0', '-1', 'NaN', 'Infinity'])

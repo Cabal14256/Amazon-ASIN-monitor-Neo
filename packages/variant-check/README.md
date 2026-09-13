@@ -32,4 +32,6 @@ Legacy 批量代码错误地使用 POST 请求体。新实现遵循 [Amazon Cata
 - `corepack pnpm --filter @asin-monitor/variant-check test`
 - 设置 `RUN_INTEGRATION_TESTS=true` 和隔离的 `DATABASE_URL` 后，运行 `test/repository.integration.test.ts` 验证实际 PostgreSQL 写入及回滚；默认跳过不代表已验证数据库。
 
-本包属于 Issue #105 的进行中实现。四个 HTTP 入口、API 运行时和所属任务的完整结果读取仍需接入；实际 PostgreSQL/Redis/编译后消费者集成测试需在隔离 CI 执行，不能据此关闭迁移阶段门禁。
+四个 HTTP 入口、API 共享运行时、本人任务完整结果与 JSON 下载已接入，调用规则和部署顺序见[检查业务运行手册](../../docs/runbooks/phase-2-variant-check.md)。任务查询可以凭原始队列操作身份及 PostgreSQL 完成凭据恢复丢失的完成确认；专用 `check-completed` CAS 允许纠正检查任务的失败状态，但不能覆盖取消、其他业务任务或不同创建实例。列表和 WS 保留小引用，详情和下载返回经过敏感字段过滤的完整结果。
+
+本包仍属于 Issue #105 的进行中实现。实际 PostgreSQL/Redis/编译后消费者集成测试需在隔离 CI 通过，不能以本地跳过的测试关闭迁移阶段门禁。`apps/api/test/variant-check.integration.test.ts` 覆盖真实 HTTP → 编译后 Worker → 完整结果及双 API 网关；只替换 Amazon HTTP 传输为固定测试响应。
