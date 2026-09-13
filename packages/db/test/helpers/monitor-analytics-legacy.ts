@@ -126,10 +126,47 @@ export async function legacyAnalyticsFixture() {
       getAggDurationCtesSql: (base: string) => string;
       getDurationMetricsSqlSelect: (prefix?: string) => string;
     };
+    const intervalModule = { exports: {} };
+    vm.runInNewContext(
+      readFileSync(
+        resolve(root, 'server/src/services/analyticsAggService.js'),
+        'utf8',
+      ),
+      {
+        module: intervalModule,
+        process: { env: { ANALYTICS_AGG_ENABLED: '1' } },
+        require: (name: string) => {
+          if (name === '../utils/logger') return dependencies[name];
+          if (name !== '../config/database')
+            throw new Error('Unexpected Legacy interval fixture dependency');
+          return {
+            query,
+            async withTransaction(
+              action: (db: { query: typeof query }) => Promise<unknown>,
+            ) {
+              await connection.beginTransaction();
+              try {
+                const value = await action({ query });
+                await connection.commit();
+                return value;
+              } catch (error) {
+                await connection.rollback();
+                throw error;
+              }
+            },
+          };
+        },
+      },
+    );
+    const intervalService = intervalModule.exports as {
+      refreshMonitorHistoryStatusIntervals(options?: object): Promise<unknown>;
+    };
     return {
       ...loaded,
       query,
       close,
+      refreshIntervals: (options?: object) =>
+        intervalService.refreshMonitorHistoryStatusIntervals(options),
       /** Only the source-selection guard is forced for arithmetic comparisons
        * on explicitly seeded aggregate tables. The actual leaf SQL and mapping
        * remain untouched; Timescale coverage is tested independently. */

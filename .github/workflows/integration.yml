@@ -180,6 +180,17 @@ jobs:
       - name: Run ASIN timestamp policy upgrade, transactions and rollback on PostgreSQL
         run: pnpm --filter @asin-monitor/db exec vitest run test/asin-timestamp-policy.integration.test.ts
 
+      - name: Apply monitor interval maintenance upgrade twice
+        run: |
+          docker cp packages/db/migrations/0008_monitor_interval_projection.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0008_monitor_interval_projection.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0008_monitor_interval_projection.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0008_monitor_interval_projection.sql
+
+      - name: Compare observed interval maintenance with Legacy and verify mutation receipts
+        env:
+          TZ: Asia/Shanghai
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-interval-projection.integration.test.ts
+
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
 

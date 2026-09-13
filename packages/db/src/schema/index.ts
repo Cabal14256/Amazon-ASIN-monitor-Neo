@@ -17,6 +17,10 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import { shanghaiTimestamp as timestampColumn } from '../timestamps';
+export {
+  monitorIntervalDirty,
+  monitorIntervalProjection,
+} from './monitor-interval-projection';
 export { variantCheckReceipts } from './variant-check-receipts';
 
 const localTimestamp = sql`LOCALTIMESTAMP`;
@@ -359,7 +363,7 @@ export const analyticsRefreshWatermark = pgTable(
 export const monitorHistoryStatusInterval = pgTable(
   'monitor_history_status_interval',
   {
-    asinKey: varchar('asin_key', { length: 50 }).notNull(),
+    asinKey: varchar('asin_key', { length: 53 }).notNull(),
     asinId: varchar('asin_id', { length: 50 }),
     asinCode: varchar('asin_code', { length: 20 }),
     asinName: varchar('asin_name', { length: 500 }),
