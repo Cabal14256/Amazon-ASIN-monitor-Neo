@@ -51,6 +51,8 @@ export async function legacyAnalyticsFixture() {
       'monitor_history_agg',
       'monitor_history_agg_dim',
       'monitor_history_agg_variant_group',
+      'monitor_history_status_interval',
+      'analytics_refresh_watermark',
     ]) {
       const statement = ddl.match(
         new RegExp(

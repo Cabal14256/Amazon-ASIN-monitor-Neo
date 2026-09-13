@@ -1,4 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
+import { getMonitorAbnormalGranularity } from '../domain/monitor-abnormal-duration';
 import {
   MonitorAnalyticsQueryError,
   validateMonitorAnalyticsQuery,
@@ -220,4 +221,103 @@ export function monitorCountStatisticsSelect(
   )}) AS group_count,
     count(DISTINCT ${ci(sql`mh.asin_id`)}) AS asin_count
     FROM public.monitor_history mh WHERE ${conjunction(where)}`;
+}
+
+/** Abnormal-duration buckets intentionally include every check type with an
+ * ASIN ID. Their snapshot fallback is NULL-only, unlike duration ASIN keys. */
+export function monitorAbnormalBucketsSelect(
+  query: MonitorAnalyticsQuery,
+): SQL {
+  validateMonitorAnalyticsQuery(query);
+  if (query.operation !== 'abnormal-duration-statistics')
+    throw new MonitorAnalyticsQueryError('input');
+  const where = [...rawWhere(query), sql`mh.asin_id IS NOT NULL`];
+  const asin = sql`coalesce(mh.asin_code, a.asin)`;
+  for (const [column, values] of [
+    [sql`mh.asin_id`, query.asinIds],
+    [asin, query.asinCodes],
+  ] as const)
+    if (values?.length)
+      where.push(
+        sql`${ci(column)} IN (${sql.join(
+          values.map((value) => sql`rtrim(${value}::text)`),
+          sql`, `,
+        )})`,
+      );
+  if (query.asinName)
+    where.push(
+      sql`public.neo_monitor_like(coalesce(mh.asin_name, a.name), ${`%${query.asinName}%`})`,
+    );
+  if (query.variantGroupName)
+    where.push(
+      sql`public.neo_monitor_like(coalesce(mh.variant_group_name, vg.name), ${`%${query.variantGroupName}%`})`,
+    );
+  if (query.asinType === '1' || query.asinType === 'MAIN_LINK')
+    where.push(sql`${ci(sql`a.asin_type`)} IN ('1','MAIN_LINK')`);
+  else if (query.asinType === '2' || query.asinType === 'SUB_REVIEW')
+    where.push(sql`${ci(sql`a.asin_type`)} IN ('2','SUB_REVIEW')`);
+  else if (query.asinType) where.push(equals(sql`a.asin_type`, query.asinType));
+  return sql`SELECT ${monitorPeriodSql(
+    sql`mh.check_time`,
+    getMonitorAbnormalGranularity(query),
+  )} AS time_period,
+    ${ci(sql`mh.asin_id`)} AS asin_id, ${ci(asin)} AS asin, ${ci(
+    sql`mh.country`,
+  )} AS country,
+    count(*) AS total_checks, sum(CASE WHEN mh.is_broken IS TRUE THEN 1 ELSE 0 END) AS broken_count
+    FROM public.monitor_history mh
+    LEFT JOIN public.asins a ON rtrim(a.id) COLLATE public.neo_import_group_ci = rtrim(mh.asin_id) COLLATE public.neo_import_group_ci
+    ${groupJoin} WHERE ${conjunction(where)}
+    GROUP BY 1,2,3,4 ORDER BY time_period ASC, country ASC, asin_id ASC`;
+}
+
+/** Source for a period-summary page. NULL dimensions coalesce before filtering
+ * here, including a PAD SPACE value such as ' '; the general raw duration
+ * source deliberately has a different Legacy filter rule. */
+export function monitorPeriodGroupsSelect(
+  query: MonitorAnalyticsQuery,
+  source: 'raw' | 'aggregate',
+  granularity: MonitorSourceGranularity,
+): SQL {
+  validateMonitorAnalyticsQuery(query);
+  validateSource('dim', granularity);
+  if (
+    query.operation !== 'period-summary' ||
+    !['raw', 'aggregate'].includes(source)
+  )
+    throw new MonitorAnalyticsQueryError('input');
+  if (source === 'aggregate')
+    return sql`SELECT country, site, brand FROM (
+      ${monitorAggregateSourceSelect(query, 'dim', granularity)}
+    ) source GROUP BY country, site, brand`;
+  const country = ci(sql`mh.country`),
+    site = ci(sql`coalesce(mh.site_snapshot, '')`),
+    brand = ci(sql`coalesce(mh.brand_snapshot, '')`);
+  const where = [...rawWhere(query), asinFilter];
+  if (query.site)
+    where.push(equals(sql`coalesce(mh.site_snapshot, '')`, query.site));
+  if (query.brand)
+    where.push(equals(sql`coalesce(mh.brand_snapshot, '')`, query.brand));
+  return sql`SELECT ${country} AS country, ${site} AS site, ${brand} AS brand
+    FROM public.monitor_history mh WHERE ${conjunction(where)}
+    GROUP BY ${country}, ${site}, ${brand}`;
+}
+
+/** A single SELECT always returns the count, even beyond the final page. An
+ * empty page is represented by row_present=NULL; country itself may be empty.
+ * Aggregate callers still need to embed the coverage proof in this statement. */
+export function monitorPeriodPageSelect(
+  query: MonitorAnalyticsQuery,
+  groupedSource: SQL,
+): SQL {
+  validateMonitorAnalyticsQuery(query);
+  if (query.operation !== 'period-summary')
+    throw new MonitorAnalyticsQueryError('input');
+  return sql`WITH grouped AS MATERIALIZED (${groupedSource}),
+    total AS (SELECT count(*) AS total_rows FROM grouped),
+    page AS (SELECT true AS row_present, country, site, brand FROM grouped
+      ORDER BY country ASC, site ASC, brand ASC
+      LIMIT ${query.pageSize} OFFSET ${(query.current! - 1) * query.pageSize!})
+    SELECT total.total_rows, page.* FROM total LEFT JOIN page ON true
+    ORDER BY page.country ASC, page.site ASC, page.brand ASC`;
 }

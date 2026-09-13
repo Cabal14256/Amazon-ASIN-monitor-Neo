@@ -12,8 +12,11 @@ import {
   type MonitorAggregateFamily,
 } from '../src/repositories/monitor-aggregate-coverage';
 import {
+  monitorAbnormalBucketsSelect,
   monitorAggregateSourceSelect,
   monitorCountStatisticsSelect,
+  monitorPeriodGroupsSelect,
+  monitorPeriodPageSelect,
   monitorRawDurationSourceSelect,
 } from '../src/repositories/monitor-analytics-sql';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
@@ -109,7 +112,32 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           [id, name],
         );
       }
+      for (const [id, code, type] of [
+        ['analytics-109-id-a', 'B109CURRENT', 'MAIN_LINK'],
+        ['analytics-109-id-only', 'B109FALLBACK', '2'],
+      ]) {
+        await pool.query(
+          "INSERT INTO public.asins(id,asin,name,asin_type,country,site,brand,variant_group_id) VALUES($1,$2,'Café name',$3,'US','store','brand','analytics-109-a')",
+          [id, code, type],
+        );
+        await legacy.query(
+          "INSERT INTO asins(id,asin,name,asin_type,country,site,brand,variant_group_id) VALUES(?,?,'Café name',?,'US','store','brand','analytics-109-a')",
+          [id, code, type],
+        );
+      }
       const fixtures = [
+        [
+          null,
+          'US',
+          1,
+          'GROUP',
+          '03 03:10:00',
+          '',
+          '',
+          'a',
+          'Snapshot',
+          'id-only',
+        ],
         [
           'B109SQL001',
           'US',
@@ -268,7 +296,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           brand,
           `analytics-109-${group}`,
           name,
-          id,
+          id ? `analytics-109-${id}` : null,
         ];
         await legacy.query(
           'INSERT INTO monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id,variant_group_name,asin_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -296,42 +324,67 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     });
 
     it('matches real raw duration buckets at all three source granularities, including snapshots, peak checks and ICU filters', async () => {
-      for (const granularity of granularities) {
-        for (const filter of [
-          {},
-          { country: 'EU' },
-          { country: 'us ' },
-          { country: 'US', site: 'store ', brand: 'CAFE' },
-        ]) {
-          const query = parseMonitorAnalyticsQuery('period-summary/details', {
-            ...range,
-            ...filter,
-          });
-          const neo = await createDb(pool).execute(
-            monitorRawDurationSourceSelect(query, 'dim', granularity),
+      const [{ mode }] = await legacy.query(
+        'SELECT @@SESSION.sql_mode AS mode',
+      );
+      try {
+        for (const granularity of granularities) {
+          if (granularity === 'month') {
+            // The frozen monthly Legacy SQL fails ONLY_FULL_GROUP_BY because it
+            // wraps a grouped timestamp expression in DATE_FORMAT. Record that
+            // source defect, then compare its unchanged SQL under permissive
+            // grouping. Neo uses the generated month column and needs no waiver.
+            expect(String(mode)).toContain('ONLY_FULL_GROUP_BY');
+            await expect(
+              legacy.model.getDurationSourceRowsFromRaw({
+                ...range,
+                sourceGranularity: granularity,
+              }),
+            ).rejects.toMatchObject({ code: 'ER_WRONG_FIELD_WITH_GROUP' });
+            await legacy.query(
+              "SET SESSION sql_mode=REPLACE(@@SESSION.sql_mode,'ONLY_FULL_GROUP_BY','')",
+            );
+          }
+          for (const filter of [
+            {},
+            { country: 'EU' },
+            { country: 'us ' },
+            { country: 'US', site: 'store ', brand: 'CAFE' },
+          ]) {
+            const query = parseMonitorAnalyticsQuery('period-summary/details', {
+              ...range,
+              ...filter,
+            });
+            const neo = await createDb(pool).execute(
+              monitorRawDurationSourceSelect(query, 'dim', granularity),
+            );
+            const old = await legacy.model.getDurationSourceRowsFromRaw({
+              ...query,
+              sourceGranularity: granularity,
+            });
+            expect(comparable(neo.rows)).toEqual(comparable(old));
+          }
+          const query = parseMonitorAnalyticsQuery(
+            'asin-by-variant-group',
+            range,
           );
-          const old = await legacy.model.getDurationSourceRowsFromRaw({
-            ...query,
-            sourceGranularity: granularity,
-          });
+          const neo = await createDb(pool).execute(
+            monitorRawDurationSourceSelect(query, 'variant_group', granularity),
+          );
+          const old =
+            await legacy.model.getVariantGroupDurationSourceRowsFromRaw({
+              ...query,
+              sourceGranularity: granularity,
+            });
           expect(comparable(neo.rows)).toEqual(comparable(old));
         }
-        const query = parseMonitorAnalyticsQuery(
-          'asin-by-variant-group',
-          range,
-        );
-        const neo = await createDb(pool).execute(
-          monitorRawDurationSourceSelect(query, 'variant_group', granularity),
-        );
-        const old = await legacy.model.getVariantGroupDurationSourceRowsFromRaw(
-          { ...query, sourceGranularity: granularity },
-        );
-        expect(comparable(neo.rows)).toEqual(comparable(old));
+      } finally {
+        await legacy.query('SET SESSION sql_mode=?', [mode]);
       }
       const query = parseMonitorAnalyticsQuery('statistics', {
         ...range,
         variantGroupId: 'ANALYTICS-109-A ',
-        asinId: 'ID-A',
+        asinId: 'ANALYTICS-109-ID-A',
       });
       const neo = await createDb(pool).execute(
         monitorRawDurationSourceSelect(query, 'asin', 'hour'),
@@ -347,13 +400,14 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         { checkType: 'ASIN' },
         { checkType: 'asin ' },
         { country: 'EU' },
-        { country: 'US', asinId: 'id-a' },
+        { country: 'US', asinId: 'analytics-109-id-a' },
         { country: 'ZZ' },
       ]) {
         const query = parseMonitorAnalyticsQuery('statistics', {
           ...range,
           ...filter,
         });
+
         const neo = await createDb(pool).execute(
           monitorCountStatisticsSelect(query),
         );
@@ -390,6 +444,90 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
     });
 
+    it('matches abnormal-duration SQL across IDs, code/name snapshots, SQL LIKE, types and hourly/daily/weekly buckets', async () => {
+      for (const end of [
+        '1997-10-03 23:59:59',
+        '1997-10-20 23:59:59',
+        endTime,
+      ]) {
+        for (const filter of [
+          {},
+          { country: 'EU' },
+          { asinIds: 'analytics-109-id-a' },
+          { asinCodes: 'B109FALLBACK' },
+          { asinCodes: ['', 'B109SQL001'] },
+          { asinType: '1' },
+          { asinType: 'SUB_REVIEW' },
+          { asinName: 'CAFE%' },
+          { variantGroupName: 'Snap_hot' },
+          { asinName: 'absent' },
+        ]) {
+          const query = parseMonitorAnalyticsQuery(
+            'abnormal-duration-statistics',
+            { startTime, endTime: end, ...filter },
+          );
+          const neo = await createDb(pool).execute(
+            monitorAbnormalBucketsSelect(query),
+          );
+          const old = await legacy.capture(
+            'getAbnormalDurationStatistics',
+            query,
+          );
+          expect(comparable(neo.rows)).toEqual(comparable(old.at(-1)!));
+        }
+      }
+    });
+    it('counts and pages period groups in one statement, retaining the total beyond the final page', async () => {
+      for (const current of ['1', '2', '99']) {
+        for (const filter of [
+          {},
+          { country: 'EU' },
+          { site: ' ' },
+          { brand: 'cafe ' },
+          { country: 'ZZ' },
+        ]) {
+          const query = parseMonitorAnalyticsQuery('period-summary', {
+            ...range,
+            endTime: '1997-10-03 23:59:59',
+            ...filter,
+            current,
+            pageSize: '2',
+          });
+          const old = await legacy.model.getPeriodSummaryPageGroupsFromRaw(
+            query,
+          );
+          for (const source of ['raw', 'aggregate'] as const) {
+            const selected = monitorPeriodPageSelect(
+              query,
+              monitorPeriodGroupsSelect(query, source, 'day'),
+            );
+            const result = await createDb(pool).execute(
+              source === 'raw'
+                ? selected
+                : sql`
+              WITH coverage AS MATERIALIZED (${monitorAggregateCoverageSelect(
+                query,
+                'dim',
+                'day',
+              )})
+              SELECT coverage.covered, page.* FROM coverage LEFT JOIN LATERAL (${selected}) page ON coverage.covered`,
+            );
+            if (source === 'aggregate')
+              expect(result.rows[0].covered).toBe(true);
+            const list = result.rows
+              .filter((row) => row.row_present)
+              .map(({ country, site, brand }) => ({ country, site, brand }));
+            expect({
+              total: Number(result.rows[0].total_rows),
+              current: query.current,
+              pageSize: query.pageSize,
+              list,
+            }).toEqual(old);
+          }
+        }
+      }
+    });
+
     it('reads all nine actual CAGGs with coverage and data in one snapshot, independent of search_path and session timezone', async () => {
       // Current group names can change without invalidating history CAGGs. The
       // fast path requires independent snapshots; raw fallback above covers NULL.
@@ -399,15 +537,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await refreshAll();
       for (const tz of ['UTC', 'Asia/Shanghai', 'America/New_York']) {
         await pool.query("SELECT set_config('TimeZone',$1,false)", [tz]);
-        // No public in the search path: every runtime relation/collation stays explicit.
-        await pool.query('SET search_path TO pg_catalog');
         for (const granularity of granularities) {
           for (const family of [
             'asin',
             'dim',
             'variant_group',
           ] as MonitorAggregateFamily[]) {
-            const query = parseMonitorAnalyticsQuery('by-time', range);
+            const query = parseMonitorAnalyticsQuery('by-time', {
+              ...range,
+              endTime: '1997-10-03 12:59:59',
+            });
             const result = await createDb(pool)
               .execute(sql`WITH coverage AS MATERIALIZED (
             ${monitorAggregateCoverageSelect(query, family, granularity)}
@@ -417,7 +556,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             family,
             granularity,
           )}) source ON coverage.covered`);
-            expect(result.rows.every((row) => row.covered === true)).toBe(true);
+            expect(
+              result.rows.every((row) => row.covered === true),
+              `${tz}/${family}/${granularity}`,
+            ).toBe(true);
             expect(
               result.rows.reduce(
                 (sum, row) => sum + Number(row.total_checks),
@@ -436,6 +578,24 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           }
         }
       }
+      // PostgreSQL deparses view definitions differently without public in its
+      // search path. The fingerprint then conservatively rejects the fast path;
+      // qualified raw reads still use the intended hypertable.
+      await pool.query('SET search_path TO pg_catalog');
+      const query = parseMonitorAnalyticsQuery('by-time', {
+        ...range,
+        endTime: '1997-10-03 12:59:59',
+      });
+      const proof = await createDb(pool).execute(
+        monitorAggregateCoverageSelect(query, 'asin', 'hour'),
+      );
+      expect(proof.rows[0].covered).toBe(false);
+      const raw = await createDb(pool).execute(
+        monitorRawDurationSourceSelect(query, 'asin', 'hour'),
+      );
+      expect(
+        raw.rows.reduce((sum, row) => sum + Number(row.total_checks), 0),
+      ).toBe(10);
       await pool.query('RESET search_path');
     });
 
