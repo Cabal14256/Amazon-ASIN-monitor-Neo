@@ -9,11 +9,12 @@ import type { Db } from '../client';
 export async function reconcileMonitorInterval(
   db: Db,
   ensureOpen: () => void,
+  onClaim?: (key: { asinKey: string; country: string }) => void,
 ): Promise<boolean> {
   ensureOpen();
   const claimed = await db.execute(sql`
     SELECT asin_key, country FROM public.monitor_interval_dirty
-    WHERE completed_revision <> revision
+    WHERE completed_revision <> revision AND retry_after <= clock_timestamp()
     ORDER BY queued_at, asin_key, country LIMIT 1 FOR UPDATE SKIP LOCKED
   `);
   ensureOpen();
@@ -25,7 +26,7 @@ export async function reconcileMonitorInterval(
     (
       await db.execute(sql`
     SELECT asin_key, country FROM public.monitor_interval_dirty d
-    WHERE EXISTS (
+    WHERE retry_after <= clock_timestamp() AND EXISTS (
       SELECT 1 FROM unnest(d.source_relation_ids) relation_id
       WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = relation_id::oid)
     ) ORDER BY queued_at, asin_key, country LIMIT 1 FOR UPDATE SKIP LOCKED
@@ -35,6 +36,7 @@ export async function reconcileMonitorInterval(
   if (!key) return false;
   const asinKey = String(key.asin_key),
     country = String(key.country);
+  onClaim?.({ asinKey, country });
   await db.execute(sql`DELETE FROM public.monitor_history_status_interval
     WHERE asin_key = ${asinKey} AND country = ${country}`);
   ensureOpen();
@@ -72,7 +74,9 @@ export async function reconcileMonitorInterval(
   // Our interval writes also dirty the key. Complete them only after the entire
   // replacement; a concurrent source writer remains blocked until our commit.
   await db.execute(sql`UPDATE public.monitor_interval_dirty
-    SET completed_revision = revision, active = ${(inserted.rowCount ?? 0) > 0},
+    SET completed_revision = revision, active = ${
+      (inserted.rowCount ?? 0) > 0
+    }, retry_after = '-infinity',
       (first_check_time, last_check_time, source_relation_ids) = (
         SELECT date_trunc('second', min(check_time)), date_trunc('second', max(check_time)),
           coalesce(array_agg(DISTINCT tableoid::bigint), '{}'::bigint[])

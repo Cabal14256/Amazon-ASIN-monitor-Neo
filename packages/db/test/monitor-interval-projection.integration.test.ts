@@ -5,6 +5,7 @@ import { createDb, createPgPool } from '../src/client';
 import { parseMonitorAnalyticsQuery } from '../src/domain/monitor-analytics-query';
 import { readMonitorAbnormalQuery } from '../src/repositories/monitor-abnormal-query';
 import { monitorIntervalCoverageSelect } from '../src/repositories/monitor-interval-coverage';
+import { PgMonitorIntervalMaintenanceRepository } from '../src/repositories/monitor-interval-maintenance-repository';
 import { reconcileMonitorInterval } from '../src/repositories/monitor-interval-projection';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
 
@@ -125,6 +126,28 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).toBe('amazon_asin_monitor_ci');
       verified = true;
       legacy = await legacyAnalyticsFixture();
+      await pool.query(
+        "DELETE FROM public.variant_groups WHERE id = 'interval-109'",
+      );
+      await pool.query(
+        "INSERT INTO public.variant_groups(id,name,country,site,brand) VALUES('interval-109','Current group','ZI109','site','brand')",
+      );
+      await legacy.query(
+        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('interval-109','Current group','ZI109','site','brand')",
+      );
+      for (const [id, code, type] of [
+        ['interval-109-a', 'I109-CURRENT', 'MAIN_LINK'],
+        ['interval-109-orphan', 'I109-FALLBACK', 'SUB_REVIEW'],
+      ]) {
+        await pool.query(
+          "INSERT INTO public.asins(id,asin,name,asin_type,country,site,brand,variant_group_id) VALUES($1,$2,'Current name',$3,'ZI109','site','brand','interval-109')",
+          [id, code, type],
+        );
+        await legacy.query(
+          "INSERT INTO asins(id,asin,name,asin_type,country,site,brand,variant_group_id) VALUES(?,?,'Current name',?,'ZI109','site','brand','interval-109')",
+          [id, code, type],
+        );
+      }
       // Other integration fixtures intentionally have unreconciled source history.
       // Lock only their receipts so the real SKIP LOCKED consumer selects our work.
       unrelated = await pool.connect();
@@ -160,6 +183,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await pool.query(
           `DELETE FROM public.monitor_interval_dirty WHERE ${predicate}`,
         );
+        await pool.query(
+          "DELETE FROM public.variant_groups WHERE id = 'interval-109'",
+        );
       }
       await legacy?.close();
       await pool?.end();
@@ -170,8 +196,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await seed({ hour: 1, broken: true });
       await seed({ hour: 2, broken: true, name: '' });
       await seed({ hour: 4, broken: false });
-      await seed({ code: null, id: 'interval-109-orphan', broken: true });
+      await seed({
+        code: null,
+        id: 'interval-109-orphan',
+        broken: true,
+        name: '',
+        group: '',
+      });
       await seed({ code: null, id: 'interval-109-orphan', hour: 4 });
+      await seed({
+        code: null,
+        id: 'interval-109-missing',
+        hour: 4,
+        broken: true,
+      });
       await seed({
         code: 'I109-GROUP',
         id: 'interval-109-group',
@@ -186,9 +224,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         { asinIds: ['interval-109-a'] },
         { asinCodes: ['I109-A'] },
         { asinCodes: ['missing'] },
+        { asinCodes: ['I109-FALLBACK'] },
         { asinName: 'First' },
+        { asinName: 'Current' },
         { asinName: '%' },
         { variantGroupName: 'First' },
+        { variantGroupName: 'Current' },
         { variantGroupId: 'interval-109' },
         { asinType: '1' },
         { asinType: 'SUB_REVIEW' },
@@ -427,14 +468,18 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const before = await client.query(
           `SELECT revision, completed_revision FROM public.monitor_interval_dirty WHERE ${predicate}`,
         );
-        const chunks =
-          await client.query(`SELECT range_start, range_end FROM timescaledb_information.chunks
+        const chunks = await client.query(`SELECT
+            to_char(range_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS range_start,
+            to_char(range_end AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS range_end
+          FROM timescaledb_information.chunks
           WHERE hypertable_schema = 'public' AND hypertable_name = 'monitor_history'
-            AND range_start <= '1998-01-01 00:00:00+08'::timestamptz AND range_end > '1998-01-01 00:00:00+08'::timestamptz`);
+            AND to_regclass(format('%I.%I', chunk_schema, chunk_name)) = (
+              SELECT tableoid FROM public.monitor_history WHERE ${predicate} LIMIT 1
+            )`);
         expect(chunks.rows).toHaveLength(1);
         const { range_start: start, range_end: end } = chunks.rows[0];
         await client.query(
-          "SELECT public.drop_chunks('public.monitor_history', newer_than => $1::timestamptz, older_than => $2::timestamptz)",
+          "SELECT public.drop_chunks('public.monitor_history', newer_than => $1::timestamp, older_than => $2::timestamp)",
           [start, end],
         );
         expect(
@@ -461,6 +506,50 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         client.release();
       }
       expect(await covered()).toBe(true);
+    });
+
+    it('defers a locked key durably while another key makes progress and retries after backoff', async () => {
+      await seed();
+      await seed({ hour: 4, broken: true });
+      await drain();
+      await pool.query(
+        `UPDATE public.monitor_history SET is_broken = true WHERE ${predicate} AND check_time = '1998-01-01 00:00:00'`,
+      );
+      const blocker = await pool.connect();
+      const repository = new PgMonitorIntervalMaintenanceRepository(pool);
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          `SELECT 1 FROM public.monitor_history_status_interval WHERE ${predicate} FOR UPDATE`,
+        );
+        expect(await repository.reconcile()).toEqual({
+          processed: false,
+          deferred: true,
+        });
+        expect(await covered()).toBe(false);
+        await seed({ code: 'I109-OTHER', id: 'interval-109-other', hour: 4 });
+        expect(await repository.reconcile()).toEqual({
+          processed: true,
+          deferred: false,
+        });
+        expect(await repository.reconcile()).toEqual({
+          processed: false,
+          deferred: false,
+        });
+        await blocker.query('ROLLBACK');
+        await pool.query(
+          `UPDATE public.monitor_interval_dirty SET retry_after = '-infinity' WHERE ${predicate}`,
+        );
+        expect(await repository.reconcile()).toEqual({
+          processed: true,
+          deferred: false,
+        });
+        expect(await covered()).toBe(true);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        repository.close();
+      }
     });
 
     it('keeps full 50-character fallback identifiers and rejects ambiguous case-insensitive identities', async () => {

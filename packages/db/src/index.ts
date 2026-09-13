@@ -28,6 +28,7 @@ export * from './repositories/auth-repository';
 export * from './repositories/bounded-auth-repository';
 export * from './repositories/legacy-mysql-auth-repository';
 export * from './repositories/monitor-history-query-repository';
+export * from './repositories/monitor-interval-maintenance-repository';
 export * from './repositories/redis-task-repository';
 export * from './repositories/role-repository';
 export * from './repositories/sp-api-config-repository';

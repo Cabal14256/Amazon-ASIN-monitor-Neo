@@ -32,6 +32,9 @@ export const monitorIntervalDirty = pgTable(
     queuedAt: timestamp('queued_at', { withTimezone: true })
       .notNull()
       .default(sql`clock_timestamp()`),
+    retryAfter: timestamp('retry_after', { withTimezone: true })
+      .notNull()
+      .default(sql`'-infinity'`),
   },
   (table) => [
     primaryKey({ columns: [table.asinKey, table.country] }),

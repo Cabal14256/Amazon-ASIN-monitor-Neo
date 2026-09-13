@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS public.monitor_interval_dirty (
   last_check_time timestamp without time zone,
   source_relation_ids bigint[] NOT NULL DEFAULT '{}',
   queued_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+  retry_after timestamp with time zone NOT NULL DEFAULT '-infinity',
   PRIMARY KEY (asin_key, country)
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_interval_dirty_queue ON public.monitor_interval_dirty (queued_at, asin_key, country)
