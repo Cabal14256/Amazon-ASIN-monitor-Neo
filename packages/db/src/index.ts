@@ -3,6 +3,7 @@ export * from './client';
 export * from './domain/asin-batch-create';
 export * from './domain/asin-batch-delete';
 export * from './domain/asin-manual-history';
+export * from './domain/monitor-history-query';
 export * from './domain/variant-check';
 export * from './domain/variant-check-receipt';
 export * from './domain/variant-status';
