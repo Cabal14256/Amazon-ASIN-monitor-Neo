@@ -26,6 +26,10 @@ import {
   monitorPeriodPageSelect,
   monitorRawDurationSourceSelect,
 } from '../src/repositories/monitor-analytics-sql';
+import {
+  readMonitorCountQuery,
+  readMonitorPeakQuery,
+} from '../src/repositories/monitor-count-query';
 import { readMonitorDurationQuery } from '../src/repositories/monitor-duration-query';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
 
@@ -890,6 +894,98 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(fast.data).toEqual(
           await legacy.aggregate('getStatisticsByTimeFromAgg', query),
         );
+        for (const [operation, method] of cases) {
+          const fastQuery = parseMonitorAnalyticsQuery(operation, {
+            ...range,
+            endTime: '1997-10-03 12:59:59',
+          });
+          const result = await readMonitorDurationQuery(
+            db,
+            fastQuery,
+            () => {},
+            { aggregateEnabled: true, onAggregateFallback() {} },
+          );
+          expect(result.source).toBe('agg');
+          const old = await legacy.aggregate(
+            operation === 'analytics-monthly-breakdown'
+              ? 'getStatisticsByTime'
+              : method,
+            {
+              ...fastQuery,
+              ...(operation === 'analytics-monthly-breakdown'
+                ? { groupBy: 'day', sourceGranularityOverride: 'day' }
+                : {}),
+            },
+          );
+          expect
+            .soft(result.data, `${operation}/complete-aggregate`)
+            .toEqual(old);
+        }
+        await client.query('COMMIT');
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    }, 20_000);
+
+    it('preserves COUNT/SUM JSON types and complete peak metrics on raw and guarded aggregate paths', async () => {
+      const client = await pool.connect();
+      const db = createDb(client);
+      try {
+        await client.query('BEGIN');
+        for (const [operation, method] of [
+          ['by-country', 'getStatisticsByCountry'],
+          ['by-variant-group', 'getStatisticsByVariantGroup'],
+        ] as const) {
+          for (const params of [
+            { ...range },
+            { ...range, country: 'EU', limit: '1' },
+            {
+              startTime: '1997-12-01 00:00:00',
+              endTime: '1997-12-01 01:00:00',
+            },
+          ]) {
+            const query = parseMonitorAnalyticsQuery(operation, params);
+            expect(await readMonitorCountQuery(db, query, () => {})).toEqual(
+              await legacy.model[method](query),
+            );
+          }
+        }
+        for (const country of ['US', 'EU', 'UK', 'CA', 'us']) {
+          for (const times of [
+            { ...range, endTime: '1997-10-03 12:59:59' },
+            {
+              startTime: '1997-10-01 03:11:12',
+              endTime: '1997-10-02 15:14:15',
+            },
+            {
+              startTime: '1997-10-01 03:00:00.123',
+              endTime: '1997-10-01 03:00:01.900',
+            },
+            { ...range, checkType: 'GROUP' },
+            { ...range, endTime: '1997-10-03 12:59:59', checkType: 'unknown' },
+          ]) {
+            const query = parseMonitorAnalyticsQuery('peak-hours', {
+              ...times,
+              country,
+            });
+            for (const aggregateEnabled of [false, true]) {
+              const neo = await readMonitorPeakQuery(db, query, () => {}, {
+                aggregateEnabled,
+                onAggregateFallback() {},
+              });
+              const old = aggregateEnabled
+                ? await legacy.aggregate('getPeakHoursStatistics', query)
+                : await legacy.model.getPeakHoursStatistics(query);
+              expect
+                .soft(
+                  neo,
+                  `${country}/${JSON.stringify(times)}/${aggregateEnabled}`,
+                )
+                .toEqual(old);
+            }
+          }
+        }
         await client.query('COMMIT');
       } finally {
         await client.query('ROLLBACK');

@@ -4,6 +4,21 @@ import { MonitorAnalyticsQueryError } from '../domain/monitor-analytics-query';
 
 const active = new WeakSet<Db>();
 export const MONITOR_ANALYTICS_SOURCE_ROW_LIMIT = 5_000_000;
+/** Only missing/incompatible aggregate definitions permit a raw retry. Keep
+ * connection, deadline, capacity and data-validation failures visible. */
+export function isMonitorAggregateDefinitionFailure(error: unknown): boolean {
+  for (
+    let depth = 0;
+    depth < 2 && error && typeof error === 'object';
+    depth++
+  ) {
+    const value = error as { code?: unknown; cause?: unknown };
+    if (['42P01', '42703', '42883', '0A000'].includes(String(value.code)))
+      return true;
+    error = value.cause;
+  }
+  return false;
+}
 /** Consume a trusted SELECT on the caller's exclusively held transaction client.
  * Its entire SELECT (including coverage/count/page CTEs) keeps one snapshot as
  * FETCH advances, without retaining every source bucket in application memory.

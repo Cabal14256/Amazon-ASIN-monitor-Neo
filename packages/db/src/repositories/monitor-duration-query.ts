@@ -19,7 +19,10 @@ import {
 import type { MonitorDurationSourceRow } from '../domain/monitor-duration-groups';
 import { MonitorDurationStream } from '../domain/monitor-duration-stream';
 import { monitorAggregateDurationSelect } from './monitor-analytics-aggregate-query';
-import { consumeMonitorAnalyticsRows } from './monitor-analytics-cursor';
+import {
+  consumeMonitorAnalyticsRows,
+  isMonitorAggregateDefinitionFailure,
+} from './monitor-analytics-cursor';
 import {
   monitorCountStatisticsSelect,
   monitorRawDurationSourceSelect,
@@ -176,15 +179,6 @@ function aggregateRow(row: Row, operation: string): Row {
   }
   return metrics;
 }
-function definitionFailure(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const value = error as { code?: unknown; cause?: unknown };
-  return (
-    ['42P01', '42703', '42883', '0A000'].includes(String(value.code)) ||
-    (value.cause !== error && definitionFailure(value.cause))
-  );
-}
-
 /** Internal data reader. Caller owns an exclusive transaction, authorization
  * locks, absolute deadline and admission slot for the entire operation.
  * Statistics counts and duration share a SELECT snapshot on both paths.
@@ -266,7 +260,7 @@ export async function readMonitorDurationQuery(
         5001,
       );
     } catch (error) {
-      if (!definitionFailure(error)) throw error;
+      if (!isMonitorAggregateDefinitionFailure(error)) throw error;
       options.onAggregateFallback('definition');
       return null;
     }

@@ -105,12 +105,13 @@ export async function legacyAnalyticsFixture() {
     };
     const filename = resolve(root, 'server/src/models/MonitorHistory.js');
     const module = { exports: {} };
+    const runtimeEnv = { ANALYTICS_AGG_ENABLED: '0' };
     vm.runInNewContext(
       readFileSync(filename, 'utf8') +
         '\nmodule.exports = { model: MonitorHistory, getAggBucketHoursSqlExpr, getAggDurationCtesSql, getDurationMetricsSqlSelect };',
       {
         module,
-        process: { env: { ANALYTICS_AGG_ENABLED: '0' } },
+        process: { env: runtimeEnv },
         require: (name: string) => {
           if (!Object.hasOwn(dependencies, name))
             throw new Error('Unexpected Legacy analytics fixture dependency');
@@ -140,17 +141,27 @@ export async function legacyAnalyticsFixture() {
             'getRegionSummaryFromAgg',
             'getASINStatisticsByCountryFromAgg',
             'getASINStatisticsByVariantGroupFromAgg',
+            'getPeakHoursStatistics',
+            'getStatistics',
+            'getStatisticsByTime',
+            'getAllCountriesSummary',
+            'getRegionSummary',
+            'getASINStatisticsByCountry',
+            'getASINStatisticsByVariantGroup',
           ].includes(method)
         )
           throw new Error('Unexpected Legacy aggregate fixture operation');
         const model = loaded.model as unknown as Record<string, unknown>;
         const normal = model.isAggTableCoveringRange,
           variant = model.isVariantGroupAggTableCoveringRange;
+        const previousEnabled = runtimeEnv.ANALYTICS_AGG_ENABLED;
+        runtimeEnv.ANALYTICS_AGG_ENABLED = '1';
         model.isAggTableCoveringRange = async () => true;
         model.isVariantGroupAggTableCoveringRange = async () => true;
         try {
           return await loaded.model[method](params);
         } finally {
+          runtimeEnv.ANALYTICS_AGG_ENABLED = previousEnabled;
           model.isAggTableCoveringRange = normal;
           model.isVariantGroupAggTableCoveringRange = variant;
         }
