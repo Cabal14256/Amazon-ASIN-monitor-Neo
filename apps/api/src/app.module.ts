@@ -6,6 +6,7 @@ import { AuthModule } from './auth/auth.module';
 import { ConfigModule } from './config/config.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { DatabaseModule } from './database/database.module';
+import { FeishuConfigModule } from './feishu-config/feishu-config.module';
 import { HealthModule } from './health/health.module';
 import { LoggerModule } from './logger/logger.module';
 import { MetricsModule } from './metrics/metrics.module';
@@ -32,6 +33,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     AuthModule,
     RoleModule,
     SpApiConfigModule,
+    FeishuConfigModule,
     SpApiRuntimeModule,
     AsinModule,
     VariantCheckModule,

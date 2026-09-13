@@ -9,7 +9,8 @@ export const feishuConfigSchema = z
     country: z.string(),
     webhookUrl: z.string().optional(),
     webhook_url: z.string().optional(),
-    enabled: z.union([z.boolean(), z.literal(0), z.literal(1)]),
+    // Legacy storage permits NULL; list responses preserve it as stored.
+    enabled: z.union([z.boolean(), z.literal(0), z.literal(1)]).nullable(),
     createTime: z.string().nullable().optional(),
     updateTime: z.string().nullable().optional(),
     create_time: z.string().nullable().optional(),

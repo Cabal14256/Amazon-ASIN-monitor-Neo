@@ -89,6 +89,16 @@ export function auditAction(
       null,
       body.country || body.region || '飞书配置',
     );
+  if (
+    segment === 'feishu-configs' &&
+    (method === 'DELETE' || (method === 'PATCH' && path.endsWith('/toggle')))
+  )
+    return entry(
+      method === 'DELETE' ? 'DELETE' : 'UPDATE',
+      'feishu_config',
+      params.country,
+      params.country,
+    );
   if ((method === 'POST' || method === 'PUT') && segment === 'sp-api-configs')
     return entry('UPDATE', 'sp_api_config', null, 'SP-API配置');
   if (method === 'POST' && /^\/(competitor\/)?monitor\/trigger$/.test(path))

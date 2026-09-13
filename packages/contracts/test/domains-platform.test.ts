@@ -45,6 +45,27 @@ describe('feishu 域', () => {
       toggleFeishuConfigRequestSchema.parse({ enabled: 'false' }),
     ).toThrow();
   });
+
+  it('保留存储中 nullable enabled，但写请求仍拒绝 null', () => {
+    expect(
+      feishuConfigListResultSchema.parse({
+        success: true,
+        data: [
+          {
+            id: 3,
+            country: 'EU',
+            webhookUrl: '',
+            enabled: null,
+            createTime: null,
+            updateTime: null,
+          },
+        ],
+      }).data?.[0].enabled,
+    ).toBeNull();
+    expect(() =>
+      toggleFeishuConfigRequestSchema.parse({ enabled: null }),
+    ).toThrow();
+  });
 });
 
 describe('sp-api-config 域', () => {
