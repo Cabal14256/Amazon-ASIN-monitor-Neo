@@ -119,6 +119,32 @@ export async function legacyAnalyticsFixture() {
       ...loaded,
       query,
       close,
+      /** Only the source-selection guard is forced for arithmetic comparisons
+       * on explicitly seeded aggregate tables. The actual leaf SQL and mapping
+       * remain untouched; Timescale coverage is tested independently. */
+      async aggregate(method: string, params: object) {
+        if (
+          ![
+            'getAllCountriesSummaryFromAgg',
+            'getStatisticsByTimeFromAgg',
+            'getRegionSummaryFromAgg',
+            'getASINStatisticsByCountryFromAgg',
+            'getASINStatisticsByVariantGroupFromAgg',
+          ].includes(method)
+        )
+          throw new Error('Unexpected Legacy aggregate fixture operation');
+        const model = loaded.model as unknown as Record<string, unknown>;
+        const normal = model.isAggTableCoveringRange,
+          variant = model.isVariantGroupAggTableCoveringRange;
+        model.isAggTableCoveringRange = async () => true;
+        model.isVariantGroupAggTableCoveringRange = async () => true;
+        try {
+          return await loaded.model[method](params);
+        } finally {
+          model.isAggTableCoveringRange = normal;
+          model.isVariantGroupAggTableCoveringRange = variant;
+        }
+      },
       async capture(method: string, params: object) {
         captured = [];
         await loaded.model[method](params);

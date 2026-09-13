@@ -12,6 +12,7 @@ import {
   monitorAggregateCoverageSelect,
   type MonitorAggregateFamily,
 } from '../src/repositories/monitor-aggregate-coverage';
+import { monitorAggregateDurationSelect } from '../src/repositories/monitor-analytics-aggregate-query';
 import { consumeMonitorAnalyticsRows } from '../src/repositories/monitor-analytics-cursor';
 import {
   monitorAggregateBucketHoursSql,
@@ -604,6 +605,204 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).toBe(10);
       await pool.query('RESET search_path');
     });
+
+    it('matches complete aggregate leaf queries, including regional UNION precision and group-wide ASIN deduplication', async () => {
+      // These tests isolate the query/mapping contract. Actual projection
+      // construction and raw parity are checked above and by the 0001 gate.
+      for (const family of ['asin', 'variant_group'] as const) {
+        const target =
+          family === 'asin'
+            ? 'monitor_history_agg'
+            : 'monitor_history_agg_variant_group';
+        const relation =
+          family === 'asin'
+            ? sql`public.monitor_history_agg_v2`
+            : sql`public.monitor_history_agg_variant_group_v2`;
+        const columns = [
+          'granularity',
+          'time_slot',
+          'country',
+          'asin_key',
+          'check_count',
+          'broken_count',
+          'has_peak',
+          'has_broken',
+          'first_check_time',
+          'last_check_time',
+          ...(family === 'variant_group'
+            ? ['variant_group_id', 'variant_group_name']
+            : []),
+        ];
+        const selected = await createDb(pool).execute(sql`SELECT granularity,
+          to_char(time_slot,'YYYY-MM-DD HH24:MI:SS') AS time_slot,country,asin_key,check_count,broken_count,
+          has_peak::int AS has_peak,has_broken::int AS has_broken,
+          to_char(first_check_time,'YYYY-MM-DD HH24:MI:SS') AS first_check_time,
+          to_char(last_check_time,'YYYY-MM-DD HH24:MI:SS') AS last_check_time
+          ${
+            family === 'variant_group'
+              ? sql`,variant_group_id,variant_group_name`
+              : sql``
+          }
+          FROM ${relation} WHERE time_slot>='1997-10-01'::timestamp AND time_slot<'1997-11-01'::timestamp`);
+        await legacy.query(`DELETE FROM ${target}`);
+        await legacy.query(
+          `INSERT INTO ${target}(${columns.join(',')}) VALUES ?`,
+          [selected.rows.map((row) => columns.map((column) => row[column]))],
+        );
+      }
+      const cases = [
+        { operation: 'statistics', method: 'getAllCountriesSummaryFromAgg' },
+        {
+          operation: 'all-countries-summary',
+          method: 'getAllCountriesSummaryFromAgg',
+        },
+        { operation: 'region-summary', method: 'getRegionSummaryFromAgg' },
+        {
+          operation: 'asin-by-country',
+          method: 'getASINStatisticsByCountryFromAgg',
+        },
+        {
+          operation: 'asin-by-variant-group',
+          method: 'getASINStatisticsByVariantGroupFromAgg',
+        },
+        {
+          operation: 'analytics-monthly-breakdown',
+          method: 'getStatisticsByTimeFromAgg',
+        },
+        ...['hour', 'day', 'week', 'month'].map((groupBy) => ({
+          operation: 'by-time',
+          method: 'getStatisticsByTimeFromAgg',
+          groupBy,
+        })),
+      ] as const;
+      const normalize = (row: Record<string, unknown>, operation: string) => {
+        if (operation === 'statistics' || operation === 'all-countries-summary')
+          return normalizeSqlDurationMetricRow(row);
+        if (operation === 'region-summary')
+          return normalizeSqlDurationMetricRow(row, {
+            regionCode: row.group_label,
+          });
+        const counts = {
+          total_checks: Number(row.totalChecks || 0),
+          broken_count: Number(row.brokenCount || 0),
+          normal_count: Math.max(
+            0,
+            Number(row.totalChecks || 0) - Number(row.brokenCount || 0),
+          ),
+        };
+        if (operation === 'asin-by-country')
+          return normalizeSqlDurationMetricRow(row, {
+            country: row.group_key,
+            ...counts,
+          });
+        if (operation === 'asin-by-variant-group')
+          return normalizeSqlDurationMetricRow(row, {
+            variant_group_id: row.group_key,
+            variant_group_name: row.group_label,
+            country: row.country,
+            ...counts,
+          });
+        const metrics = normalizeSqlDurationMetricRow(row, {
+          time_period: row.group_label,
+        });
+        return {
+          ...metrics,
+          total_asins: metrics.totalAsinsDedup,
+          broken_asins: metrics.brokenAsinsDedup,
+          asin_broken_rate: metrics.ratioAllAsin,
+          normal_count: Math.max(0, metrics.totalChecks - metrics.brokenCount),
+        };
+      };
+      const canonical = (value: unknown) =>
+        Array.isArray(value)
+          ? [...value].sort((a, b) =>
+              JSON.stringify(a, Object.keys(a).sort()).localeCompare(
+                JSON.stringify(b, Object.keys(b).sort()),
+              ),
+            )
+          : value;
+      for (const granularity of granularities) {
+        for (const item of cases) {
+          for (const bounds of [
+            { startTime, endTime: '1997-10-03 12:59:59' },
+            {
+              startTime: '1997-10-01 03:00:00.123',
+              endTime: '1997-10-01 03:00:01.900',
+            },
+            {
+              startTime: '1997-10-01 00:00:00',
+              endTime: '1997-10-01 00:00:01.900',
+              country: 'EU',
+              limit: '1',
+            },
+          ]) {
+            const operation = item.operation as Parameters<
+              typeof parseMonitorAnalyticsQuery
+            >[0];
+            const query = parseMonitorAnalyticsQuery(operation, {
+              ...bounds,
+              ...('groupBy' in item ? { groupBy: item.groupBy } : {}),
+            });
+            const neo = await createDb(pool).execute(
+              monitorAggregateDurationSelect(query, granularity),
+            );
+            expect(neo.rows[0].covered, `${operation}/${granularity}`).toBe(
+              true,
+            );
+            const rows = neo.rows
+              .filter((row) => row.group_key !== null)
+              .map((row) => normalize(row, operation));
+            const result =
+              operation === 'statistics' ||
+              operation === 'all-countries-summary'
+                ? rows[0] || normalizeSqlDurationMetricRow()
+                : rows;
+            const old = await legacy.aggregate(item.method, {
+              ...query,
+              sourceGranularity: granularity,
+              sourceGranularityOverride: granularity,
+              ...(operation === 'analytics-monthly-breakdown'
+                ? { groupBy: 'day' }
+                : {}),
+            });
+            expect(
+              canonical(result),
+              `${operation}/${granularity}/${JSON.stringify(bounds)}`,
+            ).toEqual(canonical(old));
+            if (operation === 'by-time')
+              expect(
+                rows.map(
+                  (row) => (row as { time_period?: unknown }).time_period,
+                ),
+              ).toEqual(
+                rows
+                  .map((row) => (row as { time_period?: unknown }).time_period)
+                  .sort(),
+              );
+          }
+        }
+      }
+      for (const query of [
+        parseMonitorAnalyticsQuery('statistics', {
+          ...range,
+          asinId: 'analytics-109-id-a',
+        }),
+        parseMonitorAnalyticsQuery('statistics', {
+          ...range,
+          checkType: 'GROUP',
+        }),
+        parseMonitorAnalyticsQuery('by-time', {}),
+      ]) {
+        const result = await createDb(pool).execute(
+          monitorAggregateDurationSelect(query, 'hour'),
+        );
+        expect(result.rows).toHaveLength(1);
+        expect(result.rows[0]).toMatchObject({
+          covered: false,
+          group_key: null,
+        });
+      }
+    }, 20_000);
 
     it('streams bounded batches from one cursor snapshot while another connection changes the history row', async () => {
       const client = await pool.connect(),
