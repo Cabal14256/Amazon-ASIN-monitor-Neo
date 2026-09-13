@@ -37,7 +37,9 @@ export function monitorAggregateBucketHoursSql(
  * helper above. It must remain a composable SELECT so coverage and consumption
  * share one snapshot. Do not replace this with the JS raw-row finalizer.
  *
- * MySQL's grouped asin_metrics CTE materializes duration sums at scales 4 and 8.
+ * MySQL's temporary-table GROUP BY stores every accumulator update at scales
+ * 4 and 8. Round each term before summing: rounding only the final sum changes
+ * duplicate-ASIN buckets (two 2-second buckets become 0.0012, not 0.0011).
  * The final ratios use those sums before their four-digit display rounding.
  * This explicitly retains the observed div_precision_increment=4 contract. */
 export function monitorAggregateMetricsSelect(
@@ -65,12 +67,12 @@ export function monitorAggregateMetricsSelect(
         ? sql`min(base.group_label) AS group_label, min(base.country) AS country`
         : sql`base.group_label`
     }, base.asin_key,
-      round(sum(base.bucket_hours),4) AS total_duration_hours,
-      round(sum(${abnormal}),8) AS abnormal_duration_hours,
-      round(sum(CASE WHEN base.has_peak=1 THEN base.bucket_hours ELSE 0 END),4) AS peak_duration_hours,
-      round(sum(CASE WHEN base.has_peak=1 THEN ${abnormal} ELSE 0 END),8) AS peak_abnormal_duration_hours,
-      round(sum(CASE WHEN base.has_peak=0 THEN base.bucket_hours ELSE 0 END),4) AS low_duration_hours,
-      round(sum(CASE WHEN base.has_peak=0 THEN ${abnormal} ELSE 0 END),8) AS low_abnormal_duration_hours,
+      sum(round(base.bucket_hours,4)) AS total_duration_hours,
+      sum(round(${abnormal},8)) AS abnormal_duration_hours,
+      sum(CASE WHEN base.has_peak=1 THEN round(base.bucket_hours,4) ELSE 0 END) AS peak_duration_hours,
+      sum(CASE WHEN base.has_peak=1 THEN round(${abnormal},8) ELSE 0 END) AS peak_abnormal_duration_hours,
+      sum(CASE WHEN base.has_peak=0 THEN round(base.bucket_hours,4) ELSE 0 END) AS low_duration_hours,
+      sum(CASE WHEN base.has_peak=0 THEN round(${abnormal},8) ELSE 0 END) AS low_abnormal_duration_hours,
       sum(base.check_count) AS total_checks, sum(base.broken_count) AS broken_count
       FROM base WHERE base.bucket_hours>0 GROUP BY base.group_key, ${
         variant ? sql`` : sql`base.group_label,`

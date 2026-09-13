@@ -765,10 +765,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                 ? { groupBy: 'day' }
                 : {}),
             });
-            expect(
-              canonical(result),
-              `${operation}/${granularity}/${JSON.stringify(bounds)}`,
-            ).toEqual(canonical(old));
+            expect
+              .soft(
+                canonical(result),
+                `${operation}/${granularity}/${JSON.stringify(bounds)}`,
+              )
+              .toEqual(canonical(old));
             if (operation === 'by-time')
               expect(
                 rows.map(
