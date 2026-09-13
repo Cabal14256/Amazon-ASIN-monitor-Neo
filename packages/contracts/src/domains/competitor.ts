@@ -34,10 +34,13 @@ export const competitorAsinChildSchema = z
     country: z.string(),
     brand: z.string().nullable().optional(),
     parentId: z.string().nullable().optional(),
-    isBroken: z.union([z.literal(0), z.literal(1), z.boolean()]).optional(),
+    isBroken: z
+      .union([z.literal(0), z.literal(1), z.boolean()])
+      .nullable()
+      .optional(),
     variantStatus: z.string().nullable().optional(),
-    createTime: dateTimeString.optional(),
-    updateTime: dateTimeString.optional(),
+    createTime: dateTimeString.nullable().optional(),
+    updateTime: dateTimeString.nullable().optional(),
     lastCheckTime: dateTimeString.nullable().optional(),
     feishuNotifyEnabled: z
       .union([z.literal(0), z.literal(1), z.boolean()])
@@ -58,15 +61,15 @@ export const competitorVariantGroupSchema = z
     feishu_notify_enabled: z
       .union([z.literal(0), z.literal(1), z.boolean(), z.null()])
       .optional(),
-    create_time: dateTimeString.optional(),
-    update_time: dateTimeString.optional(),
+    create_time: dateTimeString.nullable().optional(),
+    update_time: dateTimeString.nullable().optional(),
     last_check_time: dateTimeString.nullable().optional(),
     asin_count: z.number().optional(),
     children: z.array(competitorAsinChildSchema).optional(),
     isBroken: z.union([z.literal(0), z.literal(1), z.boolean()]).optional(),
     variantStatus: z.string().optional(),
-    createTime: dateTimeString.optional(),
-    updateTime: dateTimeString.optional(),
+    createTime: dateTimeString.nullable().optional(),
+    updateTime: dateTimeString.nullable().optional(),
     lastCheckTime: dateTimeString.nullable().optional(),
     feishuNotifyEnabled: z
       .union([z.literal(0), z.literal(1), z.boolean()])

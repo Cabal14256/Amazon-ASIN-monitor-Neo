@@ -3,6 +3,7 @@ export * from './client';
 export * from './domain/asin-batch-create';
 export * from './domain/asin-batch-delete';
 export * from './domain/asin-manual-history';
+export * from './domain/competitor-query';
 export * from './domain/dashboard-query';
 export * from './domain/feishu-configuration';
 export * from './domain/monitor-abnormal-duration';
