@@ -442,7 +442,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           );
         if (kind === 'user')
           await f.pools.primaryPool.query(
-            "UPDATE users SET status='DISABLED' WHERE id=$1",
+            "UPDATE users SET status='INACTIVE' WHERE id=$1",
             [userId],
           );
         if (kind === 'password-expiry')
