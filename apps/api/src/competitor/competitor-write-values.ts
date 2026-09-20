@@ -1,14 +1,16 @@
 import {
+  batchCreateAsinsRequestSchema,
   competitorCreateAsinRequestSchema,
   competitorFeishuNotifyRequestSchema,
   competitorGroupUpsertRequestSchema,
   competitorMoveAsinRequestSchema,
   competitorUpdateAsinRequestSchema,
 } from '@asin-monitor/contracts';
+import { MAX_ASIN_BATCH_CREATE_ITEMS } from '@asin-monitor/db';
 import { z } from 'zod';
 
 export class CompetitorWriteInputError extends Error {
-  constructor(readonly code: 'input' | 'notify' = 'input') {
+  constructor(readonly code: 'input' | 'notify' | 'batch-empty' = 'input') {
     super('Invalid competitor write request');
   }
 }
@@ -73,6 +75,19 @@ export const parseCompetitorAsinUpdate = (value: unknown) =>
   normalizeName(parse(updateSchema, value));
 export const parseCompetitorAsinMove = (value: unknown) =>
   parse(moveSchema, value);
+export function parseCompetitorBatchCreate(value: unknown): unknown[] {
+  const items = (value as { items?: unknown } | null)?.items;
+  if (!Array.isArray(items) || !items.length)
+    throw new CompetitorWriteInputError('batch-empty');
+  return parse(
+    batchCreateAsinsRequestSchema
+      .extend({
+        items: z.array(z.unknown()).min(1).max(MAX_ASIN_BATCH_CREATE_ITEMS),
+      })
+      .strict(),
+    value,
+  ).items;
+}
 export function parseCompetitorNotify(value: unknown): boolean {
   try {
     const { enabled } = parse(

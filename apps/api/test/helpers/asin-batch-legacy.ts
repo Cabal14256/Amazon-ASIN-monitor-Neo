@@ -7,6 +7,7 @@ import vm from 'node:vm';
 export async function legacyAsinBatch(
   items: unknown[],
   options: {
+    domain?: 'asin' | 'competitor';
     groups?: { id: string; country: string }[];
     existing?: { asin: string; country: string }[];
     failAsin?: string;
@@ -24,16 +25,23 @@ export async function legacyAsinBatch(
       return options.groups ?? [{ id: 'g', country: 'US' }];
     if (sql.includes('SELECT asin, country FROM'))
       return options.existing ?? [];
-    if (sql.includes('INSERT INTO asins')) {
-      const chunk = Array.from({ length: params.length / 10 }, (_, index) =>
-        params.slice(index * 10, (index + 1) * 10),
+    if (
+      sql.includes('INSERT INTO asins') ||
+      sql.includes('INSERT INTO competitor_asins')
+    ) {
+      const width = 10;
+      const chunk = Array.from({ length: params.length / width }, (_, index) =>
+        params.slice(index * width, (index + 1) * width),
       );
       if (chunk.some((row) => row[1] === options.failAsin))
         throw new Error('创建失败');
       inserts.push(...chunk);
       return [];
     }
-    if (sql.includes('UPDATE variant_groups')) {
+    if (
+      sql.includes('UPDATE variant_groups') ||
+      sql.includes('UPDATE competitor_variant_groups')
+    ) {
       touched.push(...params);
       return [];
     }
@@ -47,6 +55,7 @@ export async function legacyAsinBatch(
   const module = {
     exports: {} as {
       batchCreateASINs(options: {
+        domain?: 'asin' | 'competitor';
         items: unknown[];
       }): Promise<BatchCreateAsinsData>;
     },
@@ -77,7 +86,12 @@ export async function legacyAsinBatch(
   );
   return {
     result: JSON.parse(
-      JSON.stringify(await module.exports.batchCreateASINs({ items })),
+      JSON.stringify(
+        await module.exports.batchCreateASINs({
+          items,
+          domain: options.domain,
+        }),
+      ),
     ) as BatchCreateAsinsData,
     inserts,
     touched,

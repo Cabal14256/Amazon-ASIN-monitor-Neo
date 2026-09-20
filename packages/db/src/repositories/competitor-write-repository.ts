@@ -8,35 +8,9 @@ import {
   CompetitorTransactionError,
   PgCompetitorTransactions,
 } from './competitor-transactions';
+import { duplicateCompetitorAsin } from './competitor-write-errors';
 import { prepareCompetitorWrites } from './competitor-write-policy';
 import { DrizzleCompetitorWriteUnit } from './competitor-write-unit';
-
-function duplicate(error: unknown) {
-  let current = error;
-  for (
-    let depth = 0;
-    depth < 3 && current && typeof current === 'object';
-    depth++
-  ) {
-    const value = current as {
-      code?: unknown;
-      constraint?: unknown;
-      cause?: unknown;
-    };
-    if (
-      value.code === '23505' &&
-      typeof value.constraint === 'string' &&
-      [
-        'uk_competitor_asins_asin_country',
-        'uq_competitor_asins_asin_country_ci',
-        'idx_neo_competitor_write_asin_country',
-      ].includes(value.constraint)
-    )
-      return true;
-    current = value.cause;
-  }
-  return false;
-}
 export class PgCompetitorWriteRepository
   implements CompetitorWriteRepositoryPort
 {
@@ -70,6 +44,8 @@ export class PgCompetitorWriteRepository
             updateGroup: async (id, fields) =>
               (await business()).updateGroup(id, fields),
             createAsin: async (fields) => (await business()).createAsin(fields),
+            batchCreateAsins: async (items) =>
+              (await business()).batchCreateAsins(items),
             updateAsin: async (id, fields) =>
               (await business()).updateAsin(id, fields),
             moveAsin: async (id, target) =>
@@ -85,7 +61,8 @@ export class PgCompetitorWriteRepository
         signal,
       );
     } catch (error) {
-      if (duplicate(error)) throw new CompetitorWriteError('duplicate');
+      if (duplicateCompetitorAsin(error))
+        throw new CompetitorWriteError('duplicate');
       throw error;
     }
   }

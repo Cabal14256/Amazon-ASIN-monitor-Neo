@@ -84,13 +84,14 @@ export async function legacyCompetitorQueryFixture() {
         throw error;
       }
     };
-    let nextId: string | undefined;
+    let nextIds: string[] = [];
+    const useGeneratedIds = (ids: string[]) => {
+      if (ids.some((id) => !/^[0-9a-f-]{36}$/.test(id)))
+        throw new Error('Expected generated fixture UUID');
+      nextIds = [...ids];
+    };
     const uuid = {
-      v4: () => {
-        const id = nextId ?? randomUUID();
-        nextId = undefined;
-        return id;
-      },
+      v4: () => nextIds.shift() ?? randomUUID(),
     };
     const logger = { debug() {}, info() {}, warn() {}, error() {} };
     function load(path: string, dependencies: Record<string, unknown>) {
@@ -131,6 +132,17 @@ export async function legacyCompetitorQueryFixture() {
     const shared = load('services/sharedService.js', {
       '../utils/logger': logger,
     });
+    const unexpectedPrimary = () => {
+      throw new Error('Competitor batch touched primary business data');
+    };
+    const batch = load('services/asinBatchCreateService.js', {
+      '../config/database': { withTransaction: unexpectedPrimary },
+      '../config/competitor-database': { query, withTransaction },
+      '../models/VariantGroup': { clearCache: unexpectedPrimary },
+      '../models/CompetitorVariantGroup': model,
+      '../utils/logger': logger,
+      uuid,
+    });
     type Handler = (request: unknown, response: unknown) => Promise<void>;
     const controller = load('controllers/competitorAsinController.js', {
       '../models/CompetitorVariantGroup': model,
@@ -140,7 +152,7 @@ export async function legacyCompetitorQueryFixture() {
       '../services/taskRegistryService': {},
       '../services/batchDeleteTaskQueue': {},
       '../services/batchDeleteService': {},
-      '../services/asinBatchCreateService': {},
+      '../services/asinBatchCreateService': batch,
       '../services/sharedService': shared,
     }) as {
       getCompetitorVariantGroups: Handler;
@@ -148,6 +160,7 @@ export async function legacyCompetitorQueryFixture() {
       createCompetitorVariantGroup: Handler;
       updateCompetitorVariantGroup: Handler;
       createCompetitorASIN: Handler;
+      batchCreateCompetitorASINs: Handler;
       updateCompetitorASIN: Handler;
       moveCompetitorASIN: Handler;
       deleteCompetitorVariantGroup: Handler;
@@ -174,11 +187,8 @@ export async function legacyCompetitorQueryFixture() {
     return {
       query,
       close,
-      useGeneratedId: (id: string) => {
-        if (!/^[0-9a-f-]{36}$/.test(id))
-          throw new Error('Expected generated fixture UUID');
-        nextId = id;
-      },
+      useGeneratedId: (id: string) => useGeneratedIds([id]),
+      useGeneratedIds,
       createGroup: (body: unknown) =>
         invoke(controller.createCompetitorVariantGroup, { body }),
       updateGroup: (groupId: string, body: unknown) =>
@@ -188,6 +198,8 @@ export async function legacyCompetitorQueryFixture() {
         }),
       createAsin: (body: unknown) =>
         invoke(controller.createCompetitorASIN, { body }),
+      batchCreateAsins: (body: unknown) =>
+        invoke(controller.batchCreateCompetitorASINs, { body }),
       updateAsin: (asinId: string, body: unknown) =>
         invoke(controller.updateCompetitorASIN, { body, params: { asinId } }),
       moveAsin: (asinId: string, body: unknown) =>

@@ -1,3 +1,4 @@
+import type { BatchCreateAsinsData } from '@asin-monitor/contracts';
 import type { CompetitorAsin } from '../schema-competitor';
 import type {
   CompetitorGroupReadResult,
@@ -36,6 +37,7 @@ export interface CompetitorWriteUnit
     fields: CompetitorAsinWriteFields,
   ): Promise<CompetitorAsin>;
   moveAsin(id: string, targetGroupId: string): Promise<CompetitorAsin>;
+  batchCreateAsins(items: unknown[]): Promise<BatchCreateAsinsData>;
   deleteGroup(id: string): Promise<void>;
   deleteAsin(id: string): Promise<void>;
   updateGroupNotify(
