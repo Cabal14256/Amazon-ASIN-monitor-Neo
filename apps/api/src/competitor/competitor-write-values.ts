@@ -1,5 +1,6 @@
 import {
   competitorCreateAsinRequestSchema,
+  competitorFeishuNotifyRequestSchema,
   competitorGroupUpsertRequestSchema,
   competitorMoveAsinRequestSchema,
   competitorUpdateAsinRequestSchema,
@@ -7,7 +8,7 @@ import {
 import { z } from 'zod';
 
 export class CompetitorWriteInputError extends Error {
-  constructor() {
+  constructor(readonly code: 'input' | 'notify' = 'input') {
     super('Invalid competitor write request');
   }
 }
@@ -72,6 +73,19 @@ export const parseCompetitorAsinUpdate = (value: unknown) =>
   normalizeName(parse(updateSchema, value));
 export const parseCompetitorAsinMove = (value: unknown) =>
   parse(moveSchema, value);
+export function parseCompetitorNotify(value: unknown): boolean {
+  try {
+    const { enabled } = parse(
+      competitorFeishuNotifyRequestSchema.strict(),
+      value,
+    );
+    return enabled === true || enabled === 1;
+  } catch (error) {
+    if (error instanceof CompetitorWriteInputError)
+      throw new CompetitorWriteInputError('notify');
+    throw error;
+  }
+}
 export function parseCompetitorWriteId(value: unknown) {
   const result = id.safeParse(value);
   if (!result.success) throw new CompetitorWriteInputError();

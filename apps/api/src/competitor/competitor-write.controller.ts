@@ -3,6 +3,7 @@ import {
   Body,
   Catch,
   Controller,
+  Delete,
   Header,
   HttpCode,
   HttpException,
@@ -57,6 +58,60 @@ export class CompetitorWriteController {
         { success: false, errorCode: 403, errorMessage: '不允许的请求来源' },
         403,
       );
+  }
+  @Delete('variant-groups/:groupId')
+  @Header('Cache-Control', 'no-store')
+  async deleteGroup(
+    @Req() request: FastifyRequest,
+    @Param('groupId') id: string,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.deleteGroup(request.auth!, id),
+    };
+  }
+  @Delete('asins/:asinId')
+  @Header('Cache-Control', 'no-store')
+  async deleteAsin(
+    @Req() request: FastifyRequest,
+    @Param('asinId') id: string,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.deleteAsin(request.auth!, id),
+    };
+  }
+  @Put('variant-groups/:groupId/feishu-notify')
+  @Header('Cache-Control', 'no-store')
+  async updateGroupNotify(
+    @Req() request: FastifyRequest,
+    @Param('groupId') id: string,
+    @Body() body: unknown,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.updateGroupNotify(request.auth!, id, body),
+    };
+  }
+  @Put('asins/:asinId/feishu-notify')
+  @Header('Cache-Control', 'no-store')
+  async updateAsinNotify(
+    @Req() request: FastifyRequest,
+    @Param('asinId') id: string,
+    @Body() body: unknown,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.updateAsinNotify(request.auth!, id, body),
+    };
   }
   @Post('variant-groups')
   @HttpCode(200)

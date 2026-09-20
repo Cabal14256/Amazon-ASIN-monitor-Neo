@@ -46,7 +46,11 @@ export async function legacyCompetitorQueryFixture() {
       resolve(__dirname, '../../../../server/database/competitor-init.sql'),
       'utf8',
     );
-    for (const table of ['competitor_variant_groups', 'competitor_asins']) {
+    for (const table of [
+      'competitor_variant_groups',
+      'competitor_asins',
+      'competitor_monitor_history',
+    ]) {
       const statement = ddl.match(
         new RegExp(
           'CREATE TABLE IF NOT EXISTS `' +
@@ -146,6 +150,10 @@ export async function legacyCompetitorQueryFixture() {
       createCompetitorASIN: Handler;
       updateCompetitorASIN: Handler;
       moveCompetitorASIN: Handler;
+      deleteCompetitorVariantGroup: Handler;
+      deleteCompetitorASIN: Handler;
+      updateCompetitorVariantGroupFeishuNotify: Handler;
+      updateCompetitorASINFeishuNotify: Handler;
     };
     const invoke = async (handler: Handler, request: unknown) => {
       let body: unknown,
@@ -184,6 +192,22 @@ export async function legacyCompetitorQueryFixture() {
         invoke(controller.updateCompetitorASIN, { body, params: { asinId } }),
       moveAsin: (asinId: string, body: unknown) =>
         invoke(controller.moveCompetitorASIN, { body, params: { asinId } }),
+      deleteGroup: (groupId: string) =>
+        invoke(controller.deleteCompetitorVariantGroup, {
+          params: { groupId },
+        }),
+      deleteAsin: (asinId: string) =>
+        invoke(controller.deleteCompetitorASIN, { params: { asinId } }),
+      updateGroupNotify: (groupId: string, body: unknown) =>
+        invoke(controller.updateCompetitorVariantGroupFeishuNotify, {
+          params: { groupId },
+          body,
+        }),
+      updateAsinNotify: (asinId: string, body: unknown) =>
+        invoke(controller.updateCompetitorASINFeishuNotify, {
+          params: { asinId },
+          body,
+        }),
       list: (query: Record<string, string>) =>
         invoke(controller.getCompetitorVariantGroups, { query }),
       detail: (groupId: string) =>

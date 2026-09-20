@@ -142,6 +142,43 @@ export class DrizzleCompetitorWriteUnit {
         .where(inArray(g.id, [...new Set(ids)])),
     );
   }
+  async deleteGroup(id: string) {
+    const group = await this.group(id);
+    if (!group) throw new CompetitorWriteError('group-not-found');
+    // The real FK cascades children; monitor history has no FK and is retained.
+    await this.query(() => this.db.delete(g).where(eq(g.id, group.id)));
+  }
+  async deleteAsin(id: string) {
+    const { asin, parent } = await this.lockAsin(id);
+    await this.query(() => this.db.delete(a).where(eq(a.id, asin.id)));
+    await this.touchGroups([parent.id]);
+  }
+  async updateGroupNotify(id: string, enabled: boolean) {
+    if (typeof enabled !== 'boolean') throw new CompetitorWriteError('input');
+    const group = await this.group(id);
+    if (!group) throw new CompetitorWriteError('group-not-found');
+    await this.query(() =>
+      this.db
+        .update(g)
+        .set({ feishuNotifyEnabled: enabled, updateTime: now })
+        .where(eq(g.id, group.id)),
+    );
+    // A bounded complete response is part of the transaction; an oversized
+    // group must fail before COMMIT rather than leave an unreported mutation.
+    return this.reader.detail(group.id);
+  }
+  async updateAsinNotify(id: string, enabled: boolean) {
+    if (typeof enabled !== 'boolean') throw new CompetitorWriteError('input');
+    const { asin } = await this.lockAsin(id);
+    await this.query(() =>
+      this.db
+        .update(a)
+        .set({ feishuNotifyEnabled: enabled, updateTime: now })
+        .where(eq(a.id, asin.id)),
+    );
+    // Legacy notification changes do not touch the parent group's timestamp.
+    return this.asin(asin.id);
+  }
   async createGroup(fields: CompetitorGroupWriteFields) {
     groupFields(fields);
     const id = randomUUID();

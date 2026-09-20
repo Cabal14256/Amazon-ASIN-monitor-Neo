@@ -25,6 +25,7 @@ import {
   parseCompetitorAsinMove,
   parseCompetitorAsinUpdate,
   parseCompetitorGroupWrite,
+  parseCompetitorNotify,
   parseCompetitorWriteId,
 } from './competitor-write-values';
 
@@ -70,7 +71,11 @@ export class CompetitorWriteService implements OnModuleDestroy {
       | 'update-group'
       | 'create-asin'
       | 'update-asin'
-      | 'move-asin',
+      | 'move-asin'
+      | 'delete-group'
+      | 'delete-asin'
+      | 'group-notify'
+      | 'asin-notify',
     action: (unit: CompetitorWriteUnit) => Promise<T>,
   ) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -84,6 +89,8 @@ export class CompetitorWriteService implements OnModuleDestroy {
       return result;
     } catch (error) {
       if (error instanceof HttpException) throw error;
+      if (error instanceof CompetitorWriteInputError && error.code === 'notify')
+        fail(400, 'enabled参数必须是布尔值或0/1');
       if (
         error instanceof CompetitorWriteInputError ||
         (error instanceof CompetitorWriteError && error.code === 'input')
@@ -174,6 +181,38 @@ export class CompetitorWriteService implements OnModuleDestroy {
         await unit.moveAsin(
           parseCompetitorWriteId(id),
           parseCompetitorAsinMove(body).targetGroupId,
+        ),
+      ),
+    );
+  }
+  deleteGroup(principal: AuthPrincipal, id: unknown) {
+    return this.write(principal, 'delete-group', async (unit) => {
+      await unit.deleteGroup(parseCompetitorWriteId(id));
+      return '删除成功';
+    });
+  }
+  deleteAsin(principal: AuthPrincipal, id: unknown) {
+    return this.write(principal, 'delete-asin', async (unit) => {
+      await unit.deleteAsin(parseCompetitorWriteId(id));
+      return '删除成功';
+    });
+  }
+  updateGroupNotify(principal: AuthPrincipal, id: unknown, body: unknown) {
+    return this.write(principal, 'group-notify', async (unit) =>
+      groupResult(
+        await unit.updateGroupNotify(
+          parseCompetitorWriteId(id),
+          parseCompetitorNotify(body),
+        ),
+      ),
+    );
+  }
+  updateAsinNotify(principal: AuthPrincipal, id: unknown, body: unknown) {
+    return this.write(principal, 'asin-notify', async (unit) =>
+      mapCompetitorAsinWrite(
+        await unit.updateAsinNotify(
+          parseCompetitorWriteId(id),
+          parseCompetitorNotify(body),
         ),
       ),
     );
