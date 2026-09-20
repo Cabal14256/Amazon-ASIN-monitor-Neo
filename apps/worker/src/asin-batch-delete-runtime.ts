@@ -2,11 +2,12 @@ import { getPhysicalQueueName, type Env } from '@asin-monitor/config';
 import {
   createPgPool,
   PgAsinBatchDeleteRepository,
+  PgCompetitorBatchDeleteRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
-import { createAsinBatchDeleteProcessor } from './asin-batch-delete-processor';
+import { createBatchDeleteProcessor } from './asin-batch-delete-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -19,6 +20,9 @@ export async function startAsinBatchDeleteRuntime(
   if (env.AUTH_DATA_AUTHORITY !== 'postgresql')
     throw new Error('ASIN batch deletion requires PostgreSQL authority');
   const connection = parseRedisUrl(env.REDIS_URL);
+  // Match the existing primary writer's admission bound. Queue excess jobs
+  // instead of claiming them and failing an otherwise valid deletion chunk.
+  const concurrency = Math.min(env.BATCH_DELETE_QUEUE_WORKER_CONCURRENCY, 16);
   const control = new Redis({
     ...connection,
     lazyConnect: true,
@@ -37,7 +41,7 @@ export async function startAsinBatchDeleteRuntime(
     }),
   );
   const pool = createPgPool(env.DATABASE_URL, {
-    max: Math.min(env.BATCH_DELETE_QUEUE_WORKER_CONCURRENCY, 16),
+    max: concurrency,
     connectionTimeoutMillis: Math.min(
       env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
       2000,
@@ -48,6 +52,24 @@ export async function startAsinBatchDeleteRuntime(
     logger.error('批量删除数据库连接异常', {
       reason: 'batch_delete_database_error',
     }),
+  );
+  const competitorPool = createPgPool(env.COMPETITOR_DATABASE_URL, {
+    max: concurrency,
+    connectionTimeoutMillis: Math.min(
+      env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+      2000,
+    ),
+    statement_timeout: 1500,
+  });
+  competitorPool.on('error', () =>
+    logger.error('竞品批量删除数据库连接异常', {
+      reason: 'competitor_batch_delete_database_error',
+    }),
+  );
+  const competitorRepository = new PgCompetitorBatchDeleteRepository(
+    pool,
+    competitorPool,
+    concurrency,
   );
   let queue: Queue | undefined;
   let worker: Worker | undefined;
@@ -83,8 +105,8 @@ export async function startAsinBatchDeleteRuntime(
         const activeQueue = queue;
         worker = new Worker(
           getPhysicalQueueName('batch-delete'),
-          createAsinBatchDeleteProcessor(
-            repository,
+          createBatchDeleteProcessor(
+            { asin: repository, competitor: competitorRepository },
             new RedisTaskRepository(
               control,
               env,
@@ -112,6 +134,7 @@ export async function startAsinBatchDeleteRuntime(
           ),
           {
             ...getWorkerOptions('batch-delete', env, connection),
+            concurrency,
             autorun: false,
           },
         );
@@ -150,7 +173,12 @@ export async function startAsinBatchDeleteRuntime(
           try {
             await activeWorker.close();
           } finally {
-            await Promise.allSettled([activeQueue.close(), pool.end()]);
+            competitorRepository.close();
+            await Promise.allSettled([
+              activeQueue.close(),
+              pool.end(),
+              competitorPool.end(),
+            ]);
             control.disconnect(false);
           }
         })();
@@ -160,7 +188,13 @@ export async function startAsinBatchDeleteRuntime(
   } catch {
     closing = true;
     control.disconnect(false);
-    await Promise.allSettled([worker?.close(true), queue?.close(), pool.end()]);
+    competitorRepository.close();
+    await Promise.allSettled([
+      worker?.close(true),
+      queue?.close(),
+      pool.end(),
+      competitorPool.end(),
+    ]);
     throw new Error('ASIN batch deletion initialization failed');
   } finally {
     if (timer) clearTimeout(timer);

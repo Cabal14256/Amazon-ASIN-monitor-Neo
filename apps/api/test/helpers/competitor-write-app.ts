@@ -3,9 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { CompetitorModule } from '../../src/competitor/competitor.module';
+import { asinWriteApp } from './asin-write-app';
 import { spApiConfigApp } from './sp-api-config-app';
 
-export async function competitorWriteApp() {
+export async function competitorWriteApp(
+  options: {
+    configure?: NonNullable<Parameters<typeof spApiConfigApp>[0]>['configure'];
+    primaryBusiness?: boolean;
+  } = {},
+) {
   if (
     process.env.RUN_INTEGRATION_TESTS !== 'true' ||
     process.env.INTEGRATION_ALLOW_DROP_DATABASES !== 'true' ||
@@ -59,10 +65,13 @@ export async function competitorWriteApp() {
     );
     const url = new URL(process.env.COMPETITOR_DATABASE_URL);
     url.searchParams.set('options', `-c search_path=${schema}`);
-    const f = await spApiConfigApp({
+    const appOptions = {
       imports: [CompetitorModule],
       env: { COMPETITOR_DATABASE_URL: url.toString() },
-    });
+    };
+    const f = options.primaryBusiness
+      ? await asinWriteApp(options.configure, appOptions)
+      : await spApiConfigApp({ ...appOptions, configure: options.configure });
     fixture = f;
     const baseline = readFileSync(
       resolve(

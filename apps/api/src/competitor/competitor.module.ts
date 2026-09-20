@@ -1,4 +1,5 @@
 import {
+  PgCompetitorBatchDeleteRepository,
   PgCompetitorQueryRepository,
   PgCompetitorWriteRepository,
 } from '@asin-monitor/db';
@@ -6,6 +7,12 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
 import { ApplicationDatabasePools } from '../database/database.service';
+import { TaskQueryModule } from '../tasks/task-query.module';
+import { CompetitorBatchDeleteController } from './competitor-batch-delete.controller';
+import {
+  COMPETITOR_BATCH_DELETE_REPOSITORY,
+  CompetitorBatchDeleteService,
+} from './competitor-batch-delete.service';
 import { CompetitorQueryController } from './competitor-query.controller';
 import {
   COMPETITOR_QUERY_REPOSITORY,
@@ -18,11 +25,25 @@ import {
 } from './competitor-write.service';
 
 @Module({
-  imports: [AuthModule, DatabaseModule],
-  controllers: [CompetitorQueryController, CompetitorWriteController],
+  imports: [AuthModule, DatabaseModule, TaskQueryModule],
+  controllers: [
+    CompetitorQueryController,
+    CompetitorWriteController,
+    CompetitorBatchDeleteController,
+  ],
   providers: [
     CompetitorQueryService,
     CompetitorWriteService,
+    CompetitorBatchDeleteService,
+    {
+      provide: COMPETITOR_BATCH_DELETE_REPOSITORY,
+      inject: [ApplicationDatabasePools],
+      useFactory: (pools: ApplicationDatabasePools) =>
+        new PgCompetitorBatchDeleteRepository(
+          pools.primaryPool,
+          pools.competitorPool,
+        ),
+    },
     {
       provide: COMPETITOR_WRITE_REPOSITORY,
       inject: [ApplicationDatabasePools],

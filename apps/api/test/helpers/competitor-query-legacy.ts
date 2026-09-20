@@ -143,6 +143,17 @@ export async function legacyCompetitorQueryFixture() {
       '../utils/logger': logger,
       uuid,
     });
+    const deletion = load('services/batchDeleteService.js', {
+      '../config/database': {
+        query: unexpectedPrimary,
+        withTransaction: unexpectedPrimary,
+      },
+      '../config/competitor-database': { query, withTransaction },
+      '../models/VariantGroup': { clearCache: unexpectedPrimary },
+      '../models/CompetitorVariantGroup': model,
+      '../utils/logger': logger,
+      uuid,
+    });
     type Handler = (request: unknown, response: unknown) => Promise<void>;
     const controller = load('controllers/competitorAsinController.js', {
       '../models/CompetitorVariantGroup': model,
@@ -151,7 +162,7 @@ export async function legacyCompetitorQueryFixture() {
       '../services/importService': {},
       '../services/taskRegistryService': {},
       '../services/batchDeleteTaskQueue': {},
-      '../services/batchDeleteService': {},
+      '../services/batchDeleteService': deletion,
       '../services/asinBatchCreateService': batch,
       '../services/sharedService': shared,
     }) as {
@@ -161,6 +172,7 @@ export async function legacyCompetitorQueryFixture() {
       updateCompetitorVariantGroup: Handler;
       createCompetitorASIN: Handler;
       batchCreateCompetitorASINs: Handler;
+      batchDeleteCompetitorVariantGroups: Handler;
       updateCompetitorASIN: Handler;
       moveCompetitorASIN: Handler;
       deleteCompetitorVariantGroup: Handler;
@@ -200,6 +212,8 @@ export async function legacyCompetitorQueryFixture() {
         invoke(controller.createCompetitorASIN, { body }),
       batchCreateAsins: (body: unknown) =>
         invoke(controller.batchCreateCompetitorASINs, { body }),
+      batchDelete: (body: unknown) =>
+        invoke(controller.batchDeleteCompetitorVariantGroups, { body }),
       updateAsin: (asinId: string, body: unknown) =>
         invoke(controller.updateCompetitorASIN, { body, params: { asinId } }),
       moveAsin: (asinId: string, body: unknown) =>

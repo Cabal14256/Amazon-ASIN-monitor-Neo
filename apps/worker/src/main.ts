@@ -26,7 +26,7 @@ import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
 
 /**
  * Worker 进程入口（PROCESS_ROLE=worker 角色）。
- * D4 认证维护、主营批量删除、导入及变体检查已注册 Processor。
+ * D4 认证维护、主营/竞品批量删除、主营导入及变体检查已注册 Processor。
  * BullMQ 自管连接（传 ConnectionOptions），看门狗使用独立 ioredis 实例。
  */
 async function bootstrap(): Promise<void> {

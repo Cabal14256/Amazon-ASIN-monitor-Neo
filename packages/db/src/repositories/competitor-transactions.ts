@@ -36,8 +36,14 @@ export class PgCompetitorTransactions {
   constructor(
     private readonly primary: Pool,
     private readonly competitor: Pool,
+    private readonly maximumOperations = 8,
   ) {
-    if (primary === competitor)
+    if (
+      primary === competitor ||
+      !Number.isInteger(maximumOperations) ||
+      maximumOperations < 1 ||
+      maximumOperations > 16
+    )
       throw new CompetitorTransactionError('dependency');
   }
   getDiagnostics() {
@@ -50,7 +56,8 @@ export class PgCompetitorTransactions {
   ): Promise<T> {
     if (this.closed) throw new CompetitorTransactionError('closed');
     if (signal?.aborted) throw new CompetitorTransactionError('cancelled');
-    if (this.active >= 8) throw new CompetitorTransactionError('capacity');
+    if (this.active >= this.maximumOperations)
+      throw new CompetitorTransactionError('capacity');
     this.active++;
     const clients = new Set<PoolClient>(),
       released = new Set<PoolClient>();
