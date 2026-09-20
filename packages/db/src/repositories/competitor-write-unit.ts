@@ -13,6 +13,7 @@ import {
   competitorVariantGroups as g,
   type CompetitorAsin,
 } from '../schema-competitor';
+import { CompetitorBatchCreateUnit } from './competitor-batch-create-unit';
 import { DrizzleCompetitorReadUnit } from './competitor-read-unit';
 
 const ci = (left: unknown, right: unknown) =>
@@ -71,6 +72,11 @@ export class DrizzleCompetitorWriteUnit {
     const result = await action();
     this.ensureOpen();
     return result;
+  }
+  batchCreateAsins(items: unknown[]) {
+    return new CompetitorBatchCreateUnit(this.db, this.ensureOpen).create(
+      items,
+    );
   }
   private async group(id: string, lock = true) {
     text(id, 50);

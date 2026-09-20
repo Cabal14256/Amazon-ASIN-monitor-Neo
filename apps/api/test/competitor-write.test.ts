@@ -1,5 +1,6 @@
 import {
   competitorAsinRecordResultSchema,
+  competitorBatchCreateResultSchema,
   competitorDeleteGroupResultSchema,
   competitorGroupResultSchema,
 } from '@asin-monitor/contracts';
@@ -86,6 +87,12 @@ const cases = [
     body: { enabled: true },
     action: 'updateAsinNotify',
   },
+  {
+    method: 'POST',
+    url: '/competitor/asins/batch-create',
+    body: { items: [{ ...asinBody, parentId: 'group-119' }] },
+    action: 'batchCreateAsins',
+  },
 ] as const;
 function fixture() {
   const user: AuthUserRecord = {
@@ -128,6 +135,22 @@ function fixture() {
     createGroup: vi.fn(async () => result),
     updateGroup: vi.fn(async () => result),
     createAsin: vi.fn(async () => competitorQueryAsin()),
+    batchCreateAsins: vi.fn(async () => ({
+      total: 1,
+      successCount: 1,
+      failedCount: 0,
+      errors: [],
+      results: [
+        {
+          index: 0,
+          id: 'asin-125',
+          asin: 'B000000121',
+          country: 'US',
+          parentId: 'group-119',
+          success: true,
+        },
+      ],
+    })),
     updateAsin: vi.fn(async () => competitorQueryAsin()),
     moveAsin: vi.fn(async () => competitorQueryAsin()),
     deleteGroup: vi.fn(async () => {}),
@@ -220,6 +243,8 @@ describe('competitor writes HTTP / current primary authorization', () => {
       expect(result.headers['cache-control']).toBe('no-store');
       (value.method === 'DELETE'
         ? competitorDeleteGroupResultSchema
+        : value.action === 'batchCreateAsins'
+        ? competitorBatchCreateResultSchema
         : value.action.includes('Group')
         ? competitorGroupResultSchema
         : competitorAsinRecordResultSchema
@@ -298,7 +323,7 @@ describe('competitor writes HTTP / current primary authorization', () => {
       expect(f.unit[value.action]).not.toHaveBeenCalled();
     },
   );
-  it.each(cases.slice(5))(
+  it.each(cases.slice(5, 9))(
     'rejects an invalid decoded ID before $action',
     async (value) => {
       const response = await app.http.inject({
@@ -314,7 +339,7 @@ describe('competitor writes HTTP / current primary authorization', () => {
   it.each([true, false, 0, 1])(
     'normalizes notification input %s on both actual routes',
     async (enabled) => {
-      for (const value of cases.slice(7)) {
+      for (const value of cases.slice(7, 9)) {
         expect((await request(value, headers, { enabled })).statusCode).toBe(
           200,
         );
@@ -328,7 +353,7 @@ describe('competitor writes HTTP / current primary authorization', () => {
   it.each([undefined, null, '', 'true', 'false', '0', '1', 2, [], {}])(
     'rejects non-boolean notification input %j on both routes',
     async (enabled) => {
-      for (const value of cases.slice(7)) {
+      for (const value of cases.slice(7, 9)) {
         expect((await request(value, headers, { enabled })).statusCode).toBe(
           400,
         );
@@ -368,6 +393,39 @@ describe('competitor writes HTTP / current primary authorization', () => {
       result.body + JSON.stringify(app.logger.error.mock.calls),
     ).not.toContain('private-sql');
   });
+  it.each([{}, { items: [] }, { items: null }, { items: 'bad' }])(
+    'preserves the empty batch error %#',
+    async (body) => {
+      const result = await request(cases[9], headers, body);
+      expect(result.statusCode).toBe(400);
+      expect(result.json().errorMessage).toBe('items不能为空');
+      expect(f.unit.batchCreateAsins).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps invalid rows intact for individual results', async () => {
+    const body = { items: [null] };
+    expect((await request(cases[9], headers, body)).statusCode).toBe(200);
+    expect(f.unit.batchCreateAsins).toHaveBeenCalledWith([null]);
+  });
+  it.each([
+    { total: 2 },
+    { successCount: 2 },
+    { results: [] },
+    { failedCount: 1 },
+    { errors: [{ index: 0, asin: null, country: null, message: 'invalid' }] },
+  ])(
+    'rejects inconsistent batch responses before committing %#',
+    async (changes) => {
+      const valid = await f.unit.batchCreateAsins([]);
+      vi.mocked(f.unit.batchCreateAsins).mockResolvedValue({
+        ...valid,
+        ...changes,
+      });
+      const result = await request(cases[9]);
+      expect(result.statusCode).toBe(500);
+      expect(result.json().data).toBeUndefined();
+    },
+  );
   it('checks guard permissions before acquiring a transaction', async () => {
     f.auth.getPermissionCodes.mockResolvedValue([]);
     expect((await request(cases[0])).statusCode).toBe(403);

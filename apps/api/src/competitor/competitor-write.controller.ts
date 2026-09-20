@@ -149,6 +149,20 @@ export class CompetitorWriteController {
       data: await this.service.createAsin(request.auth!, body),
     };
   }
+  @Post('asins/batch-create')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async batchCreateAsins(
+    @Req() request: FastifyRequest,
+    @Body() body: unknown,
+  ) {
+    this.assertOrigin(request);
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.batchCreateAsins(request.auth!, body),
+    };
+  }
   @Put('asins/:asinId')
   @Header('Cache-Control', 'no-store')
   async updateAsin(

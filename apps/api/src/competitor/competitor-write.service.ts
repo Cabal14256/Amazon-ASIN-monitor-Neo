@@ -1,4 +1,5 @@
 import type { Env } from '@asin-monitor/config';
+import { batchCreateAsinsDataSchema } from '@asin-monitor/contracts';
 import {
   CompetitorQueryError,
   CompetitorTransactionError,
@@ -24,6 +25,7 @@ import {
   parseCompetitorAsinCreate,
   parseCompetitorAsinMove,
   parseCompetitorAsinUpdate,
+  parseCompetitorBatchCreate,
   parseCompetitorGroupWrite,
   parseCompetitorNotify,
   parseCompetitorWriteId,
@@ -70,6 +72,7 @@ export class CompetitorWriteService implements OnModuleDestroy {
       | 'create-group'
       | 'update-group'
       | 'create-asin'
+      | 'batch-create'
       | 'update-asin'
       | 'move-asin'
       | 'delete-group'
@@ -89,6 +92,11 @@ export class CompetitorWriteService implements OnModuleDestroy {
       return result;
     } catch (error) {
       if (error instanceof HttpException) throw error;
+      if (
+        error instanceof CompetitorWriteInputError &&
+        error.code === 'batch-empty'
+      )
+        fail(400, 'items不能为空');
       if (error instanceof CompetitorWriteInputError && error.code === 'notify')
         fail(400, 'enabled参数必须是布尔值或0/1');
       if (
@@ -174,6 +182,22 @@ export class CompetitorWriteService implements OnModuleDestroy {
         ),
       ),
     );
+  }
+  batchCreateAsins(principal: AuthPrincipal, body: unknown) {
+    return this.write(principal, 'batch-create', async (unit) => {
+      const items = parseCompetitorBatchCreate(body);
+      const result = batchCreateAsinsDataSchema.parse(
+        await unit.batchCreateAsins(items),
+      );
+      if (
+        result.total !== items.length ||
+        result.total !== result.successCount + result.failedCount ||
+        result.results.length !== result.total ||
+        result.errors.length !== result.failedCount
+      )
+        throw new Error('Invalid competitor batch result');
+      return result;
+    });
   }
   moveAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'move-asin', async (unit) =>

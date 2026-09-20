@@ -72,6 +72,14 @@ export function prepareBatchAsins(
   return prepareAsins(items, idFactory, MAX_ASIN_BATCH_CREATE_ITEMS);
 }
 
+/** Competitor rows share Legacy normalization but have no site column. */
+export function prepareCompetitorBatchAsins(
+  items: unknown[],
+  idFactory: () => string = randomUUID,
+): BatchAsinPlan {
+  return prepareAsins(items, idFactory, MAX_ASIN_BATCH_CREATE_ITEMS, false);
+}
+
 /** File imports normalize/deduplicate the entire file before bounded writes.
  * Splitting first would lose duplicate detection across transaction boundaries. */
 export function prepareImportAsins(
@@ -85,6 +93,7 @@ function prepareAsins(
   items: unknown[],
   idFactory: () => string,
   maximum: number,
+  hasSite = true,
 ): BatchAsinPlan {
   if (!items.length || items.length > maximum)
     throw new Error('Invalid ASIN batch size');
@@ -135,7 +144,7 @@ function prepareAsins(
       ? 'ASIN编码必须是10位字母数字组合'
       : !item.country
       ? '国家不能为空'
-      : !item.site
+      : hasSite && !item.site
       ? '站点不能为空'
       : !item.brand
       ? '品牌不能为空'
@@ -155,11 +164,14 @@ function prepareAsins(
   return { result, items: valid };
 }
 /** PG varchar counts code points; invalid text is a per-row create failure. */
-export function batchAsinFitsStorage(item: BatchAsinItem): boolean {
+export function batchAsinFitsStorage(
+  item: BatchAsinItem,
+  hasSite = true,
+): boolean {
   const fields = [
     [item.name, 500],
     [item.country, 10],
-    [item.site, 100],
+    [hasSite ? item.site : null, 100],
     [item.brand, 100],
     [item.parentId, 50],
   ] as const;
