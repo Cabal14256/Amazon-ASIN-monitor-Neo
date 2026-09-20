@@ -23,5 +23,26 @@ export interface CompetitorQueryUnit
   detail(groupId: string): Promise<CompetitorGroupReadResult>;
 }
 export interface CompetitorQueryRepositoryPort {
-  read<T>(operation: (unit: CompetitorQueryUnit) => Promise<T>): Promise<T>;
+  read<T>(
+    operation: (unit: CompetitorQueryUnit) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T>;
+  close?(): void;
+}
+
+export class CompetitorQueryError extends Error {
+  constructor(
+    readonly code:
+      | 'input'
+      | 'result'
+      | 'capacity'
+      | 'too-many-children'
+      | 'dependency'
+      | 'timeout'
+      | 'cancelled'
+      | 'closed',
+  ) {
+    super(`Competitor query ${code}`);
+    this.name = 'CompetitorQueryError';
+  }
 }

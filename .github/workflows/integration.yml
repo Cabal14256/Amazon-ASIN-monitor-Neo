@@ -248,6 +248,16 @@ jobs:
       - name: Run ASIN group queries and shared authorization locks
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-query.integration.test.ts
 
+      - name: Upgrade competitor query matching twice
+        run: |
+          docker cp packages/db/docker/apply-competitor-query-matching.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-query-matching.sh"
+          docker cp packages/db/migrations/0010_competitor_query_matching.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0010_competitor_query_matching.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-query-matching.sh /tmp/0010_competitor_query_matching.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-query-matching.sh /tmp/0010_competitor_query_matching.sql
+
+      - name: Compare competitor query HTTP with Legacy MySQL and verify actual dual-database authorization
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-query.integration.test.ts
+
       - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
@@ -351,6 +361,12 @@ jobs:
           docker cp packages/db/migrations/0009_notification_country_collation.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0009_notification_country_collation.rollback.sql"
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-notification-country-collation.sh /tmp/0009_notification_country_collation.rollback.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-notification-country-collation.sh /tmp/0009_notification_country_collation.rollback.sql
+
+      - name: Smoke test competitor query rollback twice
+        run: |
+          docker cp packages/db/migrations/0010_competitor_query_matching.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0010_competitor_query_matching.rollback.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-query-matching.sh /tmp/0010_competitor_query_matching.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-query-matching.sh /tmp/0010_competitor_query_matching.rollback.sql
 
       - name: Upload sanitized Timescale performance evidence
         if: always()
