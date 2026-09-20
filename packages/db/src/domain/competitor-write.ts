@@ -36,6 +36,13 @@ export interface CompetitorWriteUnit
     fields: CompetitorAsinWriteFields,
   ): Promise<CompetitorAsin>;
   moveAsin(id: string, targetGroupId: string): Promise<CompetitorAsin>;
+  deleteGroup(id: string): Promise<void>;
+  deleteAsin(id: string): Promise<void>;
+  updateGroupNotify(
+    id: string,
+    enabled: boolean,
+  ): Promise<CompetitorGroupReadResult>;
+  updateAsinNotify(id: string, enabled: boolean): Promise<CompetitorAsin>;
 }
 export interface CompetitorWriteRepositoryPort {
   transaction<T>(

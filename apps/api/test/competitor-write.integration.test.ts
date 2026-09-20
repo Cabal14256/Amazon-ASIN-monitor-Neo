@@ -80,7 +80,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     });
     beforeEach(async () => {
-      for (const table of ['competitor_asins', 'competitor_variant_groups']) {
+      for (const table of [
+        'competitor_monitor_history',
+        'competitor_asins',
+        'competitor_variant_groups',
+      ]) {
         await f.pools.competitorPool.query(`DELETE FROM ${table}`);
         await legacy.query(`DELETE FROM ${table}`);
       }
@@ -107,7 +111,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         )}`,
       };
     });
-    const request = (method: 'POST' | 'PUT', path: string, payload: unknown) =>
+    const request = (
+      method: 'POST' | 'PUT' | 'DELETE',
+      path: string,
+      payload: unknown = undefined,
+    ) =>
       f.http.inject({
         method,
         url: `/api/v1/competitor/${path}`,
@@ -191,6 +199,320 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         { timeout: 1000, interval: 10 },
       );
     }
+    const actionCases = [
+      {
+        method: 'DELETE',
+        path: 'variant-groups/g1',
+        source: () => legacy.deleteGroup('g1'),
+      },
+      {
+        method: 'DELETE',
+        path: 'asins/a1',
+        source: () => legacy.deleteAsin('a1'),
+      },
+      {
+        method: 'PUT',
+        path: 'variant-groups/g1/feishu-notify',
+        source: () => legacy.updateGroupNotify('g1', { enabled: true }),
+      },
+      {
+        method: 'PUT',
+        path: 'asins/a1/feishu-notify',
+        source: () => legacy.updateAsinNotify('a1', { enabled: true }),
+      },
+    ] as const;
+    async function history() {
+      const values = ['g1', 'Group snapshot', 'a1', 'B0000000A1', 'US'];
+      await f.pools.competitorPool.query(
+        "INSERT INTO competitor_monitor_history(variant_group_id,variant_group_name,asin_id,asin_code,country,check_time,check_result,create_time) VALUES($1,$2,$3,$4,$5,'2020-01-01 08:00:00','{\"fixture\":true}','2020-01-01 08:00:00')",
+        values,
+      );
+      await legacy.query(
+        "INSERT INTO competitor_monitor_history(variant_group_id,variant_group_name,asin_id,asin_code,country,check_time,check_result,create_time) VALUES(?,?,?,?,?,'2020-01-01 08:00:00','{\"fixture\":true}','2020-01-01 08:00:00')",
+        values,
+      );
+    }
+    async function histories() {
+      return {
+        neo: (
+          await f.pools.competitorPool.query(
+            'SELECT * FROM competitor_monitor_history ORDER BY id',
+          )
+        ).rows,
+        legacy: await legacy.query(
+          'SELECT * FROM competitor_monitor_history ORDER BY id',
+        ),
+      };
+    }
+    it.each(actionCases)(
+      'returns the complete Legacy missing-record result for $method $path',
+      async (value) => {
+        const response = await request(
+          value.method,
+          value.path,
+          value.method === 'PUT' ? { enabled: true } : undefined,
+        );
+        const source = await value.source();
+        expect(response.statusCode).toBe(404);
+        expect(response.statusCode).toBe(source.statusCode);
+        complete(response.json(), source.body);
+      },
+    );
+    it.each(actionCases)(
+      'rechecks current primary permission before $method $path with cached guard grants',
+      async (value) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot();
+        expect((await read()).statusCode).toBe(200);
+        await f.pools.primaryPool.query(
+          'DELETE FROM user_roles WHERE user_id=$1',
+          [userId],
+        );
+        expect(
+          (
+            await request(
+              value.method,
+              value.path,
+              value.method === 'PUT' ? { enabled: true } : undefined,
+            )
+          ).statusCode,
+        ).toBe(403);
+        expect(await snapshot()).toEqual(before);
+      },
+    );
+    it('deletes a group and its real FK children while retaining both Legacy and Neo histories', async () => {
+      await group('g1');
+      await group('g2');
+      await asin('a1');
+      await asin('a2', 'g2');
+      await history();
+      const before = await snapshot(),
+        savedHistory = await histories();
+      const response = await request('DELETE', 'variant-groups/g1'),
+        source = await legacy.deleteGroup('g1');
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      complete(response.json(), source.body);
+      expect(response.json().data).toBe('删除成功');
+      const after = await snapshot();
+      expect(after.groups).toEqual(
+        before.groups.filter((row) => row.id === 'g2'),
+      );
+      expect(after.asins).toEqual(
+        before.asins.filter((row) => row.id === 'a2'),
+      );
+      expect(await histories()).toEqual(savedHistory);
+      expect(
+        await legacy.query('SELECT id FROM competitor_asins ORDER BY id'),
+      ).toEqual([{ id: 'a2' }]);
+      expect(
+        (
+          await f.pools.primaryPool.query(
+            'SELECT * FROM competitor_variant_groups',
+          )
+        ).rows,
+      ).toEqual([{ id: 'g1', name: 'wrong-primary-data' }]);
+    });
+    it('deletes only the target ASIN, touches its parent and preserves historical records', async () => {
+      await group('g1');
+      await asin('a1');
+      await asin('a2');
+      await history();
+      const before = await snapshot(),
+        savedHistory = await histories();
+      const response = await request('DELETE', 'asins/a1'),
+        source = await legacy.deleteAsin('a1');
+      expect(response.statusCode).toBe(200);
+      complete(response.json(), source.body);
+      expect((await snapshot()).asins).toEqual(
+        before.asins.filter((row) => row.id === 'a2'),
+      );
+      expect(await histories()).toEqual(savedHistory);
+      const detail = await f.http.inject({
+        method: 'GET',
+        url: '/api/v1/competitor/variant-groups/g1',
+        headers,
+      });
+      complete(detail.json(), (await legacy.detail('g1')).body);
+      expect((await snapshot()).groups[0].update_time).not.toEqual(
+        before.groups[0].update_time,
+      );
+    });
+    it.each([true, false, 0, 1])(
+      'changes only the group notification fields for Legacy input %s',
+      async (enabled) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot(),
+          body = { enabled };
+        await compare(
+          await request('PUT', 'variant-groups/g1/feishu-notify', body),
+          await legacy.updateGroupNotify('g1', body),
+          true,
+        );
+        const after = await snapshot();
+        expect(after.asins).toEqual(before.asins);
+        expect(after.groups[0]).toEqual({
+          ...before.groups[0],
+          feishu_notify_enabled: enabled === true || enabled === 1,
+          update_time: after.groups[0].update_time,
+        });
+        expect(after.groups[0].update_time).not.toEqual(
+          before.groups[0].update_time,
+        );
+      },
+    );
+    it.each([true, false, 0, 1])(
+      'changes only the ASIN notification fields and keeps the parent time for %s',
+      async (enabled) => {
+        await group('g1');
+        await asin('a1');
+        await asin('a2');
+        const before = await snapshot(),
+          body = { enabled };
+        await compare(
+          await request('PUT', 'asins/a1/feishu-notify', body),
+          await legacy.updateAsinNotify('a1', body),
+        );
+        const after = await snapshot();
+        expect(after.groups).toEqual(before.groups);
+        expect(after.asins[1]).toEqual(before.asins[1]);
+        expect(after.asins[0]).toEqual({
+          ...before.asins[0],
+          feishu_notify_enabled: enabled === true || enabled === 1,
+          update_time: after.asins[0].update_time,
+        });
+        expect(after.asins[0].update_time).not.toEqual(
+          before.asins[0].update_time,
+        );
+      },
+    );
+    it.each([null, '', 'false', 'true', '0', '1', 2, {}])(
+      'matches the full Legacy invalid enabled response for %j',
+      async (enabled) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot(),
+          body = { enabled };
+        await compare(
+          await request('PUT', 'variant-groups/g1/feishu-notify', body),
+          await legacy.updateGroupNotify('g1', body),
+        );
+        await compare(
+          await request('PUT', 'asins/a1/feishu-notify', body),
+          await legacy.updateAsinNotify('a1', body),
+        );
+        expect(await snapshot()).toEqual(before);
+      },
+    );
+    it('uses the same real CI/accent/PADSPACE identity for notification changes and deletion', async () => {
+      await group('Gróup ');
+      await asin('Ásin ', 'Gróup ');
+      const response = await request('PUT', 'asins/ASIN/feishu-notify', {
+        enabled: true,
+      });
+      await compare(
+        response,
+        await legacy.updateAsinNotify('ASIN', { enabled: true }),
+      );
+      expect(response.json().data.variantGroupId).toBe('Gróup ');
+      const deleted = await request('DELETE', 'variant-groups/GROUP');
+      expect(deleted.statusCode).toBe(200);
+      complete(deleted.json(), (await legacy.deleteGroup('GROUP')).body);
+      expect(await snapshot()).toEqual({ groups: [], asins: [] });
+    });
+    it('rolls back ASIN deletion when its parent timestamp update fails', async () => {
+      await group('g1');
+      await asin('a1');
+      await history();
+      const before = await snapshot(),
+        savedHistory = await histories();
+      await f.pools.competitorPool.query(
+        "CREATE FUNCTION fail_competitor_delete_touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private-delete-touch'; END $$; CREATE TRIGGER fail_competitor_delete_touch AFTER UPDATE ON competitor_variant_groups FOR EACH ROW EXECUTE FUNCTION fail_competitor_delete_touch()",
+      );
+      try {
+        const response = await request('DELETE', 'asins/a1');
+        expect(response.statusCode).toBe(500);
+        expect(
+          response.body + JSON.stringify(f.logger.error.mock.calls),
+        ).not.toContain('private-delete-touch');
+        expect(await snapshot()).toEqual(before);
+        expect(await histories()).toEqual(savedHistory);
+      } finally {
+        await f.pools.competitorPool.query(
+          'DROP TRIGGER fail_competitor_delete_touch ON competitor_variant_groups; DROP FUNCTION fail_competitor_delete_touch()',
+        );
+      }
+      expect((await request('DELETE', 'asins/a1')).statusCode).toBe(200);
+    });
+    it('rolls back the complete group cascade when a child deletion fails', async () => {
+      await group('g1');
+      await asin('a1');
+      await asin('a2');
+      await history();
+      const before = await snapshot(),
+        savedHistory = await histories();
+      await f.pools.competitorPool.query(
+        "CREATE FUNCTION fail_competitor_child_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.id='a2' THEN RAISE EXCEPTION 'private-child-delete'; END IF; RETURN OLD; END $$; CREATE TRIGGER fail_competitor_child_delete AFTER DELETE ON competitor_asins FOR EACH ROW EXECUTE FUNCTION fail_competitor_child_delete()",
+      );
+      try {
+        expect((await request('DELETE', 'variant-groups/g1')).statusCode).toBe(
+          500,
+        );
+        expect(await snapshot()).toEqual(before);
+        expect(await histories()).toEqual(savedHistory);
+      } finally {
+        await f.pools.competitorPool.query(
+          'DROP TRIGGER fail_competitor_child_delete ON competitor_asins; DROP FUNCTION fail_competitor_child_delete()',
+        );
+      }
+      expect((await request('DELETE', 'variant-groups/g1')).statusCode).toBe(
+        200,
+      );
+    });
+    it('does not delete a child moved while waiting for the original parent lock', async () => {
+      await group('g1');
+      await group('g2');
+      await asin('a1');
+      const blocker = await f.pools.competitorPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+        );
+        pending = Promise.resolve(request('DELETE', 'asins/a1'));
+        await blocked(blocker);
+        await blocker.query(
+          "UPDATE competitor_asins SET variant_group_id='g2' WHERE id='a1'",
+        );
+        await blocker.query('COMMIT');
+        expect((await pending).statusCode).toBe(409);
+        expect((await snapshot()).asins).toEqual([
+          expect.objectContaining({ id: 'a1', variant_group_id: 'g2' }),
+        ]);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        await pending?.catch(() => {});
+      }
+    });
+    it('does not commit a notification change when the complete group response exceeds the child bound', async () => {
+      await group('g1');
+      await f.pools.competitorPool.query(
+        "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) SELECT 'large-'||n,'B'||lpad(n::text,9,'0'),'US','Fixture','g1' FROM generate_series(1,5001)n",
+      );
+      const before = await snapshot();
+      expect(
+        (
+          await request('PUT', 'variant-groups/g1/feishu-notify', {
+            enabled: true,
+          })
+        ).statusCode,
+      ).toBe(413);
+      expect(await snapshot()).toEqual(before);
+    });
     it('creates a complete group in the distinct competitor database using the actual source controller', async () => {
       const body = { ...groupBody, country: ' us ' };
       const response = await request('POST', 'variant-groups', body);
@@ -757,6 +1079,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(
           (await request('POST', 'variant-groups', groupBody)).statusCode,
         ).toBe(503);
+        for (const value of actionCases)
+          expect(
+            (
+              await request(
+                value.method,
+                value.path,
+                value.method === 'PUT' ? { enabled: true } : undefined,
+              )
+            ).statusCode,
+          ).toBe(503);
         expect((await snapshot()).groups).toHaveLength(0);
       } finally {
         await f.pools.competitorPool.query(

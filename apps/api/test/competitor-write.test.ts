@@ -1,5 +1,6 @@
 import {
   competitorAsinRecordResultSchema,
+  competitorDeleteGroupResultSchema,
   competitorGroupResultSchema,
 } from '@asin-monitor/contracts';
 import {
@@ -61,6 +62,30 @@ const cases = [
     body: { targetGroupId: 'group-target' },
     action: 'moveAsin',
   },
+  {
+    method: 'DELETE',
+    url: '/competitor/variant-groups/group-119',
+    body: undefined,
+    action: 'deleteGroup',
+  },
+  {
+    method: 'DELETE',
+    url: '/competitor/asins/asin-119',
+    body: undefined,
+    action: 'deleteAsin',
+  },
+  {
+    method: 'PUT',
+    url: '/competitor/variant-groups/group-119/feishu-notify',
+    body: { enabled: true },
+    action: 'updateGroupNotify',
+  },
+  {
+    method: 'PUT',
+    url: '/competitor/asins/asin-119/feishu-notify',
+    body: { enabled: true },
+    action: 'updateAsinNotify',
+  },
 ] as const;
 function fixture() {
   const user: AuthUserRecord = {
@@ -105,6 +130,10 @@ function fixture() {
     createAsin: vi.fn(async () => competitorQueryAsin()),
     updateAsin: vi.fn(async () => competitorQueryAsin()),
     moveAsin: vi.fn(async () => competitorQueryAsin()),
+    deleteGroup: vi.fn(async () => {}),
+    deleteAsin: vi.fn(async () => {}),
+    updateGroupNotify: vi.fn(async () => result),
+    updateAsinNotify: vi.fn(async () => competitorQueryAsin()),
   };
   const repository: CompetitorWriteRepositoryPort = {
     transaction: vi.fn(async (action) => action(unit)),
@@ -189,11 +218,19 @@ describe('competitor writes HTTP / current primary authorization', () => {
       const result = await request(value);
       expect(result.statusCode).toBe(200);
       expect(result.headers['cache-control']).toBe('no-store');
-      (value.action.endsWith('Group')
+      (value.method === 'DELETE'
+        ? competitorDeleteGroupResultSchema
+        : value.action.includes('Group')
         ? competitorGroupResultSchema
         : competitorAsinRecordResultSchema
       ).parse(result.json());
-      expect(result.json().data).not.toHaveProperty('site');
+      if (value.method === 'DELETE')
+        expect(result.json()).toEqual({
+          success: true,
+          errorCode: 0,
+          data: '删除成功',
+        });
+      else expect(result.json().data).not.toHaveProperty('site');
       expect(f.unit[value.action]).toHaveBeenCalledOnce();
       expect(f.unit.lockOperator).toHaveBeenCalledWith(id);
       expect(f.unit.lockSession).toHaveBeenCalledWith(id, sessionId);
@@ -252,13 +289,51 @@ describe('competitor writes HTTP / current primary authorization', () => {
     });
     expect(f.unit.moveAsin).toHaveBeenCalledWith('asin-119', 'group-target');
   });
-  it.each(cases)(
+  it.each(cases.filter((value) => value.method !== 'DELETE'))(
     'rejects invalid bodies without writes on $action',
     async (value) => {
       expect(
         (await request(value, headers, { privateField: 'invalid' })).statusCode,
       ).toBe(400);
       expect(f.unit[value.action]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(cases.slice(5))(
+    'rejects an invalid decoded ID before $action',
+    async (value) => {
+      const response = await app.http.inject({
+        method: value.method,
+        url: `/api/v1${value.url.replace(/(?:group|asin)-119/, '%20')}`,
+        headers,
+        payload: value.body,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(f.unit[value.action]).not.toHaveBeenCalled();
+    },
+  );
+  it.each([true, false, 0, 1])(
+    'normalizes notification input %s on both actual routes',
+    async (enabled) => {
+      for (const value of cases.slice(7)) {
+        expect((await request(value, headers, { enabled })).statusCode).toBe(
+          200,
+        );
+        expect(f.unit[value.action]).toHaveBeenCalledWith(
+          value.url.includes('variant-groups') ? 'group-119' : 'asin-119',
+          enabled === true || enabled === 1,
+        );
+      }
+    },
+  );
+  it.each([undefined, null, '', 'true', 'false', '0', '1', 2, [], {}])(
+    'rejects non-boolean notification input %j on both routes',
+    async (enabled) => {
+      for (const value of cases.slice(7)) {
+        expect((await request(value, headers, { enabled })).statusCode).toBe(
+          400,
+        );
+        expect(f.unit[value.action]).not.toHaveBeenCalled();
+      }
     },
   );
   it.each([

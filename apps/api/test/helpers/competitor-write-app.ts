@@ -46,6 +46,9 @@ export async function competitorWriteApp() {
       `CREATE TABLE "${schema}".competitor_asins (LIKE public.competitor_asins INCLUDING ALL EXCLUDING INDEXES)`,
     );
     await admin.query(
+      `CREATE TABLE "${schema}".competitor_monitor_history (LIKE public.competitor_monitor_history INCLUDING ALL)`,
+    );
+    await admin.query(
       `ALTER TABLE "${schema}".competitor_asins ADD PRIMARY KEY(id), ADD CONSTRAINT uk_competitor_asins_asin_country UNIQUE(asin,country), ADD CONSTRAINT fk_competitor_asins_variant_group FOREIGN KEY(variant_group_id) REFERENCES "${schema}".competitor_variant_groups(id) ON DELETE CASCADE`,
     );
     await admin.query(
