@@ -67,6 +67,27 @@ export async function legacyCompetitorQueryFixture() {
         string,
         unknown
       >[];
+    const withTransaction = async <T>(
+      action: (unit: { query: typeof query }) => Promise<T>,
+    ) => {
+      await connection.beginTransaction();
+      try {
+        const result = await action({ query });
+        await connection.commit();
+        return result;
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
+    };
+    let nextId: string | undefined;
+    const uuid = {
+      v4: () => {
+        const id = nextId ?? randomUUID();
+        nextId = undefined;
+        return id;
+      },
+    };
     const logger = { debug() {}, info() {}, warn() {}, error() {} };
     function load(path: string, dependencies: Record<string, unknown>) {
       const filename = resolve(__dirname, '../../../../server/src', path);
@@ -88,13 +109,20 @@ export async function legacyCompetitorQueryFixture() {
       return module.exports;
     }
     const model = load('models/CompetitorVariantGroup.js', {
-      '../config/competitor-database': { query },
-      uuid: { v4: () => 'unused-fixture' },
+      '../config/competitor-database': { query, withTransaction },
+      uuid,
       '../services/cacheService': {
         getAsync: async () => null,
         setAsync: async () => {},
+        deleteByPrefix: () => {},
+        deleteByPrefixAsync: async () => {},
       },
       '../utils/logger': logger,
+    });
+    const asinModel = load('models/CompetitorASIN.js', {
+      '../config/competitor-database': { query, withTransaction },
+      uuid,
+      './CompetitorVariantGroup': model,
     });
     const shared = load('services/sharedService.js', {
       '../utils/logger': logger,
@@ -102,7 +130,7 @@ export async function legacyCompetitorQueryFixture() {
     type Handler = (request: unknown, response: unknown) => Promise<void>;
     const controller = load('controllers/competitorAsinController.js', {
       '../models/CompetitorVariantGroup': model,
-      '../models/CompetitorASIN': {},
+      '../models/CompetitorASIN': asinModel,
       '../utils/logger': logger,
       '../services/importService': {},
       '../services/taskRegistryService': {},
@@ -113,6 +141,11 @@ export async function legacyCompetitorQueryFixture() {
     }) as {
       getCompetitorVariantGroups: Handler;
       getCompetitorVariantGroupById: Handler;
+      createCompetitorVariantGroup: Handler;
+      updateCompetitorVariantGroup: Handler;
+      createCompetitorASIN: Handler;
+      updateCompetitorASIN: Handler;
+      moveCompetitorASIN: Handler;
     };
     const invoke = async (handler: Handler, request: unknown) => {
       let body: unknown,
@@ -133,6 +166,24 @@ export async function legacyCompetitorQueryFixture() {
     return {
       query,
       close,
+      useGeneratedId: (id: string) => {
+        if (!/^[0-9a-f-]{36}$/.test(id))
+          throw new Error('Expected generated fixture UUID');
+        nextId = id;
+      },
+      createGroup: (body: unknown) =>
+        invoke(controller.createCompetitorVariantGroup, { body }),
+      updateGroup: (groupId: string, body: unknown) =>
+        invoke(controller.updateCompetitorVariantGroup, {
+          body,
+          params: { groupId },
+        }),
+      createAsin: (body: unknown) =>
+        invoke(controller.createCompetitorASIN, { body }),
+      updateAsin: (asinId: string, body: unknown) =>
+        invoke(controller.updateCompetitorASIN, { body, params: { asinId } }),
+      moveAsin: (asinId: string, body: unknown) =>
+        invoke(controller.moveCompetitorASIN, { body, params: { asinId } }),
       list: (query: Record<string, string>) =>
         invoke(controller.getCompetitorVariantGroups, { query }),
       detail: (groupId: string) =>

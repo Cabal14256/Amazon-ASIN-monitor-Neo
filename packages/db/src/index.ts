@@ -47,6 +47,10 @@ export * from './repositories/user-password-repository';
 export * from './repositories/user-query-repository';
 export * from './repositories/variant-check-repository';
 
+export * from './domain/competitor-write';
+export * from './repositories/competitor-transactions';
+export * from './repositories/competitor-write-policy';
+export * from './repositories/competitor-write-repository';
 export * from './repositories/login-repository';
 export * from './schema';
 export * from './schema-competitor';
