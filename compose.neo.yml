@@ -47,6 +47,9 @@ services:
       - ./packages/db/docker/apply-competitor-query-matching.sh:/opt/asin-monitor/apply-competitor-query-matching.sh:ro
       - ./packages/db/migrations/0010_competitor_query_matching.sql:/opt/asin-monitor/0010_competitor_query_matching.sql:ro
       - ./packages/db/migrations/0010_competitor_query_matching.rollback.sql:/opt/asin-monitor/0010_competitor_query_matching.rollback.sql:ro
+      - ./packages/db/docker/apply-competitor-write-policy.sh:/opt/asin-monitor/apply-competitor-write-policy.sh:ro
+      - ./packages/db/migrations/0011_competitor_write_policy.sql:/opt/asin-monitor/0011_competitor_write_policy.sql:ro
+      - ./packages/db/migrations/0011_competitor_write_policy.rollback.sql:/opt/asin-monitor/0011_competitor_write_policy.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

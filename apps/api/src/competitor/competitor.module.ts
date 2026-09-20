@@ -1,4 +1,7 @@
-import { PgCompetitorQueryRepository } from '@asin-monitor/db';
+import {
+  PgCompetitorQueryRepository,
+  PgCompetitorWriteRepository,
+} from '@asin-monitor/db';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
@@ -8,12 +11,27 @@ import {
   COMPETITOR_QUERY_REPOSITORY,
   CompetitorQueryService,
 } from './competitor-query.service';
+import { CompetitorWriteController } from './competitor-write.controller';
+import {
+  COMPETITOR_WRITE_REPOSITORY,
+  CompetitorWriteService,
+} from './competitor-write.service';
 
 @Module({
   imports: [AuthModule, DatabaseModule],
-  controllers: [CompetitorQueryController],
+  controllers: [CompetitorQueryController, CompetitorWriteController],
   providers: [
     CompetitorQueryService,
+    CompetitorWriteService,
+    {
+      provide: COMPETITOR_WRITE_REPOSITORY,
+      inject: [ApplicationDatabasePools],
+      useFactory: (pools: ApplicationDatabasePools) =>
+        new PgCompetitorWriteRepository(
+          pools.primaryPool,
+          pools.competitorPool,
+        ),
+    },
     {
       provide: COMPETITOR_QUERY_REPOSITORY,
       inject: [ApplicationDatabasePools],
