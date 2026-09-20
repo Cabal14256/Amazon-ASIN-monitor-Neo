@@ -28,21 +28,9 @@ const normalizedCode = (max: number) =>
 const id = required(50);
 const common = { country: normalizedCode(10), brand: required(100) };
 // The actual Legacy controller accepts falsy type values as unspecified.
-const asinType = z
-  .union([
-    z.literal('1'),
-    z.literal('2'),
-    z.literal(1),
-    z.literal(2),
-    z.literal(''),
-    z.literal(0),
-    z.literal(false),
-    z.null(),
-  ])
-  .optional()
-  .transform((value): '1' | '2' | null =>
-    value ? (String(value) as '1' | '2') : null,
-  );
+const asinType = competitorCreateAsinRequestSchema.shape.asinType.transform(
+  (value): '1' | '2' | null => (value ? (String(value) as '1' | '2') : null),
+);
 const asinFields = {
   ...common,
   asin: normalizedCode(20),

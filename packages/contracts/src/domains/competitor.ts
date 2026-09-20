@@ -81,16 +81,9 @@ export type CompetitorVariantGroup = z.infer<
 >;
 
 /** 竞对 ASIN 记录（create/update/move/feishu-notify 返回 data） */
-export const competitorAsinRecordSchema = z
-  .object({
-    id: z.string(),
-    asin: z.string(),
-    name: z.string().nullable().optional(),
-    country: z.string(),
-    brand: z.string().nullable().optional(),
-    variant_group_id: z.string().nullable().optional(),
-    asin_type: z.union([z.string(), z.number()]).nullable().optional(),
-  })
+export const competitorAsinRecordSchema = competitorAsinChildSchema
+  .omit({ parentId: true })
+  .extend({ variantGroupId: z.string() })
   .passthrough();
 export type CompetitorAsinRecord = z.infer<typeof competitorAsinRecordSchema>;
 
@@ -116,16 +109,27 @@ export type CompetitorGroupUpsertRequest = z.infer<
   typeof competitorGroupUpsertRequestSchema
 >;
 
+// The Legacy controller treats these falsy values as an unspecified type.
+const competitorAsinTypeInputSchema = z
+  .union([
+    z.literal('1'),
+    z.literal('2'),
+    z.literal(1),
+    z.literal(2),
+    z.literal(''),
+    z.literal(0),
+    z.literal(false),
+  ])
+  .nullable()
+  .optional();
+
 export const competitorCreateAsinRequestSchema = z.object({
   asin: z.string().min(1, 'asin 为必填项'),
   name: z.string().nullable().optional(),
   country: z.string().min(1, 'country 为必填项'),
   brand: z.string().min(1, 'brand 为必填项'),
   parentId: z.string().min(1, 'parentId 为必填项'),
-  asinType: z
-    .union([z.literal('1'), z.literal('2'), z.literal(1), z.literal(2)])
-    .nullable()
-    .optional(),
+  asinType: competitorAsinTypeInputSchema,
 });
 export type CompetitorCreateAsinRequest = z.infer<
   typeof competitorCreateAsinRequestSchema
@@ -136,10 +140,7 @@ export const competitorUpdateAsinRequestSchema = z.object({
   name: z.string().nullable().optional(),
   country: z.string().min(1, 'country 为必填项'),
   brand: z.string().min(1, 'brand 为必填项'),
-  asinType: z
-    .union([z.literal('1'), z.literal('2'), z.literal(1), z.literal(2)])
-    .nullable()
-    .optional(),
+  asinType: competitorAsinTypeInputSchema,
 });
 export type CompetitorUpdateAsinRequest = z.infer<
   typeof competitorUpdateAsinRequestSchema

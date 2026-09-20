@@ -1,3 +1,7 @@
+import {
+  competitorCreateAsinRequestSchema,
+  competitorUpdateAsinRequestSchema,
+} from '@asin-monitor/contracts';
 import { describe, expect, it } from 'vitest';
 import {
   CompetitorWriteInputError,
@@ -35,10 +39,12 @@ describe('competitor write input boundaries', () => {
     'preserves Legacy controller type input %s',
     (asinType) => {
       const input = { ...fields, asinType };
+      competitorCreateAsinRequestSchema.parse(input);
       expect(parseCompetitorAsinCreate(input).asinType).toBe(
         asinType ? String(asinType) : null,
       );
       const { parentId: _parentId, ...update } = input;
+      competitorUpdateAsinRequestSchema.parse(update);
       expect(parseCompetitorAsinUpdate(update).asinType).toBe(
         asinType ? String(asinType) : null,
       );
