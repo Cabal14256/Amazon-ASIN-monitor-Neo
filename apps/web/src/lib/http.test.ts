@@ -204,6 +204,29 @@ describe('fetch and download transport boundary', () => {
     });
     expect(cancel).toHaveBeenCalledTimes(1);
   });
+  it('allows a bounded endpoint override without increasing the default limit', async () => {
+    const f = setup();
+    const body = JSON.stringify({
+      success: true,
+      data: 'x'.repeat(9 * 1024 * 1024),
+    });
+    f.fetcher.mockResolvedValueOnce(new Response(body));
+    await expect(f.client.request('/v1/example')).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
+    f.fetcher.mockResolvedValueOnce(new Response(body));
+    const result = await f.client.request<{ success: true; data: string }>(
+      '/v1/example',
+      { maxResponseBytes: 32 * 1024 * 1024 },
+    );
+    expect(result.data).toHaveLength(9 * 1024 * 1024);
+    await expect(
+      f.client.request('/v1/example', {
+        maxResponseBytes: 32 * 1024 * 1024 + 1,
+      }),
+    ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  });
   it('aborts native/injected I/O and retains capacity if a dependency ignores the signal', async () => {
     vi.useFakeTimers();
     const f = setup();
