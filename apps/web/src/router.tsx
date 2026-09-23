@@ -16,6 +16,7 @@ import { routerDestination } from './auth/router-navigation';
 const LoginPage = lazy(() => import('./pages/auth/login'));
 const ProfilePage = lazy(() => import('./pages/auth/profile'));
 const ForbiddenPage = lazy(() => import('./pages/auth/forbidden'));
+const HomePage = lazy(() => import('./pages/home'));
 const UnavailablePage = lazy(() => import('./pages/unavailable'));
 const DesignPreview = import.meta.env.DEV
   ? lazy(() => import('./pages/dev/design-system'))
@@ -49,6 +50,8 @@ export function createAppRouter(
                 <ProfilePage />
               ) : page.path === '/403' ? (
                 <ForbiddenPage />
+              ) : page.path === '/home' ? (
+                <HomePage />
               ) : (
                 <UnavailablePage title={page.name} />
               )}

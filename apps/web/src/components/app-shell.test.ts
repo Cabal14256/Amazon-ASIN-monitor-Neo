@@ -1,0 +1,37 @@
+import { describe, expect, it } from 'vitest';
+import { createAccess } from '../auth/access';
+import { workspaceNavigation } from './app-shell-navigation';
+
+describe('workspace navigation', () => {
+  it('shows only granted destinations and keeps unfinished pages noninteractive', () => {
+    const access = {
+      ...createAccess(),
+      isLogin: true,
+      canReadASIN: true,
+      canReadMonitor: true,
+    };
+    const items = workspaceNavigation(access).flatMap(
+      (section) => section.items,
+    );
+    expect(items.map((item) => item.path)).toContain('/home');
+    expect(items.map((item) => item.path)).toContain('/monitor-history');
+    expect(items.map((item) => item.path)).not.toContain('/settings');
+    expect(
+      items.find((item) => item.path === '/monitor-history')?.available,
+    ).toBe(false);
+    expect(items.find((item) => item.path === '/home')?.available).toBe(true);
+  });
+  it('exposes only password management when a password change is required', () => {
+    const access = {
+      ...createAccess(),
+      isLogin: true,
+      canReadASIN: true,
+      mustChangePassword: true,
+    };
+    expect(
+      workspaceNavigation(access).flatMap((section) =>
+        section.items.map((item) => item.path),
+      ),
+    ).toEqual(['/profile']);
+  });
+});
