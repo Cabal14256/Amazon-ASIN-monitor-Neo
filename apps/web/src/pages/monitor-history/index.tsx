@@ -20,6 +20,7 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
+import { ApiError } from '../../lib/http';
 import {
   getMonitorHistory,
   getMonitorHistoryDetail,
@@ -228,9 +229,14 @@ function HistoryDetail({ id, close }: { id: number; close: () => void }) {
     queryKey: ['monitor-history', 'detail', id],
     queryFn: ({ signal }) => getMonitorHistoryDetail(runtime.http, id, signal),
     staleTime: 0,
+    gcTime: 0,
     refetchOnWindowFocus: true,
   });
-  const record = detail.data;
+  const permissionDenied =
+    detail.isError &&
+    detail.error instanceof ApiError &&
+    detail.error.status === 403;
+  const record = permissionDenied ? undefined : detail.data;
   const result = record ? historyResultPreview(record) : null;
   return (
     <Card aria-label="监控历史详情">
@@ -356,11 +362,20 @@ export default function MonitorHistoryPage() {
     queryKey: ['monitor-history', 'list', query],
     queryFn: ({ signal }) => getMonitorHistory(runtime.http, query, signal),
     staleTime: 0,
+    gcTime: 0,
     refetchOnWindowFocus: true,
   });
-  const data = history.data;
+  const permissionDenied =
+    history.isError &&
+    history.error instanceof ApiError &&
+    history.error.status === 403;
+  const data = permissionDenied ? undefined : history.data;
   const page = data ? historyPageInfo(data) : null;
   const current = data?.current ?? query.current ?? 1;
+  const visibleSelectedId =
+    selectedId !== null && data?.list.some((record) => record.id === selectedId)
+      ? selectedId
+      : null;
 
   function setFilter(key: keyof Filters, value: string) {
     setFilters((previous) => ({ ...previous, [key]: value }));
@@ -628,8 +643,11 @@ export default function MonitorHistoryPage() {
             )}
           </CardContent>
         </Card>
-        {selectedId !== null && (
-          <HistoryDetail id={selectedId} close={() => setSelectedId(null)} />
+        {visibleSelectedId !== null && (
+          <HistoryDetail
+            id={visibleSelectedId}
+            close={() => setSelectedId(null)}
+          />
         )}
       </div>
     </AppShell>
