@@ -21,6 +21,7 @@ import {
   alertsForCountry,
   countryLabel,
   countryOverview,
+  subscribeDashboardChanges,
   type DashboardCountry,
 } from './dashboard-data';
 
@@ -61,12 +62,12 @@ export default function HomePage() {
   });
   useEffect(
     () =>
-      runtime.ws.onMessage((message) => {
-        if (
-          message.type === 'stats_update' ||
-          (message.type === 'monitor_complete' && !message.isCompetitor)
-        )
-          void runtime.queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+      subscribeDashboardChanges(runtime.ws.onMessage.bind(runtime.ws), () => {
+        void runtime.queryClient.invalidateQueries({
+          queryKey: QUERY_KEY,
+          refetchType:
+            document.visibilityState === 'visible' ? 'active' : 'none',
+        });
       }),
     [runtime],
   );

@@ -58,4 +58,19 @@ describe('dashboard transport', () => {
       kind: 'INVALID_RESPONSE',
     });
   });
+  it('uses the dashboard-specific 120-second and 32 MiB transport bounds', async () => {
+    const request = vi.fn().mockResolvedValue({ success: true, data });
+    await expect(
+      getDashboard({ request } as unknown as Pick<HttpClient, 'request'>),
+    ).resolves.toEqual(data);
+    expect(request).toHaveBeenCalledWith(
+      '/api/v1/dashboard',
+      {
+        signal: undefined,
+        timeoutMs: 120_000,
+        maxResponseBytes: 32 * 1024 * 1024,
+      },
+      expect.anything(),
+    );
+  });
 });

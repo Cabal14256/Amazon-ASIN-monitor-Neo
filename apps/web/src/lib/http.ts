@@ -33,6 +33,8 @@ export interface RequestOptions {
   body?: FormData;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Default 8 MiB; endpoint overrides remain capped at 32 MiB. */
+  maxResponseBytes?: number;
   /** Login failures are not expired sessions; callers can suppress global logout. */
   authFailure?: 'notify' | 'ignore';
 }
@@ -100,7 +102,10 @@ export function transportURL(
   }
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(
+  response: Response,
+  maxResponseBytes: number,
+): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) return undefined;
   const decoder = new TextDecoder();
@@ -112,7 +117,7 @@ async function readJson(response: Response): Promise<unknown> {
       const part = await reader.read();
       if (part.done) break;
       bytes += part.value.byteLength;
-      if (bytes > 8 * 1024 * 1024 || ++chunks > 10000)
+      if (bytes > maxResponseBytes || ++chunks > 10000)
         throw new ApiError(
           'INVALID_RESPONSE',
           '服务器响应过大',
@@ -163,10 +168,14 @@ export class HttpClient {
       throw new ApiError('CAPACITY', '请求过多，请稍后重试');
     const url = this.url(path, options.query);
     const timeout = options.timeoutMs ?? 30000;
+    const maxResponseBytes = options.maxResponseBytes ?? 8 * 1024 * 1024;
     if (
       !Number.isInteger(timeout) ||
       timeout < 1 ||
       timeout > 300000 ||
+      !Number.isInteger(maxResponseBytes) ||
+      maxResponseBytes < 1 ||
+      maxResponseBytes > 32 * 1024 * 1024 ||
       (options.json !== undefined && options.body !== undefined)
     )
       throw new ApiError('INVALID_INPUT', '请求参数无效');
@@ -215,7 +224,7 @@ export class HttpClient {
       if (signal.aborted) throw signal.reason;
       let parsed: unknown;
       try {
-        parsed = await readJson(response);
+        parsed = await readJson(response, maxResponseBytes);
       } catch {
         if (response.status !== 401 && response.status !== 403 && response.ok)
           throw new ApiError(

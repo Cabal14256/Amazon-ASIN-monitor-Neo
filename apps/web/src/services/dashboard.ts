@@ -11,7 +11,7 @@ export async function getDashboard(
 ): Promise<DashboardData> {
   const response = await http.request(
     '/api/v1/dashboard',
-    { signal },
+    { signal, timeoutMs: 120_000, maxResponseBytes: 32 * 1024 * 1024 },
     dashboardResultSchema,
   );
   if (!response.success || !response.data)

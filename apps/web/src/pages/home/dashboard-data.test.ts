@@ -1,10 +1,12 @@
-import type { DashboardData } from '@asin-monitor/contracts';
-import { describe, expect, it } from 'vitest';
+import type { DashboardData, WsMessage } from '@asin-monitor/contracts';
+import { describe, expect, it, vi } from 'vitest';
 import {
   activitiesForCountry,
-  alertText,
   alertsForCountry,
+  alertText,
   countryOverview,
+  DASHBOARD_SERVER_TTL_MS,
+  subscribeDashboardChanges,
 } from './dashboard-data';
 
 const counters = {
@@ -52,5 +54,45 @@ describe('dashboard country view', () => {
   it('renders only bounded text from unknown Legacy alert fields', () => {
     expect(alertText({ name: { secret: 'hidden' } }, 'name')).toBe('');
     expect(alertText({ name: 'a'.repeat(300) }, 'name')).toHaveLength(160);
+  });
+});
+
+describe('dashboard server cache refresh', () => {
+  it('reads immediately and again after cache expiry; ignores competitor events and cancels on unmount', () => {
+    vi.useFakeTimers();
+    try {
+      let emit: (message: WsMessage) => void = () => undefined;
+      const unsubscribe = vi.fn();
+      const refresh = vi.fn();
+      const dispose = subscribeDashboardChanges((handler) => {
+        emit = handler;
+        return unsubscribe;
+      }, refresh);
+      emit({ type: 'stats_update' });
+      expect(refresh).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(DASHBOARD_SERVER_TTL_MS - 1);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1001);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      emit({
+        type: 'monitor_complete',
+        success: true,
+        totalChecked: 0,
+        totalBroken: 0,
+        totalNormal: 0,
+        duration: 0,
+        countryResults: {},
+        timestamp: '2026-09-23T00:00:00.000Z',
+        isCompetitor: true,
+      });
+      expect(refresh).toHaveBeenCalledTimes(2);
+      emit({ type: 'stats_update' });
+      dispose();
+      vi.runAllTimers();
+      expect(refresh).toHaveBeenCalledTimes(3);
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

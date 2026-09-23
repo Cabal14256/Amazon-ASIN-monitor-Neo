@@ -232,7 +232,9 @@ export function AppShell({
         <div className="flex h-20 items-center justify-between gap-2 border-b border-border px-5 lg:px-4">
           <Link
             to={access.mustChangePassword ? '/profile' : '/home'}
-            aria-label="返回监控总览"
+            aria-label={
+              access.mustChangePassword ? '前往个人中心' : '返回监控总览'
+            }
             onClick={() => setMobileOpen(false)}
             className="flex min-w-0 items-center gap-3"
           >

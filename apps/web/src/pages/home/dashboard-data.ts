@@ -1,4 +1,31 @@
-import type { DashboardData } from '@asin-monitor/contracts';
+import type { DashboardData, WsMessage } from '@asin-monitor/contracts';
+
+export const DASHBOARD_SERVER_TTL_MS = 30_000;
+
+/** A completion may hit the server's still-valid snapshot; read again after its TTL. */
+export function subscribeDashboardChanges(
+  subscribe: (handler: (message: WsMessage) => void) => () => void,
+  refresh: () => void,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const unsubscribe = subscribe((message) => {
+    if (
+      message.type !== 'stats_update' &&
+      (message.type !== 'monitor_complete' || message.isCompetitor)
+    )
+      return;
+    refresh();
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      refresh();
+    }, DASHBOARD_SERVER_TTL_MS + 1000);
+  });
+  return () => {
+    unsubscribe();
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
 
 export const COUNTRIES = [
   ['ALL', '全部站点'],
