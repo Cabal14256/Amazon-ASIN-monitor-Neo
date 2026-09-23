@@ -8,12 +8,30 @@ import {
   statusSource,
 } from './catalog-data';
 
-describe('ASIN catalog display data', () => {
+describe('shared ASIN catalog display data', () => {
   it('uses effective status before the stored automatic flag', () => {
-    expect(groupStatus({ isBroken: 0, is_broken: 1 } as never)).toBe('success');
-    expect(childStatus({ isBroken: 1, autoIsBroken: 0 } as never)).toBe(
-      'danger',
-    );
+    expect(
+      groupStatus({
+        id: 'g',
+        name: 'group',
+        country: 'US',
+        brand: 'brand',
+        isBroken: 0,
+        is_broken: 1,
+      }),
+    ).toBe('success');
+    expect(
+      childStatus({
+        id: 'c',
+        asin: 'B00TEST',
+        country: 'US',
+        isBroken: 1,
+        autoIsBroken: 0,
+      }),
+    ).toBe('danger');
+    expect(
+      childStatus({ id: 'c', asin: 'B00TEST', country: 'US', isBroken: null }),
+    ).toBe('unknown');
     expect(statusSource('AUTO+MANUAL')).toBe('自动检测 + 人工标记');
     expect(statusSource('NORMAL')).toBe('正常');
   });

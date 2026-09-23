@@ -63,7 +63,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '竞品 ASIN',
         access: 'canReadASIN',
         icon: Boxes,
-        available: false,
+        available: true,
       },
       {
         path: '/monitor-history',
