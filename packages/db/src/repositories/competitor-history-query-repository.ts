@@ -127,7 +127,7 @@ class DrizzleCompetitorHistoryQueryUnit {
               WHERE ${comparison(
                 sql`child.variant_group_id`,
               )}=rtrim(mh.variant_group_id)
-                AND child.asin_type IN ('1','MAIN_LINK')
+                AND ${comparison(sql`child.asin_type`)} IN ('1','MAIN_LINK')
             ) AS parent ON true
           ) AS record
         ) ELSE NULL END AS records FROM size_bound

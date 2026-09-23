@@ -85,7 +85,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
       }
       for (const [id, asin, asinType] of [
-        ['a1', 'B000000001', '1'],
+        ['a1', 'B000000001', 'main_link '],
         ['a2', 'B000000002', '2'],
       ]) {
         await legacy.query(
