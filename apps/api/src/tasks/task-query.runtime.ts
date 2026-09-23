@@ -13,7 +13,7 @@ import {
   type TaskRedisPort,
   type TaskState,
 } from '@asin-monitor/db';
-import type { AsinImportTaskData } from '@asin-monitor/import';
+import { isImportTaskData, type ImportTaskData } from '@asin-monitor/import';
 import {
   parseVariantCheckJob,
   variantCheckJobOperation,
@@ -51,7 +51,7 @@ export interface BatchDeleteProducerPort {
 }
 export interface ImportProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
-  enqueue(data: AsinImportTaskData): Promise<void>;
+  enqueue(data: ImportTaskData): Promise<void>;
 }
 export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
@@ -305,6 +305,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       store: this.createStore(ensureOpen),
       enqueue: (data) =>
         command(async () => {
+          if (!isImportTaskData(data)) throw new Error('IMPORT_TASK_INVALID');
           const queue = (this.importQueue ??= new Queue(
             getPhysicalQueueName('import'),
             {
@@ -328,7 +329,11 @@ export class TaskQueryRuntime implements OnModuleDestroy {
             throw error;
           }
           ensureOpen();
-          await queue.add('asin-import', data, { jobId: data.taskId });
+          await queue.add(
+            data.taskSubType === 'asin' ? 'asin-import' : 'competitor-import',
+            data,
+            { jobId: data.taskId },
+          );
         }),
     };
   }

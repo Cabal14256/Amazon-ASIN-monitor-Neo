@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import { stat } from 'node:fs/promises';
 import { posix } from 'node:path';
 import { openPromise, type Entry, type ZipFile } from 'yauzl';
+import type { ImportMode } from './columns';
 import { IMPORT_MAX_FILE_BYTES, IMPORT_PARSE_TIMEOUT_MS } from './csv';
 import {
   IMPORT_MAX_CELL_LENGTH,
@@ -68,6 +69,7 @@ function relatedPath(base: string, target: string) {
 async function parseWorkbook(
   zip: ZipFile,
   signal: AbortSignal,
+  mode: ImportMode = 'standard',
 ): Promise<ImportPlan> {
   const entries = await archiveEntries(zip, signal);
   const required = (name: string) => {
@@ -268,7 +270,7 @@ async function parseWorkbook(
   ) => {
     signal.throwIfAborted();
     const merged = merges.apply(number, cells, mergedTexts);
-    if (number === 1) builder = new ImportPlanBuilder(merged, maxColumns);
+    if (number === 1) builder = new ImportPlanBuilder(merged, maxColumns, mode);
     else builder!.add(number, merged);
     processedRow = number;
   };
@@ -282,7 +284,7 @@ async function parseWorkbook(
 
 export async function parseXlsxFile(
   path: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; mode?: ImportMode } = {},
 ): Promise<ImportPlan> {
   const timeout = AbortSignal.timeout(IMPORT_PARSE_TIMEOUT_MS);
   const signal = options.signal
@@ -305,7 +307,7 @@ export async function parseXlsxFile(
     // listener through close so a concurrent I/O error cannot crash the process.
     zip.on('error', () => undefined);
     signal.throwIfAborted();
-    return await parseWorkbook(zip, signal);
+    return await parseWorkbook(zip, signal, options.mode);
   } catch (error) {
     signal.throwIfAborted();
     if (error instanceof ImportParseError) throw error;

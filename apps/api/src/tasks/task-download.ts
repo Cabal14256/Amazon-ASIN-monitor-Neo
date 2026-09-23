@@ -77,7 +77,8 @@ export class TaskDownloadService implements OnModuleDestroy {
           : {};
       if (
         task.taskType !== 'import' ||
-        task.taskSubType !== 'asin' ||
+        !['asin', 'competitor-asin'].includes(task.taskSubType || '') ||
+        result.taskSubType !== task.taskSubType ||
         !isImportReportReference(result.report)
       )
         fail(404, '任务结果文件不存在或已过期');

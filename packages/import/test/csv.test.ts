@@ -12,10 +12,13 @@ const legacyPath = resolve(
   '../../../server/src/services/importParserService.js',
 );
 const legacy = createRequire(legacyPath)(legacyPath) as {
-  parseImportFile(file: {
-    originalname: string;
-    buffer: Buffer;
-  }): Promise<ImportPlan>;
+  parseImportFile(
+    file: {
+      originalname: string;
+      buffer: Buffer;
+    },
+    options?: { mode: 'competitor' },
+  ): Promise<ImportPlan>;
 };
 const header = '变体组名称,国家,站点,品牌,ASIN,ASIN类型';
 const record = '主营组,US,店铺,品牌,b000000001,1';
@@ -44,6 +47,18 @@ async function compare(buffer: Buffer) {
 }
 
 describe('real CSV bytes compared with the actual Legacy ExcelJS parser', () => {
+  it('matches competitor mode without a site column in real CSV bytes', async () => {
+    const bytes = Buffer.from(
+      '变体组名称,国家,品牌,ASIN,ASIN类型\n竞品组,US,品牌,b000000001,1\n竞品组,US,品牌,b000000001,2\n竞品组,UK,品牌,b000000002,2',
+    );
+    const expected = await legacy.parseImportFile(
+      { originalname: 'fixture.csv', buffer: bytes },
+      { mode: 'competitor' },
+    );
+    expect(
+      await parseCsvFile(await file(bytes), { mode: 'competitor' }),
+    ).toEqual(expected);
+  });
   it.each(['utf8', 'utf8-bom', 'utf16-le', 'utf16-be', 'gb18030'])(
     'decodes %s without changing grouped records or row errors',
     async (encoding) => {

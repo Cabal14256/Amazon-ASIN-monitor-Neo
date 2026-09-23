@@ -11,6 +11,7 @@ import {
   batchDuplicateMessage,
   prepareCompetitorBatchAsins,
   type BatchAsinItem,
+  type BatchAsinPlan,
 } from '../domain/asin-batch-create';
 import {
   competitorAsins as a,
@@ -38,7 +39,13 @@ export class CompetitorBatchCreateUnit {
   }
 
   async create(raw: unknown[]): Promise<BatchCreateAsinsData> {
-    const { result, items } = prepareCompetitorBatchAsins(raw);
+    return this.createPrepared(prepareCompetitorBatchAsins(raw));
+  }
+
+  async createPrepared(
+    { result, items }: BatchAsinPlan,
+    onFailure?: (index: number, phase: 'group' | 'existing' | 'write') => void,
+  ): Promise<BatchCreateAsinsData> {
     if (!items.length) return result;
     const parentIds = [...new Set(items.map((item) => item.parentId!))].filter(
       (id) => !id.includes('\0') && [...id].length <= 50,
@@ -64,9 +71,11 @@ export class CompetitorBatchCreateUnit {
     const groups = new Map(rows.map((row) => [row.id, row.country]));
     const groupValid: BatchAsinItem[] = [];
     for (const item of items) {
-      if (!groups.has(item.parentId!))
+      if (!groups.has(item.parentId!)) {
+        onFailure?.(item.index, 'group');
         addBatchAsinFailure(result, item, '所属变体组不存在');
-      else if (batchCountry(groups.get(item.parentId!)) !== item.country)
+      } else if (batchCountry(groups.get(item.parentId!)) !== item.country) {
+        onFailure?.(item.index, 'group');
         addBatchAsinFailure(
           result,
           item,
@@ -74,7 +83,7 @@ export class CompetitorBatchCreateUnit {
             groups.get(item.parentId!),
           )}）`,
         );
-      else groupValid.push(item);
+      } else groupValid.push(item);
     }
     const existing = new Set<string>();
     for (
@@ -106,9 +115,10 @@ export class CompetitorBatchCreateUnit {
     }
     const candidates: BatchAsinItem[] = [];
     for (const item of groupValid) {
-      if (existing.has(batchAsinKey(item)))
+      if (existing.has(batchAsinKey(item))) {
+        onFailure?.(item.index, 'existing');
         addBatchAsinFailure(result, item, batchDuplicateMessage(item));
-      else candidates.push(item);
+      } else candidates.push(item);
     }
     if (!candidates.length) return result;
     // Lock unique keys in database collation order across batches. Equivalent
@@ -175,7 +185,10 @@ export class CompetitorBatchCreateUnit {
       );
     for (const item of candidates) {
       const message = failed.get(item.id);
-      if (message) addBatchAsinFailure(result, item, message);
+      if (message) {
+        onFailure?.(item.index, 'write');
+        addBatchAsinFailure(result, item, message);
+      }
     }
     createdItems.forEach((item) => addBatchAsinSuccess(result, item));
     return result;

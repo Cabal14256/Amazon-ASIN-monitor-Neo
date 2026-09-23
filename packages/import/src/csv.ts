@@ -8,6 +8,7 @@ import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import type { ImportMode } from './columns';
 import {
   IMPORT_MAX_CELL_LENGTH,
   IMPORT_MAX_COLUMNS,
@@ -159,7 +160,7 @@ async function scanCsv(
 
 export async function parseCsvFile(
   path: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; mode?: ImportMode } = {},
 ): Promise<ImportPlan> {
   const timeout = AbortSignal.timeout(IMPORT_PARSE_TIMEOUT_MS);
   const signal = options.signal
@@ -178,7 +179,7 @@ export async function parseCsvFile(
         'invalid',
         'Excel文件至少需要包含表头和数据行',
       );
-    const builder = new ImportPlanBuilder(headers, maxColumns);
+    const builder = new ImportPlanBuilder(headers, maxColumns, options.mode);
     await scanCsv(path, encoding, signal, (number, cells) => {
       if (number > 1) builder.add(number, cells);
     });

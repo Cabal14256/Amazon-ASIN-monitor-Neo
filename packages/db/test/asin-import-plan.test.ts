@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   prepareBatchAsins,
+  prepareCompetitorImportAsins,
   prepareImportAsins,
 } from '../src/domain/asin-batch-create';
 
@@ -17,7 +18,7 @@ function item(index: number) {
     asinType: '1',
   };
 }
-function legacy(raw: unknown[]) {
+function legacy(raw: unknown[], hasSite = true) {
   const module = {
     exports: {} as {
       fixture(items: unknown[]): ReturnType<typeof prepareImportAsins>;
@@ -32,7 +33,7 @@ function legacy(raw: unknown[]) {
       ),
       'utf8',
     ) +
-      '\nmodule.exports.fixture = (items) => { const result = createEmptyResult(items.length); return {items: normalizeItems(items, {hasSite: true}, result), result}; };',
+      `\nmodule.exports.fixture = (items) => { const result = createEmptyResult(items.length); return {items: normalizeItems(items, {hasSite: ${hasSite}}, result), result}; };`,
     {
       module,
       require: (name: string) =>
@@ -42,6 +43,18 @@ function legacy(raw: unknown[]) {
   return JSON.parse(JSON.stringify(module.exports.fixture(raw)));
 }
 describe('import batch preparation spans all bounded database chunks', () => {
+  it('matches Legacy competitor normalization and duplicate detection without site', () => {
+    const raw = Array.from({ length: 1002 }, (_, index) => ({
+      ...item(index),
+      site: undefined,
+    }));
+    raw[1001] = { ...raw[1], parentId: 'different-group' };
+    let id = 0;
+    const plan = prepareCompetitorImportAsins(raw, () => `id-${id++}`);
+    expect(plan).toEqual(legacy(raw, false));
+    expect(plan.items).toHaveLength(1001);
+    expect(plan.result.errors[0].index).toBe(1001);
+  });
   it('preserves full-file duplicate detection and validation order against the actual Legacy service', () => {
     const raw = Array.from({ length: 1005 }, (_, index) => item(index));
     raw[2].asin = 'invalid';

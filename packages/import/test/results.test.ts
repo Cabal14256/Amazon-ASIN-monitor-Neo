@@ -54,6 +54,29 @@ afterEach(async () => {
 });
 
 describe('full import report and bounded task metadata', () => {
+  it('binds competitor reports to the matching immutable task subtype', async () => {
+    const { data, store } = await fixture();
+    const competitor = {
+      ...data,
+      taskSubType: 'competitor-asin' as const,
+      title: '竞品ASIN导入' as const,
+      domain: 'competitor' as const,
+    };
+    const completed = normalizeImportTaskResult(
+      result(),
+      'fixture.csv',
+      'competitor-asin',
+    );
+    await expect(store.save(competitor, result(), signal())).rejects.toThrow(
+      '导入结果无效',
+    );
+    const report = await store.save(competitor, completed, signal());
+    expect((await store.read(competitor, signal()))?.result).toEqual(completed);
+    await expect(store.read(data, signal())).rejects.toThrow('内容无效');
+    expect(importTaskPreview(completed, report).downloadUrl).toBe(
+      `/api/v1/tasks/${data.taskId}/download`,
+    );
+  });
   it('matches the Legacy structured task result', () => {
     const module = {
       exports: {} as {

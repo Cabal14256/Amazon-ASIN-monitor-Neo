@@ -46,6 +46,33 @@ function repository() {
   return { groups, writes, port };
 }
 describe('shared API/Worker import write flow', () => {
+  it('writes competitor rows without a site while preserving file-wide duplicate counts', async () => {
+    const builder = new ImportPlanBuilder(
+      ['变体组名称', '国家', '品牌', 'ASIN'],
+      4,
+      'competitor',
+    );
+    builder.add(2, ['竞品组', 'US', '品牌', 'B000000001']);
+    builder.add(3, ['竞品组', 'US', '品牌', 'B000000001']);
+    builder.add(4, ['其他组', 'UK', '品牌', 'B000000002']);
+    const repo = repository();
+    const result = await executeImportPlan(builder.finish(), repo.port, {
+      signal: AbortSignal.timeout(5000),
+      mode: 'competitor',
+    });
+    expect(result).toMatchObject({
+      total: 3,
+      successCount: 2,
+      failedCount: 1,
+      missingCount: 0,
+      verificationPassed: true,
+    });
+    expect(repo.groups.mock.calls[0][0]).toMatchObject({ site: '' });
+    expect(repo.writes.mock.calls.flatMap(([items]) => items)).toEqual([
+      expect.objectContaining({ asin: 'B000000001', site: null }),
+      expect.objectContaining({ asin: 'B000000002', site: null }),
+    ]);
+  });
   it('deduplicates across groups before splitting writes and omits empty error properties', async () => {
     const repo = repository();
     const result = await executeImportPlan(

@@ -3,6 +3,7 @@ import {
   missingImportColumns,
   repairImportHeader,
   type ImportColumns,
+  type ImportMode,
 } from './columns';
 
 export class ImportParseError extends Error {
@@ -55,7 +56,11 @@ export class ImportPlanBuilder {
   private totalDataRows = 0;
   private totalRows = 1;
   private textCharacters = 0;
-  constructor(rawHeaders: string[], maxColumns = rawHeaders.length) {
+  constructor(
+    rawHeaders: string[],
+    maxColumns = rawHeaders.length,
+    private readonly mode: ImportMode = 'standard',
+  ) {
     if (
       !Number.isInteger(maxColumns) ||
       maxColumns < rawHeaders.length ||
@@ -67,8 +72,8 @@ export class ImportPlanBuilder {
       ...rawHeaders.map(repairImportHeader),
       ...Array<string>(maxColumns - rawHeaders.length).fill(''),
     ];
-    this.indexes = findImportColumns(this.headers);
-    const missing = missingImportColumns(this.indexes);
+    this.indexes = findImportColumns(this.headers, mode);
+    const missing = missingImportColumns(this.indexes, mode);
     if (missing.length)
       throw new ImportParseError(
         'invalid',
@@ -103,7 +108,7 @@ export class ImportPlanBuilder {
     const text = (index: number) => (cells[index] || '').trim();
     const name = text(indexes.groupNameIndex),
       country = text(indexes.countryIndex).toUpperCase(),
-      site = text(indexes.siteIndex),
+      site = this.mode === 'competitor' ? '' : text(indexes.siteIndex),
       brand = text(indexes.brandIndex),
       asin = text(indexes.asinIndex).toUpperCase(),
       asinName = text(indexes.asinNameIndex) || null,
@@ -113,7 +118,8 @@ export class ImportPlanBuilder {
     else if (!['US', 'UK', 'DE', 'FR', 'IT', 'ES'].includes(country))
       message = `国家代码无效: ${country}，必须是 US/UK/DE/FR/IT/ES 之一`;
     else if (!brand) message = '品牌不能为空';
-    else if (!site) message = '站点（店铺代号）不能为空';
+    else if (this.mode === 'standard' && !site)
+      message = '站点（店铺代号）不能为空';
     else if (!asin) message = 'ASIN不能为空';
     else if (asinType && asinType !== '1' && asinType !== '2')
       message = `ASIN类型无效: ${asinType}，必须是 1（主链）或 2（副评）`;
@@ -123,7 +129,10 @@ export class ImportPlanBuilder {
     }
     // Keep the historical group-key semantics while replacing the quadratic
     // within-group duplicate scan with a Set. Cross-group checks belong to DB planning.
-    const key = `${name}__${country}__${site}__${brand}`;
+    const key =
+      this.mode === 'competitor'
+        ? `${name}__${country}__${brand}`
+        : `${name}__${country}__${site}__${brand}`;
     let entry = this.groups.get(key);
     if (!entry) {
       entry = {

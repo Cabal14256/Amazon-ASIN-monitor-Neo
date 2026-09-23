@@ -1,15 +1,15 @@
 import {
   transitionTask,
-  type AsinImportRepositoryPort,
   type AsinImportUnit,
   type BatchAsinItem,
+  type ImportRepositoryPort,
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
 import {
   ImportFileStore,
   ImportResultStore,
-  type AsinImportTaskData,
+  type ImportTaskData,
 } from '@asin-monitor/import';
 import { UnrecoverableError, type Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
@@ -18,14 +18,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createAsinImportProcessor } from '../src/asin-import-processor';
+import {
+  createAsinImportProcessor,
+  createImportProcessor,
+} from '../src/asin-import-processor';
 
 const disposals: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   for (const dispose of disposals.splice(0)) await dispose();
   vi.restoreAllMocks();
 });
-async function fixture(rows = 2) {
+async function fixture(rows = 2, domain: 'asin' | 'competitor' = 'asin') {
   const directory = await mkdtemp(join(tmpdir(), 'neo-import-processor-'));
   const files = new ImportFileStore(directory),
     reports = new ImportResultStore(directory);
@@ -35,10 +38,13 @@ async function fixture(rows = 2) {
   });
   const taskId = randomUUID();
   const text =
-    '变体组名称,国家,站点,品牌,ASIN,ASIN类型\n' +
+    `变体组名称,国家,${domain === 'asin' ? '站点,' : ''}品牌,ASIN,ASIN类型\n` +
     Array.from(
       { length: rows },
-      (_, i) => `Group,US,Shop,Brand,B${String(i).padStart(9, '0')},1`,
+      (_, i) =>
+        `Group,US,${domain === 'asin' ? 'Shop,' : ''}Brand,B${String(
+          i,
+        ).padStart(9, '0')},1`,
     ).join('\n');
   const file = await files.save(
     Readable.from([text]),
@@ -47,14 +53,19 @@ async function fixture(rows = 2) {
     'text/csv',
     new AbortController().signal,
   );
-  const data: AsinImportTaskData = {
+  const data: ImportTaskData = {
     taskId,
     file,
     userId: 'owner-101',
     createdAt: '2026-09-01T00:00:00.000Z',
     taskType: 'import',
-    taskSubType: 'asin',
-    title: 'ASIN导入',
+    ...(domain === 'asin'
+      ? { taskSubType: 'asin', title: 'ASIN导入' }
+      : {
+          taskSubType: 'competitor-asin',
+          title: '竞品ASIN导入',
+          domain: 'competitor',
+        }),
   };
   let state: TaskState | null = {
     ...data,
@@ -78,7 +89,7 @@ async function fixture(rows = 2) {
       errors: [],
     })),
   };
-  const repository: AsinImportRepositoryPort = {
+  const repository: ImportRepositoryPort = {
     transaction: vi.fn(async (operation) =>
       operation(unit as unknown as AsinImportUnit),
     ),
@@ -95,15 +106,30 @@ async function fixture(rows = 2) {
     updateProgress: vi.fn(async (_job: Job, _progress: number) => undefined),
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const processor = createAsinImportProcessor(
-    repository,
-    store,
-    files,
-    reports,
-    options,
-    log,
-  );
-  const job = { id: taskId, name: 'asin-import', data } as Job;
+  const otherRepository: ImportRepositoryPort = {
+    transaction: vi.fn(async () => {
+      throw new Error('WRONG_IMPORT_DOMAIN');
+    }),
+  };
+  const processor =
+    domain === 'asin'
+      ? createAsinImportProcessor(
+          repository,
+          store,
+          files,
+          reports,
+          options,
+          log,
+        )
+      : createImportProcessor(
+          { asin: otherRepository, competitor: repository },
+          store,
+          files,
+          reports,
+          options,
+          log,
+        );
+  const job = { id: taskId, name: `${domain}-import`, data } as Job;
   return {
     data,
     directory,
@@ -111,6 +137,7 @@ async function fixture(rows = 2) {
     reports,
     unit,
     repository,
+    otherRepository,
     store,
     mutate,
     shutdown,
@@ -129,6 +156,28 @@ async function fixture(rows = 2) {
 }
 
 describe('actual streaming import processor and durable result recovery', () => {
+  it('routes a competitor payload on the shared queue without touching the primary repository', async () => {
+    const f = await fixture(2, 'competitor');
+    const result = await f.run();
+    expect(result).toMatchObject({
+      successCount: 2,
+      taskSubType: 'competitor-asin',
+    });
+    expect(f.repository.transaction).toHaveBeenCalled();
+    expect(f.otherRepository.transaction).not.toHaveBeenCalled();
+    expect(
+      (await f.reports.read(f.data, new AbortController().signal))?.result
+        .taskSubType,
+    ).toBe('competitor-asin');
+  });
+  it('rejects cross-domain job names before metadata or database access', async () => {
+    const f = await fixture(1, 'competitor');
+    f.job.name = 'asin-import';
+    await expect(f.run()).rejects.toThrow('任务数据无效');
+    expect(f.store.read).not.toHaveBeenCalled();
+    expect(f.repository.transaction).not.toHaveBeenCalled();
+    expect(f.otherRepository.transaction).not.toHaveBeenCalled();
+  });
   it('parses a stored CSV, writes bounded chunks, saves full results before metadata and removes input', async () => {
     const f = await fixture(1001);
     const result = await f.run();
