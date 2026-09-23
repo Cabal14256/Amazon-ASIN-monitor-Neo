@@ -57,6 +57,42 @@ describe('task API boundary', () => {
     expect(f.tasks.downloadURL('job-1')).not.toContain('token');
   });
 
+  it('downloads task results with the same credential mode as task detail', async () => {
+    const f = setup();
+    f.local.set('token', 'fixture-legacy');
+    f.fetcher.mockResolvedValueOnce(new Response('{"ok":true}'));
+    const file = await f.tasks.download('job-1');
+    expect(await file.text()).toBe('{"ok":true}');
+    expect(f.fetcher.mock.calls[0][0]).toBe(
+      'https://api.test/gateway/api/v1/tasks/job-1/download',
+    );
+    expect(f.fetcher.mock.calls[0][1]?.credentials).toBe('include');
+    expect(
+      new Headers(f.fetcher.mock.calls[0][1]?.headers).get('authorization'),
+    ).toBe('Bearer fixture-legacy');
+  });
+
+  it('reads valid large check details and aggregate task lists beyond the generic 8 MiB limit', async () => {
+    const f = setup();
+    const detail = taskFixture({
+      taskType: 'batch-check',
+      status: 'completed',
+      result: { payload: 'x'.repeat(9 * 1024 * 1024) },
+    });
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: true, data: detail }),
+    );
+    expect((await f.tasks.get('job-1')).result).toEqual(detail.result);
+    const preview = 'x'.repeat(190 * 1024);
+    const list = Array.from({ length: 50 }, (_, index) =>
+      taskFixture({ taskId: `job-${index + 1}`, result: { preview } }),
+    );
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: true, data: list }),
+    );
+    expect(await f.tasks.list({ limit: 100 })).toHaveLength(50);
+  });
+
   it('creates, lists and cancels using shared envelopes and the correct methods', async () => {
     const f = setup();
     f.fetcher.mockResolvedValueOnce(
@@ -110,6 +146,9 @@ describe('task API boundary', () => {
         kind: 'INVALID_INPUT',
       });
       expect(() => f.tasks.downloadURL(id)).toThrow();
+      await expect(f.tasks.download(id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
       expect(f.fetcher).not.toHaveBeenCalled();
     },
   );
