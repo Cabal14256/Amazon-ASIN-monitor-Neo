@@ -16,16 +16,17 @@ import { ApiError } from '../../lib/http';
 import { getDashboard } from '../../services/dashboard';
 import {
   COUNTRIES,
+  DASHBOARD_QUERY_KEY,
   activitiesForCountry,
   alertText,
   alertsForCountry,
   countryLabel,
   countryOverview,
+  refreshDashboardQuery,
   subscribeDashboardChanges,
   type DashboardCountry,
 } from './dashboard-data';
 
-const QUERY_KEY = ['dashboard', 'home'] as const;
 const percent = (broken: number, total: number) =>
   total > 0 ? Math.min(100, Math.round((broken / total) * 100)) : 0;
 const errorText = (error: unknown) =>
@@ -53,7 +54,7 @@ export default function HomePage() {
   const { runtime } = useAuth();
   const [country, setCountry] = useState<DashboardCountry>('ALL');
   const dashboard = useQuery({
-    queryKey: QUERY_KEY,
+    queryKey: DASHBOARD_QUERY_KEY,
     queryFn: ({ signal }) => getDashboard(runtime.http, signal),
     staleTime: 30_000,
     refetchOnWindowFocus: true,
@@ -62,13 +63,16 @@ export default function HomePage() {
   });
   useEffect(
     () =>
-      subscribeDashboardChanges(runtime.ws.onMessage.bind(runtime.ws), () => {
-        void runtime.queryClient.invalidateQueries({
-          queryKey: QUERY_KEY,
-          refetchType:
-            document.visibilityState === 'visible' ? 'active' : 'none',
-        });
-      }),
+      subscribeDashboardChanges(
+        runtime.ws.onMessage.bind(runtime.ws),
+        (phase) => {
+          return refreshDashboardQuery(
+            runtime.queryClient,
+            phase,
+            document.visibilityState === 'visible',
+          );
+        },
+      ),
     [runtime],
   );
   const data = dashboard.data;

@@ -1,11 +1,14 @@
 import type { DashboardData, WsMessage } from '@asin-monitor/contracts';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 import {
   activitiesForCountry,
   alertsForCountry,
   alertText,
   countryOverview,
+  DASHBOARD_QUERY_KEY,
   DASHBOARD_SERVER_TTL_MS,
+  refreshDashboardQuery,
   subscribeDashboardChanges,
 } from './dashboard-data';
 
@@ -58,7 +61,7 @@ describe('dashboard country view', () => {
 });
 
 describe('dashboard server cache refresh', () => {
-  it('reads immediately and again after cache expiry; ignores competitor events and cancels on unmount', () => {
+  it('reads immediately and again after cache expiry; ignores competitor events and cancels on unmount', async () => {
     vi.useFakeTimers();
     try {
       let emit: (message: WsMessage) => void = () => undefined;
@@ -70,10 +73,12 @@ describe('dashboard server cache refresh', () => {
       }, refresh);
       emit({ type: 'stats_update' });
       expect(refresh).toHaveBeenCalledTimes(1);
-      vi.advanceTimersByTime(DASHBOARD_SERVER_TTL_MS - 1);
+      expect(refresh).toHaveBeenNthCalledWith(1, 'event');
+      await vi.advanceTimersByTimeAsync(DASHBOARD_SERVER_TTL_MS - 1);
       expect(refresh).toHaveBeenCalledTimes(1);
-      vi.advanceTimersByTime(1001);
+      await vi.advanceTimersByTimeAsync(1001);
       expect(refresh).toHaveBeenCalledTimes(2);
+      expect(refresh).toHaveBeenNthCalledWith(2, 'after-cache');
       emit({
         type: 'monitor_complete',
         success: true,
@@ -88,11 +93,75 @@ describe('dashboard server cache refresh', () => {
       expect(refresh).toHaveBeenCalledTimes(2);
       emit({ type: 'stats_update' });
       dispose();
-      vi.runAllTimers();
+      await vi.runAllTimersAsync();
       expect(refresh).toHaveBeenCalledTimes(3);
       expect(unsubscribe).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+  it('starts the server cache window after a long initial read settles', async () => {
+    vi.useFakeTimers();
+    try {
+      let emit: (message: WsMessage) => void = () => undefined;
+      let settle: () => void = () => undefined;
+      const refresh = vi.fn((phase: 'event' | 'after-cache') =>
+        phase === 'event'
+          ? new Promise<void>((resolve) => {
+              settle = resolve;
+            })
+          : Promise.resolve(),
+      );
+      const dispose = subscribeDashboardChanges((handler) => {
+        emit = handler;
+        return () => undefined;
+      }, refresh);
+      emit({ type: 'stats_update' });
+      await vi.advanceTimersByTimeAsync(DASHBOARD_SERVER_TTL_MS + 1000);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      settle();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(DASHBOARD_SERVER_TTL_MS);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      expect(refresh).toHaveBeenNthCalledWith(2, 'after-cache');
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('cancels an in-flight initial read before the post-cache refetch', async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    let calls = 0;
+    const queryFn = vi.fn(({ signal }: { signal: AbortSignal }) => {
+      calls++;
+      if (calls === 1)
+        return new Promise<string>((resolve) => {
+          signal.addEventListener('abort', () => resolve('before-monitor'), {
+            once: true,
+          });
+        });
+      return Promise.resolve('after-monitor');
+    });
+    const observer = new QueryObserver(client, {
+      queryKey: DASHBOARD_QUERY_KEY,
+      queryFn,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+    try {
+      expect(queryFn).toHaveBeenCalledTimes(1);
+      const immediate = refreshDashboardQuery(client, 'event', true);
+      expect(queryFn).toHaveBeenCalledTimes(1);
+      await refreshDashboardQuery(client, 'after-cache', true);
+      await immediate;
+      expect(queryFn).toHaveBeenCalledTimes(2);
+      expect(observer.getCurrentResult().data).toBe('after-monitor');
+    } finally {
+      unsubscribe();
+      client.clear();
     }
   });
 });
