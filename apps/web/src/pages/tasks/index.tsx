@@ -247,7 +247,9 @@ export default function TaskCenterPage() {
   const list = tasks.data;
   const selectedTask = list?.find((task) => task.taskId === selectedId);
   const canShowSelected =
-    !selectedTask || canOpenTaskDetail(selectedTask, canReadASIN);
+    selectedId === null ||
+    (selectedTask !== undefined &&
+      canOpenTaskDetail(selectedTask, canReadASIN));
   const detail = useTaskQuery(
     runtime,
     selectedId ?? undefined,
@@ -282,8 +284,8 @@ export default function TaskCenterPage() {
     return () => clearTimeout(timer);
   }, [notice]);
   useEffect(() => {
-    if (selectedId && !canShowSelected) setSelectedId(null);
-  }, [selectedId, canShowSelected]);
+    if (selectedId && list && !canShowSelected) setSelectedId(null);
+  }, [selectedId, list, canShowSelected]);
 
   async function confirmCancel(taskId: string) {
     setNotice(null);
