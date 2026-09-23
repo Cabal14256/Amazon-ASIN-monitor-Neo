@@ -76,6 +76,7 @@ describe('monitor history display boundaries', () => {
 
   it.each([
     [400, '筛选参数'],
+    [403, '没有监控历史读取权限'],
     [404, '不存在'],
     [413, '结果过大'],
     [429, '查询繁忙'],

@@ -64,6 +64,8 @@ export function historyError(error: unknown): string {
     switch (error.status) {
       case 400:
         return '筛选参数无效，请检查时间范围和分页设置。';
+      case 403:
+        return '当前账号没有监控历史读取权限，请联系管理员。';
       case 404:
         return '这条历史记录已不存在，请刷新列表。';
       case 413:
