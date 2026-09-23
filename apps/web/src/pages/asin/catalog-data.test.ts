@@ -15,6 +15,7 @@ describe('ASIN catalog display data', () => {
       'danger',
     );
     expect(statusSource('AUTO+MANUAL')).toBe('自动检测 + 人工标记');
+    expect(statusSource('NORMAL')).toBe('正常');
   });
   it('renders missing and invalid timestamps without implying a check occurred', () => {
     expect(checkedAt(null)).toBe('尚未检查');
@@ -28,5 +29,8 @@ describe('ASIN catalog display data', () => {
     expect(catalogError(new ApiError('HTTP', 'raw', 503))).toContain(
       '数据源尚未开放',
     );
+    expect(
+      catalogError(new ApiError('INVALID_RESPONSE', '服务器响应过大')),
+    ).toContain('缩小筛选范围');
   });
 });

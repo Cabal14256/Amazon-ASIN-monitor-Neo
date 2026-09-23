@@ -26,6 +26,8 @@ export function statusSource(source?: string | null): string {
       return '人工标记';
     case 'AUTO+MANUAL':
       return '自动检测 + 人工标记';
+    case 'NORMAL':
+      return '正常';
     default:
       return source || '未记录';
   }

@@ -201,6 +201,7 @@ describe('fetch and download transport boundary', () => {
     );
     await expect(f.client.request('/v1/example')).rejects.toMatchObject({
       kind: 'INVALID_RESPONSE',
+      message: '服务器响应过大',
     });
     expect(cancel).toHaveBeenCalledTimes(1);
   });

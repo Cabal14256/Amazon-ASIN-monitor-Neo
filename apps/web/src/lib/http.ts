@@ -225,13 +225,15 @@ export class HttpClient {
       let parsed: unknown;
       try {
         parsed = await readJson(response, maxResponseBytes);
-      } catch {
-        if (response.status !== 401 && response.status !== 403 && response.ok)
+      } catch (error) {
+        if (response.status !== 401 && response.status !== 403 && response.ok) {
+          if (error instanceof ApiError) throw error;
           throw new ApiError(
             'INVALID_RESPONSE',
             '服务器响应格式无效',
             response.status,
           );
+        }
       }
       if (signal.aborted) throw signal.reason;
       const envelope =

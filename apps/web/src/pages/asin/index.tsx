@@ -11,7 +11,13 @@ import {
   RefreshCw,
   Search,
 } from 'lucide-react';
-import { Fragment, useMemo, useState, type FormEvent } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useMemo,
+  useState,
+  type FormEvent,
+} from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -126,9 +132,18 @@ function GroupCard({
   );
 }
 
-function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
+function GroupDetail({
+  id,
+  onClose,
+  childPage,
+  onChildPageChange,
+}: {
+  id: string;
+  onClose: () => void;
+  childPage: number;
+  onChildPageChange: (page: number) => void;
+}) {
   const { runtime } = useAuth();
-  const [childPage, setChildPage] = useState(1);
   const detail = useQuery({
     queryKey: ['asin', 'group', id],
     queryFn: ({ signal }) => getVariantGroup(runtime.http, id, signal),
@@ -291,7 +306,7 @@ function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       variant="secondary"
                       size="small"
                       disabled={visiblePage <= 1}
-                      onClick={() => setChildPage(visiblePage - 1)}
+                      onClick={() => onChildPageChange(visiblePage - 1)}
                     >
                       <ChevronLeft aria-hidden="true" />
                       上一页
@@ -300,7 +315,7 @@ function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       variant="secondary"
                       size="small"
                       disabled={visiblePage >= childPages}
-                      onClick={() => setChildPage(visiblePage + 1)}
+                      onClick={() => onChildPageChange(visiblePage + 1)}
                     >
                       下一页
                       <ChevronRight aria-hidden="true" />
@@ -325,6 +340,15 @@ export function GroupRows({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
+  // Both CSS layouts stay mounted; one parent page keeps rotation/resize stable.
+  const [childPage, setChildPage] = useState(1);
+  const toggleGroup = useCallback(
+    (id: string) => {
+      setChildPage(1);
+      onSelect(id);
+    },
+    [onSelect],
+  );
   const columns = useMemo<ColumnDef<typeof TABLE_FEATURES, VariantGroup>[]>(
     () => [
       {
@@ -391,14 +415,14 @@ export function GroupRows({
             variant="secondary"
             size="small"
             aria-expanded={selectedId === row.original.id}
-            onClick={() => onSelect(row.original.id)}
+            onClick={() => toggleGroup(row.original.id)}
           >
             {selectedId === row.original.id ? '收起' : '查看'}
           </Button>
         ),
       },
     ],
-    [onSelect, selectedId],
+    [selectedId, toggleGroup],
   );
   const table = useTable({
     features: TABLE_FEATURES,
@@ -415,11 +439,16 @@ export function GroupRows({
             <GroupCard
               group={row.original}
               selected={selectedId === row.id}
-              onSelect={() => onSelect(row.id)}
+              onSelect={() => toggleGroup(row.id)}
             />
             {selectedId === row.id && (
               <li>
-                <GroupDetail id={row.id} onClose={() => onSelect(row.id)} />
+                <GroupDetail
+                  id={row.id}
+                  onClose={() => toggleGroup(row.id)}
+                  childPage={childPage}
+                  onChildPageChange={setChildPage}
+                />
               </li>
             )}
           </Fragment>
@@ -469,7 +498,9 @@ export function GroupRows({
                     <td colSpan={columns.length} className="pb-4">
                       <GroupDetail
                         id={row.id}
-                        onClose={() => onSelect(row.id)}
+                        onClose={() => toggleGroup(row.id)}
+                        childPage={childPage}
+                        onChildPageChange={setChildPage}
                       />
                     </td>
                   </tr>
