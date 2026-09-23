@@ -134,7 +134,10 @@ export function canOpenTaskDetail(
   task: TaskInfo,
   canReadASIN: boolean,
 ): boolean {
-  return !completedCheckTask(task) || canReadASIN;
+  const protectedCheckResult =
+    ['completed', 'failed'].includes(task.status) &&
+    ['variant-check', 'batch-check'].includes(task.taskType);
+  return !protectedCheckResult || canReadASIN;
 }
 
 export function hasTaskDownload(task: TaskInfo, canReadASIN = true): boolean {

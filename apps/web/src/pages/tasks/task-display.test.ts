@@ -142,6 +142,14 @@ describe('task center display boundaries', () => {
     expect(hasTaskDownload(completedCheck, false)).toBe(false);
     expect(canOpenTaskDetail(completedCheck, true)).toBe(true);
     expect(hasTaskDownload(completedCheck, true)).toBe(true);
+    for (const taskType of ['variant-check', 'batch-check'] as const) {
+      const failedCheck = task({ taskType, status: 'failed' });
+      expect(canOpenTaskDetail(failedCheck, false)).toBe(false);
+      expect(canOpenTaskDetail(failedCheck, true)).toBe(true);
+      expect(
+        canOpenTaskDetail(task({ taskType, status: 'cancelled' }), false),
+      ).toBe(true);
+    }
     expect(hasMoreTaskErrors(completedCheck, 20)).toBe(true);
     expect(taskErrorOverflowMessage(completedCheck, true)).toContain(
       '完整结果',
