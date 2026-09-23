@@ -232,11 +232,11 @@ function HistoryDetail({ id, close }: { id: number; close: () => void }) {
     gcTime: 0,
     refetchOnWindowFocus: true,
   });
-  const permissionDenied =
+  const inaccessible =
     detail.isError &&
     detail.error instanceof ApiError &&
-    detail.error.status === 403;
-  const record = permissionDenied ? undefined : detail.data;
+    [401, 403, 404].includes(detail.error.status ?? 0);
+  const record = inaccessible ? undefined : detail.data;
   const result = record ? historyResultPreview(record) : null;
   return (
     <Card aria-label="监控历史详情">
@@ -365,11 +365,11 @@ export default function MonitorHistoryPage() {
     gcTime: 0,
     refetchOnWindowFocus: true,
   });
-  const permissionDenied =
+  const accessDenied =
     history.isError &&
     history.error instanceof ApiError &&
-    history.error.status === 403;
-  const data = permissionDenied ? undefined : history.data;
+    [401, 403].includes(history.error.status ?? 0);
+  const data = accessDenied ? undefined : history.data;
   const page = data ? historyPageInfo(data) : null;
   const current = data?.current ?? query.current ?? 1;
   const visibleSelectedId =
