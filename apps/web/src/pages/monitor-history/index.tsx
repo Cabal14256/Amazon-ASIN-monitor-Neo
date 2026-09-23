@@ -392,9 +392,7 @@ export default function MonitorHistoryPage() {
       setFilterError('请输入有效的上海时间范围，结束时间应不早于开始时间。');
       return;
     }
-    setFilterError(null);
-    setSelectedId(null);
-    setQuery({
+    const nextQuery: MonitorHistoryListQuery = {
       ...Object.fromEntries(
         TEXT_FILTERS.map(({ key }) => [key, filters[key].trim() || undefined]),
       ),
@@ -405,7 +403,18 @@ export default function MonitorHistoryPage() {
       endTime,
       current: 1,
       pageSize: query.pageSize,
-    });
+    };
+    try {
+      runtime.http.url('/api/v1/monitor-history', nextQuery);
+    } catch {
+      setFilterError(
+        '筛选条件无法组成有效请求地址，请减少 ASIN 或其他筛选项。',
+      );
+      return;
+    }
+    setFilterError(null);
+    setSelectedId(null);
+    setQuery(nextQuery);
   }
   function changePage(next: number) {
     setSelectedId(null);
