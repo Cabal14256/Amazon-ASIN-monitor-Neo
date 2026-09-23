@@ -49,7 +49,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: 'ASIN 管理',
         access: 'canReadASIN',
         icon: Boxes,
-        available: false,
+        available: true,
       },
       {
         path: '/asin-parent-query',
