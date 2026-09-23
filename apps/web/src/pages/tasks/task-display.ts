@@ -123,8 +123,23 @@ export function canCancelTask(task: TaskInfo): boolean {
   );
 }
 
-export function hasTaskDownload(task: TaskInfo): boolean {
+function completedCheckTask(task: TaskInfo): boolean {
+  return (
+    task.status === 'completed' &&
+    ['variant-check', 'batch-check'].includes(task.taskType)
+  );
+}
+
+export function canOpenTaskDetail(
+  task: TaskInfo,
+  canReadASIN: boolean,
+): boolean {
+  return !completedCheckTask(task) || canReadASIN;
+}
+
+export function hasTaskDownload(task: TaskInfo, canReadASIN = true): boolean {
   if (task.status !== 'completed' || !task.downloadUrl) return false;
+  if (completedCheckTask(task) && !canReadASIN) return false;
   if (task.taskType === 'import') {
     const result = taskResult(task);
     const report = result?.report;
@@ -157,8 +172,34 @@ export function hasTaskDownload(task: TaskInfo): boolean {
   );
 }
 
-export function taskErrorOverflowMessage(task: TaskInfo): string {
-  return hasTaskDownload(task)
+export function hasMoreTaskErrors(task: TaskInfo, shown: number): boolean {
+  const result = taskResult(task);
+  if (!result) return false;
+  if (result.errorsTruncated === true) return true;
+  if (
+    typeof result.errorCount === 'number' &&
+    Number.isSafeInteger(result.errorCount) &&
+    result.errorCount > shown
+  )
+    return true;
+  if (
+    task.taskType === 'batch-check' &&
+    typeof result.failedCount === 'number' &&
+    Number.isSafeInteger(result.failedCount) &&
+    result.failedCount > shown
+  )
+    return true;
+  return (
+    (Array.isArray(result.errors) && result.errors.length > shown) ||
+    (Array.isArray(result.failedSamples) && result.failedSamples.length > shown)
+  );
+}
+
+export function taskErrorOverflowMessage(
+  task: TaskInfo,
+  canReadASIN = true,
+): string {
+  return hasTaskDownload(task, canReadASIN)
     ? '仅展示前 20 项，完整结果请下载报告。'
     : '仅展示前 20 项；此类任务暂无完整结果下载入口。';
 }

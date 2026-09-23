@@ -1,7 +1,8 @@
 import type { TaskInfo } from '@asin-monitor/contracts';
 import { ChevronDown, Download, RefreshCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { useAuth } from '../../auth/context';
+import { createAccess } from '../../auth/access';
+import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
 import {
@@ -27,6 +28,8 @@ import {
 import { ApiError } from '../../lib/http';
 import {
   canCancelTask,
+  canOpenTaskDetail,
+  hasMoreTaskErrors,
   hasTaskDownload,
   taskDate,
   taskErrorOverflowMessage,
@@ -89,7 +92,13 @@ function DownloadAction({
   );
 }
 
-function TaskDetails({ task }: { task: TaskInfo }) {
+function TaskDetails({
+  task,
+  canReadASIN,
+}: {
+  task: TaskInfo;
+  canReadASIN: boolean;
+}) {
   const result = taskResult(task);
   const warnings = taskWarnings(task);
   const errors = taskErrors(task);
@@ -197,12 +206,9 @@ function TaskDetails({ task }: { task: TaskInfo }) {
               </li>
             ))}
           </ul>
-          {(Array.isArray(result?.errors) &&
-            result.errors.length > errors.length) ||
-          (Array.isArray(result?.failedSamples) &&
-            result.failedSamples.length > errors.length) ? (
+          {hasMoreTaskErrors(task, errors.length) ? (
             <p className="mt-2 text-xs text-muted-foreground">
-              {taskErrorOverflowMessage(task)}
+              {taskErrorOverflowMessage(task, canReadASIN)}
             </p>
           ) : null}
         </section>
@@ -212,7 +218,7 @@ function TaskDetails({ task }: { task: TaskInfo }) {
         warnings.length === 0 &&
         counts.length === 0 && (
           <p className="text-xs text-muted-foreground">
-            {hasTaskDownload(task)
+            {hasTaskDownload(task, canReadASIN)
               ? '当前结果没有可展示的结构化摘要；可通过下载入口获取完整结果。'
               : '当前结果没有可展示的结构化摘要。'}
           </p>
@@ -223,6 +229,10 @@ function TaskDetails({ task }: { task: TaskInfo }) {
 
 export default function TaskCenterPage() {
   const { runtime } = useAuth();
+  const identity = useIdentity();
+  const canReadASIN =
+    identity.status === 'authenticated' &&
+    createAccess(identity.identity).canReadASIN;
   const [filter, setFilter] = useState<'all' | 'active'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -234,13 +244,16 @@ export default function TaskCenterPage() {
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const tasks = useTaskListQuery(runtime, { status: filter, limit: 100 }, true);
+  const list = tasks.data;
+  const selectedTask = list?.find((task) => task.taskId === selectedId);
+  const canShowSelected =
+    !selectedTask || canOpenTaskDetail(selectedTask, canReadASIN);
   const detail = useTaskQuery(
     runtime,
     selectedId ?? undefined,
-    Boolean(selectedId),
+    Boolean(selectedId) && canShowSelected,
   );
   const cancellation = useCancelTask(runtime);
-  const list = tasks.data;
   const activeCount =
     list?.filter((task) =>
       ['pending', 'processing', 'cancelling'].includes(task.status),
@@ -268,6 +281,9 @@ export default function TaskCenterPage() {
     const timer = setTimeout(() => setNotice(null), 8000);
     return () => clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    if (selectedId && !canShowSelected) setSelectedId(null);
+  }, [selectedId, canShowSelected]);
 
   async function confirmCancel(taskId: string) {
     setNotice(null);
@@ -287,7 +303,7 @@ export default function TaskCenterPage() {
   }
 
   async function downloadTask(task: TaskInfo) {
-    if (downloadId) return;
+    if (downloadId || !hasTaskDownload(task, canReadASIN)) return;
     setDownloadId(task.taskId);
     setDownloadError(null);
     try {
@@ -463,22 +479,30 @@ export default function TaskCenterPage() {
                               {taskSummary(task)}
                             </p>
                             <div className="flex flex-wrap gap-2 lg:justify-end">
-                              <Button
-                                variant="secondary"
-                                size="small"
-                                aria-expanded={selected}
-                                onClick={() => {
-                                  setSelectedId(selected ? null : task.taskId);
-                                  setConfirmId(null);
-                                }}
-                              >
-                                {selected ? '收起' : '详情'}
-                                <ChevronDown
-                                  aria-hidden="true"
-                                  className={selected ? 'rotate-180' : ''}
-                                />
-                              </Button>
-                              {hasTaskDownload(task) && (
+                              {canOpenTaskDetail(task, canReadASIN) ? (
+                                <Button
+                                  variant="secondary"
+                                  size="small"
+                                  aria-expanded={selected}
+                                  onClick={() => {
+                                    setSelectedId(
+                                      selected ? null : task.taskId,
+                                    );
+                                    setConfirmId(null);
+                                  }}
+                                >
+                                  {selected ? '收起' : '详情'}
+                                  <ChevronDown
+                                    aria-hidden="true"
+                                    className={selected ? 'rotate-180' : ''}
+                                  />
+                                </Button>
+                              ) : (
+                                <span className="self-center text-xs text-muted-foreground">
+                                  检查结果需 ASIN 读取权限
+                                </span>
+                              )}
+                              {hasTaskDownload(task, canReadASIN) && (
                                 <DownloadAction
                                   task={task}
                                   pending={downloadId === task.taskId}
@@ -543,7 +567,7 @@ export default function TaskCenterPage() {
           </CardContent>
         </Card>
 
-        {selectedId && (
+        {selectedId && canShowSelected && (
           <Card aria-label="任务详情">
             <CardHeader
               title="任务详情"
@@ -584,8 +608,8 @@ export default function TaskCenterPage() {
                       详情刷新失败，当前展示上一次成功读取的内容。
                     </p>
                   )}
-                  <TaskDetails task={detail.data} />
-                  {hasTaskDownload(detail.data) && (
+                  <TaskDetails task={detail.data} canReadASIN={canReadASIN} />
+                  {hasTaskDownload(detail.data, canReadASIN) && (
                     <div className="mt-5">
                       <DownloadAction
                         task={detail.data}

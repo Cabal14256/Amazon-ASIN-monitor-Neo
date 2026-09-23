@@ -35,6 +35,8 @@ export function taskDetailOptions(
     queryFn: ({ signal }) => api.get(taskId ?? '', signal),
     enabled: enabled && Boolean(taskId),
     staleTime: 0,
+    // Completed check results may occupy 32 MiB; release inactive detail snapshots immediately.
+    gcTime: 0,
     retry: shouldRetryQuery,
     refetchInterval: (query) =>
       taskRefreshInterval(query.state.data, query.state.error),

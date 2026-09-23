@@ -97,6 +97,29 @@ describe('query policy', () => {
     );
     expect(f.fetcher).not.toHaveBeenCalled();
   });
+  it('evicts an inactive completed check detail instead of retaining a large result', async () => {
+    const f = setup();
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        data: taskFixture({
+          status: 'completed',
+          taskType: 'batch-check',
+          result: { payload: 'x'.repeat(9 * 1024 * 1024) },
+        }),
+      }),
+    );
+    const observer = new QueryObserver(
+      f.client,
+      taskDetailOptions(f.tasks, 'job-1', true),
+    );
+    const unsubscribe = observer.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.client.getQueryData(taskKeys.detail('job-1'))).toBeDefined();
+    unsubscribe();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.client.getQueryData(taskKeys.detail('job-1'))).toBeUndefined();
+  });
 });
 
 describe('WS invalidation through actual Query observers', () => {

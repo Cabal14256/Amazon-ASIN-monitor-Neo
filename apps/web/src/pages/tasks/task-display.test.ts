@@ -2,6 +2,8 @@ import type { TaskInfo } from '@asin-monitor/contracts';
 import { describe, expect, it } from 'vitest';
 import {
   canCancelTask,
+  canOpenTaskDetail,
+  hasMoreTaskErrors,
   hasTaskDownload,
   taskErrorOverflowMessage,
   taskErrors,
@@ -126,6 +128,25 @@ describe('task center display boundaries', () => {
         }),
       ),
     ).toBe(true);
+    const completedCheck = task({
+      status: 'completed',
+      taskType: 'batch-check',
+      filename: 'check-result-task-1.json',
+      downloadUrl: '/api/v1/tasks/task-1/download',
+      result: {
+        failedCount: 25,
+        failedSamples: Array.from({ length: 20 }, () => ({ error: 'failed' })),
+      },
+    });
+    expect(canOpenTaskDetail(completedCheck, false)).toBe(false);
+    expect(hasTaskDownload(completedCheck, false)).toBe(false);
+    expect(canOpenTaskDetail(completedCheck, true)).toBe(true);
+    expect(hasTaskDownload(completedCheck, true)).toBe(true);
+    expect(hasMoreTaskErrors(completedCheck, 20)).toBe(true);
+    expect(taskErrorOverflowMessage(completedCheck, true)).toContain(
+      '完整结果',
+    );
+    expect(canOpenTaskDetail(task(), false)).toBe(true);
     const batchDelete = task({
       taskType: 'batch-delete',
       status: 'completed',
