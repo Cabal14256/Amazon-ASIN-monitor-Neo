@@ -1,6 +1,6 @@
-import type { DecoratedAsin, VariantGroup } from '@asin-monitor/contracts';
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
+import type { CatalogChild, CatalogGroup } from './catalog-types';
 
 type Flag = 0 | 1 | boolean | null | undefined;
 
@@ -10,11 +10,11 @@ export function statusOf(value: Flag): 'danger' | 'success' | 'unknown' {
   return 'unknown';
 }
 
-export function groupStatus(group: VariantGroup) {
+export function groupStatus(group: CatalogGroup) {
   return statusOf(group.isBroken ?? group.is_broken);
 }
 
-export function childStatus(child: DecoratedAsin) {
+export function childStatus(child: CatalogChild) {
   return statusOf(child.isBroken ?? child.autoIsBroken);
 }
 
