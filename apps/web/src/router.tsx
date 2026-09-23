@@ -17,6 +17,7 @@ const LoginPage = lazy(() => import('./pages/auth/login'));
 const ProfilePage = lazy(() => import('./pages/auth/profile'));
 const ForbiddenPage = lazy(() => import('./pages/auth/forbidden'));
 const HomePage = lazy(() => import('./pages/home'));
+const AsinCatalogPage = lazy(() => import('./pages/asin'));
 const UnavailablePage = lazy(() => import('./pages/unavailable'));
 const DesignPreview = import.meta.env.DEV
   ? lazy(() => import('./pages/dev/design-system'))
@@ -52,6 +53,8 @@ export function createAppRouter(
                 <ForbiddenPage />
               ) : page.path === '/home' ? (
                 <HomePage />
+              ) : page.path === '/asin' ? (
+                <AsinCatalogPage />
               ) : (
                 <UnavailablePage title={page.name} />
               )}

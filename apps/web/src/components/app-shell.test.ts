@@ -20,6 +20,7 @@ describe('workspace navigation', () => {
       items.find((item) => item.path === '/monitor-history')?.available,
     ).toBe(false);
     expect(items.find((item) => item.path === '/home')?.available).toBe(true);
+    expect(items.find((item) => item.path === '/asin')?.available).toBe(true);
   });
   it('exposes only password management when a password change is required', () => {
     const access = {
