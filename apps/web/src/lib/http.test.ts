@@ -266,12 +266,12 @@ describe('fetch and download transport boundary', () => {
     f.fetcher.mockResolvedValueOnce(new Response(body));
     const result = await f.client.request<{ success: true; data: string }>(
       '/v1/example',
-      { maxResponseBytes: 40 * 1024 * 1024 },
+      { maxResponseBytes: 64 * 1024 * 1024 },
     );
     expect(result.data).toHaveLength(9 * 1024 * 1024);
     await expect(
       f.client.request('/v1/example', {
-        maxResponseBytes: 40 * 1024 * 1024 + 1,
+        maxResponseBytes: 64 * 1024 * 1024 + 1,
       }),
     ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
     expect(f.fetcher).toHaveBeenCalledTimes(2);
