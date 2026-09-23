@@ -27,9 +27,19 @@ export interface AsinImportUnit extends AsinWriteUnit {
   findOrCreateImportGroup(fields: VariantGroupWriteFields): Promise<string>;
   writeImportChunk(items: BatchAsinItem[]): Promise<ImportChunkResult>;
 }
-export interface AsinImportRepositoryPort {
-  transaction<T>(operation: (unit: AsinImportUnit) => Promise<T>): Promise<T>;
+export interface ImportWriteUnit
+  extends Pick<
+    AsinWriteUnit,
+    'lockOperator' | 'lockSession' | 'operatorPermissionCodes'
+  > {
+  findOrCreateImportGroup(fields: VariantGroupWriteFields): Promise<string>;
+  writeImportChunk(items: BatchAsinItem[]): Promise<ImportChunkResult>;
 }
+export interface ImportRepositoryPort {
+  transaction<T>(operation: (unit: ImportWriteUnit) => Promise<T>): Promise<T>;
+  close?(): void;
+}
+export type AsinImportRepositoryPort = ImportRepositoryPort;
 export class AsinImportRepositoryError extends Error {
   constructor(readonly code: 'capacity' | 'invalid-group') {
     super('ASIN import could not be completed');
@@ -140,11 +150,11 @@ class DrizzleAsinImportUnit
     };
   }
 }
-export class PgAsinImportRepository implements AsinImportRepositoryPort {
+export class PgAsinImportRepository implements ImportRepositoryPort {
   private active = 0;
   constructor(private readonly pool: Pool) {}
   async transaction<T>(
-    operation: (unit: AsinImportUnit) => Promise<T>,
+    operation: (unit: ImportWriteUnit) => Promise<T>,
   ): Promise<T> {
     if (this.active >= 8) throw new AsinImportRepositoryError('capacity');
     this.active++;

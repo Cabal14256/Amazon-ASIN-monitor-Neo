@@ -6,7 +6,7 @@ import { Readable, Transform } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import type { ImportResult } from './flow';
 import { ImportParseError } from './rows';
-import { isAsinImportTaskData, type AsinImportTaskData } from './task';
+import { isImportTaskData, type ImportTaskData } from './task';
 
 // The semantic input budget is 32 Mi characters; JSON escaping may expand each
 // character to six bytes, in addition to per-error messages and structure.
@@ -23,13 +23,14 @@ export interface ImportReportReference {
 }
 export interface ImportTaskResult extends ImportResult {
   originalFilename: string;
-  taskSubType: 'asin';
+  taskSubType: ImportTaskData['taskSubType'];
   summary: string;
   warnings: string[];
 }
 export function normalizeImportTaskResult(
   result: ImportResult,
   filename: string,
+  taskSubType: ImportTaskData['taskSubType'] = 'asin',
 ): ImportTaskResult {
   const processedCount =
     Number(result.processedCount) || result.successCount + result.failedCount;
@@ -44,7 +45,7 @@ export function normalizeImportTaskResult(
   return {
     ...result,
     originalFilename: filename,
-    taskSubType: 'asin',
+    taskSubType,
     total,
     processedCount,
     missingCount,
@@ -90,7 +91,7 @@ function isResult(value: unknown): value is ImportTaskResult {
     typeof result.verificationPassed === 'boolean' &&
     typeof result.originalFilename === 'string' &&
     result.originalFilename.length <= 255 &&
-    result.taskSubType === 'asin' &&
+    ['asin', 'competitor-asin'].includes(String(result.taskSubType)) &&
     typeof result.summary === 'string' &&
     result.summary.length <= 1000 &&
     Array.isArray(result.warnings) &&
@@ -164,15 +165,16 @@ export class ImportResultStore {
     return join(this.directory, `import-${taskId}.${inputSha256}.result.json`);
   }
   async save(
-    data: AsinImportTaskData,
+    data: ImportTaskData,
     result: ImportTaskResult,
     signal: AbortSignal,
   ): Promise<ImportReportReference> {
     signal.throwIfAborted();
     if (
-      !isAsinImportTaskData(data) ||
+      !isImportTaskData(data) ||
       !isResult(result) ||
-      result.originalFilename !== data.file.originalFilename
+      result.originalFilename !== data.file.originalFilename ||
+      result.taskSubType !== data.taskSubType
     )
       throw new ImportParseError('invalid', '导入结果无效');
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -236,14 +238,14 @@ export class ImportResultStore {
   /** A published final result is also a completion marker for a lost Redis ACK.
    * Binding the filename to task ID + source hash prevents resuming other input. */
   async read(
-    data: AsinImportTaskData,
+    data: ImportTaskData,
     signal: AbortSignal,
   ): Promise<{
     result: ImportTaskResult;
     report: ImportReportReference;
   } | null> {
     signal.throwIfAborted();
-    if (!isAsinImportTaskData(data))
+    if (!isImportTaskData(data))
       throw new ImportParseError('invalid', '导入任务数据无效');
     const path = this.path(data.taskId, data.file.sha256);
     const info = await lstat(path).catch((error: unknown) => {
@@ -269,7 +271,8 @@ export class ImportResultStore {
     }
     if (
       !isResult(result) ||
-      result.originalFilename !== data.file.originalFilename
+      result.originalFilename !== data.file.originalFilename ||
+      result.taskSubType !== data.taskSubType
     )
       throw new ImportParseError('invalid', '导入结果内容无效');
     return {

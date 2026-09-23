@@ -9,9 +9,19 @@ export interface AsinImportTaskData {
   title: 'ASIN导入';
   file: ImportFileReference;
 }
-export function isAsinImportTaskData(
-  value: unknown,
-): value is AsinImportTaskData {
+export interface CompetitorImportTaskData {
+  taskId: string;
+  userId: string;
+  createdAt: string;
+  taskType: 'import';
+  taskSubType: 'competitor-asin';
+  title: '竞品ASIN导入';
+  domain: 'competitor';
+  file: ImportFileReference;
+}
+export type ImportTaskData = AsinImportTaskData | CompetitorImportTaskData;
+
+function isImportTaskCore(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const data = value as Record<string, unknown>;
   if (
@@ -22,8 +32,6 @@ export function isAsinImportTaskData(
     data.userId.length > 200 ||
     /[\x00-\x1f\x7f]/.test(data.userId) ||
     data.taskType !== 'import' ||
-    data.taskSubType !== 'asin' ||
-    data.title !== 'ASIN导入' ||
     typeof data.createdAt !== 'string'
   )
     return false;
@@ -32,4 +40,26 @@ export function isAsinImportTaskData(
     Number.isFinite(timestamp.getTime()) &&
     timestamp.toISOString() === data.createdAt
   );
+}
+export function isAsinImportTaskData(
+  value: unknown,
+): value is AsinImportTaskData {
+  return (
+    isImportTaskCore(value) &&
+    value.taskSubType === 'asin' &&
+    value.title === 'ASIN导入'
+  );
+}
+export function isCompetitorImportTaskData(
+  value: unknown,
+): value is CompetitorImportTaskData {
+  return (
+    isImportTaskCore(value) &&
+    value.taskSubType === 'competitor-asin' &&
+    value.title === '竞品ASIN导入' &&
+    value.domain === 'competitor'
+  );
+}
+export function isImportTaskData(value: unknown): value is ImportTaskData {
+  return isAsinImportTaskData(value) || isCompetitorImportTaskData(value);
 }

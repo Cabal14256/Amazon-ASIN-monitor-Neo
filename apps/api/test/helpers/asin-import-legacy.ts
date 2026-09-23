@@ -7,7 +7,9 @@ import vm from 'node:vm';
 
 /** Actual frozen Worker -> import service -> parser/group model/batch service,
  * against a private MySQL schema. Only queues, cache, WS and logging are stubbed. */
-export async function legacyImportFixture() {
+export async function legacyImportFixture(
+  mode: 'asin' | 'competitor' = 'asin',
+) {
   if (
     process.env.RUN_INTEGRATION_TESTS !== 'true' ||
     process.env.INTEGRATION_ALLOW_DROP_DATABASES !== 'true'
@@ -42,11 +44,19 @@ export async function legacyImportFixture() {
     );
     created = true;
     await connection.query(`USE \`${schema}\``);
+    const competitor = mode === 'competitor';
     const ddl = readFileSync(
-      resolve(__dirname, '../../../../server/database/init.sql'),
+      resolve(
+        __dirname,
+        `../../../../server/database/${
+          competitor ? 'competitor-init.sql' : 'init.sql'
+        }`,
+      ),
       'utf8',
     );
-    for (const table of ['variant_groups', 'asins']) {
+    for (const table of competitor
+      ? ['competitor_variant_groups', 'competitor_asins']
+      : ['variant_groups', 'asins']) {
       const statement = ddl.match(
         new RegExp(
           'CREATE TABLE IF NOT EXISTS `' +
@@ -108,15 +118,20 @@ export async function legacyImportFixture() {
       );
       return module.exports;
     }
-    const group = load('models/VariantGroup.js', {
-      '../config/database': database,
-      '../services/cacheService': {
-        deleteByPrefix() {},
-        async deleteByPrefixAsync() {},
+    const group = load(
+      `models/${competitor ? 'CompetitorVariantGroup' : 'VariantGroup'}.js`,
+      {
+        [competitor ? '../config/competitor-database' : '../config/database']:
+          database,
+        '../services/cacheService': {
+          deleteByPrefix() {},
+          async deleteByPrefixAsync() {},
+          getAsync: async () => null,
+        },
+        '../utils/logger': log,
+        './MonitorHistory': {},
       },
-      '../utils/logger': log,
-      './MonitorHistory': {},
-    });
+    );
     const batch = load('services/asinBatchCreateService.js', {
       '../config/database': database,
       '../config/competitor-database': database,
@@ -166,7 +181,7 @@ export async function legacyImportFixture() {
             await processor.processImportTask({
               data: {
                 taskId: randomUUID(),
-                taskSubType: 'asin',
+                taskSubType: competitor ? 'competitor-asin' : 'asin',
                 userId: 'legacy-import-fixture',
                 fileBuffer: buffer,
                 originalFilename,

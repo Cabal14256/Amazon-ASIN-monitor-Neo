@@ -1,10 +1,12 @@
 import {
   AsinImportRepositoryError,
   MAX_ASIN_BATCH_CREATE_ITEMS,
+  prepareCompetitorImportAsins,
   prepareImportAsins,
-  type AsinImportRepositoryPort,
   type ImportChunkResult,
+  type ImportRepositoryPort,
 } from '@asin-monitor/db';
+import type { ImportMode } from './columns';
 import { parseCsvFile } from './csv';
 import { ImportFileStore, type ImportFileReference } from './files';
 import type { ImportPlan, ImportRowError } from './rows';
@@ -21,6 +23,7 @@ export interface ImportResult {
 }
 export interface ImportControls {
   signal: AbortSignal;
+  mode?: ImportMode;
   /** Outside PG transactions: checks queue ownership and requested cancellation. */
   checkpoint?(): Promise<void>;
   onProgress?(progress: number, message: string): Promise<void>;
@@ -30,7 +33,7 @@ export interface ImportControls {
  * followed by bounded ASIN transactions; cancellation prevents subsequent writes. */
 export async function executeImportPlan(
   plan: ImportPlan,
-  repository: AsinImportRepositoryPort,
+  repository: ImportRepositoryPort,
   controls: ImportControls,
 ): Promise<ImportResult> {
   const check = async () => {
@@ -90,7 +93,10 @@ export async function executeImportPlan(
   }
   await check();
   if (items.length) {
-    const prepared = prepareImportAsins(items);
+    const prepared =
+      controls.mode === 'competitor'
+        ? prepareCompetitorImportAsins(items)
+        : prepareImportAsins(items);
     failedCount += prepared.result.failedCount;
     const batchErrors: ImportChunkResult['errors'] = [];
     const format = (error: { asin?: string | null; message: string }) => ({
@@ -148,7 +154,7 @@ export async function executeImportPlan(
 export async function importStoredFile(
   file: ImportFileReference,
   storage: ImportFileStore,
-  repository: AsinImportRepositoryPort,
+  repository: ImportRepositoryPort,
   controls: ImportControls,
 ): Promise<ImportResult> {
   controls.signal.throwIfAborted();
@@ -157,7 +163,7 @@ export async function importStoredFile(
   const path = await storage.verifiedPath(file, controls.signal);
   const plan = await (file.extension === 'csv' ? parseCsvFile : parseXlsxFile)(
     path,
-    { signal: controls.signal },
+    { signal: controls.signal, mode: controls.mode },
   );
   await controls.onProgress?.(50, 'Excel解析完成，正在准备写入...');
   return executeImportPlan(plan, repository, controls);

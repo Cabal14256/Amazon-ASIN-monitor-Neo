@@ -1,6 +1,6 @@
 import {
   isTerminalTaskStatus,
-  type AsinImportRepositoryPort,
+  type ImportRepositoryPort,
   type RedisTaskRepository,
   type TaskMutation,
   type TaskState,
@@ -11,6 +11,8 @@ import {
   importStoredFile,
   importTaskPreview,
   isAsinImportTaskData,
+  isCompetitorImportTaskData,
+  isImportTaskData,
   normalizeImportTaskResult,
 } from '@asin-monitor/import';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
@@ -36,21 +38,83 @@ const failureMessage = '导入任务中断，请核实已写入的数据后重�
 /** Accepted authorization survives logout. The job must retain the same owner,
  * metadata incarnation and BullMQ lease before parsing or each database chunk. */
 export function createAsinImportProcessor(
-  repository: AsinImportRepositoryPort,
+  repository: ImportRepositoryPort,
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
   files: ImportFileStore,
   reports: ImportResultStore,
   options: ImportProcessorOptions,
   log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
 ): Processor<unknown, unknown, string> {
+  return createDomainProcessor(
+    'asin',
+    repository,
+    store,
+    files,
+    reports,
+    options,
+    log,
+  );
+}
+
+/** A single physical import queue accepts the preserved primary payload and
+ * explicit competitor payload; each is routed before any file or DB access. */
+export function createImportProcessor(
+  repositories: Record<'asin' | 'competitor', ImportRepositoryPort>,
+  store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
+  files: ImportFileStore,
+  reports: ImportResultStore,
+  options: ImportProcessorOptions,
+  log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
+): Processor<unknown, unknown, string> {
+  const processors = {
+    asin: createDomainProcessor(
+      'asin',
+      repositories.asin,
+      store,
+      files,
+      reports,
+      options,
+      log,
+    ),
+    competitor: createDomainProcessor(
+      'competitor',
+      repositories.competitor,
+      store,
+      files,
+      reports,
+      options,
+      log,
+    ),
+  };
   return async (job, token) => {
+    const domain = (job.data as { domain?: unknown } | null)?.domain;
+    if (domain === 'competitor') return processors.competitor(job, token);
+    if (domain === undefined) return processors.asin(job, token);
+    throw new UnrecoverableError('导入任务数据无效');
+  };
+}
+
+function createDomainProcessor(
+  domain: 'asin' | 'competitor',
+  repository: ImportRepositoryPort,
+  store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
+  files: ImportFileStore,
+  reports: ImportResultStore,
+  options: ImportProcessorOptions,
+  log: Pick<typeof logger, 'info' | 'warn' | 'error'>,
+): Processor<unknown, unknown, string> {
+  const label = domain === 'asin' ? 'ASIN' : '竞品';
+  return async (job, token) => {
+    const data = job.data;
     if (
-      !isAsinImportTaskData(job.data) ||
-      job.id !== job.data.taskId ||
-      job.name !== 'asin-import'
+      !isImportTaskData(data) ||
+      (domain === 'asin'
+        ? !isAsinImportTaskData(data)
+        : !isCompetitorImportTaskData(data)) ||
+      job.id !== data.taskId ||
+      job.name !== `${domain}-import`
     )
       throw new UnrecoverableError('导入任务数据无效');
-    const data = job.data;
     const controller = new AbortController();
     const shutdown = () =>
       controller.abort(new Error('IMPORT_WORKER_SHUTDOWN'));
@@ -149,10 +213,11 @@ export function createAsinImportProcessor(
       await inspect(
         await mutate({ kind: 'processing', message: '导入任务开始处理' }),
       );
-      log.info('ASIN 导入任务开始');
+      log.info(`${label} 导入任务开始`);
       const result = normalizeImportTaskResult(
         await importStoredFile(data.file, files, repository, {
           signal: controller.signal,
+          mode: domain === 'asin' ? 'standard' : 'competitor',
           checkpoint: async () => {
             await check();
           },
@@ -165,12 +230,13 @@ export function createAsinImportProcessor(
           },
         }),
         data.file.originalFilename,
+        data.taskSubType,
       );
       await check();
       const report = await reports.save(data, result, controller.signal);
       published = true;
       const completed = await complete(importTaskPreview(result, report));
-      log.info('ASIN 导入任务完成', {
+      log.info(`${label} 导入任务完成`, {
         successCount: result.successCount,
         failedCount: result.failedCount,
       });
@@ -204,7 +270,7 @@ export function createAsinImportProcessor(
           reason: 'import_status_unconfirmed',
         });
       }
-      log.error('ASIN 导入任务停止', {
+      log.error(`${label} 导入任务停止`, {
         reason:
           error instanceof InterruptedImport
             ? 'import_previous_attempt_interrupted'

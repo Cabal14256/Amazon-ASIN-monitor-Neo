@@ -7,12 +7,13 @@ import {
   createPgPool,
   isTerminalTaskStatus,
   PgAsinImportRepository,
+  PgCompetitorImportRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import { ImportFileStore, ImportResultStore } from '@asin-monitor/import';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
-import { createAsinImportProcessor } from './asin-import-processor';
+import { createImportProcessor } from './asin-import-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -45,6 +46,25 @@ export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
   });
   pool.on('error', () =>
     logger.error('导入数据库连接异常', { reason: 'import_database_error' }),
+  );
+  // Keep this pool lazy: an unavailable competitor database must not stop
+  // already accepted primary imports from using their existing consumer.
+  const competitorPool = createPgPool(env.COMPETITOR_DATABASE_URL, {
+    max: 1,
+    connectionTimeoutMillis: Math.min(
+      env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+      2000,
+    ),
+    statement_timeout: 1500,
+  });
+  competitorPool.on('error', () =>
+    logger.error('竞品导入数据库连接异常', {
+      reason: 'competitor_import_database_error',
+    }),
+  );
+  const competitorRepository = new PgCompetitorImportRepository(
+    pool,
+    competitorPool,
   );
   const directory = getImportStorageDirectory(env);
   const files = new ImportFileStore(directory);
@@ -87,23 +107,29 @@ export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
         const activeQueue = queue;
         worker = new Worker(
           getPhysicalQueueName('import'),
-          createAsinImportProcessor(repository, store, files, reports, {
-            shutdownSignal: shutdown.signal,
-            assertJobLock: async (job, token) => {
-              if (
-                !token ||
-                !job.id ||
-                (await control.get(`${activeQueue.toKey(job.id)}:lock`)) !==
-                  token
-              )
-                throw new Error('IMPORT_JOB_LOCK_LOST');
+          createImportProcessor(
+            { asin: repository, competitor: competitorRepository },
+            store,
+            files,
+            reports,
+            {
+              shutdownSignal: shutdown.signal,
+              assertJobLock: async (job, token) => {
+                if (
+                  !token ||
+                  !job.id ||
+                  (await control.get(`${activeQueue.toKey(job.id)}:lock`)) !==
+                    token
+                )
+                  throw new Error('IMPORT_JOB_LOCK_LOST');
+              },
+              updateProgress: async (job, value) => {
+                const current = await activeQueue.getJob(job.id!);
+                if (!current) throw new Error('IMPORT_JOB_MISSING');
+                await current.updateProgress(value);
+              },
             },
-            updateProgress: async (job, value) => {
-              const current = await activeQueue.getJob(job.id!);
-              if (!current) throw new Error('IMPORT_JOB_MISSING');
-              await current.updateProgress(value);
-            },
-          }),
+          ),
           { ...getWorkerOptions('import', env, connection), autorun: false },
         );
         worker.on('error', () =>
@@ -178,7 +204,12 @@ export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
             await activeWorker.close();
           } finally {
             await files.close();
-            await Promise.allSettled([activeQueue.close(), pool.end()]);
+            competitorRepository.close();
+            await Promise.allSettled([
+              activeQueue.close(),
+              pool.end(),
+              competitorPool.end(),
+            ]);
             control.disconnect(false);
           }
         })();
@@ -190,10 +221,12 @@ export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
     control.disconnect(false);
+    competitorRepository.close();
     await Promise.allSettled([
       worker?.close(true),
       queue?.close(),
       pool.end(),
+      competitorPool.end(),
       files.close(),
     ]);
     throw new Error('ASIN import initialization failed');

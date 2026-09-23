@@ -341,6 +341,9 @@ jobs:
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
 
+      - name: Compare competitor imports with Legacy MySQL and verify shared compiled import Worker dispatch
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-import.integration.test.ts
+
       - name: Run task notifications across a compiled Worker and two API WebSocket gateways
         run: pnpm --filter @asin-monitor/api exec vitest run test/task-websocket.integration.test.ts
 

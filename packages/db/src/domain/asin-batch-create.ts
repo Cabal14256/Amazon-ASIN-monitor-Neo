@@ -89,6 +89,14 @@ export function prepareImportAsins(
   return prepareAsins(items, idFactory, 100_000);
 }
 
+/** Competitor file imports share the file-wide duplicate pass without a site. */
+export function prepareCompetitorImportAsins(
+  items: unknown[],
+  idFactory: () => string = randomUUID,
+): BatchAsinPlan {
+  return prepareAsins(items, idFactory, 100_000, false);
+}
+
 function prepareAsins(
   items: unknown[],
   idFactory: () => string,

@@ -2,7 +2,9 @@ import type { Env } from '@asin-monitor/config';
 import {
   AsinImportRepositoryError,
   AsinTimestampPolicyError,
-  type AsinImportRepositoryPort,
+  CompetitorTransactionError,
+  CompetitorWriteError,
+  type ImportRepositoryPort,
 } from '@asin-monitor/db';
 import {
   ImportParseError,
@@ -57,19 +59,25 @@ export class AsinImportService implements OnModuleDestroy {
   constructor(
     @Inject(ENV) private readonly env: Env,
     @Inject(ASIN_IMPORT_REPOSITORY)
-    private readonly repository: AsinImportRepositoryPort,
+    private readonly repository: ImportRepositoryPort,
     @Inject(ApplicationImportStorage)
     private readonly storage: ApplicationImportStorage,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
   ) {}
+  protected get mode(): 'standard' | 'competitor' {
+    return 'standard';
+  }
+  private get label() {
+    return this.mode === 'competitor' ? '竞品' : 'ASIN';
+  }
   async execute(
     principal: AuthPrincipal,
     request: FastifyRequest,
     reply: FastifyReply,
   ) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
-      fail(503, '鉴权权威源尚未切换，请使用现有 ASIN 入口');
+      fail(503, `鉴权权威源尚未切换，请使用现有 ${this.label} 入口`);
     if (this.closed) fail(503, 'API 正在停止');
     if (this.active.size >= 2) fail(429, '导入繁忙，请稍后再试');
     const controller = new AbortController();
@@ -108,9 +116,9 @@ export class AsinImportService implements OnModuleDestroy {
           file,
           this.storage,
           this.repository,
-          { signal: controller.signal },
+          { signal: controller.signal, mode: this.mode },
         );
-        this.logger.info('ASIN 导入完成', 'AsinImportService', {
+        this.logger.info(`${this.label} 导入完成`, 'AsinImportService', {
           mode: 'sync',
           successCount: result.successCount,
           failedCount: result.failedCount,
@@ -126,12 +134,19 @@ export class AsinImportService implements OnModuleDestroy {
           throw new Error('IMPORT_ENQUEUE_DEADLINE');
       });
       submissionStarted = true;
+      const identity =
+        this.mode === 'competitor'
+          ? ({
+              taskSubType: 'competitor-asin',
+              title: '竞品ASIN导入',
+              domain: 'competitor',
+            } as const)
+          : ({ taskSubType: 'asin', title: 'ASIN导入' } as const);
       const task = await port.store.create({
         taskId,
         userId: principal.userId,
         taskType: 'import',
-        taskSubType: 'asin',
-        title: 'ASIN导入',
+        ...identity,
         message: '导入任务已创建，等待处理',
       });
       await port.enqueue({
@@ -139,21 +154,24 @@ export class AsinImportService implements OnModuleDestroy {
         userId: principal.userId,
         createdAt: task.createdAt,
         taskType: 'import',
-        taskSubType: 'asin',
-        title: 'ASIN导入',
+        ...identity,
         file,
       });
       handedOff = true;
-      this.logger.info('ASIN 导入任务已创建', 'AsinImportService', {
+      this.logger.info(`${this.label} 导入任务已创建`, 'AsinImportService', {
         mode: 'async',
       });
       return { taskId, status: 'pending' as const };
     } catch (error) {
       if (submissionStarted) {
         handedOff = true;
-        this.logger.error('ASIN 导入任务提交未确认', 'AsinImportService', {
-          reason: 'enqueue_outcome_unknown',
-        });
+        this.logger.error(
+          `${this.label} 导入任务提交未确认`,
+          'AsinImportService',
+          {
+            reason: 'enqueue_outcome_unknown',
+          },
+        );
         throw new ImportSubmissionError(taskId);
       }
       if (error instanceof HttpException) throw error;
@@ -161,6 +179,16 @@ export class AsinImportService implements OnModuleDestroy {
         fail(error.code === 'capacity' ? 413 : 400, error.message);
       if (error instanceof AsinTimestampPolicyError)
         fail(503, 'ASIN 写入暂不可用，请使用现有 ASIN 入口');
+      if (
+        error instanceof CompetitorWriteError &&
+        error.code === 'timestamp-policy'
+      )
+        fail(503, '竞品写入暂不可用，请使用现有竞品入口');
+      if (error instanceof CompetitorTransactionError) {
+        if (error.code === 'capacity') fail(429, '竞品导入繁忙，请稍后再试');
+        if (error.code === 'commit-uncertain')
+          fail(503, '竞品提交结果未确认，请刷新后核实导入结果');
+      }
       if (
         error instanceof AsinImportRepositoryError &&
         error.code === 'capacity'
@@ -172,7 +200,7 @@ export class AsinImportService implements OnModuleDestroy {
           ['AbortError', 'TimeoutError'].includes(error.name))
       )
         fail(408, '导入请求已中断或超时');
-      this.logger.error('ASIN 导入失败', 'AsinImportService', {
+      this.logger.error(`${this.label} 导入失败`, 'AsinImportService', {
         reason: 'import_failed',
       });
       return fail(500, '导入失败');
@@ -193,5 +221,6 @@ export class AsinImportService implements OnModuleDestroy {
   onModuleDestroy() {
     this.closed = true;
     for (const controller of this.active) controller.abort();
+    this.repository.close?.();
   }
 }

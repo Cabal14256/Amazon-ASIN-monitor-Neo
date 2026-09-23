@@ -30,6 +30,7 @@ export * from './repositories/auth-maintenance-repository';
 export * from './repositories/auth-repository';
 export * from './repositories/bounded-auth-repository';
 export * from './repositories/competitor-batch-delete-repository';
+export * from './repositories/competitor-import-repository';
 export * from './repositories/competitor-query-repository';
 export * from './repositories/dashboard-query-repository';
 export * from './repositories/feishu-configuration-repository';
