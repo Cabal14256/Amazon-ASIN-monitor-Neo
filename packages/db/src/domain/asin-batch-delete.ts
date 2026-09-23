@@ -4,37 +4,58 @@ export const MAX_ASIN_BATCH_DELETE_TARGETS = 1000;
 const jobIds = z
   .array(z.string().min(1).max(100))
   .max(MAX_ASIN_BATCH_DELETE_TARGETS);
+const taskFields = {
+  taskId: z.string().uuid(),
+  taskType: z.literal('batch-delete'),
+  userId: z.string().min(1).max(200),
+  createdAt: z.string().datetime(),
+  groupIds: jobIds,
+  asinIds: jobIds,
+};
+function validateTaskTargets(data: BatchDeleteIds, ctx: z.RefinementCtx) {
+  try {
+    const normalized = parseBatchDeleteRequest({
+      groupIds: data.groupIds,
+      asinIds: data.asinIds,
+    });
+    if (
+      JSON.stringify(normalized.groupIds) !== JSON.stringify(data.groupIds) ||
+      JSON.stringify(normalized.asinIds) !== JSON.stringify(data.asinIds)
+    )
+      throw new Error();
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Invalid batch deletion targets',
+    });
+  }
+}
 export const asinBatchDeleteTaskDataSchema = z
   .object({
-    taskId: z.string().uuid(),
-    taskType: z.literal('batch-delete'),
+    ...taskFields,
     taskSubType: z.literal('variant-group-delete'),
     domain: z.literal('asin'),
     title: z.literal('批量删除变体组'),
-    userId: z.string().min(1).max(200),
-    createdAt: z.string().datetime(),
-    groupIds: jobIds,
-    asinIds: jobIds,
   })
   .strict()
-  .superRefine((data, ctx) => {
-    try {
-      const normalized = parseBatchDeleteRequest({
-        groupIds: data.groupIds,
-        asinIds: data.asinIds,
-      });
-      if (
-        JSON.stringify(normalized.groupIds) !== JSON.stringify(data.groupIds) ||
-        JSON.stringify(normalized.asinIds) !== JSON.stringify(data.asinIds)
-      )
-        throw new Error();
-    } catch {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Invalid batch deletion targets',
-      });
-    }
-  });
+  .superRefine(validateTaskTargets);
+export const competitorBatchDeleteTaskDataSchema = z
+  .object({
+    ...taskFields,
+    taskSubType: z.literal('competitor-variant-group-delete'),
+    domain: z.literal('competitor'),
+    title: z.literal('批量删除竞品变体组'),
+  })
+  .strict()
+  .superRefine(validateTaskTargets);
+export const batchDeleteTaskDataSchema = z.union([
+  asinBatchDeleteTaskDataSchema,
+  competitorBatchDeleteTaskDataSchema,
+]);
+export type BatchDeleteTaskData = z.infer<typeof batchDeleteTaskDataSchema>;
+export type CompetitorBatchDeleteTaskData = z.infer<
+  typeof competitorBatchDeleteTaskDataSchema
+>;
 export type AsinBatchDeleteTaskData = z.infer<
   typeof asinBatchDeleteTaskDataSchema
 >;
@@ -63,8 +84,8 @@ export interface BatchDeleteCounts {
   skipped: BatchDeleteIds;
 }
 export interface BatchDeleteAnalysis extends BatchDeleteCounts {
-  domain: 'asin';
-  taskSubType: 'variant-group';
+  domain: 'asin' | 'competitor';
+  taskSubType: 'variant-group' | 'competitor-variant-group';
   requestedGroupIds: string[];
   requestedAsinIds: string[];
   groupIds: string[];
@@ -73,7 +94,7 @@ export interface BatchDeleteAnalysis extends BatchDeleteCounts {
   estimatedAsinCount: number;
 }
 export class BatchDeleteInputError extends Error {
-  constructor(readonly code: 'input' | 'capacity' = 'input') {
+  constructor(readonly code: 'input' | 'capacity' | 'empty' = 'input') {
     super('Invalid ASIN batch deletion request');
   }
 }
@@ -120,7 +141,8 @@ export function parseBatchDeleteRequest(value: unknown): BatchDeleteRequest {
     throw new BatchDeleteInputError('capacity');
   const groupIds = ids(raw.groupIds),
     asinIds = ids(raw.asinIds);
-  if (!groupIds.length && !asinIds.length) throw new BatchDeleteInputError();
+  if (!groupIds.length && !asinIds.length)
+    throw new BatchDeleteInputError('empty');
   const useAsync = normalizeBatchDeleteMode(raw.useAsync);
   return { groupIds, asinIds, ...(useAsync === undefined ? {} : { useAsync }) };
 }
@@ -130,6 +152,7 @@ export function buildBatchDeleteAnalysis(
   existingGroupIds: string[],
   asinRows: { id: string; variantGroupId: string }[],
   nestedCount: number,
+  domain: BatchDeleteAnalysis['domain'] = 'asin',
 ): BatchDeleteAnalysis {
   if (!Number.isSafeInteger(nestedCount) || nestedCount < 0)
     throw new Error('Invalid batch delete count');
@@ -142,8 +165,9 @@ export function buildBatchDeleteAnalysis(
     return row && !selectedGroups.has(row.variantGroupId) ? [row] : [];
   });
   return {
-    domain: 'asin',
-    taskSubType: 'variant-group',
+    domain,
+    taskSubType:
+      domain === 'asin' ? 'variant-group' : 'competitor-variant-group',
     totalRequested: requested.groupIds.length + requested.asinIds.length,
     requestedGroupIds: [...requested.groupIds],
     requestedAsinIds: [...requested.asinIds],
@@ -183,6 +207,18 @@ export function batchDeleteSyncResult(result: BatchDeleteCounts) {
       asinIds: [...result.skipped.asinIds],
     },
   };
+}
+/** Worker ports deliberately do not require the accepting session to remain active. */
+export interface BatchDeleteExecutionUnit {
+  analyze(ids: BatchDeleteIds): Promise<BatchDeleteAnalysis>;
+  execute(
+    ids: BatchDeleteIds,
+  ): Promise<ReturnType<typeof batchDeleteSyncResult>>;
+}
+export interface BatchDeleteExecutionRepositoryPort {
+  transaction<T>(
+    operation: (unit: BatchDeleteExecutionUnit) => Promise<T>,
+  ): Promise<T>;
 }
 export function splitBatchDeletePlan(
   analysis: Pick<BatchDeleteAnalysis, 'groupIds' | 'directAsinIds'>,

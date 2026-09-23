@@ -137,4 +137,58 @@ describe('paired competitor writes / commit outcome and authorization lifetime',
     expect(p.release).toHaveBeenCalledWith(true);
     expect(c.release).toHaveBeenCalledWith(true);
   });
+  it.each([0, -1, 1.5, 17, Infinity, NaN])(
+    'rejects invalid admission capacity %s',
+    (maximum) => {
+      expect(
+        () => new PgCompetitorTransactions({} as Pool, {} as Pool, maximum),
+      ).toThrow('dependency');
+    },
+  );
+  it.each([undefined, 1, 16])(
+    'bounds configured capacity %s and retains late acquisition ownership',
+    async (maximum) => {
+      const count = maximum ?? 8;
+      const releases: (() => void)[] = [];
+      const clients = Array.from({ length: count }, () => client('primary'));
+      const primary = {
+        connect: vi.fn(
+          () =>
+            new Promise<PoolClient>((resolve) => {
+              const index = releases.length;
+              releases.push(() =>
+                resolve(clients[index] as unknown as PoolClient),
+              );
+            }),
+        ),
+      };
+      const competitor = { connect: vi.fn() };
+      transactions = new PgCompetitorTransactions(
+        primary as unknown as Pool,
+        competitor as unknown as Pool,
+        maximum,
+      );
+      const pending = Array.from({ length: count }, () =>
+        transactions.run(false, async () => undefined),
+      );
+      const settled = Promise.allSettled(pending);
+      expect(transactions.getDiagnostics().pendingOperations).toBe(count);
+      await expect(
+        transactions.run(false, async () => undefined),
+      ).rejects.toMatchObject({ code: 'capacity' });
+      transactions.close();
+      expect(
+        (await settled).every((result) => result.status === 'rejected'),
+      ).toBe(true);
+      expect(transactions.getDiagnostics().pendingOperations).toBe(count);
+      releases.forEach((resolve) => resolve());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transactions.getDiagnostics().pendingOperations).toBe(0);
+      clients.forEach((value) =>
+        expect(value.release).toHaveBeenCalledExactlyOnceWith(true),
+      );
+      expect(competitor.connect).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });

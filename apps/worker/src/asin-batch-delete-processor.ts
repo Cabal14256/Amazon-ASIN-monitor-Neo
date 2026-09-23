@@ -2,10 +2,11 @@ import {
   addBatchDeleteResult,
   asinBatchDeleteTaskDataSchema,
   batchDeleteTaskResult,
+  competitorBatchDeleteTaskDataSchema,
   createBatchDeleteAggregate,
   isTerminalTaskStatus,
   splitBatchDeletePlan,
-  type AsinBatchDeleteRepositoryPort,
+  type BatchDeleteExecutionRepositoryPort,
   type RedisTaskRepository,
   type TaskMutation,
   type TaskState,
@@ -30,17 +31,61 @@ const cancelledResult = { cancelled: true, message: '批量删除任务已取消
 /** Authorization is captured by the API. Workers verify immutable task identity
  * and cancellation, rather than requiring the accepting session to remain active. */
 export function createAsinBatchDeleteProcessor(
-  repository: AsinBatchDeleteRepositoryPort,
+  repository: BatchDeleteExecutionRepositoryPort,
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
   options: ProcessorOptions,
   log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
 ): Processor<unknown, unknown, string> {
+  return createDomainProcessor('asin', repository, store, options, log);
+}
+
+/** One physical queue has one dispatcher: every job validates its matching
+ * immutable domain/subtype/name before touching either business database. */
+export function createBatchDeleteProcessor(
+  repositories: Record<
+    'asin' | 'competitor',
+    BatchDeleteExecutionRepositoryPort
+  >,
+  store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
+  options: ProcessorOptions,
+  log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
+): Processor<unknown, unknown, string> {
+  const processors = {
+    asin: createDomainProcessor('asin', repositories.asin, store, options, log),
+    competitor: createDomainProcessor(
+      'competitor',
+      repositories.competitor,
+      store,
+      options,
+      log,
+    ),
+  };
   return async (job, token) => {
-    const parsed = asinBatchDeleteTaskDataSchema.safeParse(job.data);
+    const domain = (job.data as { domain?: unknown } | null)?.domain;
+    if (domain !== 'asin' && domain !== 'competitor')
+      throw new UnrecoverableError('批量删除任务数据无效');
+    return processors[domain](job, token);
+  };
+}
+
+function createDomainProcessor(
+  domain: 'asin' | 'competitor',
+  repository: BatchDeleteExecutionRepositoryPort,
+  store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
+  options: ProcessorOptions,
+  log: Pick<typeof logger, 'info' | 'warn' | 'error'>,
+): Processor<unknown, unknown, string> {
+  const schema =
+    domain === 'asin'
+      ? asinBatchDeleteTaskDataSchema
+      : competitorBatchDeleteTaskDataSchema;
+  const label = domain === 'asin' ? 'ASIN' : '竞品';
+  return async (job, token) => {
+    const parsed = schema.safeParse(job.data);
     if (
       !parsed.success ||
       job.id !== parsed.data.taskId ||
-      job.name !== 'asin-batch-delete'
+      job.name !== `${domain}-batch-delete`
     )
       throw new UnrecoverableError('批量删除任务数据无效');
     const data = parsed.data;
@@ -81,7 +126,7 @@ export function createAsinBatchDeleteProcessor(
       await inspect(
         await mutate({ kind: 'processing', message: '批量删除任务开始处理' }),
       );
-      log.info('ASIN 批量删除任务开始');
+      log.info(`${label} 批量删除任务开始`);
       await progress(5, '正在分析删除目标...');
       const analysis = await repository.transaction((unit) =>
         unit.analyze({ groupIds: data.groupIds, asinIds: data.asinIds }),
@@ -111,7 +156,7 @@ export function createAsinBatchDeleteProcessor(
             asinCount: chunk.asinIds.length,
             error: '删除分块失败，请刷新后核实剩余目标',
           });
-          log.error('ASIN 批量删除分块失败', {
+          log.error(`${label} 批量删除分块失败`, {
             chunkIndex: index + 1,
             reason: 'batch_delete_chunk_failed',
           });
@@ -129,7 +174,7 @@ export function createAsinBatchDeleteProcessor(
         message: '批量删除完成',
       });
       if (completed.status !== 'completed') throw new TaskStopped(completed);
-      log.info('ASIN 批量删除任务完成', {
+      log.info(`${label} 批量删除任务完成`, {
         failedChunks: aggregate.failedCount,
       });
       // Durable metadata precedes BullMQ completion. A lost completion ACK is
@@ -158,11 +203,11 @@ export function createAsinBatchDeleteProcessor(
           if (cancelled.status === 'cancelled') return cancelledResult;
         } else await mutate({ kind: 'failed', message });
       } catch {
-        log.warn('ASIN 批量删除任务状态写入未确认', {
+        log.warn(`${label} 批量删除任务状态写入未确认`, {
           reason: 'batch_delete_status_unconfirmed',
         });
       }
-      log.error('ASIN 批量删除任务停止', {
+      log.error(`${label} 批量删除任务停止`, {
         reason:
           error instanceof WorkerStopping
             ? 'worker_shutdown'

@@ -5,9 +5,12 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   addBatchDeleteResult,
+  asinBatchDeleteTaskDataSchema,
   batchDeleteSyncResult,
+  batchDeleteTaskDataSchema,
   batchDeleteTaskResult,
   buildBatchDeleteAnalysis,
+  competitorBatchDeleteTaskDataSchema,
   createBatchDeleteAggregate,
   DEFAULT_BATCH_DELETE_LIMITS,
   MAX_ASIN_BATCH_DELETE_TARGETS,
@@ -96,10 +99,10 @@ function legacyFixture(
     normalizeIdList(raw: unknown): string[];
     normalizeUseAsync(raw: unknown): boolean | undefined;
     analyzeBatchDelete(
-      input: BatchDeleteIds & { domain: 'asin' },
+      input: BatchDeleteIds & { domain: 'asin' | 'competitor' },
     ): Promise<BatchDeleteAnalysis>;
     executeBatchDelete(
-      input: BatchDeleteIds & { domain: 'asin' },
+      input: BatchDeleteIds & { domain: 'asin' | 'competitor' },
     ): Promise<unknown>;
     shouldUseAsyncForBatchDelete(
       analysis: Pick<
@@ -161,41 +164,84 @@ describe('batch deletion / actual Legacy domain compatibility', () => {
       legacyFixture().service.normalizeUseAsync(value),
     );
   });
-  it.each([
-    { groupIds: ['missing-g', 'g1'], asinIds: ['a2', 'a1', 'missing-a'] },
-    { groupIds: [], asinIds: ['a2', 'a1'] },
-    { groupIds: ['g2', 'g1'], asinIds: ['a1', 'a2'] },
-    { groupIds: ['missing-g'], asinIds: ['missing-a'] },
-  ])(
-    'compares the complete analysis and synchronous result: %#',
-    async (request) => {
-      const groups = ['g1', 'g2'];
-      const asins = [
-        { id: 'a1', variantGroupId: 'g1' },
-        { id: 'a2', variantGroupId: 'g2' },
-        { id: 'a3', variantGroupId: 'g1' },
-      ];
-      const { service } = legacyFixture({ groups, asins });
-      const expected = await service.analyzeBatchDelete({
-        ...request,
-        domain: 'asin',
-      });
-      const actual = buildBatchDeleteAnalysis(
-        request,
-        groups.filter((id) => request.groupIds.includes(id)),
-        asins.filter((row) => request.asinIds.includes(row.id)),
-        asins.filter((row) => request.groupIds.includes(row.variantGroupId))
-          .length,
+  describe.each(['asin', 'competitor'] as const)(
+    '%s business domain',
+    (domain) => {
+      it.each([
+        { groupIds: ['missing-g', 'g1'], asinIds: ['a2', 'a1', 'missing-a'] },
+        { groupIds: [], asinIds: ['a2', 'a1'] },
+        { groupIds: ['g2', 'g1'], asinIds: ['a1', 'a2'] },
+        { groupIds: ['missing-g'], asinIds: ['missing-a'] },
+      ])(
+        'compares the complete analysis and synchronous result: %#',
+        async (request) => {
+          const groups = ['g1', 'g2'];
+          const asins = [
+            { id: 'a1', variantGroupId: 'g1' },
+            { id: 'a2', variantGroupId: 'g2' },
+            { id: 'a3', variantGroupId: 'g1' },
+          ];
+          const { service } = legacyFixture({ groups, asins });
+          const expected = await service.analyzeBatchDelete({
+            ...request,
+            domain,
+          });
+          const actual = buildBatchDeleteAnalysis(
+            request,
+            groups.filter((id) => request.groupIds.includes(id)),
+            asins.filter((row) => request.asinIds.includes(row.id)),
+            asins.filter((row) => request.groupIds.includes(row.variantGroupId))
+              .length,
+            domain,
+          );
+          expect(json(actual)).toEqual(json(expected));
+          const response = batchDeleteSyncResult(actual);
+          expect(json(response)).toEqual(
+            json(await service.executeBatchDelete({ ...request, domain })),
+          );
+          batchDeleteVariantGroupsResultSchema.parse({
+            success: true,
+            errorCode: 0,
+            data: response,
+          });
+        },
       );
-      expect(json(actual)).toEqual(json(expected));
-      const response = batchDeleteSyncResult(actual);
-      expect(json(response)).toEqual(
-        json(await service.executeBatchDelete({ ...request, domain: 'asin' })),
-      );
-      batchDeleteVariantGroupsResultSchema.parse({
-        success: true,
-        errorCode: 0,
-        data: response,
+      it('accepts only the exact normalized queue identity for this domain', () => {
+        const payload = {
+          taskId: '12345678-1234-4234-8234-123456789012',
+          taskType: 'batch-delete',
+          taskSubType:
+            domain === 'asin'
+              ? 'variant-group-delete'
+              : 'competitor-variant-group-delete',
+          domain,
+          title: domain === 'asin' ? '批量删除变体组' : '批量删除竞品变体组',
+          userId: 'user-127',
+          createdAt: '2026-09-21T00:00:00.000Z',
+          groupIds: ['g1'],
+          asinIds: [],
+        };
+        expect(batchDeleteTaskDataSchema.parse(payload)).toEqual(payload);
+        const opposite =
+          domain === 'asin'
+            ? competitorBatchDeleteTaskDataSchema
+            : asinBatchDeleteTaskDataSchema;
+        expect(opposite.safeParse(payload).success).toBe(false);
+        for (const invalid of [
+          { domain: 'other' },
+          { domain: domain === 'asin' ? 'competitor' : 'asin' },
+          { taskSubType: 'other' },
+          { title: 'other' },
+          { extra: true },
+          { groupIds: [' g1 '] },
+          { groupIds: ['g1', 'g1'] },
+          { groupIds: [], asinIds: [] },
+          { groupIds: Array(1000).fill('g1'), asinIds: ['a1'] },
+        ])
+          expect(
+            batchDeleteTaskDataSchema.safeParse({ ...payload, ...invalid })
+              .success,
+          ).toBe(false);
       });
     },
   );

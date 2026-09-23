@@ -8,7 +8,8 @@ import {
 import type { VariantCheckJobData } from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
-  type AsinBatchDeleteTaskData,
+  batchDeleteTaskDataSchema,
+  type BatchDeleteTaskData,
   type TaskRedisPort,
   type TaskState,
 } from '@asin-monitor/db';
@@ -46,7 +47,7 @@ export interface TaskCancellationPort {
 }
 export interface BatchDeleteProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
-  enqueue(data: AsinBatchDeleteTaskData): Promise<void>;
+  enqueue(data: BatchDeleteTaskData): Promise<void>;
 }
 export interface ImportProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
@@ -216,6 +217,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       store: this.createStore(ensureOpen),
       enqueue: (data) =>
         command(async () => {
+          const accepted = batchDeleteTaskDataSchema.parse(data);
           const queue = (this.batchDeleteQueue ??= new Queue(
             getPhysicalQueueName('batch-delete'),
             {
@@ -240,7 +242,9 @@ export class TaskQueryRuntime implements OnModuleDestroy {
             throw error;
           }
           ensureOpen();
-          await queue.add('asin-batch-delete', data, { jobId: data.taskId });
+          await queue.add(`${accepted.domain}-batch-delete`, accepted, {
+            jobId: accepted.taskId,
+          });
         }),
     };
   }
