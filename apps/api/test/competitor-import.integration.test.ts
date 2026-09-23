@@ -10,6 +10,7 @@ import { Queue, type Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -101,6 +102,22 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               },
             }),
       });
+      const primaryImportCollation = readFileSync(
+        resolve(
+          __dirname,
+          '../../../packages/db/migrations/0005_import_group_collation.sql',
+        ),
+        'utf8',
+      ).replaceAll('public', f.schema);
+      const connection = await f.pools.primaryPool.connect();
+      try {
+        await connection.query(primaryImportCollation);
+      } catch (error) {
+        await connection.query('ROLLBACK');
+        throw error;
+      } finally {
+        connection.release();
+      }
       legacy = await legacyImportFixture('competitor');
       redis = new Redis(env.REDIS_URL, {
         lazyConnect: true,
