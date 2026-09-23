@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canCancelTask,
   hasTaskDownload,
+  taskErrorOverflowMessage,
   taskErrors,
   taskProgress,
   taskSummary,
@@ -32,6 +33,13 @@ function task(override: Partial<TaskInfo> = {}): TaskInfo {
     ...override,
   };
 }
+const importId = '123e4567-e89b-42d3-a456-426614174000';
+const report = {
+  taskId: importId,
+  inputSha256: 'a'.repeat(64),
+  sha256: 'b'.repeat(64),
+  bytes: 2048,
+};
 
 describe('task center display boundaries', () => {
   it('shows cancel only for active supported jobs and downloads only from supported completed results', () => {
@@ -42,11 +50,44 @@ describe('task center display boundaries', () => {
     expect(
       hasTaskDownload(
         task({
+          taskId: importId,
+          status: 'completed',
+          downloadUrl: '/api/v1/tasks/task-1/download',
+          result: { taskSubType: 'asin', report },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasTaskDownload(
+        task({
+          taskId: importId,
+          status: 'completed',
+          downloadUrl: '/api/v1/tasks/task-1/download',
+          result: {
+            taskSubType: 'asin',
+            report: { ...report, taskId: 'other' },
+          },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasTaskDownload(
+        task({
+          taskId: importId,
+          status: 'completed',
+          downloadUrl: '/api/v1/tasks/task-1/download',
+          result: { taskSubType: 'competitor-asin', report },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasTaskDownload(
+        task({
           status: 'completed',
           downloadUrl: '/api/v1/tasks/task-1/download',
         }),
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       hasTaskDownload(
         task({
@@ -81,9 +122,22 @@ describe('task center display boundaries', () => {
           taskType: 'variant-check',
           filename: 'check-result-task-1.json',
           downloadUrl: '/api/v1/tasks/task-1/download',
+          result: { errors: [] },
         }),
       ),
     ).toBe(true);
+    const batchDelete = task({
+      taskType: 'batch-delete',
+      status: 'completed',
+      downloadUrl: '/api/v1/tasks/task-1/download',
+      result: {
+        failedSamples: [...Array(30)].map(() => ({ message: 'failed' })),
+      },
+    });
+    expect(hasTaskDownload(batchDelete)).toBe(false);
+    expect(taskErrorOverflowMessage(batchDelete)).toContain(
+      '暂无完整结果下载入口',
+    );
   });
 
   it('uses a bounded structured summary without dumping arbitrary result payloads', () => {

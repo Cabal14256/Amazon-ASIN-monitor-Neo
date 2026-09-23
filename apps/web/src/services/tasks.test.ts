@@ -57,6 +57,21 @@ describe('task API boundary', () => {
     expect(f.tasks.downloadURL('job-1')).not.toContain('token');
   });
 
+  it('downloads task results with the same credential mode as task detail', async () => {
+    const f = setup();
+    f.local.set('token', 'fixture-legacy');
+    f.fetcher.mockResolvedValueOnce(new Response('{"ok":true}'));
+    const file = await f.tasks.download('job-1');
+    expect(await file.text()).toBe('{"ok":true}');
+    expect(f.fetcher.mock.calls[0][0]).toBe(
+      'https://api.test/gateway/api/v1/tasks/job-1/download',
+    );
+    expect(f.fetcher.mock.calls[0][1]?.credentials).toBe('include');
+    expect(
+      new Headers(f.fetcher.mock.calls[0][1]?.headers).get('authorization'),
+    ).toBe('Bearer fixture-legacy');
+  });
+
   it('creates, lists and cancels using shared envelopes and the correct methods', async () => {
     const f = setup();
     f.fetcher.mockResolvedValueOnce(
@@ -110,6 +125,9 @@ describe('task API boundary', () => {
         kind: 'INVALID_INPUT',
       });
       expect(() => f.tasks.downloadURL(id)).toThrow();
+      await expect(f.tasks.download(id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
       expect(f.fetcher).not.toHaveBeenCalled();
     },
   );

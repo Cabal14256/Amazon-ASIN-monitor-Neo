@@ -134,9 +134,13 @@ export class TaskApi {
     validateTaskId(data.taskId);
     return data;
   }
-  /** Native browser download uses HttpOnly Cookie, never a token query or WS URL. */
+  /** URL for callers that already have a Cookie session. */
   downloadURL(taskId: string): string {
     return this.http.url(`${taskPath(taskId)}/download`);
+  }
+  /** Authenticated transfer also works for legacy Bearer sessions. */
+  async download(taskId: string, signal?: AbortSignal): Promise<Blob> {
+    return this.http.download(`${taskPath(taskId)}/download`, signal);
   }
 
   /** Stops local waiting only; server cancellation is the explicit cancel() action. */

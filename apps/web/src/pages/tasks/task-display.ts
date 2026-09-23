@@ -125,10 +125,40 @@ export function canCancelTask(task: TaskInfo): boolean {
 
 export function hasTaskDownload(task: TaskInfo): boolean {
   if (task.status !== 'completed' || !task.downloadUrl) return false;
-  if (task.taskType === 'import')
-    return ['asin', 'competitor-asin'].includes(task.taskSubType ?? '');
+  if (task.taskType === 'import') {
+    const result = taskResult(task);
+    const report = result?.report;
+    if (!report || typeof report !== 'object' || Array.isArray(report))
+      return false;
+    const ref = report as Record<string, unknown>;
+    const uuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    const sha = /^[0-9a-f]{64}$/;
+    return (
+      ['asin', 'competitor-asin'].includes(task.taskSubType ?? '') &&
+      result?.taskSubType === task.taskSubType &&
+      ref.taskId === task.taskId &&
+      typeof ref.taskId === 'string' &&
+      uuid.test(ref.taskId) &&
+      typeof ref.inputSha256 === 'string' &&
+      sha.test(ref.inputSha256) &&
+      typeof ref.sha256 === 'string' &&
+      sha.test(ref.sha256) &&
+      typeof ref.bytes === 'number' &&
+      Number.isSafeInteger(ref.bytes) &&
+      ref.bytes > 0 &&
+      ref.bytes <= 256 * 1024 * 1024
+    );
+  }
   return (
     ['variant-check', 'batch-check'].includes(task.taskType) &&
+    task.result !== null &&
     task.filename === `check-result-${task.taskId}.json`
   );
+}
+
+export function taskErrorOverflowMessage(task: TaskInfo): string {
+  return hasTaskDownload(task)
+    ? '仅展示前 20 项，完整结果请下载报告。'
+    : '仅展示前 20 项；此类任务暂无完整结果下载入口。';
 }

@@ -24,6 +24,54 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('fetch and download transport boundary', () => {
+  it('downloads through the normalized authenticated transport for legacy Bearer sessions', async () => {
+    const f = setup('https://api.test/gateway/api/');
+    f.local.set('token', 'fixture-legacy');
+    f.fetcher.mockResolvedValueOnce(
+      new Response('{"rows":1}', {
+        headers: { 'content-type': 'application/json', 'content-length': '10' },
+      }),
+    );
+    const file = await f.client.download('/api/v1/tasks/job-1/download');
+    expect(await file.text()).toBe('{"rows":1}');
+    expect(f.fetcher.mock.calls[0][0]).toBe(
+      'https://api.test/gateway/api/v1/tasks/job-1/download',
+    );
+    expect(f.fetcher.mock.calls[0][0]).not.toContain('/api/api/');
+    expect(f.fetcher.mock.calls[0][1]).toMatchObject({
+      method: 'GET',
+      credentials: 'include',
+      redirect: 'error',
+    });
+    expect(
+      new Headers(f.fetcher.mock.calls[0][1]?.headers).get('authorization'),
+    ).toBe('Bearer fixture-legacy');
+  });
+
+  it('bounds downloads and preserves the authentication failure', async () => {
+    const f = setup();
+    f.fetcher.mockResolvedValueOnce(
+      new Response('too large', {
+        headers: { 'content-length': String(256 * 1024 * 1024 + 1) },
+      }),
+    );
+    await expect(
+      f.client.download('/v1/tasks/job-1/download'),
+    ).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: false, errorCode: 401 }, 401),
+    );
+    await expect(
+      f.client.download('/v1/tasks/job-1/download'),
+    ).rejects.toMatchObject({
+      kind: 'AUTH',
+      status: 401,
+    });
+    expect(f.unauthorized).toHaveBeenCalledOnce();
+  });
+
   it('shares request/download normalization and merges existing query before fragments', async () => {
     const f = setup('https://api.test/gateway/api/v1/');
     const expected =

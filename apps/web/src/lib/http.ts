@@ -138,6 +138,51 @@ async function readJson(
   }
 }
 
+async function readBlob(
+  response: Response,
+  maxResponseBytes: number,
+): Promise<Blob> {
+  const announced = Number(response.headers.get('content-length'));
+  if (Number.isFinite(announced) && announced > maxResponseBytes) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      /* The size violation remains authoritative. */
+    }
+    throw new ApiError('INVALID_RESPONSE', '下载文件过大', response.status);
+  }
+  const reader = response.body?.getReader();
+  if (!reader)
+    throw new ApiError('INVALID_RESPONSE', '下载响应为空', response.status);
+  const chunks: BlobPart[] = [];
+  let bytes = 0;
+  let reads = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > maxResponseBytes || ++reads > 200_000)
+        throw new ApiError('INVALID_RESPONSE', '下载文件过大', response.status);
+      chunks.push(new Uint8Array(part.value));
+    }
+    if (bytes === 0)
+      throw new ApiError('INVALID_RESPONSE', '下载响应为空', response.status);
+    return new Blob(chunks, {
+      type: response.headers.get('content-type') || 'application/octet-stream',
+    });
+  } catch (error) {
+    try {
+      await reader.cancel();
+    } catch {
+      /* The fetch signal also owns cancellation. */
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export class HttpClient {
   private readonly active = new Set<AbortController>();
   private closed = false;
@@ -303,6 +348,87 @@ export class HttpClient {
       work
         .then(resolve, reject)
         .finally(() => signal.removeEventListener('abort', cancelled));
+    });
+  }
+  /** Bounded authenticated file transfer for Cookie and legacy Bearer sessions. */
+  async download(path: string, signal?: AbortSignal): Promise<Blob> {
+    if (this.closed) throw new ApiError('CLOSED', '请求客户端已关闭');
+    if (this.active.size >= 64)
+      throw new ApiError('CAPACITY', '请求过多，请稍后重试');
+    const url = this.url(path);
+    const headers = new Headers({ accept: 'application/json' });
+    const token = this.options.session.getLegacyToken();
+    if (token) headers.set('authorization', `Bearer ${token}`);
+    const controller = new AbortController();
+    const abort = () =>
+      controller.abort(new ApiError('CANCELLED', '请求已取消'));
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(
+      () => controller.abort(new ApiError('TIMEOUT', '下载超时')),
+      125_000,
+    );
+    const revision = this.options.session.revision;
+    this.active.add(controller);
+    const requestSignal = controller.signal;
+    const work = (async () => {
+      if (requestSignal.aborted) throw requestSignal.reason;
+      const response = await (this.options.fetch ?? fetch)(url, {
+        method: 'GET',
+        headers,
+        signal: requestSignal,
+        credentials: 'include',
+        redirect: 'error',
+      });
+      if (requestSignal.aborted) throw requestSignal.reason;
+      if (!response.ok) {
+        let payload: unknown;
+        try {
+          payload = await readJson(response, 8192);
+        } catch {
+          /* HTTP status remains authoritative for a malformed error body. */
+        }
+        const envelope =
+          payload && typeof payload === 'object'
+            ? (payload as Record<string, unknown>)
+            : undefined;
+        if (response.status === 401) {
+          if (revision === this.options.session.revision) {
+            this.active.delete(controller);
+            try {
+              this.options.onUnauthorized?.();
+            } catch {
+              /* Preserve the authentication error. */
+            }
+          }
+          throw new ApiError('AUTH', '未认证或认证已过期', 401, 401);
+        }
+        const message =
+          typeof envelope?.errorMessage === 'string' &&
+          envelope.errorMessage.length <= 500
+            ? envelope.errorMessage
+            : '任务下载失败';
+        throw new ApiError('HTTP', message, response.status);
+      }
+      return readBlob(response, 256 * 1024 * 1024);
+    })()
+      .catch((error: unknown) => {
+        if (requestSignal.aborted) throw requestSignal.reason;
+        if (error instanceof ApiError) throw error;
+        throw new ApiError('NETWORK', '网络请求失败');
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        this.active.delete(controller);
+      });
+    return new Promise<Blob>((resolve, reject) => {
+      const cancelled = () => reject(requestSignal.reason);
+      if (requestSignal.aborted) cancelled();
+      else requestSignal.addEventListener('abort', cancelled, { once: true });
+      work
+        .then(resolve, reject)
+        .finally(() => requestSignal.removeEventListener('abort', cancelled));
     });
   }
   cancelAll(): void {

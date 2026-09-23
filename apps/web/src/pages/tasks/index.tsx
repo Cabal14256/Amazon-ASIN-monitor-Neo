@@ -29,6 +29,7 @@ import {
   canCancelTask,
   hasTaskDownload,
   taskDate,
+  taskErrorOverflowMessage,
   taskErrors,
   taskProgress,
   taskResult,
@@ -63,15 +64,28 @@ function ErrorNotice({
   );
 }
 
-function DownloadLink({ task, href }: { task: TaskInfo; href: string }) {
+function DownloadAction({
+  task,
+  onDownload,
+  pending,
+  disabled,
+}: {
+  task: TaskInfo;
+  onDownload: () => void;
+  pending: boolean;
+  disabled: boolean;
+}) {
   return (
-    <a
-      href={href}
-      className="inline-flex min-h-9 items-center gap-2 rounded-pill border border-input bg-card px-3.5 py-2 text-xs font-semibold hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-ring"
+    <Button
+      variant="secondary"
+      size="small"
+      pending={pending}
+      disabled={disabled}
+      onClick={onDownload}
     >
       <Download aria-hidden="true" className="size-4" />
       下载{task.taskType === 'import' ? '报告' : '结果'}
-    </a>
+    </Button>
   );
 }
 
@@ -188,7 +202,7 @@ function TaskDetails({ task }: { task: TaskInfo }) {
           (Array.isArray(result?.failedSamples) &&
             result.failedSamples.length > errors.length) ? (
             <p className="mt-2 text-xs text-muted-foreground">
-              仅展示前 20 项，完整结果请下载报告。
+              {taskErrorOverflowMessage(task)}
             </p>
           ) : null}
         </section>
@@ -217,6 +231,8 @@ export default function TaskCenterPage() {
     text: string;
   } | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [downloadId, setDownloadId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const tasks = useTaskListQuery(runtime, { status: filter, limit: 100 }, true);
   const detail = useTaskQuery(
     runtime,
@@ -270,6 +286,33 @@ export default function TaskCenterPage() {
     }
   }
 
+  async function downloadTask(task: TaskInfo) {
+    if (downloadId) return;
+    setDownloadId(task.taskId);
+    setDownloadError(null);
+    try {
+      const blob = await runtime.tasks.download(task.taskId);
+      const objectURL = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement('a');
+        link.href = objectURL;
+        link.download = `${
+          task.taskType === 'import' ? 'import' : 'check'
+        }-result-${task.taskId}.json`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+      } finally {
+        // Give the browser time to begin reading the object URL after click().
+        setTimeout(() => URL.revokeObjectURL(objectURL), 30_000);
+      }
+    } catch (error) {
+      setDownloadError(errorMessage(error));
+    } finally {
+      setDownloadId(null);
+    }
+  }
+
   return (
     <AppShell title="任务中心">
       <div className="space-y-6">
@@ -309,6 +352,14 @@ export default function TaskCenterPage() {
             className="rounded-control bg-status-danger-soft p-4 text-sm text-status-danger"
           >
             取消失败：{cancelError}
+          </p>
+        )}
+        {downloadError && (
+          <p
+            role="alert"
+            className="rounded-control bg-status-danger-soft p-4 text-sm text-status-danger"
+          >
+            下载失败：{downloadError}
           </p>
         )}
 
@@ -428,9 +479,13 @@ export default function TaskCenterPage() {
                                 />
                               </Button>
                               {hasTaskDownload(task) && (
-                                <DownloadLink
+                                <DownloadAction
                                   task={task}
-                                  href={runtime.tasks.downloadURL(task.taskId)}
+                                  pending={downloadId === task.taskId}
+                                  disabled={downloadId !== null}
+                                  onDownload={() => {
+                                    void downloadTask(task);
+                                  }}
                                 />
                               )}
                               {canCancelTask(task) && (
@@ -532,9 +587,13 @@ export default function TaskCenterPage() {
                   <TaskDetails task={detail.data} />
                   {hasTaskDownload(detail.data) && (
                     <div className="mt-5">
-                      <DownloadLink
+                      <DownloadAction
                         task={detail.data}
-                        href={runtime.tasks.downloadURL(detail.data.taskId)}
+                        pending={downloadId === detail.data.taskId}
+                        disabled={downloadId !== null}
+                        onDownload={() => {
+                          void downloadTask(detail.data);
+                        }}
                       />
                     </div>
                   )}
