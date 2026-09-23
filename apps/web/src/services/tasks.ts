@@ -22,6 +22,9 @@ export const isTaskMessage = (message: WsMessage) =>
   message.type === 'task_error' ||
   message.type === 'task_cancelled';
 
+// Check results can reach 32 MiB before the HTTP envelope and task metadata.
+const TASK_READ_RESPONSE_LIMIT = 40 * 1024 * 1024;
+
 function taskPath(taskId: string): string {
   if (
     !taskId ||
@@ -91,7 +94,11 @@ export class TaskApi {
     const data = requireData(
       await this.http.request(
         '/api/v1/tasks',
-        { query: parsed.data, signal },
+        {
+          query: parsed.data,
+          signal,
+          maxResponseBytes: TASK_READ_RESPONSE_LIMIT,
+        },
         taskListResultSchema,
       ),
     );
@@ -102,7 +109,7 @@ export class TaskApi {
     const data = requireData(
       await this.http.request(
         taskPath(taskId),
-        { signal },
+        { signal, maxResponseBytes: TASK_READ_RESPONSE_LIMIT },
         taskInfoResultSchema,
       ),
     );

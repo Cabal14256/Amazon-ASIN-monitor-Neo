@@ -72,6 +72,27 @@ describe('task API boundary', () => {
     ).toBe('Bearer fixture-legacy');
   });
 
+  it('reads valid large check details and aggregate task lists beyond the generic 8 MiB limit', async () => {
+    const f = setup();
+    const detail = taskFixture({
+      taskType: 'batch-check',
+      status: 'completed',
+      result: { payload: 'x'.repeat(9 * 1024 * 1024) },
+    });
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: true, data: detail }),
+    );
+    expect((await f.tasks.get('job-1')).result).toEqual(detail.result);
+    const preview = 'x'.repeat(190 * 1024);
+    const list = Array.from({ length: 50 }, (_, index) =>
+      taskFixture({ taskId: `job-${index + 1}`, result: { preview } }),
+    );
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: true, data: list }),
+    );
+    expect(await f.tasks.list({ limit: 100 })).toHaveLength(50);
+  });
+
   it('creates, lists and cancels using shared envelopes and the correct methods', async () => {
     const f = setup();
     f.fetcher.mockResolvedValueOnce(

@@ -22,7 +22,7 @@
 ## 失败、取消和身份切换
 
 - fetch 本身没有自动重试；Query 只对网络、截止或 5xx 错误再试一次，业务/权限/契约错误不重试。Mutation 不自动重试，避免重复写入。
-- HTTP 默认 30 秒、可设 1 ms ～ 5 分钟，覆盖请求与 JSON 读取；原生 AbortSignal 取消实际 I/O。JSON 响应上限 8 MiB/10000 个读取块，请求准入最多 64 个实际未结束 work。注入 fetch 若忽略取消，调用方能收到截止，但旧槽直到依赖实际结束才释放。
+- HTTP 默认 30 秒、可设 1 ms ～ 5 分钟，覆盖请求与 JSON 读取；原生 AbortSignal 取消实际 I/O。JSON 响应默认上限 8 MiB，端点可设最多 40 MiB（任务详情的 32 MiB 结果另需容纳信封与元数据）；每次最多 10000 个读取块，请求准入最多 64 个实际未结束 work。注入 fetch 若忽略取消，调用方能收到截止，但旧槽直到依赖实际结束才释放。
 - 原 helper 保持兼容，传输边界另拒绝危险协议、URL 用户名/密码、HTTPS 降级、API 根路径逃逸、编码分隔符/反斜线/控制字符及超长地址。`redirect:error` 禁止携带凭据跟随重定向；这是 [Fetch 显式支持的重定向策略](https://developer.mozilla.org/en-US/docs/Web/API/Request/redirect)。
 - SessionStore 在存储/Cookie 不可访问时不崩溃；本地 clear 即使删除持久化失败也压制旧提示。旧请求的 401 不能清掉 revision 已更新的新会话。
 - login/logout 在同一 AuthApi 实例中串行；默认 rememberMe=false。新登录成功会断开旧用户 WS、清 Query 和取消旧请求。其他标签页 storage 变更执行同样的旧工作清理和提示重读；Issue #55 的 auth context 重新获取当前用户后才恢复连接。
