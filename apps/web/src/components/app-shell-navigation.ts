@@ -37,7 +37,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '任务中心',
         access: 'isLogin',
         icon: ClipboardList,
-        available: false,
+        available: true,
       },
     ],
   },

@@ -20,6 +20,7 @@ describe('workspace navigation', () => {
       items.find((item) => item.path === '/monitor-history')?.available,
     ).toBe(false);
     expect(items.find((item) => item.path === '/home')?.available).toBe(true);
+    expect(items.find((item) => item.path === '/tasks')?.available).toBe(true);
     expect(items.find((item) => item.path === '/asin')?.available).toBe(true);
     expect(
       items.find((item) => item.path === '/competitor-asin')?.available,

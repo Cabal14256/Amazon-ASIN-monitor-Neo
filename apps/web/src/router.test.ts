@@ -117,7 +117,7 @@ describe('application router identity boundary', () => {
     await f.router.load();
     expect(f.router.state.location.href).toBe('/profile?tab=sessions#device');
   });
-  it.each(['/login', '/403', '/asin'])(
+  it.each(['/login', '/403', '/asin', '/tasks'])(
     'requires a password change before visiting %s',
     async (path) => {
       const f = setup(path, async () =>
