@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
+import type { ImportMode } from '../src/columns';
 import { ImportPlanBuilder, type ImportPlan } from '../src/rows';
 
 const header = ['变体组名称', '国家', '站点', '品牌', 'ASIN', 'ASIN类型'];
@@ -16,13 +17,19 @@ const row = (group = 'Group', asin = 'b000000001') => [
 
 /** Execute the full old parser; replace only the spreadsheet I/O adapter with
  * the same cell.text matrix supplied to the streaming plan builder. */
-async function legacy(rows: string[][]): Promise<ImportPlan> {
+async function legacy(
+  rows: string[][],
+  mode: ImportMode = 'standard',
+): Promise<ImportPlan> {
   const module = {
     exports: {} as {
-      parseImportFile(file: {
-        originalname: string;
-        buffer: Buffer;
-      }): Promise<ImportPlan>;
+      parseImportFile(
+        file: {
+          originalname: string;
+          buffer: Buffer;
+        },
+        options?: { mode: ImportMode },
+      ): Promise<ImportPlan>;
     },
   };
   class Workbook {
@@ -57,22 +64,37 @@ async function legacy(rows: string[][]): Promise<ImportPlan> {
   });
   return JSON.parse(
     JSON.stringify(
-      await module.exports.parseImportFile({
-        originalname: 'fixture.xlsx',
-        buffer: Buffer.alloc(0),
-      }),
+      await module.exports.parseImportFile(
+        { originalname: 'fixture.xlsx', buffer: Buffer.alloc(0) },
+        { mode },
+      ),
     ),
   );
 }
-function plan(rows: string[][]) {
+function plan(rows: string[][], mode: ImportMode = 'standard') {
   const builder = new ImportPlanBuilder(
     rows[0],
     Math.max(...rows.map((cells) => cells.length)),
+    mode,
   );
   rows.slice(1).forEach((cells, index) => builder.add(index + 2, cells));
   return builder.finish(rows.length);
 }
 describe('streaming import plan against complete Legacy row results', () => {
+  it('matches competitor rows without a site column, duplicate grouping and validation order', async () => {
+    const rows = [
+      ['变体组名称', '国家', '品牌', 'ASIN', 'ASIN类型'],
+      ['竞品组', 'us', '品牌', 'b000000001', '1'],
+      ['竞品组', 'US', '品牌', 'B000000001', '2'],
+      ['竞品组', 'UK', '品牌', 'b000000002', '2'],
+      ['竞品组', 'US', '', 'b000000003', '1'],
+      ['竞品组', 'US', '品牌', 'b000000004', '3'],
+    ];
+    const actual = plan(rows, 'competitor');
+    expect(actual).toEqual(await legacy(rows, 'competitor'));
+    expect(actual.groupedItems[0].site).toBe('');
+    expect(actual.groupedItems).toHaveLength(2);
+  });
   const cases: [string, string[][]][] = [
     [
       'normal and file order',

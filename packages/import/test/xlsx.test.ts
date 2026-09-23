@@ -13,10 +13,13 @@ const legacyPath = resolve(
   '../../../server/src/services/importParserService.js',
 );
 const legacy = createRequire(legacyPath)(legacyPath) as {
-  parseImportFile(file: {
-    originalname: string;
-    buffer: Buffer;
-  }): Promise<ImportPlan>;
+  parseImportFile(
+    file: {
+      originalname: string;
+      buffer: Buffer;
+    },
+    options?: { mode: 'competitor' },
+  ): Promise<ImportPlan>;
 };
 const header = [
   '变体组名称',
@@ -78,6 +81,21 @@ async function editXml(
 }
 
 describe('real XLSX bytes compared with the actual Legacy document reader', () => {
+  it('matches competitor mode with no site header in real XLSX bytes', async () => {
+    const book = new ExcelJS.Workbook();
+    const sheet = book.addWorksheet('竞品');
+    sheet.addRow(['变体组名称', '国家', '品牌', 'ASIN', 'ASIN类型']);
+    sheet.addRow(['竞品组', 'US', '品牌', 'b000000001', '1']);
+    sheet.addRow(['竞品组', 'US', '品牌', 'b000000001', '2']);
+    const bytes = Buffer.from(await book.xlsx.writeBuffer());
+    const expected = await legacy.parseImportFile(
+      { originalname: 'fixture.xlsx', buffer: bytes },
+      { mode: 'competitor' },
+    );
+    expect(
+      await parseXlsxFile(await file(bytes), { mode: 'competitor' }),
+    ).toEqual(expected);
+  });
   it('imports records, duplicates and row errors in the same order', async () => {
     const actual = await compare(
       await workbook((_book, sheet) => {
