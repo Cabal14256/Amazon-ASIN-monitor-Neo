@@ -272,8 +272,24 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           extension,
         );
         const expected = await legacy.run(buffer, `fixture.${extension}`);
+        const legacyAccepted = await legacy.controller!(
+          buffer,
+          `fixture.${extension}`,
+          true,
+        );
+        expect(legacyAccepted.statusCode).toBe(200);
+        expect(legacyAccepted.body).toMatchObject({
+          success: true,
+          errorCode: 0,
+          data: { status: 'pending' },
+        });
         const response = await request(buffer, extension);
         expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+          success: true,
+          errorCode: 0,
+          data: { status: 'pending' },
+        });
         importExcelResultSchema.parse(response.json());
         const id = response.json().data.taskId as string;
         expect((await queue.getJob(id))?.name).toBe('competitor-import');
@@ -308,10 +324,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         url: '/api/v1/competitor/variant-groups/import-excel',
       });
       expect(denied.statusCode).toBe(401);
-      const expected = await legacy.run(buffer, 'fixture.csv');
+      const expected = await legacy.controller!(buffer, 'fixture.csv');
       const response = await request(buffer, 'csv', true);
       expect(response.statusCode).toBe(200);
-      expect(response.json().data.successCount).toBe(expected.successCount);
+      expect(response.json()).toEqual(expected.body);
       await compareRecords();
     });
   },

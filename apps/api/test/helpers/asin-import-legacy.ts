@@ -172,9 +172,62 @@ export async function legacyImportFixture(
         async markTaskFailed() {},
       },
     });
+    const shared = load('services/sharedService.js', {
+      '../utils/logger': log,
+    });
+    const controller = competitor
+      ? load('controllers/competitorAsinController.js', {
+          '../models/CompetitorVariantGroup': group,
+          '../models/CompetitorASIN': {},
+          '../utils/logger': log,
+          '../services/importService': service,
+          '../services/taskRegistryService': { async createTask() {} },
+          '../services/batchDeleteTaskQueue': {},
+          '../services/batchDeleteService': {},
+          '../services/asinBatchCreateService': batch,
+          '../services/sharedService': shared,
+          '../services/importTaskQueue': { async enqueue() {} },
+        })
+      : null;
     return {
       query,
       close,
+      controller: competitor
+        ? async (
+            buffer: Buffer,
+            originalFilename: string,
+            useAsync = false,
+          ) => {
+            let statusCode = 200;
+            let body: unknown;
+            const response = {
+              status(code: number) {
+                statusCode = code;
+                return response;
+              },
+              json(value: unknown) {
+                body = value;
+                return response;
+              },
+            };
+            await controller.importCompetitorFromExcel(
+              {
+                file: {
+                  buffer,
+                  originalname: originalFilename,
+                  mimetype: originalFilename.endsWith('.csv')
+                    ? 'text/csv'
+                    : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                  size: buffer.length,
+                },
+                body: { useAsync: String(useAsync) },
+                user: { userId: 'legacy-import-fixture' },
+              },
+              response,
+            );
+            return { statusCode, body: JSON.parse(JSON.stringify(body)) };
+          }
+        : undefined,
       run: async (buffer: Buffer, originalFilename: string) =>
         JSON.parse(
           JSON.stringify(
