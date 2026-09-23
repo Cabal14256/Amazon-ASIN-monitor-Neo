@@ -69,9 +69,9 @@ describe('monitor history API boundary', () => {
     expect(f.fetcher.mock.calls[0][1]?.credentials).toBe('include');
   });
 
-  it('accepts an API-valid aliased history payload above the generic 32 MiB override', async () => {
+  it('accepts an API-valid aliased history payload above the task 40 MiB override', async () => {
     const f = setup();
-    const result = 'x'.repeat(17 * 1024 * 1024);
+    const result = 'x'.repeat(21 * 1024 * 1024);
     f.fetcher.mockResolvedValueOnce(
       jsonResponse({
         success: true,
