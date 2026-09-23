@@ -39,6 +39,7 @@ import {
 } from './catalog-data';
 
 const PAGE_SIZES = [10, 20, 50, 100] as const;
+const CHILD_PAGE_SIZE = 50;
 const TABLE_FEATURES = tableFeatures({});
 type StatusFilter = 'ALL' | 'BROKEN' | 'NORMAL';
 const INITIAL_QUERY: VariantGroupListQuery = { current: 1, pageSize: 10 };
@@ -127,6 +128,7 @@ function GroupCard({
 
 function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const { runtime } = useAuth();
+  const [childPage, setChildPage] = useState(1);
   const detail = useQuery({
     queryKey: ['asin', 'group', id],
     queryFn: ({ signal }) => getVariantGroup(runtime.http, id, signal),
@@ -134,6 +136,13 @@ function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
     refetchOnWindowFocus: true,
   });
   const group = detail.data;
+  const children = group?.children ?? [];
+  const childPages = Math.max(1, Math.ceil(children.length / CHILD_PAGE_SIZE));
+  const visiblePage = Math.min(childPage, childPages);
+  const visibleChildren = children.slice(
+    (visiblePage - 1) * CHILD_PAGE_SIZE,
+    visiblePage * CHILD_PAGE_SIZE,
+  );
   return (
     <Card aria-label="变体组详情" className="overflow-hidden">
       <CardHeader
@@ -217,17 +226,17 @@ function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
               <h4 className="mb-3 font-semibold">
                 组内 ASIN{' '}
                 <span className="neo-mono ml-1 text-sm text-muted-foreground">
-                  {group.children?.length ?? 0}
+                  {children.length}
                 </span>
               </h4>
-              {!group.children?.length ? (
+              {children.length === 0 ? (
                 <EmptyState
                   title="组内暂无 ASIN"
                   description="当前变体组未返回任何 ASIN。"
                 />
               ) : (
                 <ul className="grid gap-3 lg:grid-cols-2">
-                  {group.children.map((child) => (
+                  {visibleChildren.map((child) => (
                     <li
                       key={child.id}
                       className="rounded-control border border-border p-4"
@@ -270,6 +279,34 @@ function GroupDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     </li>
                   ))}
                 </ul>
+              )}
+              {childPages > 1 && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+                  <span className="text-muted-foreground">
+                    第 {visiblePage} / {childPages} 页 · 每页最多{' '}
+                    {CHILD_PAGE_SIZE} 个 ASIN
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={visiblePage <= 1}
+                      onClick={() => setChildPage(visiblePage - 1)}
+                    >
+                      <ChevronLeft aria-hidden="true" />
+                      上一页
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={visiblePage >= childPages}
+                      onClick={() => setChildPage(visiblePage + 1)}
+                    >
+                      下一页
+                      <ChevronRight aria-hidden="true" />
+                    </Button>
+                  </div>
+                </div>
               )}
             </div>
           </>
