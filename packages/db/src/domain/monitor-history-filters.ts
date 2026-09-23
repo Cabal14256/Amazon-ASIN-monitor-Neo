@@ -30,7 +30,7 @@ const text = (value: unknown, max: number, whitespace = false): string => {
 /** Frontend sends Shanghai DATETIME, independent of the API host time zone.
  * Date-only bounds mean midnight. Offset-bearing instants are not silently
  * interpreted as wall clocks; they must first be formatted by the caller. */
-function wallTime(value: string): string {
+export function parseMonitorHistoryWallTime(value: string): string {
   const match =
     /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?)?$/.exec(
       value,
@@ -125,7 +125,7 @@ export function parseMonitorHistoryQuery(
   }
   for (const key of ['startTime', 'endTime'] as const)
     if (raw[key] !== undefined && raw[key] !== '')
-      result[key] = wallTime(text(raw[key], 30));
+      result[key] = parseMonitorHistoryWallTime(text(raw[key], 30));
   return result;
 }
 export function parseMonitorHistoryId(value: unknown): number {

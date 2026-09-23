@@ -129,6 +129,26 @@ export async function legacyCompetitorQueryFixture() {
       uuid,
       './CompetitorVariantGroup': model,
     });
+    const historyModel = load('models/CompetitorMonitorHistory.js', {
+      '../config/competitor-database': { query },
+      '../services/cacheService': {
+        getAsync: async () => null,
+        setAsync: async () => {},
+        deleteByPrefix: () => {},
+        deleteByPrefixAsync: async () => {},
+      },
+      '../utils/logger': logger,
+    });
+    const historyController = load(
+      'controllers/competitorMonitorController.js',
+      {
+        '../models/CompetitorMonitorHistory': historyModel,
+        '../utils/logger': logger,
+      },
+    ) as {
+      getCompetitorMonitorHistory: Handler;
+      getCompetitorMonitorHistoryById: Handler;
+    };
     const shared = load('services/sharedService.js', {
       '../utils/logger': logger,
     });
@@ -239,6 +259,14 @@ export async function legacyCompetitorQueryFixture() {
       detail: (groupId: string) =>
         invoke(controller.getCompetitorVariantGroupById, {
           params: { groupId },
+        }),
+      historyList: (filters: Record<string, string> = {}) =>
+        invoke(historyController.getCompetitorMonitorHistory, {
+          query: filters,
+        }),
+      historyDetail: (id: number) =>
+        invoke(historyController.getCompetitorMonitorHistoryById, {
+          params: { id },
         }),
     };
   } catch (error) {

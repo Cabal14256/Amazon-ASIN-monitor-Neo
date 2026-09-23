@@ -1,5 +1,6 @@
 import {
   PgCompetitorBatchDeleteRepository,
+  PgCompetitorHistoryQueryRepository,
   PgCompetitorImportRepository,
   PgCompetitorQueryRepository,
   PgCompetitorWriteRepository,
@@ -15,6 +16,11 @@ import {
   COMPETITOR_BATCH_DELETE_REPOSITORY,
   CompetitorBatchDeleteService,
 } from './competitor-batch-delete.service';
+import { CompetitorHistoryController } from './competitor-history.controller';
+import {
+  COMPETITOR_HISTORY_REPOSITORY,
+  CompetitorHistoryService,
+} from './competitor-history.service';
 import { CompetitorImportController } from './competitor-import.controller';
 import {
   COMPETITOR_IMPORT_REPOSITORY,
@@ -38,12 +44,23 @@ import {
     CompetitorWriteController,
     CompetitorBatchDeleteController,
     CompetitorImportController,
+    CompetitorHistoryController,
   ],
   providers: [
     CompetitorQueryService,
     CompetitorWriteService,
     CompetitorBatchDeleteService,
     CompetitorImportService,
+    CompetitorHistoryService,
+    {
+      provide: COMPETITOR_HISTORY_REPOSITORY,
+      inject: [ApplicationDatabasePools],
+      useFactory: (pools: ApplicationDatabasePools) =>
+        new PgCompetitorHistoryQueryRepository(
+          pools.primaryPool,
+          pools.competitorPool,
+        ),
+    },
     {
       provide: COMPETITOR_IMPORT_REPOSITORY,
       inject: [ApplicationDatabasePools],
