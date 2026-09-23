@@ -7,7 +7,7 @@ import {
   PanelLeftOpen,
   X,
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createAccess } from '../auth/access';
 import { useAuth, useIdentity } from '../auth/context';
 import { cn } from '../lib/utils';
@@ -41,6 +41,29 @@ export function AppShell({
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const mobilePanelRef = useRef<HTMLElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!mobileOpen) return;
+    closeButtonRef.current?.focus();
+    const menuButton = menuButtonRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    const closeAtDesktop = () => {
+      if (desktop.matches) setMobileOpen(false);
+    };
+    desktop.addEventListener('change', closeAtDesktop);
+    closeAtDesktop();
+    return () => {
+      desktop.removeEventListener('change', closeAtDesktop);
+      document.body.style.overflow = previousOverflow;
+      if (menuButton?.getClientRects().length) {
+        menuButton.focus();
+      }
+    };
+  }, [mobileOpen]);
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
@@ -169,6 +192,37 @@ export function AppShell({
         />
       )}
       <aside
+        ref={mobilePanelRef}
+        role={mobileOpen ? 'dialog' : undefined}
+        aria-modal={mobileOpen ? true : undefined}
+        aria-label={mobileOpen ? '主导航' : undefined}
+        onKeyDown={(event) => {
+          if (!mobileOpen) return;
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            setMobileOpen(false);
+            return;
+          }
+          if (event.key !== 'Tab') return;
+          const controls = Array.from(
+            mobilePanelRef.current?.querySelectorAll<HTMLElement>(
+              'a[href], button:not([disabled])',
+            ) ?? [],
+          ).filter((element) => element.getClientRects().length > 0);
+          const first = controls[0];
+          const last = controls.at(-1);
+          if (event.shiftKey && document.activeElement === first && last) {
+            event.preventDefault();
+            last.focus();
+          } else if (
+            !event.shiftKey &&
+            document.activeElement === last &&
+            first
+          ) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
         className={cn(
           'invisible fixed inset-y-0 left-0 z-40 flex w-[264px] shrink-0 -translate-x-full flex-col border-r border-border bg-card transition-transform duration-300 lg:visible lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:translate-x-0',
           mobileOpen && 'visible translate-x-0',
@@ -198,6 +252,7 @@ export function AppShell({
             </span>
           </Link>
           <button
+            ref={closeButtonRef}
             type="button"
             aria-label="关闭导航"
             onClick={() => setMobileOpen(false)}
@@ -223,10 +278,11 @@ export function AppShell({
           </button>
         </div>
       </aside>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1" inert={mobileOpen}>
         <header className="sticky top-0 z-20 flex min-h-20 items-center justify-between gap-3 border-b border-border bg-cream/95 px-5 backdrop-blur-sm sm:px-8 lg:px-10">
           <div className="flex min-w-0 items-center gap-3">
             <button
+              ref={menuButtonRef}
               type="button"
               aria-label="打开导航"
               aria-expanded={mobileOpen}
