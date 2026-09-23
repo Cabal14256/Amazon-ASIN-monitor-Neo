@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
   historyError,
+  historyLinkFilter,
   historyNotification,
   historyPageInfo,
   historyResultPreview,
@@ -23,6 +24,21 @@ const record = (
 });
 
 describe('monitor history display boundaries', () => {
+  it('maps Legacy catalog links to the matching history scope', () => {
+    expect(historyLinkFilter('?type=group&id=group-1')).toEqual({
+      key: 'variantGroupId',
+      id: 'group-1',
+    });
+    expect(historyLinkFilter('?type=asin&id=asin%20one')).toEqual({
+      key: 'asinId',
+      id: 'asin one',
+    });
+    expect(historyLinkFilter('?type=group&id=')).toBeNull();
+    expect(historyLinkFilter('?type=group&id=x&type=asin')).toBeNull();
+    expect(historyLinkFilter('?type=other&id=x')).toBeNull();
+    expect(historyLinkFilter('?type=group&id=x%0A')).toBeNull();
+    expect(historyLinkFilter(`?type=asin&id=${'x'.repeat(51)}`)).toBeNull();
+  });
   it('preserves unknown flags, Shanghai time and bounded detail text', () => {
     expect(historyStatus(record()).label).toBe('状态未记录');
     expect(historyStatus(record({ is_broken: 1 })).label).toBe('异常');

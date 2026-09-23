@@ -7,6 +7,28 @@ import { ApiError } from '../../lib/http';
 
 type Flag = 0 | 1 | boolean | null | undefined;
 
+/** Legacy catalog links identify one group or ASIN by its opaque database ID. */
+export function historyLinkFilter(
+  search: string,
+): { key: 'variantGroupId' | 'asinId'; id: string } | null {
+  const params = new URLSearchParams(search);
+  if (params.getAll('type').length !== 1 || params.getAll('id').length !== 1)
+    return null;
+  const type = params.get('type');
+  const id = params.get('id');
+  if (
+    !id?.trim() ||
+    [...id].length > 50 ||
+    [...id].some(
+      (char) => char.charCodeAt(0) <= 31 || char.charCodeAt(0) === 127,
+    )
+  )
+    return null;
+  if (type === 'group') return { key: 'variantGroupId', id };
+  if (type === 'asin') return { key: 'asinId', id };
+  return null;
+}
+
 export function historyFlag(value: Flag): {
   label: string;
   badge: 'danger' | 'success' | 'unknown';

@@ -3,8 +3,9 @@ import type {
   MonitorHistoryRecord,
 } from '@asin-monitor/contracts';
 import { useQuery } from '@tanstack/react-query';
+import { useRouterState } from '@tanstack/react-router';
 import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -27,6 +28,7 @@ import {
 } from '../../services/monitor-history';
 import {
   historyError,
+  historyLinkFilter,
   historyNotification,
   historyPageInfo,
   historyResultPreview,
@@ -66,6 +68,18 @@ const EMPTY_FILTERS: Filters = {
   startTime: '',
   endTime: '',
 };
+
+function historyLinkState(search: string): {
+  filters: Filters;
+  query: MonitorHistoryListQuery;
+} {
+  const link = historyLinkFilter(search);
+  const scope = link ? { [link.key]: link.id } : {};
+  return {
+    filters: { ...EMPTY_FILTERS, ...scope },
+    query: { ...INITIAL_QUERY, ...scope },
+  };
+}
 
 function ErrorNotice({
   title,
@@ -354,10 +368,26 @@ function HistoryDetail({ id, close }: { id: number; close: () => void }) {
 
 export default function MonitorHistoryPage() {
   const { runtime } = useAuth();
-  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const [query, setQuery] = useState<MonitorHistoryListQuery>(INITIAL_QUERY);
+  const search = useRouterState({
+    select: (state) => state.location.searchStr,
+  });
+  const [initialState] = useState(() => historyLinkState(search));
+  const [filters, setFilters] = useState<Filters>(initialState.filters);
+  const [query, setQuery] = useState<MonitorHistoryListQuery>(
+    initialState.query,
+  );
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
+  const previousSearch = useRef(search);
+  useEffect(() => {
+    if (previousSearch.current === search) return;
+    previousSearch.current = search;
+    const next = historyLinkState(search);
+    setFilters(next.filters);
+    setQuery(next.query);
+    setSelectedId(null);
+    setFilterError(null);
+  }, [search]);
   const history = useQuery({
     queryKey: ['monitor-history', 'list', query],
     queryFn: ({ signal }) => getMonitorHistory(runtime.http, query, signal),
