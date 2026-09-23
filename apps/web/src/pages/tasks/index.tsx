@@ -12,7 +12,7 @@ import {
   StatusBadge,
   SuccessNotice,
 } from '../../components/ui/feedback';
-import { Entrance } from '../../components/ui/motion';
+import { Entrance, MotionProvider } from '../../components/ui/motion';
 import {
   Card,
   CardContent,
@@ -297,9 +297,11 @@ export default function TaskCenterPage() {
         </section>
 
         {notice && (
-          <Entrance key={notice.revision}>
-            <SuccessNotice>{notice.text}</SuccessNotice>
-          </Entrance>
+          <MotionProvider>
+            <Entrance key={notice.revision}>
+              <SuccessNotice>{notice.text}</SuccessNotice>
+            </Entrance>
+          </MotionProvider>
         )}
         {cancelError && (
           <p
