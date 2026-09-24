@@ -9,6 +9,7 @@ describe('workspace navigation', () => {
       isLogin: true,
       canReadASIN: true,
       canReadMonitor: true,
+      canReadAudit: true,
     };
     const items = workspaceNavigation(access).flatMap(
       (section) => section.items,
@@ -29,6 +30,9 @@ describe('workspace navigation', () => {
       items.find((item) => item.path === '/competitor-monitor-history')
         ?.available,
     ).toBe(true);
+    expect(items.find((item) => item.path === '/audit-log')?.available).toBe(
+      true,
+    );
   });
   it('exposes only password management when a password change is required', () => {
     const access = {

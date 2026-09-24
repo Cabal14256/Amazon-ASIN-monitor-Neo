@@ -58,6 +58,7 @@ describe('Neo audit query HTTP authorization and validation', () => {
       headers: fixture.headers,
     });
     expect(response.statusCode).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
     expect(queries.list).toHaveBeenCalledExactlyOnceWith({
       current: 2,
       pageSize: 3,
@@ -106,6 +107,14 @@ describe('Neo audit query HTTP authorization and validation', () => {
     });
     expect(missing.statusCode).toBe(404);
     expect(queries.detail).toHaveBeenCalledExactlyOnceWith(19);
+    queries.detail.mockResolvedValueOnce({ id: 19 });
+    const found = await fixture.http.inject({
+      method: 'GET',
+      url: '/api/v1/audit-logs/19',
+      headers: fixture.headers,
+    });
+    expect(found.statusCode).toBe(200);
+    expect(found.headers['cache-control']).toBe('no-store');
     for (const kind of ['actions', 'resources'] as const) {
       const response = await fixture.http.inject({
         method: 'GET',
@@ -113,6 +122,7 @@ describe('Neo audit query HTTP authorization and validation', () => {
         headers: fixture.headers,
       });
       expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
       expect(queries[kind]).toHaveBeenCalledExactlyOnceWith({
         startTime: '2026-08-31T16:00:00.000Z',
       });

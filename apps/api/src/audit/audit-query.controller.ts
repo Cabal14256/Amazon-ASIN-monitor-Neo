@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Header,
   Inject,
   Param,
   Query,
@@ -36,6 +37,7 @@ export class AuditQueryController {
   ) {}
 
   @Get()
+  @Header('Cache-Control', 'no-store')
   async list(@Query() query: unknown) {
     return {
       success: true,
@@ -46,6 +48,7 @@ export class AuditQueryController {
     };
   }
   @Get('statistics/actions')
+  @Header('Cache-Control', 'no-store')
   async actions(@Query() query: unknown) {
     return {
       success: true,
@@ -56,6 +59,7 @@ export class AuditQueryController {
     };
   }
   @Get('statistics/resources')
+  @Header('Cache-Control', 'no-store')
   async resources(@Query() query: unknown) {
     return {
       success: true,
@@ -66,6 +70,7 @@ export class AuditQueryController {
     };
   }
   @Get(':id')
+  @Header('Cache-Control', 'no-store')
   async detail(@Param() params: unknown) {
     return {
       success: true,

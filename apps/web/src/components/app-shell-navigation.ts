@@ -117,7 +117,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '操作审计',
         access: 'canReadAudit',
         icon: ScrollText,
-        available: false,
+        available: true,
       },
       {
         path: '/profile',
