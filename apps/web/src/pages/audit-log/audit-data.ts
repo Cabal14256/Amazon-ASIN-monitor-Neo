@@ -78,3 +78,17 @@ export function auditError(error: unknown): string {
   }
   return '审计数据暂不可用，请稍后重试。';
 }
+
+/** A revoked read must hide any previously authorized list snapshot. */
+export function auditAccessError(error: unknown): ApiError | null {
+  return error instanceof ApiError && [401, 403].includes(error.status ?? 0)
+    ? error
+    : null;
+}
+
+export function auditVisibleList<T>(
+  data: T | undefined,
+  ...errors: unknown[]
+): T | undefined {
+  return errors.some((error) => auditAccessError(error)) ? undefined : data;
+}

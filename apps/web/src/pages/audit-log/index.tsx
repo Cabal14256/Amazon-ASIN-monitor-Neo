@@ -10,7 +10,7 @@ import {
   ScrollText,
   Search,
 } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -25,11 +25,13 @@ import { ApiError } from '../../lib/http';
 import { getAuditLogDetail, getAuditLogs } from '../../services/audit-log';
 import { historyWallTime } from '../monitor-history/history-data';
 import {
+  auditAccessError,
   auditAction,
   auditError,
   auditResource,
   auditResponseStatus,
   auditTime,
+  auditVisibleList,
 } from './audit-data';
 
 const INITIAL_QUERY: NeoAuditLogListQuery = { current: 1, pageSize: 10 };
@@ -216,15 +218,30 @@ function AuditRows({
   );
 }
 
-function AuditDetail({ id, close }: { id: number; close: () => void }) {
+function useAuditDetail(id: number | null) {
   const { runtime } = useAuth();
-  const detail = useQuery({
+  return useQuery({
     queryKey: ['audit-log', 'detail', id],
-    queryFn: ({ signal }) => getAuditLogDetail(runtime.http, id, signal),
+    queryFn: ({ signal }) => {
+      if (id === null) throw new ApiError('INVALID_INPUT', '审计记录标识无效');
+      return getAuditLogDetail(runtime.http, id, signal);
+    },
+    enabled: id !== null,
     staleTime: 0,
     gcTime: 0,
     refetchOnWindowFocus: true,
   });
+}
+
+function AuditDetail({
+  id,
+  close,
+  detail,
+}: {
+  id: number;
+  close: () => void;
+  detail: ReturnType<typeof useAuditDetail>;
+}) {
   const inaccessible =
     detail.isError &&
     detail.error instanceof ApiError &&
@@ -312,6 +329,7 @@ export default function AuditLogPage() {
   const [query, setQuery] = useState<NeoAuditLogListQuery>(INITIAL_QUERY);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [accessError, setAccessError] = useState<ApiError | null>(null);
   const audit = useQuery({
     queryKey: ['audit-log', 'list', query],
     queryFn: ({ signal }) => getAuditLogs(runtime.http, query, signal),
@@ -319,16 +337,41 @@ export default function AuditLogPage() {
     gcTime: 0,
     refetchOnWindowFocus: true,
   });
-  const accessDenied =
-    audit.isError &&
-    audit.error instanceof ApiError &&
-    [401, 403].includes(audit.error.status ?? 0);
-  const data = accessDenied ? undefined : audit.data;
-  const current = data?.current ?? query.current;
-  const visibleSelectedId =
-    selectedId !== null && data?.list.some((row) => row.id === selectedId)
+  const listAccessError = audit.isError ? auditAccessError(audit.error) : null;
+  const selectedInList =
+    selectedId !== null &&
+    !listAccessError &&
+    audit.data?.list.some((row) => row.id === selectedId)
       ? selectedId
       : null;
+  const detail = useAuditDetail(selectedInList);
+  const detailAccessError = detail.isError
+    ? auditAccessError(detail.error)
+    : null;
+  useEffect(() => {
+    if (detailAccessError) setAccessError(detailAccessError);
+  }, [detailAccessError]);
+  const data = auditVisibleList(
+    audit.data,
+    accessError,
+    listAccessError,
+    detailAccessError,
+  );
+  const current = data?.current ?? query.current;
+  const visibleSelectedId = data ? selectedInList : null;
+
+  function retryList() {
+    if (!accessError && !detailAccessError) {
+      void audit.refetch();
+      return;
+    }
+    void audit.refetch().then((result) => {
+      if (result.isSuccess) {
+        setSelectedId(null);
+        setAccessError(null);
+      }
+    });
+  }
 
   function setFilter(key: keyof Filters, value: string) {
     setFilters((previous) => ({ ...previous, [key]: value }));
@@ -505,13 +548,11 @@ export default function AuditLogPage() {
                 <Skeleton className="h-24" />
               </div>
             )}
-            {!data && audit.isError && (
+            {!data && (audit.isError || accessError || detailAccessError) && (
               <ErrorNotice
                 title="审计记录暂不可用"
-                error={audit.error}
-                retry={() => {
-                  void audit.refetch();
-                }}
+                error={accessError ?? detailAccessError ?? audit.error}
+                retry={retryList}
               />
             )}
             {data && (
@@ -584,6 +625,7 @@ export default function AuditLogPage() {
         {visibleSelectedId !== null && (
           <AuditDetail
             id={visibleSelectedId}
+            detail={detail}
             close={() => setSelectedId(null)}
           />
         )}

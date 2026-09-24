@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
+  auditAccessError,
   auditAction,
   auditError,
   auditResource,
   auditResponseStatus,
   auditTime,
+  auditVisibleList,
 } from './audit-data';
 
 describe('audit log display boundaries', () => {
@@ -36,5 +38,17 @@ describe('audit log display boundaries', () => {
     expect(auditError(new ApiError('HTTP', 'raw payload', status))).toContain(
       message,
     );
+  });
+
+  it('hides an old list after detail read revocation until a fresh authorized read', () => {
+    const oldList = [{ id: 7, username: 'previously authorized' }];
+    const revoked = new ApiError('HTTP', 'forbidden', 403);
+    expect(auditAccessError(revoked)).toBe(revoked);
+    expect(auditVisibleList(oldList, null, revoked)).toBeUndefined();
+    expect(auditVisibleList(oldList, revoked, null)).toBeUndefined();
+    expect(
+      auditVisibleList(oldList, new ApiError('HTTP', 'missing', 404)),
+    ).toBe(oldList);
+    expect(auditVisibleList(oldList, null, null)).toBe(oldList);
   });
 });
