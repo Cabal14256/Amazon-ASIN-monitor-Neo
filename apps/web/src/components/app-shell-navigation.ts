@@ -77,7 +77,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '竞品历史',
         access: 'canReadMonitor',
         icon: History,
-        available: false,
+        available: true,
       },
       {
         path: '/analytics',

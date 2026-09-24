@@ -21,6 +21,9 @@ const AsinCatalogPage = lazy(() => import('./pages/asin'));
 const CompetitorAsinCatalogPage = lazy(() => import('./pages/competitor-asin'));
 const TaskCenterPage = lazy(() => import('./pages/tasks'));
 const MonitorHistoryPage = lazy(() => import('./pages/monitor-history'));
+const CompetitorMonitorHistoryPage = lazy(
+  () => import('./pages/competitor-monitor-history'),
+);
 const UnavailablePage = lazy(() => import('./pages/unavailable'));
 const DesignPreview = import.meta.env.DEV
   ? lazy(() => import('./pages/dev/design-system'))
@@ -64,6 +67,8 @@ export function createAppRouter(
                 <TaskCenterPage />
               ) : page.path === '/monitor-history' ? (
                 <MonitorHistoryPage />
+              ) : page.path === '/competitor-monitor-history' ? (
+                <CompetitorMonitorHistoryPage />
               ) : (
                 <UnavailablePage title={page.name} />
               )}
