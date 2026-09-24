@@ -672,6 +672,7 @@ export default function AuditLogPage() {
         </Card>
         {visibleSelectedId !== null && (
           <AuditDetail
+            key={visibleSelectedId}
             id={visibleSelectedId}
             detail={detail}
             close={() => setSelectedId(null)}
