@@ -99,7 +99,6 @@ describe('application router identity boundary', () => {
     ).toBe('success');
   });
   it.each([
-    '/competitor-monitor-history',
     '/analytics',
     '/settings',
     '/ops',
@@ -111,26 +110,30 @@ describe('application router identity boundary', () => {
     expect(f.router.state.location.href).toBe('/403');
     expect(f.identity.getSnapshot().status).toBe('authenticated');
   });
-  it('opens monitor history with the current monitor permission', async () => {
-    const f = setup('/monitor-history', async () =>
-      jsonResponse({
-        success: true,
-        data: { ...user, permissions: ['asin:read', 'monitor:read'] },
-      }),
-    );
-    await f.router.load();
-    expect(f.router.state.location.pathname).toBe('/monitor-history');
-    expect(
-      f.router.state.matches.find(
-        (match) => match.routeId === '/monitor-history',
-      )?.status,
-    ).toBe('success');
-  });
-  it('still blocks monitor history without monitor permission', async () => {
-    const f = setup('/monitor-history');
-    await f.router.load();
-    expect(f.router.state.location.href).toBe('/403');
-  });
+  it.each(['/monitor-history', '/competitor-monitor-history'])(
+    'opens %s with the current monitor permission',
+    async (path) => {
+      const f = setup(path, async () =>
+        jsonResponse({
+          success: true,
+          data: { ...user, permissions: ['asin:read', 'monitor:read'] },
+        }),
+      );
+      await f.router.load();
+      expect(f.router.state.location.pathname).toBe(path);
+      expect(
+        f.router.state.matches.find((match) => match.routeId === path)?.status,
+      ).toBe('success');
+    },
+  );
+  it.each(['/monitor-history', '/competitor-monitor-history'])(
+    'still blocks %s without monitor permission',
+    async (path) => {
+      const f = setup(path);
+      await f.router.load();
+      expect(f.router.state.location.href).toBe('/403');
+    },
+  );
   it('returns to a permitted local location after login', async () => {
     const f = setup('/login?redirect=%2Fprofile%3Ftab%3Dsessions%23device');
     await f.router.load();

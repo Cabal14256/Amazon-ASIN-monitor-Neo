@@ -25,6 +25,10 @@ describe('workspace navigation', () => {
     expect(
       items.find((item) => item.path === '/competitor-asin')?.available,
     ).toBe(true);
+    expect(
+      items.find((item) => item.path === '/competitor-monitor-history')
+        ?.available,
+    ).toBe(true);
   });
   it('exposes only password management when a password change is required', () => {
     const access = {

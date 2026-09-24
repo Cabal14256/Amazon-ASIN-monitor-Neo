@@ -12,7 +12,7 @@ export default function UnavailablePage({
         <h2 className="text-lg font-semibold">此页面暂不可用</h2>
         <p className="mt-3 text-sm leading-7 text-muted-foreground">
           此业务页面正在迁移。监控总览、ASIN 与竞品 ASIN
-          目录、任务中心、主营监控历史和个人中心现已在 Neo 工作台开放。
+          目录、任务中心、主营与竞品监控历史和个人中心现已在 Neo 工作台开放。
         </p>
         <Link
           to="/home"

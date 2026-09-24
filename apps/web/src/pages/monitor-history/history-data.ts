@@ -81,13 +81,13 @@ export function historyPageInfo(data: MonitorHistoryListData): {
   return { count, canNext };
 }
 
-export function historyError(error: unknown): string {
+export function historyError(error: unknown, subject = '监控历史'): string {
   if (error instanceof ApiError) {
     switch (error.status) {
       case 400:
         return '筛选参数无效，请检查时间范围和分页设置。';
       case 403:
-        return '当前账号没有监控历史读取权限，请联系管理员。';
+        return `当前账号没有${subject}读取权限，请联系管理员。`;
       case 404:
         return '这条历史记录已不存在，请刷新列表。';
       case 413:
@@ -95,13 +95,13 @@ export function historyError(error: unknown): string {
       case 429:
         return '查询繁忙，请稍后重试。';
       case 503:
-        return '监控历史数据源暂不可用，请稍后重试。';
+        return `${subject}数据源暂不可用，请稍后重试。`;
     }
     if (error.kind === 'INVALID_RESPONSE' && error.message === '服务器响应过大')
       return '页面读取上限已达到，请缩小范围或减少每页数量。';
     return error.message;
   }
-  return '监控历史暂不可用，请稍后重试。';
+  return `${subject}暂不可用，请稍后重试。`;
 }
 
 /** datetime-local is a wall clock: send it as Shanghai time, without UTC conversion. */
