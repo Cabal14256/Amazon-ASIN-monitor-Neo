@@ -33,7 +33,7 @@ export interface RequestOptions {
   body?: FormData;
   signal?: AbortSignal;
   timeoutMs?: number;
-  /** Default 8 MiB; endpoint overrides remain capped at 40 MiB. */
+  /** Default 8 MiB; endpoint overrides remain capped at 64 MiB. */
   maxResponseBytes?: number;
   /** Login failures are not expired sessions; callers can suppress global logout. */
   authFailure?: 'notify' | 'ignore';
@@ -220,7 +220,7 @@ export class HttpClient {
       timeout > 300000 ||
       !Number.isInteger(maxResponseBytes) ||
       maxResponseBytes < 1 ||
-      maxResponseBytes > 40 * 1024 * 1024 ||
+      maxResponseBytes > 64 * 1024 * 1024 ||
       (options.json !== undefined && options.body !== undefined)
     )
       throw new ApiError('INVALID_INPUT', '请求参数无效');

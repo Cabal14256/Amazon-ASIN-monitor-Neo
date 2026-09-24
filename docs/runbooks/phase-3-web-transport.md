@@ -22,7 +22,7 @@
 ## 失败、取消和身份切换
 
 - fetch 本身没有自动重试；Query 只对网络、截止或 5xx 错误再试一次，业务/权限/契约错误不重试。Mutation 不自动重试，避免重复写入。
-- HTTP 默认 30 秒、可设 1 ms ～ 5 分钟，覆盖请求与 JSON 读取；原生 AbortSignal 取消实际 I/O。JSON 响应默认上限 8 MiB，端点可设最多 40 MiB（任务详情的 32 MiB 结果另需容纳信封与元数据）；每次最多 10000 个读取块，请求准入最多 64 个实际未结束 work。注入 fetch 若忽略取消，调用方能收到截止，但旧槽直到依赖实际结束才释放。
+- HTTP 默认 30 秒、可设 1 ms ～ 5 分钟，覆盖请求与 JSON 读取；原生 AbortSignal 取消实际 I/O。JSON 响应默认上限 8 MiB，端点可设最多 64 MiB（任务详情使用 40 MiB，监控历史使用 64 MiB）；每次最多 10000 个读取块，请求准入最多 64 个实际未结束 work。注入 fetch 若忽略取消，调用方能收到截止，但旧槽直到依赖实际结束才释放。
 - 原 helper 保持兼容，传输边界另拒绝危险协议、URL 用户名/密码、HTTPS 降级、API 根路径逃逸、编码分隔符/反斜线/控制字符及超长地址。`redirect:error` 禁止携带凭据跟随重定向；这是 [Fetch 显式支持的重定向策略](https://developer.mozilla.org/en-US/docs/Web/API/Request/redirect)。
 - SessionStore 在存储/Cookie 不可访问时不崩溃；本地 clear 即使删除持久化失败也压制旧提示。旧请求的 401 不能清掉 revision 已更新的新会话。
 - login/logout 在同一 AuthApi 实例中串行；默认 rememberMe=false。新登录成功会断开旧用户 WS、清 Query 和取消旧请求。其他标签页 storage 变更执行同样的旧工作清理和提示重读；Issue #55 的 auth context 重新获取当前用户后才恢复连接。
@@ -41,6 +41,6 @@
 
 运行根目录 `corepack pnpm --filter web test`、`typecheck`、`lint`、`build`。新测试覆盖 URL 对照、Cookie/storage、HTTP/Query 策略、七个 auth service、WS 状态机，以及真实 loopback HTTP 请求/跨域重定向拒绝/响应流超时并确认 socket close。WS 使用确定性浏览器 socket 替身，Cookie 使用模拟存储；不是实浏览器 Cookie/CORS 或真实账号验收。
 
-Issue #44 补充了 [任务客户端与 Query hooks](phase-3-task-hooks.md)，包括轮询、WS 失效通知、任务等待与取消和规范化下载地址；Issue #55 接通 auth context、15 路由、权限 guard、登录与个人中心。后续仍需完成：其他 WS React hooks、任务中心 UI、导出浏览器落盘、表格/图表/完整应用外壳和其余业务页面、真实账号浏览器 E2E/灰度验收。下载地址与等待函数不等于完整导出/任务 UI；这些基础设施不代替生产切流 gate。
+Issue #44 补充了 [任务客户端与 Query hooks](phase-3-task-hooks.md)，包括轮询、WS 失效通知、任务等待与取消和规范化下载地址；Issue #55 接通 auth context、15 路由、权限 guard、登录与个人中心；Issue #139 接通任务中心。后续仍需完成：其他 WS React hooks、导出浏览器落盘、图表和其余业务页面、真实账号浏览器 E2E/灰度验收。下载地址与等待函数不等于完整导出业务 UI；这些基础设施不代替生产切流 gate。
 
 本批无数据库/依赖版本变化，Legacy 源码不删除。回滚本 PR 即恢复旧 Neo 空骨架 QueryClient 和构建配置，不影响 Legacy 用户流量。

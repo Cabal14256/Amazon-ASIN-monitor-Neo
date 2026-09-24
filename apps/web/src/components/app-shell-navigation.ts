@@ -70,7 +70,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '监控历史',
         access: 'canReadMonitor',
         icon: History,
-        available: false,
+        available: true,
       },
       {
         path: '/competitor-monitor-history',

@@ -18,7 +18,7 @@ describe('workspace navigation', () => {
     expect(items.map((item) => item.path)).not.toContain('/settings');
     expect(
       items.find((item) => item.path === '/monitor-history')?.available,
-    ).toBe(false);
+    ).toBe(true);
     expect(items.find((item) => item.path === '/home')?.available).toBe(true);
     expect(items.find((item) => item.path === '/tasks')?.available).toBe(true);
     expect(items.find((item) => item.path === '/asin')?.available).toBe(true);
