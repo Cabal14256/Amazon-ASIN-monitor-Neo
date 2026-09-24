@@ -4,10 +4,12 @@ import {
   auditAccessError,
   auditAccessReducer,
   auditAction,
+  auditDeletedDetailError,
   auditError,
   auditResource,
   auditResponseStatus,
   auditTime,
+  auditVisibleDetail,
   auditVisibleList,
 } from './audit-data';
 
@@ -53,19 +55,42 @@ describe('audit log display boundaries', () => {
     expect(auditVisibleList(oldList, null, null)).toBe(oldList);
   });
 
-  it('restores the list after a success in the new authorization epoch', () => {
+  it('keeps a denied list hidden through transient failures until a fresh success', () => {
     const revoked = new ApiError('HTTP', 'forbidden', 403);
-    const initial = { error: null, listEpoch: 0 };
+    const initial = { error: null, generation: 0 };
     const blocked = auditAccessReducer(initial, {
-      type: 'detail-revoked',
+      type: 'list-revoked',
       error: revoked,
+      generation: 1,
     });
-    expect(blocked).toEqual({ error: revoked, listEpoch: 1 });
+    expect(blocked).toEqual({ error: revoked, generation: 1 });
+    expect(auditVisibleList([{ id: 7 }], blocked.error)).toBeUndefined();
     expect(
-      auditAccessReducer(blocked, { type: 'list-succeeded', listEpoch: 0 }),
+      auditAccessReducer(blocked, { type: 'list-succeeded', generation: 0 }),
     ).toBe(blocked);
     expect(
-      auditAccessReducer(blocked, { type: 'list-succeeded', listEpoch: 1 }),
-    ).toEqual({ error: null, listEpoch: 1 });
+      auditAccessReducer(blocked, { type: 'list-succeeded', generation: 1 }),
+    ).toEqual({ error: null, generation: 1 });
+    const detailBlocked = auditAccessReducer(blocked, {
+      type: 'detail-revoked',
+      error: revoked,
+      generation: 2,
+    });
+    expect(
+      auditAccessReducer(detailBlocked, {
+        type: 'list-succeeded',
+        generation: 1,
+      }),
+    ).toBe(detailBlocked);
+  });
+
+  it('does not reveal a deleted detail after a transient retry failure', () => {
+    const missing = new ApiError('HTTP', 'removed', 404);
+    const temporary = new ApiError('HTTP', 'offline', 503);
+    expect(auditDeletedDetailError(missing)).toBe(missing);
+    expect(auditDeletedDetailError(temporary)).toBeNull();
+    expect(auditVisibleDetail({ id: 7 }, null, missing)).toBeUndefined();
+    expect(auditVisibleDetail({ id: 7 }, missing, temporary)).toBeUndefined();
+    expect(auditVisibleDetail({ id: 7 }, null, temporary)).toEqual({ id: 7 });
   });
 });

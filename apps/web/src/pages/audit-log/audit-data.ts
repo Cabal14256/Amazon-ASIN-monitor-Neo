@@ -86,21 +86,42 @@ export function auditAccessError(error: unknown): ApiError | null {
     : null;
 }
 
-export type AuditAccessState = { error: ApiError | null; listEpoch: number };
+export type AuditAccessState = { error: ApiError | null; generation: number };
 export type AuditAccessEvent =
-  | { type: 'detail-revoked'; error: ApiError }
-  | { type: 'list-succeeded'; listEpoch: number };
+  | {
+      type: 'detail-revoked' | 'list-revoked';
+      error: ApiError;
+      generation: number;
+    }
+  | { type: 'list-succeeded'; generation: number };
 
 export function auditAccessReducer(
   state: AuditAccessState,
   event: AuditAccessEvent,
 ): AuditAccessState {
-  if (event.type === 'detail-revoked') {
-    return { error: event.error, listEpoch: state.listEpoch + 1 };
+  if (event.type !== 'list-succeeded') {
+    return event.generation > state.generation
+      ? { error: event.error, generation: event.generation }
+      : state;
   }
-  return event.listEpoch === state.listEpoch && state.error
+  return event.generation === state.generation && state.error
     ? { ...state, error: null }
     : state;
+}
+
+export function auditDeletedDetailError(error: unknown): ApiError | null {
+  return error instanceof ApiError && error.status === 404 ? error : null;
+}
+
+export function auditVisibleDetail<T>(
+  data: T | undefined,
+  missingError: ApiError | null,
+  currentError: unknown,
+): T | undefined {
+  const status = currentError instanceof ApiError ? currentError.status : null;
+  return missingError || [401, 403, 404].includes(status ?? 0)
+    ? undefined
+    : data;
 }
 
 export function auditVisibleList<T>(

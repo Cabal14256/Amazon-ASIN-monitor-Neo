@@ -10,7 +10,7 @@ import {
   ScrollText,
   Search,
 } from 'lucide-react';
-import { useEffect, useReducer, useState, type FormEvent } from 'react';
+import { useEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -28,10 +28,12 @@ import {
   auditAccessError,
   auditAccessReducer,
   auditAction,
+  auditDeletedDetailError,
   auditError,
   auditResource,
   auditResponseStatus,
   auditTime,
+  auditVisibleDetail,
   auditVisibleList,
 } from './audit-data';
 
@@ -246,11 +248,21 @@ function AuditDetail({
   close: () => void;
   detail: ReturnType<typeof useAuditDetail>;
 }) {
-  const inaccessible =
-    detail.isError &&
-    detail.error instanceof ApiError &&
-    [401, 403, 404].includes(detail.error.status ?? 0);
-  const row = inaccessible ? undefined : detail.data;
+  const [missingError, setMissingError] = useState<ApiError | null>(null);
+  const currentMissingError = detail.isError
+    ? auditDeletedDetailError(detail.error)
+    : null;
+  useEffect(() => {
+    if (currentMissingError) setMissingError(currentMissingError);
+  }, [currentMissingError]);
+  useEffect(() => {
+    if (detail.isSuccess && missingError) setMissingError(null);
+  }, [detail.isSuccess, missingError]);
+  const row = auditVisibleDetail(
+    detail.data,
+    missingError,
+    detail.isError ? detail.error : null,
+  );
   const status = row ? auditResponseStatus(row.responseStatus) : null;
   return (
     <Card aria-label="审计记录详情">
@@ -270,10 +282,10 @@ function AuditDetail({
             <Skeleton className="h-32" />
           </div>
         )}
-        {!row && detail.isError && (
+        {!row && (detail.isError || missingError) && (
           <ErrorNotice
             title="详情暂不可用"
-            error={detail.error}
+            error={missingError ?? detail.error}
             retry={() => {
               void detail.refetch();
             }}
@@ -333,22 +345,41 @@ export default function AuditLogPage() {
   const [query, setQuery] = useState<NeoAuditLogListQuery>(INITIAL_QUERY);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const accessGeneration = useRef(0);
   const [access, dispatchAccess] = useReducer(auditAccessReducer, {
     error: null,
-    listEpoch: 0,
+    generation: 0,
   });
   const audit = useQuery({
-    queryKey: ['audit-log', 'list', query, access.listEpoch],
-    queryFn: ({ signal }) => getAuditLogs(runtime.http, query, signal),
+    queryKey: ['audit-log', 'list', query],
+    queryFn: async ({ signal }) => {
+      const generation = accessGeneration.current;
+      try {
+        const result = await getAuditLogs(runtime.http, query, signal);
+        return { result, generation };
+      } catch (error) {
+        const revoked = auditAccessError(error);
+        if (revoked && !signal.aborted) {
+          const nextGeneration = ++accessGeneration.current;
+          dispatchAccess({
+            type: 'list-revoked',
+            error: revoked,
+            generation: nextGeneration,
+          });
+        }
+        throw error;
+      }
+    },
     staleTime: 0,
     gcTime: 0,
     refetchOnWindowFocus: true,
   });
+  const refetchList = audit.refetch;
   const listAccessError = audit.isError ? auditAccessError(audit.error) : null;
   const selectedInList =
     selectedId !== null &&
     !listAccessError &&
-    audit.data?.list.some((row) => row.id === selectedId)
+    audit.data?.result.list.some((row) => row.id === selectedId)
       ? selectedId
       : null;
   const detail = useAuditDetail(selectedInList);
@@ -358,17 +389,27 @@ export default function AuditLogPage() {
   useEffect(() => {
     if (detailAccessError) {
       setSelectedId(null);
-      // A new key prevents a pre-revocation list response from clearing the latch.
-      dispatchAccess({ type: 'detail-revoked', error: detailAccessError });
+      const generation = ++accessGeneration.current;
+      dispatchAccess({
+        type: 'detail-revoked',
+        error: detailAccessError,
+        generation,
+      });
+      // Only a request started after revocation may clear the latch.
+      void refetchList();
     }
-  }, [detailAccessError]);
+  }, [detailAccessError, refetchList]);
   useEffect(() => {
-    if (access.error && audit.isSuccess) {
-      dispatchAccess({ type: 'list-succeeded', listEpoch: access.listEpoch });
+    if (
+      access.error &&
+      audit.isSuccess &&
+      audit.data?.generation === access.generation
+    ) {
+      dispatchAccess({ type: 'list-succeeded', generation: access.generation });
     }
-  }, [access.error, access.listEpoch, audit.isSuccess]);
+  }, [access.error, access.generation, audit.isSuccess, audit.data]);
   const data = auditVisibleList(
-    audit.data,
+    audit.data?.result,
     access.error,
     listAccessError,
     detailAccessError,
