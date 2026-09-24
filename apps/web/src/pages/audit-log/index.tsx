@@ -10,7 +10,7 @@ import {
   ScrollText,
   Search,
 } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useReducer, useState, type FormEvent } from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -26,6 +26,7 @@ import { getAuditLogDetail, getAuditLogs } from '../../services/audit-log';
 import { historyWallTime } from '../monitor-history/history-data';
 import {
   auditAccessError,
+  auditAccessReducer,
   auditAction,
   auditError,
   auditResource,
@@ -133,9 +134,12 @@ function AuditRows({
                   <dd>{row.method || '未记录'}</dd>
                 </div>
               </dl>
-              <p className="mt-3 break-all text-xs text-muted-foreground">
-                {row.resourceName || row.path || '未记录资源名称或路径'}
-              </p>
+              <div className="mt-3 space-y-1 break-all text-xs text-muted-foreground">
+                <p>
+                  资源名称：{row.resourceName || row.resourceId || '未记录'}
+                </p>
+                <p>请求路径：{row.path || '未记录'}</p>
+              </div>
               <Button
                 variant="secondary"
                 size="small"
@@ -329,9 +333,12 @@ export default function AuditLogPage() {
   const [query, setQuery] = useState<NeoAuditLogListQuery>(INITIAL_QUERY);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [accessError, setAccessError] = useState<ApiError | null>(null);
+  const [access, dispatchAccess] = useReducer(auditAccessReducer, {
+    error: null,
+    listEpoch: 0,
+  });
   const audit = useQuery({
-    queryKey: ['audit-log', 'list', query],
+    queryKey: ['audit-log', 'list', query, access.listEpoch],
     queryFn: ({ signal }) => getAuditLogs(runtime.http, query, signal),
     staleTime: 0,
     gcTime: 0,
@@ -349,11 +356,20 @@ export default function AuditLogPage() {
     ? auditAccessError(detail.error)
     : null;
   useEffect(() => {
-    if (detailAccessError) setAccessError(detailAccessError);
+    if (detailAccessError) {
+      setSelectedId(null);
+      // A new key prevents a pre-revocation list response from clearing the latch.
+      dispatchAccess({ type: 'detail-revoked', error: detailAccessError });
+    }
   }, [detailAccessError]);
+  useEffect(() => {
+    if (access.error && audit.isSuccess) {
+      dispatchAccess({ type: 'list-succeeded', listEpoch: access.listEpoch });
+    }
+  }, [access.error, access.listEpoch, audit.isSuccess]);
   const data = auditVisibleList(
     audit.data,
-    accessError,
+    access.error,
     listAccessError,
     detailAccessError,
   );
@@ -361,16 +377,7 @@ export default function AuditLogPage() {
   const visibleSelectedId = data ? selectedInList : null;
 
   function retryList() {
-    if (!accessError && !detailAccessError) {
-      void audit.refetch();
-      return;
-    }
-    void audit.refetch().then((result) => {
-      if (result.isSuccess) {
-        setSelectedId(null);
-        setAccessError(null);
-      }
-    });
+    void audit.refetch();
   }
 
   function setFilter(key: keyof Filters, value: string) {
@@ -548,10 +555,10 @@ export default function AuditLogPage() {
                 <Skeleton className="h-24" />
               </div>
             )}
-            {!data && (audit.isError || accessError || detailAccessError) && (
+            {!data && (audit.isError || access.error || detailAccessError) && (
               <ErrorNotice
                 title="审计记录暂不可用"
-                error={accessError ?? detailAccessError ?? audit.error}
+                error={access.error ?? detailAccessError ?? audit.error}
                 retry={retryList}
               />
             )}

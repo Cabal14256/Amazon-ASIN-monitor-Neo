@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
   auditAccessError,
+  auditAccessReducer,
   auditAction,
   auditError,
   auditResource,
@@ -50,5 +51,21 @@ describe('audit log display boundaries', () => {
       auditVisibleList(oldList, new ApiError('HTTP', 'missing', 404)),
     ).toBe(oldList);
     expect(auditVisibleList(oldList, null, null)).toBe(oldList);
+  });
+
+  it('restores the list after a success in the new authorization epoch', () => {
+    const revoked = new ApiError('HTTP', 'forbidden', 403);
+    const initial = { error: null, listEpoch: 0 };
+    const blocked = auditAccessReducer(initial, {
+      type: 'detail-revoked',
+      error: revoked,
+    });
+    expect(blocked).toEqual({ error: revoked, listEpoch: 1 });
+    expect(
+      auditAccessReducer(blocked, { type: 'list-succeeded', listEpoch: 0 }),
+    ).toBe(blocked);
+    expect(
+      auditAccessReducer(blocked, { type: 'list-succeeded', listEpoch: 1 }),
+    ).toEqual({ error: null, listEpoch: 1 });
   });
 });

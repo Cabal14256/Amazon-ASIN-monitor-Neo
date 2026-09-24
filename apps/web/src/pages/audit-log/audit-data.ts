@@ -86,6 +86,23 @@ export function auditAccessError(error: unknown): ApiError | null {
     : null;
 }
 
+export type AuditAccessState = { error: ApiError | null; listEpoch: number };
+export type AuditAccessEvent =
+  | { type: 'detail-revoked'; error: ApiError }
+  | { type: 'list-succeeded'; listEpoch: number };
+
+export function auditAccessReducer(
+  state: AuditAccessState,
+  event: AuditAccessEvent,
+): AuditAccessState {
+  if (event.type === 'detail-revoked') {
+    return { error: event.error, listEpoch: state.listEpoch + 1 };
+  }
+  return event.listEpoch === state.listEpoch && state.error
+    ? { ...state, error: null }
+    : state;
+}
+
 export function auditVisibleList<T>(
   data: T | undefined,
   ...errors: unknown[]
