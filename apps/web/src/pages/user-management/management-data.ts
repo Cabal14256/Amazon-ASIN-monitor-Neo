@@ -1,6 +1,8 @@
 import {
   adminResetPasswordRequestSchema,
   type AdminResetPasswordRequest,
+  type UpdateUserRequest,
+  type UserDetailData,
   type UserPublic,
 } from '@asin-monitor/contracts';
 import { formatBeijing } from '../../lib/beijingTime';
@@ -44,6 +46,41 @@ export function statusForManagedUser(
   return currentUserId !== null && targetUserId === currentUserId
     ? 'ACTIVE'
     : chosenStatus;
+}
+
+export function changedUserUpdate(
+  user: UserDetailData,
+  currentUserId: string | null,
+  values: {
+    realName: string;
+    status: UserPublic['status'];
+    statusReason: string;
+    roleIds: string[];
+  },
+  canReadRole: boolean,
+): Omit<UpdateUserRequest, 'roleIds'> & { roleIds?: string[] } {
+  const update: Omit<UpdateUserRequest, 'roleIds'> & { roleIds?: string[] } =
+    {};
+  const realName = values.realName.trim();
+  if (realName !== (user.real_name ?? '')) update.real_name = realName;
+
+  const status = statusForManagedUser(user.id, currentUserId, values.status);
+  if (status !== user.status) {
+    update.status = status;
+    const reason = values.statusReason.trim();
+    if (reason) update.statusReason = reason;
+  }
+
+  if (canReadRole) {
+    const previous = new Set(user.roles?.map((role) => role.id) ?? []);
+    const next = new Set(values.roleIds);
+    if (
+      previous.size !== next.size ||
+      [...previous].some((id) => !next.has(id))
+    )
+      update.roleIds = values.roleIds;
+  }
+  return update;
 }
 
 export function managementTime(value: string | null | undefined): string {

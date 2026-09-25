@@ -12,9 +12,9 @@ import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { useManagement } from './context';
 import {
   canAdminResetPassword,
+  changedUserUpdate,
   managementWriteError,
   parseAdminResetForm,
-  statusForManagedUser,
   USER_STATUSES,
 } from './management-data';
 import { ManagementFailure } from './management-feedback';
@@ -28,6 +28,7 @@ function RoleOptions({
   error,
   retry,
   lockedRoleIds,
+  editing,
 }: {
   selected: string[];
   change: (value: string[]) => void;
@@ -36,12 +37,15 @@ function RoleOptions({
   error: unknown;
   retry: () => void;
   lockedRoleIds: string[];
+  editing: boolean;
 }) {
   const { access } = useManagement();
   if (!access.canReadRole)
     return (
       <p role="alert" className="text-sm text-status-warning">
-        当前账号缺少角色读取权限，无法选择角色或提交用户表单。
+        {editing
+          ? '当前账号缺少角色读取权限；可以修改姓名或状态，现有角色保持不变。'
+          : '当前账号缺少角色读取权限，无法选择角色或创建用户。'}
       </p>
     );
   return (
@@ -117,21 +121,30 @@ export function UserEditor({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!access.canWriteUser || !access.canReadRole || pending) return;
+    if (!access.canWriteUser || pending) return;
     setError(null);
-    if (!roles.data || roles.query.isFetching) {
+    if (!editing && (!roles.data || roles.query.isFetching)) {
       setError('请先成功加载可分配角色。');
       return;
     }
     setPending(true);
     try {
       if (editing && user) {
-        const input = updateUserRequestSchema.safeParse({
-          real_name: realName.trim(),
-          status: statusForManagedUser(user.id, currentUserId, status),
-          roleIds,
-          statusReason: statusReason.trim() || undefined,
-        });
+        const changes = changedUserUpdate(
+          user,
+          currentUserId,
+          { realName, status, statusReason, roleIds },
+          access.canReadRole,
+        );
+        if (changes.roleIds && (!roles.data || roles.query.isFetching)) {
+          setError('请先成功加载可分配角色。');
+          return;
+        }
+        if (Object.keys(changes).length === 0) {
+          setError('没有可保存的更改。');
+          return;
+        }
+        const input = updateUserRequestSchema.safeParse(changes);
         if (!input.success) {
           setError(input.error.issues[0]?.message ?? '请检查用户表单。');
           return;
@@ -230,6 +243,7 @@ export function UserEditor({
             error={roles.error}
             retry={() => void roles.query.refetch()}
             lockedRoleIds={lockedRoleIds}
+            editing={editing}
           />
           {lockedRoleIds.length > 0 && (
             <p className="text-xs text-muted-foreground">
@@ -296,10 +310,11 @@ export function UserEditor({
               type="submit"
               pending={pending}
               disabled={
-                !access.canReadRole ||
-                !roles.data ||
-                roles.query.isFetching ||
-                roleIds.length === 0
+                !editing &&
+                (!access.canReadRole ||
+                  !roles.data ||
+                  roles.query.isFetching ||
+                  roleIds.length === 0)
               }
             >
               {editing ? '保存用户' : '创建用户'}

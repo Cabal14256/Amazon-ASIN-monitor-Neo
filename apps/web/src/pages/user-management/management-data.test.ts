@@ -1,7 +1,9 @@
+import type { UserDetailData } from '@asin-monitor/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
   canAdminResetPassword,
+  changedUserUpdate,
   managementError,
   managementTime,
   managementWriteError,
@@ -50,6 +52,56 @@ describe('user management display boundaries', () => {
   it('fixes the current user to ACTIVE while allowing another user status change', () => {
     expect(statusForManagedUser('self', 'self', 'LOCKED')).toBe('ACTIVE');
     expect(statusForManagedUser('other', 'self', 'LOCKED')).toBe('LOCKED');
+  });
+
+  it('sends only edited user fields and permits basic edits without role-read access', () => {
+    const user: UserDetailData = {
+      id: 'other',
+      username: 'operator',
+      real_name: 'Old name',
+      status: 'ACTIVE',
+      force_password_change: false,
+      roles: [{ id: 'role-1', code: 'VIEWER', name: 'Viewer' }],
+    };
+    const values = {
+      realName: 'New name',
+      status: 'ACTIVE' as const,
+      statusReason: 'outdated reason',
+      roleIds: ['role-2'],
+    };
+    expect(changedUserUpdate(user, 'self', values, false)).toEqual({
+      real_name: 'New name',
+    });
+    expect(changedUserUpdate(user, 'self', values, true)).toEqual({
+      real_name: 'New name',
+      roleIds: ['role-2'],
+    });
+    expect(
+      changedUserUpdate(
+        user,
+        'self',
+        {
+          ...values,
+          realName: 'Old name',
+          status: 'LOCKED',
+          statusReason: 'policy',
+          roleIds: ['role-1'],
+        },
+        true,
+      ),
+    ).toEqual({ status: 'LOCKED', statusReason: 'policy' });
+    expect(
+      changedUserUpdate(
+        user,
+        'self',
+        {
+          ...values,
+          realName: 'Old name',
+          roleIds: ['role-1'],
+        },
+        true,
+      ),
+    ).toEqual({});
   });
 
   it('keeps privileged snapshots hidden after revocation until a newer read succeeds', () => {

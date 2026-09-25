@@ -1,4 +1,8 @@
-import type { UserListItem, UserListQuery } from '@asin-monitor/contracts';
+import type {
+  UserDetailData,
+  UserListItem,
+  UserListQuery,
+} from '@asin-monitor/contracts';
 import {
   ChevronLeft,
   ChevronRight,
@@ -6,7 +10,7 @@ import {
   Search,
   UserPlus,
 } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Button } from '../../components/ui/button';
 import {
   EmptyState,
@@ -166,8 +170,11 @@ export function UserPanel() {
   const [queryInputError, setQueryInputError] = useState<string | null>(null);
   const [query, setQuery] = useState<UserListQuery>(INITIAL_QUERY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [editor, setEditor] = useState<Editor>(null);
+  const [editingUser, setEditingUser] = useState<UserDetailData | null>(null);
+  const [preparingEdit, setPreparingEdit] = useState(false);
   const [deleteIds, setDeleteIds] = useState<string[] | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -188,7 +195,9 @@ export function UserPanel() {
       users.data &&
       !users.data.list.some((row) => row.id === selectedId)
     ) {
+      selectedIdRef.current = null;
       setSelectedId(null);
+      setEditingUser(null);
       setEditor(null);
     }
   }, [selectedId, users.data]);
@@ -200,11 +209,37 @@ export function UserPanel() {
 
   function changeQuery(next: UserListQuery) {
     setQuery(next);
+    selectedIdRef.current = null;
     setSelectedId(null);
+    setEditingUser(null);
     setSelectedIds([]);
     setEditor(null);
     setDeleteIds(null);
     setDeleteResult(null);
+  }
+  function selectUser(id: string | null) {
+    selectedIdRef.current = id;
+    setSelectedId(id);
+    setEditingUser(null);
+    setEditor(null);
+  }
+  async function openEditor() {
+    const userId = selectedIdRef.current;
+    if (!userId || preparingEdit) return;
+    setPreparingEdit(true);
+    try {
+      const refreshed = await detail.query.refetch();
+      if (
+        selectedIdRef.current === userId &&
+        refreshed.isSuccess &&
+        refreshed.data?.value.id === userId
+      ) {
+        setEditingUser(refreshed.data.value);
+        setEditor('edit');
+      }
+    } finally {
+      setPreparingEdit(false);
+    }
   }
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -263,7 +298,7 @@ export function UserPanel() {
         if (result.deletedCount > 0) await afterWrite(summary);
       }
       setSelectedIds([]);
-      setSelectedId(null);
+      selectUser(null);
       setEditor(null);
       setDeleteIds(null);
     } catch (error) {
@@ -343,11 +378,11 @@ export function UserPanel() {
           }
           action={
             <div className="flex flex-wrap gap-2">
-              {access.canWriteUser && (
+              {access.canWriteUser && access.canReadRole && (
                 <Button
                   size="small"
                   onClick={() => {
-                    setSelectedId(null);
+                    selectUser(null);
                     setEditor('create');
                   }}
                 >
@@ -388,8 +423,7 @@ export function UserPanel() {
                 selectedIds={selectedIds}
                 toggle={toggle}
                 open={(id) => {
-                  setSelectedId(id);
-                  setEditor(null);
+                  selectUser(id);
                   setDeleteIds(null);
                 }}
                 canDelete={access.canDeleteUser}
@@ -478,7 +512,7 @@ export function UserPanel() {
               <Button
                 variant="ghost"
                 size="small"
-                onClick={() => setSelectedId(null)}
+                onClick={() => selectUser(null)}
               >
                 关闭
               </Button>
@@ -556,7 +590,10 @@ export function UserPanel() {
                 <div className="flex flex-wrap gap-2">
                   {access.canWriteUser && (
                     <>
-                      <Button onClick={() => setEditor('edit')}>
+                      <Button
+                        pending={preparingEdit}
+                        onClick={() => void openEditor()}
+                      >
                         编辑用户
                       </Button>
                       {canAdminResetPassword(selectedId, currentUserId) && (
@@ -586,11 +623,14 @@ export function UserPanel() {
       {editor === 'create' && (
         <UserEditor key="create" close={() => setEditor(null)} />
       )}
-      {editor === 'edit' && detail.data && (
+      {editor === 'edit' && editingUser && (
         <UserEditor
-          key={`edit-${detail.data.id}`}
-          user={detail.data}
-          close={() => setEditor(null)}
+          key={`edit-${editingUser.id}`}
+          user={editingUser}
+          close={() => {
+            setEditingUser(null);
+            setEditor(null);
+          }}
         />
       )}
       {editor === 'reset' && detail.data && (
