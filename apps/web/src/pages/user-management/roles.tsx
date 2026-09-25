@@ -4,12 +4,16 @@ import { Button } from '../../components/ui/button';
 import { EmptyState, Skeleton } from '../../components/ui/feedback';
 import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { useManagement } from './context';
-import { managementError, managementTime } from './management-data';
+import {
+  managementError,
+  managementTime,
+  managementWriteError,
+} from './management-data';
 import { ManagementFailure } from './management-feedback';
 import { useSensitiveQuery } from './use-sensitive-query';
 
 export function RolePanel() {
-  const { api, access, afterWrite } = useManagement();
+  const { api, access, afterWrite, reportAccessDenied } = useManagement();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [selectedPermissionIds, setSelectedPermissionIds] = useState<
@@ -92,7 +96,7 @@ export function RolePanel() {
       await afterWrite('角色权限已更新，当前身份与权限已重新验证。', true);
       close();
     } catch (error) {
-      setSaveError(managementError(error));
+      setSaveError(managementWriteError(error, reportAccessDenied));
     } finally {
       setSaving(false);
     }

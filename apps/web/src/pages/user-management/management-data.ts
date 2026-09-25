@@ -1,4 +1,8 @@
-import type { UserPublic } from '@asin-monitor/contracts';
+import {
+  adminResetPasswordRequestSchema,
+  type AdminResetPasswordRequest,
+  type UserPublic,
+} from '@asin-monitor/contracts';
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 
@@ -46,6 +50,44 @@ export function managementError(error: unknown): string {
 
 export function permissionDenied(error: unknown): error is ApiError {
   return error instanceof ApiError && [401, 403].includes(error.status ?? 0);
+}
+
+export function managementWriteError(
+  error: unknown,
+  reportAccessDenied: () => void,
+): string {
+  if (permissionDenied(error)) reportAccessDenied();
+  return managementError(error);
+}
+
+export function canAdminResetPassword(
+  targetUserId: string,
+  currentUserId: string | null,
+): boolean {
+  return currentUserId !== null && targetUserId !== currentUserId;
+}
+
+export function parseAdminResetForm(
+  password: string,
+  confirmation: string,
+  forceChangeOnNextLogin: boolean,
+  revokeAllSessions: boolean,
+):
+  | { success: true; data: AdminResetPasswordRequest }
+  | { success: false; message: string } {
+  if (password !== confirmation)
+    return { success: false, message: '两次输入的密码不一致。' };
+  const parsed = adminResetPasswordRequestSchema.safeParse({
+    newPassword: password,
+    forceChangeOnNextLogin,
+    revokeAllSessions,
+  });
+  if (!parsed.success)
+    return {
+      success: false,
+      message: parsed.error.issues[0]?.message ?? '密码不符合要求。',
+    };
+  return { success: true, data: parsed.data };
 }
 
 export function visibleManagementData<T>(

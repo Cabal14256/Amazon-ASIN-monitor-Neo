@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
+  canAdminResetPassword,
   managementError,
   managementTime,
+  managementWriteError,
+  parseAdminResetForm,
   permissionDenied,
   visibleManagementData,
 } from './management-data';
@@ -35,5 +38,40 @@ describe('user management display boundaries', () => {
     expect(visibleManagementData(old, 1, true)).toBeUndefined();
     expect(visibleManagementData(fresh, 1, false)).toBe(fresh.value);
     expect(visibleManagementData(fresh, 1, true)).toBeUndefined();
+  });
+
+  it('invalidates the entire management view after a denied write', () => {
+    const report = vi.fn();
+    expect(
+      managementWriteError(new ApiError('HTTP', 'secret', 403), report),
+    ).toContain('没有执行');
+    expect(report).toHaveBeenCalledOnce();
+    managementWriteError(new ApiError('HTTP', 'secret', 401), report);
+    expect(report).toHaveBeenCalledTimes(2);
+    managementWriteError(new ApiError('HTTP', 'conflict', 409), report);
+    expect(report).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows only another user to be reset with a confirmed valid password', () => {
+    expect(canAdminResetPassword('user-1', 'user-1')).toBe(false);
+    expect(canAdminResetPassword('user-2', null)).toBe(false);
+    expect(canAdminResetPassword('user-2', 'user-1')).toBe(true);
+    expect(
+      parseAdminResetForm('StrongPass123!', 'StrongPass124!', true, true),
+    ).toMatchObject({
+      success: false,
+      message: '两次输入的密码不一致。',
+    });
+    expect(parseAdminResetForm('weak', 'weak', true, true).success).toBe(false);
+    expect(
+      parseAdminResetForm('StrongPass123!', 'StrongPass123!', false, true),
+    ).toEqual({
+      success: true,
+      data: {
+        newPassword: 'StrongPass123!',
+        forceChangeOnNextLogin: false,
+        revokeAllSessions: true,
+      },
+    });
   });
 });

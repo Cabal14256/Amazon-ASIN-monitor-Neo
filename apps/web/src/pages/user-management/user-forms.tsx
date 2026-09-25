@@ -1,5 +1,4 @@
 import {
-  adminResetPasswordRequestSchema,
   createUserRequestSchema,
   updateUserRequestSchema,
   type Role,
@@ -11,7 +10,12 @@ import { Skeleton } from '../../components/ui/feedback';
 import { Field, Input, Textarea } from '../../components/ui/field';
 import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { useManagement } from './context';
-import { managementError, USER_STATUSES } from './management-data';
+import {
+  canAdminResetPassword,
+  managementWriteError,
+  parseAdminResetForm,
+  USER_STATUSES,
+} from './management-data';
 import { ManagementFailure } from './management-feedback';
 import { useSensitiveQuery } from './use-sensitive-query';
 
@@ -79,7 +83,8 @@ export function UserEditor({
   user?: UserDetailData;
   close: () => void;
 }) {
-  const { api, access, currentUserId, afterWrite } = useManagement();
+  const { api, access, currentUserId, afterWrite, reportAccessDenied } =
+    useManagement();
   const editing = Boolean(user);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -143,7 +148,7 @@ export function UserEditor({
       );
       close();
     } catch (cause) {
-      setError(managementError(cause));
+      setError(managementWriteError(cause, reportAccessDenied));
     } finally {
       setPending(false);
     }
@@ -293,8 +298,10 @@ export function ResetPasswordForm({
   user: UserDetailData;
   close: () => void;
 }) {
-  const { api, access, currentUserId, afterWrite } = useManagement();
+  const { api, access, currentUserId, afterWrite, reportAccessDenied } =
+    useManagement();
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [forceChange, setForceChange] = useState(true);
   const [revokeSessions, setRevokeSessions] = useState(true);
   const [pending, setPending] = useState(false);
@@ -302,13 +309,18 @@ export function ResetPasswordForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!access.canWriteUser || pending) return;
-    const parsed = adminResetPasswordRequestSchema.safeParse({
-      newPassword: password,
-      forceChangeOnNextLogin: forceChange,
-      revokeAllSessions: revokeSessions,
-    });
+    if (!canAdminResetPassword(user.id, currentUserId)) {
+      setError('请到个人中心修改当前账号密码。');
+      return;
+    }
+    const parsed = parseAdminResetForm(
+      password,
+      confirmPassword,
+      forceChange,
+      revokeSessions,
+    );
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? '密码不符合要求。');
+      setError(parsed.message);
       return;
     }
     setPending(true);
@@ -316,13 +328,11 @@ export function ResetPasswordForm({
     try {
       await api.resetPassword(user.id, parsed.data);
       setPassword('');
-      await afterWrite(
-        '密码已重置，相关会话与当前权限已重新验证。',
-        user.id === currentUserId,
-      );
+      setConfirmPassword('');
+      await afterWrite('密码已重置；目标用户会话按所选设置处理。');
       close();
     } catch (cause) {
-      setError(managementError(cause));
+      setError(managementWriteError(cause, reportAccessDenied));
     } finally {
       setPending(false);
     }
@@ -353,6 +363,17 @@ export function ResetPasswordForm({
                 value={password}
                 autoComplete="new-password"
                 onChange={(event) => setPassword(event.target.value)}
+              />
+            )}
+          </Field>
+          <Field label="确认新密码" required>
+            {(control) => (
+              <Input
+                {...control}
+                type="password"
+                value={confirmPassword}
+                autoComplete="new-password"
+                onChange={(event) => setConfirmPassword(event.target.value)}
               />
             )}
           </Field>

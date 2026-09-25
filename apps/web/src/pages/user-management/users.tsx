@@ -17,8 +17,9 @@ import { Field, Input } from '../../components/ui/field';
 import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { useManagement } from './context';
 import {
-  managementError,
+  canAdminResetPassword,
   managementTime,
+  managementWriteError,
   USER_STATUSES,
 } from './management-data';
 import { ManagementFailure } from './management-feedback';
@@ -158,7 +159,8 @@ function UserRows({
 }
 
 export function UserPanel() {
-  const { api, access, currentUserId, afterWrite } = useManagement();
+  const { api, access, currentUserId, afterWrite, reportAccessDenied } =
+    useManagement();
   const [username, setUsername] = useState('');
   const [status, setStatus] = useState('');
   const [queryInputError, setQueryInputError] = useState<string | null>(null);
@@ -265,7 +267,7 @@ export function UserPanel() {
       setEditor(null);
       setDeleteIds(null);
     } catch (error) {
-      setDeleteError(managementError(error));
+      setDeleteError(managementWriteError(error, reportAccessDenied));
     } finally {
       setDeleting(false);
     }
@@ -557,12 +559,14 @@ export function UserPanel() {
                       <Button onClick={() => setEditor('edit')}>
                         编辑用户
                       </Button>
-                      <Button
-                        variant="secondary"
-                        onClick={() => setEditor('reset')}
-                      >
-                        重置密码
-                      </Button>
+                      {canAdminResetPassword(selectedId, currentUserId) && (
+                        <Button
+                          variant="secondary"
+                          onClick={() => setEditor('reset')}
+                        >
+                          重置密码
+                        </Button>
+                      )}
                     </>
                   )}
                   {access.canDeleteUser && selectedId !== currentUserId && (
