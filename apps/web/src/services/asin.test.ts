@@ -116,6 +116,12 @@ describe('ASIN catalog transport', () => {
     await expect(deleteAsin(http, '../outside')).rejects.toMatchObject({
       kind: 'INVALID_INPUT',
     });
+    await expect(getVariantGroup(http, '..')).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    await expect(deleteVariantGroup(http, ' group-1 ')).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
     await expect(
       createVariantGroup(http, {
         name: '',

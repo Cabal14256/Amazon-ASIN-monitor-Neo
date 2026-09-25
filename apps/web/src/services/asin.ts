@@ -25,10 +25,13 @@ const ASINS = '/api/v1/asins';
 function segment(id: string): string {
   if (
     !id ||
+    id === '.' ||
+    id === '..' ||
+    id.trim() !== id ||
     [...id].length > 50 ||
     /[\\/?#]/.test(id) ||
     [...id].some(
-      (char) => char.charCodeAt(0) <= 31 || char.charCodeAt(0) === 127,
+      (char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127,
     )
   )
     throw new ApiError('INVALID_INPUT', 'ASIN 或变体组 ID 无效');
