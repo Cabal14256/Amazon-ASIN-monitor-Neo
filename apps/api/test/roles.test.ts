@@ -180,6 +180,14 @@ describe('Neo role management HTTP', () => {
       expect(f.repository.read).not.toHaveBeenCalled();
     },
   );
+  it.each(['/roles', `/roles/${roleId}`, '/permissions', '/users/roles/all'])(
+    'marks the sensitive %s response as no-store',
+    async (path) => {
+      const response = await get(path);
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+    },
+  );
   it('requires a session for assignment', async () => {
     expect(
       (

@@ -110,7 +110,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '用户与权限',
         access: 'canAccessUserManagement',
         icon: ShieldCheck,
-        available: false,
+        available: true,
       },
       {
         path: '/audit-log',
