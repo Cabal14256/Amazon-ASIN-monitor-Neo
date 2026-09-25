@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpException,
   Inject,
   Param,
@@ -25,16 +26,19 @@ export class RoleController {
     @Inject(ENV) private readonly env: Env,
   ) {}
   @Get('roles')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions('role:read')
   async list() {
     return { success: true, errorCode: 0, data: await this.roles.listRoles() };
   }
   @Get('users/roles/all')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions('role:read')
   async all() {
     return { success: true, errorCode: 0, data: await this.roles.allRoles() };
   }
   @Get('roles/:roleId')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions('role:read')
   async detail(@Param('roleId') roleId: string) {
     return {
@@ -44,6 +48,7 @@ export class RoleController {
     };
   }
   @Get('permissions')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions('role:read')
   async permissions() {
     return {

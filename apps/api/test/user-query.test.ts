@@ -124,6 +124,14 @@ describe('Neo user query HTTP', () => {
       expect(repository.detail).not.toHaveBeenCalled();
     },
   );
+  it.each(['/users', `/users/${user.id}`])(
+    'marks the sensitive %s response as no-store',
+    async (path) => {
+      const response = await get(path);
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+    },
+  );
   it('requires user:read even for ADMIN', async () => {
     vi.mocked(auth.getPermissionCodes).mockResolvedValue([
       'role:read',

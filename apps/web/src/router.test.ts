@@ -107,6 +107,24 @@ describe('application router identity boundary', () => {
       expect(f.identity.getSnapshot().status).toBe('authenticated');
     },
   );
+  it.each(['user:read', 'role:read'])(
+    'opens user management with the current %s permission',
+    async (permission) => {
+      const granted = setup('/user-management', async () =>
+        jsonResponse({
+          success: true,
+          data: { ...user, permissions: [permission] },
+        }),
+      );
+      await granted.router.load();
+      expect(granted.router.state.location.pathname).toBe('/user-management');
+      expect(
+        granted.router.state.matches.find(
+          (match) => match.routeId === '/user-management',
+        )?.status,
+      ).toBe('success');
+    },
+  );
   it.each(['/monitor-history', '/competitor-monitor-history'])(
     'opens %s with the current monitor permission',
     async (path) => {
