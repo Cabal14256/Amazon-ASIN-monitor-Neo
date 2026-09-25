@@ -14,6 +14,7 @@ import {
   canAdminResetPassword,
   managementWriteError,
   parseAdminResetForm,
+  statusForManagedUser,
   USER_STATUSES,
 } from './management-data';
 import { ManagementFailure } from './management-feedback';
@@ -26,6 +27,7 @@ function RoleOptions({
   loading,
   error,
   retry,
+  lockedRoleIds,
 }: {
   selected: string[];
   change: (value: string[]) => void;
@@ -33,6 +35,7 @@ function RoleOptions({
   loading: boolean;
   error: unknown;
   retry: () => void;
+  lockedRoleIds: string[];
 }) {
   const { access } = useManagement();
   if (!access.canReadRole)
@@ -60,6 +63,7 @@ function RoleOptions({
             <input
               type="checkbox"
               checked={selected.includes(role.id)}
+              disabled={lockedRoleIds.includes(role.id)}
               onChange={(event) =>
                 change(
                   event.target.checked
@@ -86,6 +90,12 @@ export function UserEditor({
   const { api, access, currentUserId, afterWrite, reportAccessDenied } =
     useManagement();
   const editing = Boolean(user);
+  const editingSelf = Boolean(user && user.id === currentUserId);
+  const lockedRoleIds = editingSelf
+    ? user?.roles
+        ?.filter((role) => role.code === 'ADMIN')
+        .map((role) => role.id) ?? []
+    : [];
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [realName, setRealName] = useState(user?.real_name ?? '');
@@ -118,7 +128,7 @@ export function UserEditor({
       if (editing && user) {
         const input = updateUserRequestSchema.safeParse({
           real_name: realName.trim(),
-          status,
+          status: statusForManagedUser(user.id, currentUserId, status),
           roleIds,
           statusReason: statusReason.trim() || undefined,
         });
@@ -219,7 +229,13 @@ export function UserEditor({
             loading={roles.query.isPending}
             error={roles.error}
             retry={() => void roles.query.refetch()}
+            lockedRoleIds={lockedRoleIds}
           />
+          {lockedRoleIds.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              当前账号不能移除自己的管理员角色。
+            </p>
+          )}
           {editing ? (
             <>
               <Field label="状态" required>
@@ -227,7 +243,8 @@ export function UserEditor({
                   <select
                     {...control}
                     className="w-full rounded-input border border-input bg-card px-4 py-3 text-sm"
-                    value={status}
+                    value={editingSelf ? 'ACTIVE' : status}
+                    disabled={editingSelf}
                     onChange={(event) =>
                       setStatus(event.target.value as UserDetailData['status'])
                     }
@@ -240,16 +257,22 @@ export function UserEditor({
                   </select>
                 )}
               </Field>
-              <Field label="状态变更原因">
-                {(control) => (
-                  <Textarea
-                    {...control}
-                    value={statusReason}
-                    maxLength={255}
-                    onChange={(event) => setStatusReason(event.target.value)}
-                  />
-                )}
-              </Field>
+              {editingSelf ? (
+                <p className="text-xs text-muted-foreground">
+                  当前账号状态必须保持启用；其他资料仍可编辑。
+                </p>
+              ) : (
+                <Field label="状态变更原因">
+                  {(control) => (
+                    <Textarea
+                      {...control}
+                      value={statusReason}
+                      maxLength={255}
+                      onChange={(event) => setStatusReason(event.target.value)}
+                    />
+                  )}
+                </Field>
+              )}
             </>
           ) : (
             <label className="flex items-center gap-2 text-sm">

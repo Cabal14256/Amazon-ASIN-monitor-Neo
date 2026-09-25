@@ -7,6 +7,7 @@ import {
   managementWriteError,
   parseAdminResetForm,
   permissionDenied,
+  statusForManagedUser,
   visibleManagementData,
 } from './management-data';
 
@@ -20,6 +21,35 @@ describe('user management display boundaries', () => {
     expect(
       managementError(new ApiError('HTTP', 'raw personal data', 503)),
     ).not.toContain('raw personal data');
+  });
+
+  it('explains known 400 rules while keeping arbitrary response content private', () => {
+    expect(managementError(new ApiError('HTTP', '用户名已存在', 400))).toBe(
+      '用户名已存在，请更换用户名。',
+    );
+    expect(
+      managementError(
+        new ApiError('HTTP', '新密码不能与最近 5 次使用过的密码相同', 400),
+      ),
+    ).toContain('最近 5 次');
+    expect(
+      managementError(
+        new ApiError('HTTP', '系统至少需要保留一个启用中的管理员账户', 400),
+      ),
+    ).toContain('管理员');
+    expect(
+      managementError(
+        new ApiError('HTTP', '当前角色必须保留权限: user:read', 400),
+      ),
+    ).not.toContain('user:read');
+    expect(
+      managementError(new ApiError('HTTP', 'raw secret: abc', 400)),
+    ).not.toContain('abc');
+  });
+
+  it('fixes the current user to ACTIVE while allowing another user status change', () => {
+    expect(statusForManagedUser('self', 'self', 'LOCKED')).toBe('ACTIVE');
+    expect(statusForManagedUser('other', 'self', 'LOCKED')).toBe('LOCKED');
   });
 
   it('keeps privileged snapshots hidden after revocation until a newer read succeeds', () => {

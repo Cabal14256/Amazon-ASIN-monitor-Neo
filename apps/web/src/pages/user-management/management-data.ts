@@ -17,6 +17,35 @@ export const USER_STATUSES: Record<
   PENDING: { label: '待激活', badge: 'unknown' },
 };
 
+const VALIDATION_MESSAGES = new Map([
+  ['用户名已存在', '用户名已存在，请更换用户名。'],
+  ['新密码不能与当前密码相同', '新密码不能与当前密码相同。'],
+  [
+    '新密码不能与最近 5 次使用过的密码相同',
+    '新密码不能与最近 5 次使用过的密码相同。',
+  ],
+  ['密码不能与用户名相同', '密码不能与用户名相同。'],
+  [
+    '系统至少需要保留一个启用中的管理员账户',
+    '系统至少需要保留一个启用中的管理员账户。',
+  ],
+  ['不能移除自己当前账户的管理员角色', '当前账号不能移除自己的管理员角色。'],
+  ['不能禁用、锁定或停用自己的账户', '当前账号不能禁用、锁定或停用自己。'],
+  ['包含无效角色ID', '角色已变更，请刷新角色列表后重试。'],
+  ['包含无效权限ID', '权限已变更，请刷新权限清单后重试。'],
+  ['请至少保留一个角色', '请至少保留一个角色。'],
+]);
+
+export function statusForManagedUser(
+  targetUserId: string,
+  currentUserId: string | null,
+  chosenStatus: UserPublic['status'],
+): UserPublic['status'] {
+  return currentUserId !== null && targetUserId === currentUserId
+    ? 'ACTIVE'
+    : chosenStatus;
+}
+
 export function managementTime(value: string | null | undefined): string {
   if (!value) return '未记录';
   const formatted = formatBeijing(value, 'YYYY-MM-DD HH:mm:ss');
@@ -28,7 +57,10 @@ export function managementError(error: unknown): string {
     if (error.kind === 'INVALID_INPUT') return error.message;
     switch (error.status) {
       case 400:
-        return '提交内容或筛选条件无效，请检查输入。';
+        return error.message.startsWith('当前角色必须保留权限:')
+          ? '该角色必须保留必要权限，请恢复勾选后重试。'
+          : VALIDATION_MESSAGES.get(error.message) ??
+              '提交内容或筛选条件无效，请检查输入。';
       case 401:
         return '登录状态已失效，请重新登录。';
       case 403:
