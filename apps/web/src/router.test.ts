@@ -98,18 +98,15 @@ describe('application router identity boundary', () => {
       f.router.state.matches.find((match) => match.routeId === path)?.status,
     ).toBe('success');
   });
-  it.each([
-    '/analytics',
-    '/settings',
-    '/ops',
-    '/user-management',
-    '/audit-log',
-  ])('blocks the ungranted page %s', async (path) => {
-    const f = setup(path);
-    await f.router.load();
-    expect(f.router.state.location.href).toBe('/403');
-    expect(f.identity.getSnapshot().status).toBe('authenticated');
-  });
+  it.each(['/analytics', '/settings', '/ops', '/user-management'])(
+    'blocks the ungranted page %s',
+    async (path) => {
+      const f = setup(path);
+      await f.router.load();
+      expect(f.router.state.location.href).toBe('/403');
+      expect(f.identity.getSnapshot().status).toBe('authenticated');
+    },
+  );
   it.each(['/monitor-history', '/competitor-monitor-history'])(
     'opens %s with the current monitor permission',
     async (path) => {
@@ -126,6 +123,24 @@ describe('application router identity boundary', () => {
       ).toBe('success');
     },
   );
+  it('opens audit logs only with the current audit permission', async () => {
+    const granted = setup('/audit-log', async () =>
+      jsonResponse({
+        success: true,
+        data: { ...user, permissions: ['audit:read'] },
+      }),
+    );
+    await granted.router.load();
+    expect(granted.router.state.location.pathname).toBe('/audit-log');
+    expect(
+      granted.router.state.matches.find(
+        (match) => match.routeId === '/audit-log',
+      )?.status,
+    ).toBe('success');
+    const denied = setup('/audit-log');
+    await denied.router.load();
+    expect(denied.router.state.location.href).toBe('/403');
+  });
   it.each(['/monitor-history', '/competitor-monitor-history'])(
     'still blocks %s without monitor permission',
     async (path) => {
