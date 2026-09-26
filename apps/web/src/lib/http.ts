@@ -18,9 +18,18 @@ export class ApiError extends Error {
     message: string,
     readonly status?: number,
     readonly errorCode?: number,
+    readonly data?: unknown,
   ) {
     super(message);
     this.name = 'ApiError';
+    if (data !== undefined) {
+      Object.defineProperty(this, 'data', {
+        configurable: false,
+        enumerable: false,
+        value: data,
+        writable: false,
+      });
+    }
   }
 }
 export type QueryParams = Readonly<
@@ -310,10 +319,35 @@ export class HttpClient {
         envelope.errorMessage.length <= 500
           ? envelope.errorMessage
           : '请求失败';
+      const responseData =
+        envelope?.data &&
+        typeof envelope.data === 'object' &&
+        !Array.isArray(envelope.data) &&
+        (() => {
+          try {
+            return JSON.stringify(envelope.data).length <= 8192;
+          } catch {
+            return false;
+          }
+        })()
+          ? envelope.data
+          : undefined;
       if (!response.ok)
-        throw new ApiError('HTTP', message, response.status, errorCode);
+        throw new ApiError(
+          'HTTP',
+          message,
+          response.status,
+          errorCode,
+          responseData,
+        );
       if (envelope?.success === false)
-        throw new ApiError('BUSINESS', message, response.status, errorCode);
+        throw new ApiError(
+          'BUSINESS',
+          message,
+          response.status,
+          errorCode,
+          responseData,
+        );
       if (!envelope || Array.isArray(parsed))
         throw new ApiError(
           'INVALID_RESPONSE',

@@ -1,6 +1,6 @@
 import type { ParentAsinQueryItem } from '@asin-monitor/contracts';
-import { Download, Eraser, Play, RefreshCw, Square } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { Download, Eraser, Play, RefreshCw } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
@@ -18,6 +18,7 @@ import {
   ModuleLabel,
 } from '../../components/ui/surfaces';
 import { ApiError } from '../../lib/http';
+import { TaskCompletionError } from '../../services/tasks';
 import {
   parentQueryCsv,
   parseParentAsins,
@@ -36,7 +37,7 @@ const countries = [
 ] as const;
 
 const errorText = (error: unknown) =>
-  error instanceof ApiError
+  error instanceof ApiError || error instanceof TaskCompletionError
     ? error.message
     : '父体查询暂时不可用，请稍后重试。';
 
@@ -53,6 +54,7 @@ function Results({ items }: { items: ParentAsinQueryItem[] }) {
             <th className="px-3 py-3">品牌</th>
             <th className="px-3 py-3">变体数</th>
             <th className="px-3 py-3">状态</th>
+            <th className="px-3 py-3">错误信息</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
@@ -75,6 +77,9 @@ function Results({ items }: { items: ParentAsinQueryItem[] }) {
                   <StatusBadge status="success">成功</StatusBadge>
                 )}
               </td>
+              <td className="max-w-[260px] break-words px-3 py-3 text-status-danger">
+                {item.error || '无'}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -96,8 +101,9 @@ export default function AsinParentQueryPage() {
   const [progress, setProgress] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [taskId, setTaskId] = useState<string | null>(null);
   const waitController = useRef<AbortController | null>(null);
+
+  useEffect(() => () => waitController.current?.abort(), []);
 
   async function runQuery() {
     const asins = validParentAsins(input);
@@ -119,7 +125,6 @@ export default function AsinParentQueryPage() {
       if (Array.isArray(accepted)) {
         setItems(accepted);
       } else {
-        setTaskId(accepted.taskId);
         waitController.current = new AbortController();
         const task = await runtime.tasks.wait(accepted.taskId, {
           timeoutMs: 10 * 60 * 1000,
@@ -141,7 +146,6 @@ export default function AsinParentQueryPage() {
     } finally {
       setPending(false);
       setProgress(null);
-      setTaskId(null);
       waitController.current = null;
     }
   }
@@ -160,16 +164,6 @@ export default function AsinParentQueryPage() {
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
     setMessage('结果已导出。');
-  }
-
-  async function cancelQuery() {
-    if (!taskId) return;
-    try {
-      await runtime.tasks.cancel(taskId);
-      waitController.current?.abort();
-    } catch (cause) {
-      setError(errorText(cause));
-    }
   }
 
   return (
@@ -199,6 +193,7 @@ export default function AsinParentQueryPage() {
                   setError(null);
                   setMessage(null);
                 }}
+                disabled={pending}
               >
                 <Eraser aria-hidden="true" />
                 清空
@@ -250,15 +245,6 @@ export default function AsinParentQueryPage() {
                 <Play aria-hidden="true" />
                 查询父体
               </Button>
-              {taskId && (
-                <Button
-                  variant="destructive"
-                  onClick={() => void cancelQuery()}
-                >
-                  <Square aria-hidden="true" />
-                  取消任务
-                </Button>
-              )}
               {items.length > 0 && (
                 <Button
                   variant="secondary"

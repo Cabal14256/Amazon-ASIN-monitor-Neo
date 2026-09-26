@@ -67,6 +67,30 @@ describe('parent query transport', () => {
     );
   });
 
+  it('resumes a task returned in a failed submission envelope', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      jsonResponse(
+        {
+          success: false,
+          errorCode: 500,
+          errorMessage: '任务已受理，但响应失败',
+          data: { taskId: 'task-parent-1', status: 'pending' },
+        },
+        500,
+      ),
+    );
+    const http = new HttpClient({
+      baseURL: 'https://app.test/api',
+      pageOrigin: 'https://app.test',
+      session: sessionFixture().store,
+      fetch: fetcher,
+    });
+    await expect(
+      queryParentAsins(http, { asins: ['B012345678'], country: 'US' }),
+    ).resolves.toEqual({ taskId: 'task-parent-1', status: 'pending' });
+    http.close();
+  });
+
   it('quotes CSV cells and neutralizes spreadsheet formulas from external titles', () => {
     const csv = parentQueryCsv([
       {

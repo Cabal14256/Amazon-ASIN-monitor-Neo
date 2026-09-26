@@ -2,6 +2,7 @@ import {
   batchQueryParentAsinRequestSchema,
   batchQueryParentAsinResultSchema,
   parentAsinQueryItemSchema,
+  variantCheckTaskDataSchema,
   type ParentAsinQueryItem,
   type VariantCheckTaskData,
 } from '@asin-monitor/contracts';
@@ -81,11 +82,21 @@ export async function queryParentAsins(
     useAsync: true,
   });
   if (!parsed.success) throw new ApiError('INVALID_INPUT', '父体查询参数无效');
-  const response = await http.request(
-    '/api/v1/variant-check/batch-query-parent-asin',
-    { method: 'POST', json: parsed.data, signal, ...PARENT_QUERY_OPTIONS },
-    batchQueryParentAsinResultSchema,
-  );
+  let response;
+  try {
+    response = await http.request(
+      '/api/v1/variant-check/batch-query-parent-asin',
+      { method: 'POST', json: parsed.data, signal, ...PARENT_QUERY_OPTIONS },
+      batchQueryParentAsinResultSchema,
+    );
+  } catch (error) {
+    const pending =
+      error instanceof ApiError
+        ? variantCheckTaskDataSchema.safeParse(error.data)
+        : undefined;
+    if (pending?.success) return pending.data;
+    throw error;
+  }
   if (response.success !== true || response.data === undefined)
     throw new ApiError('INVALID_RESPONSE', '父体查询响应缺少数据');
   return Array.isArray(response.data)
