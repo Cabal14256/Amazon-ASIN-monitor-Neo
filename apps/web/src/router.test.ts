@@ -91,7 +91,15 @@ describe('application router identity boundary', () => {
     '/tasks',
     '/profile',
   ])('loads the permitted page %s', async (path) => {
-    const f = setup(path);
+    const f =
+      path === '/ops'
+        ? setup(path, async () =>
+            jsonResponse({
+              success: true,
+              data: { ...user, permissions: ['settings:read'] },
+            }),
+          )
+        : setup(path);
     await f.router.load();
     expect(f.router.state.location.pathname).toBe(path);
     expect(

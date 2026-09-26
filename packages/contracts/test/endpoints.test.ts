@@ -70,6 +70,14 @@ describe('端点注册表（契约冻结基线）', () => {
     }
   });
 
+  it('运维端点声明与 Neo 控制器一致的设置权限', () => {
+    expect(endpointsOf('ops').map((endpoint) => endpoint.permission)).toEqual([
+      'settings:read',
+      'settings:write',
+      'settings:write',
+    ]);
+  });
+
   it('SSE 导出端点全部标记 deprecatedInNeo（决策 D5）', () => {
     const sse = ENDPOINTS.filter((e) => e.special?.includes('sse'));
     expect(sse).toHaveLength(9);

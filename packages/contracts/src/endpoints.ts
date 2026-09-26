@@ -984,6 +984,7 @@ export const ENDPOINTS: EndpointSpec[] = [
     path: '/ops/overview',
     domain: 'ops',
     auth: true,
+    permission: 'settings:read',
     controller: 'opsController.getOpsOverview',
   },
   {
@@ -991,6 +992,7 @@ export const ENDPOINTS: EndpointSpec[] = [
     path: '/ops/analytics/cache/clear',
     domain: 'ops',
     auth: true,
+    permission: 'settings:write',
     controller: 'opsController.clearAnalyticsCache',
   },
   {
@@ -998,6 +1000,7 @@ export const ENDPOINTS: EndpointSpec[] = [
     path: '/ops/analytics/refresh',
     domain: 'ops',
     auth: true,
+    permission: 'settings:write',
     controller: 'opsController.refreshAnalyticsAgg',
   },
 
