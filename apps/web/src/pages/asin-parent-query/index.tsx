@@ -18,7 +18,6 @@ import {
   ModuleLabel,
 } from '../../components/ui/surfaces';
 import { ApiError } from '../../lib/http';
-import { TaskCompletionError } from '../../services/tasks';
 import {
   parentQueryCsv,
   parseParentAsins,
@@ -26,6 +25,7 @@ import {
   queryParentAsins,
   validParentAsins,
 } from '../../services/parent-query';
+import { TaskCompletionError } from '../../services/tasks';
 
 const countries = [
   ['US', '美国'],
