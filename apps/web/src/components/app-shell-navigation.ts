@@ -56,7 +56,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '父变体查询',
         access: 'canReadASIN',
         icon: Radar,
-        available: false,
+        available: true,
       },
       {
         path: '/competitor-asin',
