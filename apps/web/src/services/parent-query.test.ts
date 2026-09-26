@@ -108,5 +108,37 @@ describe('parent query transport', () => {
     expect(csv).toContain('\'=HYPERLINK(""https://invalid"")');
     expect(csv).toContain('"Brand, Inc."');
     expect(csv.split('\r\n')[0]).toContain('"国家"');
+    const newlineFormula = parentQueryCsv([
+      {
+        asin: 'B012345678',
+        hasParentAsin: false,
+        parentAsin: null,
+        parentTitle: '',
+        title: '\n=SUM(1,1)',
+        brand: '',
+        hasVariants: false,
+        variantCount: 0,
+        error: null,
+      },
+    ]);
+    expect(newlineFormula).toContain("'\n=SUM(1,1)");
+    expect(
+      parentQueryCsv(
+        [
+          {
+            asin: 'B012345678',
+            hasParentAsin: false,
+            parentAsin: null,
+            parentTitle: '',
+            title: 'Child',
+            brand: 'Brand',
+            hasVariants: false,
+            variantCount: 0,
+            error: null,
+          },
+        ],
+        'DE',
+      ),
+    ).toContain('"B012345678","DE"');
   });
 });

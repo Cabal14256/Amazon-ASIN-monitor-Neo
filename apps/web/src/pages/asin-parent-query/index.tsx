@@ -17,6 +17,7 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
+import { formatBeijingDate } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 import {
   parentQueryCsv,
@@ -97,6 +98,7 @@ export default function AsinParentQueryPage() {
   const [input, setInput] = useState('');
   const [country, setCountry] = useState('US');
   const [items, setItems] = useState<ParentAsinQueryItem[]>([]);
+  const [resultCountry, setResultCountry] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -118,6 +120,7 @@ export default function AsinParentQueryPage() {
     }
     setPending(true);
     setError(null);
+    setResultCountry(null);
     const ignoredMessage = invalid
       ? `已忽略 ${invalid} 个格式无效的输入。`
       : null;
@@ -143,6 +146,7 @@ export default function AsinParentQueryPage() {
           throw new ApiError('INVALID_RESPONSE', '父体查询任务结果无效');
         setItems(parseParentQueryItems(task.result));
       }
+      setResultCountry(country);
       setMessage(
         ignoredMessage ? `${ignoredMessage} 查询完成。` : '查询完成。',
       );
@@ -164,15 +168,13 @@ export default function AsinParentQueryPage() {
     if (!items.length || pending) return;
     setError(null);
     const url = URL.createObjectURL(
-      new Blob([parentQueryCsv(items, country)], {
+      new Blob([parentQueryCsv(items, resultCountry ?? country)], {
         type: 'text/csv;charset=utf-8',
       }),
     );
     const link = document.createElement('a');
     link.href = url;
-    link.download = `asin-parent-query-${new Date()
-      .toISOString()
-      .slice(0, 10)}.csv`;
+    link.download = `asin-parent-query-${formatBeijingDate(new Date())}.csv`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
     setMessage('结果已导出。');
@@ -202,6 +204,7 @@ export default function AsinParentQueryPage() {
                 onClick={() => {
                   setInput('');
                   setItems([]);
+                  setResultCountry(null);
                   setError(null);
                   setMessage(null);
                 }}

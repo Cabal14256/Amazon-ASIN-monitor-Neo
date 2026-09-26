@@ -46,7 +46,7 @@ export function parentQueryCsv(
 ): string {
   const escape = (value: unknown) => {
     const text = String(value ?? '');
-    const safe = /^[\t\r ]*[=+\-@]/.test(text) ? `'${text}` : text;
+    const safe = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
     return `"${safe.replaceAll('"', '""')}"`;
   };
   const headers = [
