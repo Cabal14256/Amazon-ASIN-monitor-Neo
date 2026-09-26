@@ -103,7 +103,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '运维观测',
         access: 'canReadSettings',
         icon: Radar,
-        available: false,
+        available: true,
       },
       {
         path: '/user-management',

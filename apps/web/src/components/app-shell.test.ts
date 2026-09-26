@@ -10,6 +10,7 @@ describe('workspace navigation', () => {
       canReadASIN: true,
       canReadMonitor: true,
       canReadAudit: true,
+      canReadSettings: true,
       canAccessUserManagement: true,
     };
     const items = workspaceNavigation(access).flatMap(
@@ -17,7 +18,10 @@ describe('workspace navigation', () => {
     );
     expect(items.map((item) => item.path)).toContain('/home');
     expect(items.map((item) => item.path)).toContain('/monitor-history');
-    expect(items.map((item) => item.path)).not.toContain('/settings');
+    expect(items.find((item) => item.path === '/ops')?.available).toBe(true);
+    expect(items.find((item) => item.path === '/settings')?.available).toBe(
+      false,
+    );
     expect(
       items.find((item) => item.path === '/monitor-history')?.available,
     ).toBe(true);

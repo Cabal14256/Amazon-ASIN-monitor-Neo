@@ -27,6 +27,7 @@ const CompetitorMonitorHistoryPage = lazy(
 );
 const AuditLogPage = lazy(() => import('./pages/audit-log'));
 const UserManagementPage = lazy(() => import('./pages/user-management'));
+const OpsPage = lazy(() => import('./pages/ops'));
 const UnavailablePage = lazy(() => import('./pages/unavailable'));
 const DesignPreview = import.meta.env.DEV
   ? lazy(() => import('./pages/dev/design-system'))
@@ -78,6 +79,8 @@ export function createAppRouter(
                 <AuditLogPage />
               ) : page.path === '/user-management' ? (
                 <UserManagementPage />
+              ) : page.path === '/ops' ? (
+                <OpsPage />
               ) : (
                 <UnavailablePage title={page.name} />
               )}

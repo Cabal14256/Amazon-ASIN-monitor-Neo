@@ -51,6 +51,7 @@ export * from './repositories/user-administration-repository';
 export * from './repositories/user-password-repository';
 export * from './repositories/user-query-repository';
 export * from './repositories/variant-check-repository';
+export { formatShanghaiTimestamp } from './timestamps';
 
 export * from './domain/competitor-write';
 export * from './repositories/competitor-transactions';
