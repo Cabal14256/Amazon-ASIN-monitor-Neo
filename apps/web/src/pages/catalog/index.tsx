@@ -201,7 +201,7 @@ function GroupDetail({
   async function prepareAction(
     type: Exclude<CatalogAction['type'], 'create-group'>,
     childId?: string,
-    manualAction?: Extract<CatalogAction, { type: 'asin-manual' }>['action'],
+    manualFamily: 'self' | 'group' = 'self',
   ) {
     if (!onAction || preparingAction || actionsDisabled) return;
     setPreparingAction(true);
@@ -218,12 +218,13 @@ function GroupDetail({
         const child = fresh.children?.find((item) => item.id === childId);
         if (!child) return;
         if (type === 'asin-manual')
-          onAction({
-            type,
-            action: manualAction ?? asinManualAction(child),
-            group: fresh,
-            child,
-          });
+          (() => {
+            const action =
+              manualFamily === 'group'
+                ? asinGroupManualAction(child)
+                : asinManualAction(child);
+            if (action) onAction({ type, action, group: fresh, child });
+          })();
         else
           onAction({
             type: type as
@@ -503,7 +504,11 @@ function GroupDetail({
                                   size="small"
                                   disabled={preparingAction || actionsDisabled}
                                   onClick={() =>
-                                    void prepareAction('asin-manual', child.id)
+                                    void prepareAction(
+                                      'asin-manual',
+                                      child.id,
+                                      'group',
+                                    )
                                   }
                                 >
                                   {asinGroupManualAction(child) ===
