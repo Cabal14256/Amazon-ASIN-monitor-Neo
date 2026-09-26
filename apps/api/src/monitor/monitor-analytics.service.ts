@@ -35,13 +35,13 @@ export const MONITOR_ANALYTICS_REPOSITORY = Symbol(
 export function monitorAnalyticsPermissions(
   operation: MonitorAnalyticsOperation,
 ): readonly PermissionCode[] {
-  if (operation === 'statistics' || operation === 'peak-hours')
-    return ['monitor:read', 'analytics:read'];
-  return [
+  if (
+    operation === 'statistics' ||
+    operation === 'peak-hours' ||
     operation === 'abnormal-duration-statistics'
-      ? 'monitor:read'
-      : 'analytics:read',
-  ];
+  )
+    return ['monitor:read', 'analytics:read'];
+  return ['analytics:read'];
 }
 const fail = (status: number, message: string): never => {
   throw new HttpException(
