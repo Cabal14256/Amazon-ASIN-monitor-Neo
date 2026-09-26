@@ -106,6 +106,20 @@ describe('application router identity boundary', () => {
       f.router.state.matches.find((match) => match.routeId === path)?.status,
     ).toBe('success');
   });
+  it('opens analytics with the analytics read grant', async () => {
+    const f = setup('/analytics', async () =>
+      jsonResponse({
+        success: true,
+        data: { ...user, permissions: ['analytics:read'] },
+      }),
+    );
+    await f.router.load();
+    expect(f.router.state.location.pathname).toBe('/analytics');
+    expect(
+      f.router.state.matches.find((match) => match.routeId === '/analytics')
+        ?.status,
+    ).toBe('success');
+  });
   it.each(['/analytics', '/settings', '/ops', '/user-management'])(
     'blocks the ungranted page %s',
     async (path) => {

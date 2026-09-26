@@ -17,6 +17,7 @@ const LoginPage = lazy(() => import('./pages/auth/login'));
 const ProfilePage = lazy(() => import('./pages/auth/profile'));
 const ForbiddenPage = lazy(() => import('./pages/auth/forbidden'));
 const HomePage = lazy(() => import('./pages/home'));
+const AnalyticsPage = lazy(() => import('./pages/analytics'));
 const AsinCatalogPage = lazy(() => import('./pages/asin'));
 const AsinParentQueryPage = lazy(() => import('./pages/asin-parent-query'));
 const CompetitorAsinCatalogPage = lazy(() => import('./pages/competitor-asin'));
@@ -63,6 +64,8 @@ export function createAppRouter(
                 <ForbiddenPage />
               ) : page.path === '/home' ? (
                 <HomePage />
+              ) : page.path === '/analytics' ? (
+                <AnalyticsPage />
               ) : page.path === '/asin' ? (
                 <AsinCatalogPage />
               ) : page.path === '/asin-parent-query' ? (

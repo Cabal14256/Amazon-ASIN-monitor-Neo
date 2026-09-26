@@ -158,3 +158,9 @@ export const monitorAnalyticsDataSchemas = {
     summary: z.array(summary).max(50000),
   }),
 } as const;
+
+export type MonitorAnalyticsOperation =
+  keyof typeof monitorAnalyticsDataSchemas;
+export type MonitorAnalyticsData<
+  K extends MonitorAnalyticsOperation = MonitorAnalyticsOperation,
+> = z.infer<(typeof monitorAnalyticsDataSchemas)[K]>;

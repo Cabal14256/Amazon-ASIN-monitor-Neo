@@ -9,6 +9,7 @@ describe('workspace navigation', () => {
       isLogin: true,
       canReadASIN: true,
       canReadMonitor: true,
+      canReadAnalytics: true,
       canReadAudit: true,
       canReadSettings: true,
       canAccessUserManagement: true,
@@ -18,6 +19,9 @@ describe('workspace navigation', () => {
     );
     expect(items.map((item) => item.path)).toContain('/home');
     expect(items.map((item) => item.path)).toContain('/monitor-history');
+    expect(items.find((item) => item.path === '/analytics')?.available).toBe(
+      true,
+    );
     expect(items.find((item) => item.path === '/ops')?.available).toBe(true);
     expect(items.find((item) => item.path === '/settings')?.available).toBe(
       false,

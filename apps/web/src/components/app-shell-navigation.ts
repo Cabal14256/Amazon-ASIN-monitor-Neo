@@ -84,7 +84,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '数据分析',
         access: 'canReadAnalytics',
         icon: BarChart3,
-        available: false,
+        available: true,
       },
     ],
   },
