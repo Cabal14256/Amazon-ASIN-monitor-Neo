@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
+  asinManualAction,
+  asinManualScope,
   catalogAccessDenied,
   catalogActionAllowed,
   catalogActionSourceCurrent,
@@ -75,6 +77,23 @@ describe('shared ASIN catalog display data', () => {
     expect(
       catalogActionAllowed({ type: 'delete-group', group }, true, false),
     ).toBe(false);
+    expect(
+      catalogActionAllowed({ type: 'group-notify', group }, true, false),
+    ).toBe(true);
+    expect(
+      catalogActionAllowed({ type: 'group-manual', group }, false, true),
+    ).toBe(false);
+    const child = { id: 'child-1', asin: 'B00TEST', country: 'US' };
+    expect(
+      catalogActionAllowed({ type: 'asin-notify', group, child }, false, true),
+    ).toBe(false);
+    expect(
+      catalogActionAllowed(
+        { type: 'asin-manual', action: 'MARK_BROKEN', group, child },
+        true,
+        false,
+      ),
+    ).toBe(true);
   });
   it('hides raw write failures and identifies session or permission loss', () => {
     const denied = new ApiError('HTTP', 'private backend payload', 403);
@@ -150,6 +169,29 @@ describe('shared ASIN catalog display data', () => {
     ).toBe(true);
     expect(
       catalogActionSourceCurrent(
+        { type: 'asin-notify', group, child: group.children[0] },
+        {
+          ...group,
+          children: [{ ...group.children[0], feishuNotifyEnabled: 1 }],
+        },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
+        {
+          type: 'asin-manual',
+          action: 'MARK_BROKEN',
+          group,
+          child: group.children[0],
+        },
+        {
+          ...group,
+          children: [{ ...group.children[0], manualBrokenScope: 'GROUP' }],
+        },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
         { type: 'edit-asin', group, child: group.children[0] },
         { ...group, children: [{ ...group.children[0], name: 'Other edit' }] },
       ),
@@ -159,5 +201,46 @@ describe('shared ASIN catalog display data', () => {
     expect(singleAsinCode(' b0chx1w1xy ')).toBe('B0CHX1W1XY');
     expect(singleAsinCode('B0CHX1W1XY, B00TEST123')).toBeNull();
     expect(singleAsinCode('B00SHORT')).toBeNull();
+  });
+  it('maps Legacy manual scope states to their matching next action', () => {
+    expect(asinManualAction({ id: 'a', asin: 'B00TEST', country: 'US' })).toBe(
+      'MARK_BROKEN',
+    );
+    expect(
+      asinManualAction({
+        id: 'a',
+        asin: 'B00TEST',
+        country: 'US',
+        selfManualBroken: 1,
+        manualBrokenScope: 'SELF',
+      }),
+    ).toBe('CLEAR_SELF_MANUAL');
+    expect(
+      asinManualAction({
+        id: 'a',
+        asin: 'B00TEST',
+        country: 'US',
+        selfManualBroken: 1,
+        inheritedManualBroken: 1,
+        manualBrokenScope: 'SELF+GROUP',
+      }),
+    ).toBe('CLEAR_SELF_MANUAL');
+    expect(
+      asinManualAction({
+        id: 'a',
+        asin: 'B00TEST',
+        country: 'US',
+        inheritedManualBroken: 1,
+        manualBrokenScope: 'GROUP',
+      }),
+    ).toBe('EXCLUDE_GROUP_MANUAL');
+    const excluded = {
+      id: 'a',
+      asin: 'B00TEST',
+      country: 'US',
+      manualBrokenScope: 'GROUP_EXCLUDED',
+    };
+    expect(asinManualAction(excluded)).toBe('CLEAR_GROUP_EXCLUSION');
+    expect(asinManualScope(excluded)).toBe('已排除父变体标记');
   });
 });

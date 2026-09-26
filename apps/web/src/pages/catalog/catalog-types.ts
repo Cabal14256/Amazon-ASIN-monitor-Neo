@@ -23,6 +23,12 @@ export interface CatalogChild {
   lastCheckTime?: string | null;
   feishuNotifyEnabled?: Flag;
   manualBrokenReason?: string | null;
+  manualBroken?: Flag;
+  manualBrokenScope?: string;
+  selfManualBroken?: Flag;
+  inheritedManualBroken?: Flag;
+  manualExcludedFromGroup?: Flag;
+  manualExcludedReason?: string | null;
 }
 
 export interface CatalogGroup {
@@ -38,6 +44,7 @@ export interface CatalogGroup {
   last_check_time?: string | null;
   feishuNotifyEnabled?: Flag;
   manualBrokenReason?: string | null;
+  manualBroken?: Flag;
   asin_count?: number;
   children?: CatalogChild[];
 }
@@ -60,9 +67,27 @@ export interface CatalogListData {
 
 export type CatalogAction =
   | { type: 'create-group' }
-  | { type: 'edit-group' | 'delete-group' | 'create-asin'; group: CatalogGroup }
   | {
-      type: 'edit-asin' | 'delete-asin' | 'move-asin';
+      type:
+        | 'edit-group'
+        | 'delete-group'
+        | 'create-asin'
+        | 'group-notify'
+        | 'group-manual';
+      group: CatalogGroup;
+    }
+  | {
+      type: 'edit-asin' | 'delete-asin' | 'move-asin' | 'asin-notify';
+      group: CatalogGroup;
+      child: CatalogChild;
+    }
+  | {
+      type: 'asin-manual';
+      action:
+        | 'MARK_BROKEN'
+        | 'CLEAR_SELF_MANUAL'
+        | 'EXCLUDE_GROUP_MANUAL'
+        | 'CLEAR_GROUP_EXCLUSION';
       group: CatalogGroup;
       child: CatalogChild;
     };
@@ -120,5 +145,32 @@ export interface CatalogWrites {
   deleteAsin: (
     http: Pick<HttpClient, 'request'>,
     id: string,
+  ) => Promise<unknown>;
+  updateGroupNotify: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    enabled: boolean,
+  ) => Promise<unknown>;
+  updateGroupManual: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: { markedBroken: boolean; reason?: string },
+  ) => Promise<unknown>;
+  updateAsinNotify: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    enabled: boolean,
+  ) => Promise<unknown>;
+  updateAsinManual: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: {
+      action:
+        | 'MARK_BROKEN'
+        | 'CLEAR_SELF_MANUAL'
+        | 'EXCLUDE_GROUP_MANUAL'
+        | 'CLEAR_GROUP_EXCLUSION';
+      reason?: string;
+    },
   ) => Promise<unknown>;
 }

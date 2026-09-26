@@ -22,6 +22,35 @@ export function childStatus(child: CatalogChild) {
   return statusOf(child.isBroken ?? child.autoIsBroken);
 }
 
+export function asinManualAction(
+  child: CatalogChild,
+):
+  | 'MARK_BROKEN'
+  | 'CLEAR_SELF_MANUAL'
+  | 'EXCLUDE_GROUP_MANUAL'
+  | 'CLEAR_GROUP_EXCLUSION' {
+  if (child.manualBrokenScope === 'GROUP_EXCLUDED')
+    return 'CLEAR_GROUP_EXCLUSION';
+  if (child.selfManualBroken) return 'CLEAR_SELF_MANUAL';
+  if (child.inheritedManualBroken) return 'EXCLUDE_GROUP_MANUAL';
+  return 'MARK_BROKEN';
+}
+
+export function asinManualScope(child: CatalogChild): string {
+  switch (child.manualBrokenScope) {
+    case 'GROUP':
+      return '继承父变体标记';
+    case 'GROUP_EXCLUDED':
+      return '已排除父变体标记';
+    case 'SELF+GROUP':
+      return '自身与父变体均标记';
+    case 'SELF':
+      return '自身人工标记';
+    default:
+      return '无人工标记';
+  }
+}
+
 export function statusSource(source?: string | null): string {
   switch (source) {
     case 'AUTO':
@@ -107,6 +136,18 @@ export function catalogActionSourceCurrent(
   action: CatalogAction,
   latest: CatalogGroup,
 ): boolean {
+  if (action.type === 'group-notify')
+    return (
+      action.group.id === latest.id &&
+      action.group.feishuNotifyEnabled === latest.feishuNotifyEnabled
+    );
+  if (action.type === 'group-manual')
+    return (
+      action.group.id === latest.id &&
+      action.group.manualBroken === latest.manualBroken &&
+      action.group.manualBrokenReason === latest.manualBrokenReason &&
+      action.group.statusSource === latest.statusSource
+    );
   if (
     action.type === 'edit-group' ||
     action.type === 'delete-group' ||
@@ -124,6 +165,18 @@ export function catalogActionSourceCurrent(
       (item) => item.id === action.child.id,
     );
     if (!current || latest.id !== action.group.id) return false;
+    if (action.type === 'asin-notify')
+      return action.child.feishuNotifyEnabled === current.feishuNotifyEnabled;
+    if (action.type === 'asin-manual')
+      return (
+        action.child.manualBrokenScope === current.manualBrokenScope &&
+        action.child.selfManualBroken === current.selfManualBroken &&
+        action.child.inheritedManualBroken === current.inheritedManualBroken &&
+        action.child.manualExcludedFromGroup ===
+          current.manualExcludedFromGroup &&
+        action.child.manualBrokenReason === current.manualBrokenReason &&
+        action.child.manualExcludedReason === current.manualExcludedReason
+      );
     if (action.type !== 'edit-asin') return true;
     return Boolean(
       action.child.asin === current.asin &&
