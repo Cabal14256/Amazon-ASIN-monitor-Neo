@@ -9,10 +9,21 @@ import {
 export interface GroupManualFields {
   markedBroken: boolean;
   reason: string;
+  expectedManualState?: {
+    manualBroken: boolean;
+    manualBrokenReason: string | null;
+  };
 }
 export interface AsinManualFields {
   action: (typeof ASIN_MANUAL_BROKEN_ACTIONS)[number];
   reason: string;
+  expectedManualState?: {
+    manualBroken: boolean;
+    manualBrokenReason: string | null;
+    manualExcludedFromGroup: boolean;
+    manualExcludedReason: string | null;
+    parentManualBroken: boolean;
+  };
 }
 export const manualActor = (actor: string | null) =>
   actor ? actor.trim().slice(0, 100) : null;

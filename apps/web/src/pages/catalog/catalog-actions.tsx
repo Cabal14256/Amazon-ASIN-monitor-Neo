@@ -13,9 +13,31 @@ import {
 } from './catalog-data';
 import type {
   CatalogAction,
+  CatalogChild,
   CatalogConfig,
   CatalogGroup,
 } from './catalog-types';
+
+function flag(value: boolean | 0 | 1 | null | undefined): boolean {
+  return value === true || value === 1;
+}
+function manualExpectedGroup(group: CatalogGroup) {
+  return {
+    manualBroken: flag(group.manualBroken),
+    manualBrokenReason: group.manualBrokenReason ?? null,
+  };
+}
+function manualExpectedAsin(child: CatalogChild, group: CatalogGroup) {
+  return {
+    manualBroken: flag(child.selfManualBroken),
+    manualBrokenReason: flag(child.selfManualBroken)
+      ? child.manualBrokenReason ?? null
+      : null,
+    manualExcludedFromGroup: flag(child.manualExcludedFromGroup),
+    manualExcludedReason: child.manualExcludedReason ?? null,
+    parentManualBroken: flag(group.manualBroken),
+  };
+}
 
 function title(action: CatalogAction): string {
   switch (action.type) {
@@ -236,6 +258,7 @@ export function CatalogActionPanel({
           await writes.updateGroupManual(http, action.group.id, {
             markedBroken: !action.group.manualBroken,
             reason: reason.trim() || undefined,
+            expectedManualState: manualExpectedGroup(action.group),
           });
           break;
         case 'asin-notify':
@@ -249,6 +272,7 @@ export function CatalogActionPanel({
           await writes.updateAsinManual(http, action.child.id, {
             action: action.action,
             reason: reason.trim() || undefined,
+            expectedManualState: manualExpectedAsin(action.child, action.group),
           });
           break;
       }

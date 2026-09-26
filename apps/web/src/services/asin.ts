@@ -237,7 +237,14 @@ export async function updateVariantGroupNotify(
 export async function updateVariantGroupManual(
   http: Pick<HttpClient, 'request'>,
   id: string,
-  input: { markedBroken: boolean; reason?: string },
+  input: {
+    markedBroken: boolean;
+    reason?: string;
+    expectedManualState?: {
+      manualBroken: boolean;
+      manualBrokenReason: string | null;
+    };
+  },
 ) {
   return data(
     await http.request(
@@ -276,6 +283,13 @@ export async function updateAsinManual(
       | 'EXCLUDE_GROUP_MANUAL'
       | 'CLEAR_GROUP_EXCLUSION';
     reason?: string;
+    expectedManualState?: {
+      manualBroken: boolean;
+      manualBrokenReason: string | null;
+      manualExcludedFromGroup: boolean;
+      manualExcludedReason: string | null;
+      parentManualBroken: boolean;
+    };
   },
 ) {
   return data(

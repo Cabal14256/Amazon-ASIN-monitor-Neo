@@ -103,7 +103,8 @@ export class AsinWriteRepositoryError extends Error {
       | 'asin-not-found'
       | 'group-not-found'
       | 'duplicate'
-      | 'parent-changed',
+      | 'parent-changed'
+      | 'manual-state-changed',
   ) {
     super('ASIN write could not be completed');
     this.name = 'AsinWriteRepositoryError';
@@ -387,8 +388,18 @@ export class DrizzleAsinWriteUnit
     fields: GroupManualFields,
     operatorId: string,
   ) {
-    if (!(await this.lockGroups([groupId])).has(groupId))
-      throw new AsinWriteRepositoryError('group-not-found');
+    const lockedGroups = await this.lockGroups([groupId]);
+    const lockedGroup = lockedGroups.get(groupId);
+    if (!lockedGroup) throw new AsinWriteRepositoryError('group-not-found');
+    const expected = fields.expectedManualState;
+    if (
+      expected &&
+      (Boolean(lockedGroup.manualBroken) !== expected.manualBroken ||
+        (lockedGroup.manualBroken
+          ? lockedGroup.manualBrokenReason || null
+          : null) !== expected.manualBrokenReason)
+    )
+      throw new AsinWriteRepositoryError('manual-state-changed');
     // Read the bounded complete before-state under the parent lock before mutation.
     const previous = await this.detail(groupId);
     const { actor, time } = await this.manualContext(operatorId);
@@ -434,6 +445,20 @@ export class DrizzleAsinWriteUnit
   ) {
     const { asin: previous, groups } = await this.lockAsin(asinId);
     const group = groups.get(previous.variantGroupId)!;
+    const expected = fields.expectedManualState;
+    if (
+      expected &&
+      (Boolean(previous.manualBroken) !== expected.manualBroken ||
+        (previous.manualBroken ? previous.manualBrokenReason || null : null) !==
+          expected.manualBrokenReason ||
+        Boolean(previous.manualExcludedFromGroup) !==
+          expected.manualExcludedFromGroup ||
+        (previous.manualExcludedFromGroup
+          ? previous.manualExcludedReason || null
+          : null) !== expected.manualExcludedReason ||
+        Boolean(group.manualBroken) !== expected.parentManualBroken)
+    )
+      throw new AsinWriteRepositoryError('manual-state-changed');
     const { actor, time } = await this.manualContext(operatorId);
     await this.db
       .update(asins)

@@ -503,11 +503,7 @@ function GroupDetail({
                                   size="small"
                                   disabled={preparingAction || actionsDisabled}
                                   onClick={() =>
-                                    void prepareAction(
-                                      'asin-manual',
-                                      child.id,
-                                      asinGroupManualAction(child),
-                                    )
+                                    void prepareAction('asin-manual', child.id)
                                   }
                                 >
                                   {asinGroupManualAction(child) ===

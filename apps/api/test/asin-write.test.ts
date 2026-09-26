@@ -597,6 +597,7 @@ describe('ASIN writes / HTTP current permission and commit boundaries', () => {
     ['group-not-found', 404],
     ['duplicate', 409],
     ['parent-changed', 409],
+    ['manual-state-changed', 409],
     ['capacity', 429],
   ] as const)(
     'maps %s to a fixed %i without driver details',
