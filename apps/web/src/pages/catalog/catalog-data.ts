@@ -1,6 +1,10 @@
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
-import type { CatalogChild, CatalogGroup } from './catalog-types';
+import type {
+  CatalogAction,
+  CatalogChild,
+  CatalogGroup,
+} from './catalog-types';
 
 type Flag = 0 | 1 | boolean | null | undefined;
 
@@ -50,4 +54,90 @@ export function catalogError(error: unknown): string {
     return error.message;
   }
   return '暂时无法读取 ASIN 数据，请稍后重试。';
+}
+
+export function catalogWriteError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.kind === 'INVALID_INPUT') return error.message;
+    switch (error.status) {
+      case 400:
+        return '提交内容无效，请检查必填项、长度和站点信息。';
+      case 401:
+        return '登录状态已失效，正在重新验证。';
+      case 403:
+        return '当前账号没有执行此操作的权限，正在重新验证。';
+      case 404:
+        return '目标记录已不存在，请刷新目录。';
+      case 409:
+        if (error.message === '记录已变化')
+          return '记录已被更新，请关闭表单并重新打开。';
+        if (error.message === '该 ASIN 在此国家中已存在')
+          return '该 ASIN 在所选国家中已存在，请检查编码。';
+        if (error.message === 'ASIN 所属变体组已改变，请刷新后重试')
+          return 'ASIN 已移动，请刷新目录后重试。';
+        return 'ASIN 或变体组已存在，或目标状态已变化；请刷新后重试。';
+      case 413:
+        return '变体组包含过多 ASIN，本次操作未提交；请使用现有入口。';
+      case 429:
+        return '操作过于频繁，请稍后重试。';
+      case 503:
+        return 'ASIN 写入服务尚未开放，请使用现有入口。';
+    }
+    if (error.kind === 'INVALID_RESPONSE')
+      return '服务器返回的结果不符合 ASIN 契约，请刷新后重试。';
+  }
+  return 'ASIN 操作暂不可用，请稍后重试。';
+}
+
+export function catalogAccessDenied(error: unknown): boolean {
+  return error instanceof ApiError && [401, 403].includes(error.status ?? 0);
+}
+
+export function catalogActionAllowed(
+  action: CatalogAction,
+  canWrite: boolean,
+  canDelete: boolean,
+): boolean {
+  return action.type === 'delete-group' || action.type === 'delete-asin'
+    ? canDelete
+    : canWrite;
+}
+
+export function catalogActionSourceCurrent(
+  action: CatalogAction,
+  latest: CatalogGroup,
+): boolean {
+  if (
+    action.type === 'edit-group' ||
+    action.type === 'delete-group' ||
+    action.type === 'create-asin'
+  )
+    return (
+      action.group.id === latest.id &&
+      action.group.name === latest.name &&
+      action.group.country === latest.country &&
+      action.group.site === latest.site &&
+      action.group.brand === latest.brand
+    );
+  if ('child' in action) {
+    const current = latest.children?.find(
+      (item) => item.id === action.child.id,
+    );
+    if (!current || latest.id !== action.group.id) return false;
+    if (action.type !== 'edit-asin') return true;
+    return Boolean(
+      action.child.asin === current.asin &&
+        (action.child.name ?? '') === (current.name ?? '') &&
+        action.child.country === current.country &&
+        (action.child.site ?? '') === (current.site ?? '') &&
+        (action.child.brand ?? '') === (current.brand ?? '') &&
+        String(action.child.asinType ?? '') === String(current.asinType ?? ''),
+    );
+  }
+  return true;
+}
+
+export function singleAsinCode(value: string): string | null {
+  const code = value.trim().toUpperCase();
+  return /^[A-Z0-9]{10}$/.test(code) ? code : null;
 }

@@ -10,11 +10,14 @@ import {
 import {
   Fragment,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from 'react';
-import { useAuth } from '../../auth/context';
+import { createAccess } from '../../auth/access';
+import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
 import {
@@ -30,7 +33,10 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
+import { CatalogActionPanel } from './catalog-actions';
 import {
+  catalogAccessDenied,
+  catalogActionAllowed,
   catalogError,
   checkedAt,
   childStatus,
@@ -39,6 +45,7 @@ import {
   statusSource,
 } from './catalog-data';
 import type {
+  CatalogAction,
   CatalogConfig,
   CatalogGroup,
   CatalogQuery,
@@ -148,14 +155,32 @@ function GroupDetail({
   onClose,
   childPage,
   onChildPageChange,
+  canWrite,
+  canDelete,
+  actionsDisabled,
+  onAction,
+  onDenied,
 }: {
   id: string;
   config: CatalogConfig;
   onClose: () => void;
   childPage: number;
   onChildPageChange: (page: number) => void;
+  canWrite?: boolean;
+  canDelete?: boolean;
+  actionsDisabled?: boolean;
+  onAction?: (action: CatalogAction) => void;
+  onDenied?: () => void;
 }) {
   const { runtime } = useAuth();
+  const [preparingAction, setPreparingAction] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const detail = useQuery({
     queryKey: [config.id, 'group', id],
     queryFn: ({ signal }) => config.detail(runtime.http, id, signal),
@@ -170,6 +195,39 @@ function GroupDetail({
     (visiblePage - 1) * CHILD_PAGE_SIZE,
     visiblePage * CHILD_PAGE_SIZE,
   );
+  async function prepareAction(
+    type: Exclude<CatalogAction['type'], 'create-group'>,
+    childId?: string,
+  ) {
+    if (!onAction || preparingAction || actionsDisabled) return;
+    setPreparingAction(true);
+    try {
+      const latest = await detail.refetch();
+      if (!mounted.current) return;
+      if (latest.isError) {
+        if (catalogAccessDenied(latest.error)) onDenied?.();
+        return;
+      }
+      const fresh = latest.data;
+      if (!fresh) return;
+      if (childId) {
+        const child = fresh.children?.find((item) => item.id === childId);
+        if (!child) return;
+        onAction({
+          type: type as 'edit-asin' | 'move-asin' | 'delete-asin',
+          group: fresh,
+          child,
+        });
+      } else {
+        onAction({
+          type: type as 'edit-group' | 'delete-group' | 'create-asin',
+          group: fresh,
+        });
+      }
+    } finally {
+      if (mounted.current) setPreparingAction(false);
+    }
+  }
   return (
     <Card aria-label={`${config.label}变体组详情`} className="overflow-hidden">
       <CardHeader
@@ -254,6 +312,41 @@ function GroupDetail({
                 人工标记原因：{group.manualBrokenReason}
               </p>
             )}
+            {(canWrite || canDelete) && (
+              <div className="flex flex-wrap gap-2">
+                {canWrite && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      pending={preparingAction}
+                      disabled={actionsDisabled}
+                      onClick={() => void prepareAction('edit-group')}
+                    >
+                      编辑变体组
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={preparingAction || actionsDisabled}
+                      onClick={() => void prepareAction('create-asin')}
+                    >
+                      添加 ASIN
+                    </Button>
+                  </>
+                )}
+                {canDelete && (
+                  <Button
+                    variant="destructive"
+                    size="small"
+                    disabled={preparingAction || actionsDisabled}
+                    onClick={() => void prepareAction('delete-group')}
+                  >
+                    删除变体组
+                  </Button>
+                )}
+              </div>
+            )}
             <div>
               <h4 className="mb-3 font-semibold">
                 组内 ASIN{' '}
@@ -310,6 +403,46 @@ function GroupDetail({
                           人工标记原因：{child.manualBrokenReason}
                         </p>
                       )}
+                      {(canWrite || canDelete) && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {canWrite && (
+                            <>
+                              <Button
+                                variant="secondary"
+                                size="small"
+                                disabled={preparingAction || actionsDisabled}
+                                onClick={() =>
+                                  void prepareAction('edit-asin', child.id)
+                                }
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                size="small"
+                                disabled={preparingAction || actionsDisabled}
+                                onClick={() =>
+                                  void prepareAction('move-asin', child.id)
+                                }
+                              >
+                                移动
+                              </Button>
+                            </>
+                          )}
+                          {canDelete && (
+                            <Button
+                              variant="destructive"
+                              size="small"
+                              disabled={preparingAction || actionsDisabled}
+                              onClick={() =>
+                                void prepareAction('delete-asin', child.id)
+                              }
+                            >
+                              删除
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -355,11 +488,21 @@ export function GroupRows({
   config,
   selectedId,
   onSelect,
+  canWrite,
+  canDelete,
+  actionsDisabled,
+  onAction,
+  onDenied,
 }: {
   groups: CatalogGroup[];
   config: CatalogConfig;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  canWrite?: boolean;
+  canDelete?: boolean;
+  actionsDisabled?: boolean;
+  onAction?: (action: CatalogAction) => void;
+  onDenied?: () => void;
 }) {
   // Both CSS layouts stay mounted; one parent page keeps rotation/resize stable.
   const [childPage, setChildPage] = useState(1);
@@ -474,6 +617,11 @@ export function GroupRows({
                   onClose={() => toggleGroup(row.id)}
                   childPage={childPage}
                   onChildPageChange={setChildPage}
+                  canWrite={canWrite}
+                  canDelete={canDelete}
+                  actionsDisabled={actionsDisabled}
+                  onAction={onAction}
+                  onDenied={onDenied}
                 />
               </li>
             )}
@@ -528,6 +676,11 @@ export function GroupRows({
                         onClose={() => toggleGroup(row.id)}
                         childPage={childPage}
                         onChildPageChange={setChildPage}
+                        canWrite={canWrite}
+                        canDelete={canDelete}
+                        actionsDisabled={actionsDisabled}
+                        onAction={onAction}
+                        onDenied={onDenied}
                       />
                     </td>
                   </tr>
@@ -542,7 +695,23 @@ export function GroupRows({
 }
 
 export function CatalogPage({ config }: { config: CatalogConfig }) {
-  const { runtime } = useAuth();
+  const { runtime, identity, announce } = useAuth();
+  const auth = useIdentity();
+  const access = createAccess(
+    auth.status === 'authenticated' ? auth.identity : undefined,
+  );
+  const canWrite = Boolean(config.writes && access.canWriteASIN);
+  const canDelete = Boolean(config.writes && access.canDeleteASIN);
+  const [action, setAction] = useState<CatalogAction | null>(null);
+  const [actionSerial, setActionSerial] = useState(0);
+  const [writing, setWriting] = useState(false);
+  const writingRef = useRef(false);
+  const actionRef = useRef<HTMLDivElement>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
+  const [rechecking, setRechecking] = useState(false);
+  const recheckActive = useRef(false);
   const [keyword, setKeyword] = useState('');
   const [country, setCountry] = useState('');
   const [status, setStatus] = useState<StatusFilter>('ALL');
@@ -554,13 +723,30 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  useEffect(() => {
+    if (!action) return;
+    actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    actionRef.current?.focus();
+  }, [action]);
   const data = groups.data;
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
 
+  function openAction(next: CatalogAction) {
+    if (writingRef.current) return;
+    setActionSerial((previous) => previous + 1);
+    setAction(next);
+  }
+
+  function writingChange(next: boolean) {
+    writingRef.current = next;
+    setWriting(next);
+  }
+
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setAction(null);
     setSelectedId(null);
     setQuery({
       keyword: keyword.trim() || undefined,
@@ -571,16 +757,98 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     });
   }
   function changePage(next: number) {
+    setAction(null);
     setSelectedId(null);
     setQuery((previous) => ({ ...previous, current: next }));
   }
+
+  function reportAccessDenied() {
+    setAccessDenied(true);
+    setAction(null);
+    setNotice(null);
+    if (recheckActive.current) return;
+    runtime.clearUserWork();
+    void recheckAccess();
+  }
+
+  async function recheckAccess() {
+    if (recheckActive.current) return;
+    recheckActive.current = true;
+    setRechecking(true);
+    setAccessRetryError(null);
+    try {
+      const refreshed = await identity.refresh();
+      if (
+        refreshed.status !== 'authenticated' ||
+        !createAccess(refreshed.identity).canReadASIN
+      ) {
+        setAccessRetryError('当前账号已无权读取 ASIN 目录。');
+        return;
+      }
+      const fresh = await config.list(runtime.http, query);
+      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+      setAccessDenied(false);
+    } catch {
+      setAccessRetryError('重新读取目录失败，请稍后重试。');
+    } finally {
+      recheckActive.current = false;
+      setRechecking(false);
+    }
+  }
+
+  async function afterWrite(message: string, savedAction: CatalogAction) {
+    if (savedAction.type === 'delete-group') setSelectedId(null);
+    setNotice(message);
+    announce(message);
+    await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+    await runtime.queryClient.invalidateQueries({
+      queryKey: [config.id],
+      refetchType: 'none',
+    });
+    try {
+      const fresh = await config.list(runtime.http, query);
+      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+      if (selectedId && savedAction.type !== 'delete-group') {
+        const detail = await config.detail(runtime.http, selectedId);
+        runtime.queryClient.setQueryData(
+          [config.id, 'group', selectedId],
+          detail,
+        );
+      }
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) {
+        reportAccessDenied();
+      } else {
+        setNotice(`${message}目录刷新失败，请手动重试。`);
+      }
+    }
+  }
+
+  if (accessDenied)
+    return (
+      <AppShell title={config.title}>
+        <div className="space-y-3 rounded-control bg-status-warning-soft p-5 text-sm text-status-warning">
+          <p role="alert">访问权限可能已变更，正在重新验证当前身份与目录…</p>
+          {accessRetryError && <p role="status">{accessRetryError}</p>}
+          {accessRetryError && (
+            <Button
+              variant="secondary"
+              pending={rechecking}
+              onClick={() => void recheckAccess()}
+            >
+              重新验证
+            </Button>
+          )}
+        </div>
+      </AppShell>
+    );
 
   return (
     <AppShell title={config.title}>
       <div className="space-y-6">
         <section className="rounded-card bg-ink px-6 py-7 text-white sm:px-8">
           <ModuleLabel module={config.id}>
-            {config.label} / 只读目录
+            {config.label} / {canWrite || canDelete ? '目录管理' : '只读目录'}
           </ModuleLabel>
           <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
             <div>
@@ -604,6 +872,33 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
             </Button>
           </div>
         </section>
+
+        {notice && (
+          <p
+            role="status"
+            className="rounded-control bg-status-success-soft p-4 text-sm text-status-success"
+          >
+            {notice}
+          </p>
+        )}
+        {action &&
+          config.writes &&
+          catalogActionAllowed(action, canWrite, canDelete) && (
+            <div ref={actionRef} tabIndex={-1}>
+              <CatalogActionPanel
+                key={actionSerial}
+                action={action}
+                config={config}
+                http={runtime.http}
+                close={() =>
+                  setAction((current) => (current === action ? null : current))
+                }
+                saved={afterWrite}
+                denied={reportAccessDenied}
+                writingChange={writingChange}
+              />
+            </div>
+          )}
 
         <Card>
           <CardHeader
@@ -656,6 +951,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                       selected={status === value}
                       onClick={() => {
                         setStatus(value);
+                        setAction(null);
                         setSelectedId(null);
                         setQuery({
                           keyword: keyword.trim() || undefined,
@@ -686,29 +982,41 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                 : '按当前筛选条件读取目录'
             }
             action={
-              <label className="flex items-center gap-2 text-xs">
-                每页{' '}
-                <select
-                  aria-label="每页数量"
-                  className="rounded-control border border-input bg-card px-3 py-2"
-                  value={query.pageSize ?? 10}
-                  onChange={(event) => {
-                    setSelectedId(null);
-                    setQuery((previous) => ({
-                      ...previous,
-                      current: 1,
-                      pageSize: Number(event.target.value),
-                    }));
-                  }}
-                >
-                  {PAGE_SIZES.map((size) => (
-                    <option key={size} value={size}>
-                      {size}
-                    </option>
-                  ))}
-                </select>
-                组
-              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                {canWrite && (
+                  <Button
+                    size="small"
+                    disabled={writing}
+                    onClick={() => openAction({ type: 'create-group' })}
+                  >
+                    新建变体组
+                  </Button>
+                )}
+                <label className="flex items-center gap-2 text-xs">
+                  每页{' '}
+                  <select
+                    aria-label="每页数量"
+                    className="rounded-control border border-input bg-card px-3 py-2"
+                    value={query.pageSize ?? 10}
+                    onChange={(event) => {
+                      setAction(null);
+                      setSelectedId(null);
+                      setQuery((previous) => ({
+                        ...previous,
+                        current: 1,
+                        pageSize: Number(event.target.value),
+                      }));
+                    }}
+                  >
+                    {PAGE_SIZES.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                  组
+                </label>
+              </div>
             }
           />
           <CardContent className="space-y-5">
@@ -751,9 +1059,15 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     groups={data.list}
                     config={config}
                     selectedId={selectedId}
-                    onSelect={(id) =>
-                      setSelectedId(selectedId === id ? null : id)
-                    }
+                    onSelect={(id) => {
+                      setAction(null);
+                      setSelectedId(selectedId === id ? null : id);
+                    }}
+                    canWrite={canWrite}
+                    canDelete={canDelete}
+                    actionsDisabled={writing}
+                    onAction={openAction}
+                    onDenied={reportAccessDenied}
                   />
                 )}
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-5 text-sm">
