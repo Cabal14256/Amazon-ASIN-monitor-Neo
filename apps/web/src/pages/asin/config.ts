@@ -7,7 +7,11 @@ import {
   getVariantGroups,
   moveAsin,
   updateAsin,
+  updateAsinManual,
+  updateAsinNotify,
   updateVariantGroup,
+  updateVariantGroupManual,
+  updateVariantGroupNotify,
 } from '../../services/asin';
 import type { CatalogConfig } from '../catalog/catalog-types';
 
@@ -31,5 +35,9 @@ export const ASIN_CATALOG: CatalogConfig = {
     updateAsin,
     moveAsin,
     deleteAsin,
+    updateGroupNotify: updateVariantGroupNotify,
+    updateGroupManual: updateVariantGroupManual,
+    updateAsinNotify,
+    updateAsinManual,
   },
 };

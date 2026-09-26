@@ -10,7 +10,11 @@ import {
   getVariantGroups,
   moveAsin,
   updateAsin,
+  updateAsinManual,
+  updateAsinNotify,
   updateVariantGroup,
+  updateVariantGroupManual,
+  updateVariantGroupNotify,
 } from './asin';
 
 const group = {
@@ -220,5 +224,78 @@ describe('ASIN catalog transport', () => {
         maxResponseBytes: 32 * 1024 * 1024,
       });
     }
+  });
+
+  it('covers notification and manual status routes without duplicating /api', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (url) => {
+      const path = new URL(String(url)).pathname;
+      return jsonResponse({
+        success: true,
+        errorCode: 0,
+        data: path.includes('/variant-groups/') ? group : group.children[0],
+      });
+    });
+    const http = client('https://app.test/api/', fetcher);
+    await updateVariantGroupNotify(http, 'group-1', true);
+    await updateVariantGroupManual(http, 'group-1', {
+      markedBroken: true,
+      reason: 'fixture reason',
+    });
+    await updateAsinNotify(http, 'child-1', false);
+    await updateAsinManual(http, 'child-1', {
+      action: 'EXCLUDE_GROUP_MANUAL',
+      reason: 'fixture exclusion',
+    });
+    expect(
+      fetcher.mock.calls.map(([url, options]) => [
+        options?.method,
+        new URL(String(url)).pathname,
+        JSON.parse(String(options?.body)),
+      ]),
+    ).toEqual([
+      [
+        'PUT',
+        '/api/v1/variant-groups/group-1/feishu-notify',
+        { enabled: true },
+      ],
+      [
+        'PUT',
+        '/api/v1/variant-groups/group-1/manual-broken',
+        {
+          markedBroken: true,
+          reason: 'fixture reason',
+        },
+      ],
+      ['PUT', '/api/v1/asins/child-1/feishu-notify', { enabled: false }],
+      [
+        'PUT',
+        '/api/v1/asins/child-1/manual-broken',
+        {
+          action: 'EXCLUDE_GROUP_MANUAL',
+          reason: 'fixture exclusion',
+        },
+      ],
+    ]);
+    const budgetedRequest = vi.fn().mockResolvedValue({
+      success: true,
+      errorCode: 0,
+      data: group,
+    });
+    const budgetedHttp = {
+      request: budgetedRequest,
+    } as unknown as Pick<HttpClient, 'request'>;
+    await updateVariantGroupNotify(budgetedHttp, 'group-1', true);
+    await updateVariantGroupManual(budgetedHttp, 'group-1', {
+      markedBroken: true,
+      reason: 'fixture reason',
+    });
+    expect(budgetedRequest.mock.calls[0][1]).toMatchObject({
+      timeoutMs: 120_000,
+      maxResponseBytes: 32 * 1024 * 1024,
+    });
+    expect(budgetedRequest.mock.calls[1][1]).toMatchObject({
+      timeoutMs: 120_000,
+      maxResponseBytes: 32 * 1024 * 1024,
+    });
   });
 });

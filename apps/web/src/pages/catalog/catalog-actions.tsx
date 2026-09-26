@@ -4,16 +4,40 @@ import { Field, Input } from '../../components/ui/field';
 import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { ApiError, type HttpClient } from '../../lib/http';
 import {
+  asinManualScope,
   catalogAccessDenied,
   catalogActionSourceCurrent,
   catalogWriteError,
   singleAsinCode,
+  statusSource,
 } from './catalog-data';
 import type {
   CatalogAction,
+  CatalogChild,
   CatalogConfig,
   CatalogGroup,
 } from './catalog-types';
+
+function flag(value: boolean | 0 | 1 | null | undefined): boolean {
+  return value === true || value === 1;
+}
+function manualExpectedGroup(group: CatalogGroup) {
+  return {
+    manualBroken: flag(group.manualBroken),
+    manualBrokenReason: group.manualBrokenReason ?? null,
+  };
+}
+function manualExpectedAsin(child: CatalogChild, group: CatalogGroup) {
+  return {
+    manualBroken: flag(child.selfManualBroken),
+    manualBrokenReason: flag(child.selfManualBroken)
+      ? child.manualBrokenReason ?? null
+      : null,
+    manualExcludedFromGroup: flag(child.manualExcludedFromGroup),
+    manualExcludedReason: child.manualExcludedReason ?? null,
+    parentManualBroken: flag(group.manualBroken),
+  };
+}
 
 function title(action: CatalogAction): string {
   switch (action.type) {
@@ -31,6 +55,23 @@ function title(action: CatalogAction): string {
       return '移动 ASIN';
     case 'delete-asin':
       return '删除 ASIN';
+    case 'group-notify':
+      return '变体组飞书通知';
+    case 'asin-notify':
+      return 'ASIN 飞书通知';
+    case 'group-manual':
+      return '变体组人工状态';
+    case 'asin-manual':
+      switch (action.action) {
+        case 'MARK_BROKEN':
+          return '标记 ASIN 人工异常';
+        case 'CLEAR_SELF_MANUAL':
+          return '清除 ASIN 自身标记';
+        case 'EXCLUDE_GROUP_MANUAL':
+          return '排除父变体人工标记';
+        case 'CLEAR_GROUP_EXCLUSION':
+          return '恢复继承父变体标记';
+      }
   }
 }
 
@@ -60,6 +101,26 @@ export function CatalogActionPanel({
   const deleting =
     action.type === 'delete-group' || action.type === 'delete-asin';
   const moving = action.type === 'move-asin';
+  const notifying =
+    action.type === 'group-notify' || action.type === 'asin-notify';
+  const manual =
+    action.type === 'group-manual' || action.type === 'asin-manual';
+  const manualAction =
+    action.type === 'asin-manual' ? action.action : undefined;
+  const notifyEnabled =
+    action.type === 'group-notify'
+      ? group?.feishuNotifyEnabled
+      : child?.feishuNotifyEnabled;
+  const manualStatus =
+    action.type === 'group-manual'
+      ? {
+          broken: group?.isBroken ?? group?.is_broken,
+          source: group?.statusSource,
+        }
+      : {
+          broken: child?.isBroken ?? child?.autoIsBroken,
+          source: child?.statusSource,
+        };
   const [name, setName] = useState(
     groupForm ? group?.name ?? '' : child?.name ?? '',
   );
@@ -82,6 +143,7 @@ export function CatalogActionPanel({
   const [searching, setSearching] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
   if (!writes) return null;
 
   async function searchTargets() {
@@ -116,6 +178,16 @@ export function CatalogActionPanel({
     }
     if (action.type === 'create-asin' && !singleAsinCode(asin)) {
       setError('ASIN 应为 10 位字母或数字。');
+      return;
+    }
+    if (
+      manual &&
+      ((action.type === 'group-manual' && !group?.manualBroken) ||
+        manualAction === 'MARK_BROKEN' ||
+        manualAction === 'EXCLUDE_GROUP_MANUAL') &&
+      !reason.trim()
+    ) {
+      setError('请填写人工标记原因。');
       return;
     }
     setPending(true);
@@ -175,6 +247,34 @@ export function CatalogActionPanel({
         case 'delete-asin':
           await writes.deleteAsin(http, action.child.id);
           break;
+        case 'group-notify':
+          await writes.updateGroupNotify(
+            http,
+            action.group.id,
+            !action.group.feishuNotifyEnabled,
+          );
+          break;
+        case 'group-manual':
+          await writes.updateGroupManual(http, action.group.id, {
+            markedBroken: !action.group.manualBroken,
+            reason: reason.trim() || undefined,
+            expectedManualState: manualExpectedGroup(action.group),
+          });
+          break;
+        case 'asin-notify':
+          await writes.updateAsinNotify(
+            http,
+            action.child.id,
+            !action.child.feishuNotifyEnabled,
+          );
+          break;
+        case 'asin-manual':
+          await writes.updateAsinManual(http, action.child.id, {
+            action: action.action,
+            reason: reason.trim() || undefined,
+            expectedManualState: manualExpectedAsin(action.child, action.group),
+          });
+          break;
       }
       await saved(`${title(action)}已完成。`, action);
       close();
@@ -198,6 +298,12 @@ export function CatalogActionPanel({
               : '请核对目标 ASIN 后确认删除。'
             : moving
             ? '请确认目标组；移动会改变当前 ASIN 的归属。'
+            : notifying
+            ? `确认将飞书通知${notifyEnabled ? '关闭' : '开启'}？`
+            : manual
+            ? '操作前状态：' +
+              statusSource(manualStatus.source) +
+              (child ? ` · ${asinManualScope(child)}` : '')
             : '保存后重新读取目录与详情。'
         }
         action={
@@ -221,6 +327,42 @@ export function CatalogActionPanel({
                 : `ASIN「${child?.asin}」`}
               ？
             </p>
+          )}
+          {notifying && (
+            <p className="text-sm">
+              当前状态：
+              {notifyEnabled ? '已开启' : '已关闭'}
+            </p>
+          )}
+          {manual && (
+            <>
+              <p className="text-sm">
+                当前有效状态：
+                {manualStatus.broken ? '异常' : '正常'}
+              </p>
+              {group?.manualBroken ||
+              child?.manualBroken ||
+              manualAction === 'CLEAR_SELF_MANUAL' ||
+              manualAction === 'CLEAR_GROUP_EXCLUSION' ? null : (
+                <p className="text-xs text-muted-foreground">
+                  人工标记将出现在状态来源中，并保留操作原因。
+                </p>
+              )}
+              {((action.type === 'group-manual' && !group?.manualBroken) ||
+                manualAction === 'MARK_BROKEN' ||
+                manualAction === 'EXCLUDE_GROUP_MANUAL') && (
+                <Field label="原因" required>
+                  {(control) => (
+                    <Input
+                      {...control}
+                      value={reason}
+                      maxLength={500}
+                      onChange={(event) => setReason(event.target.value)}
+                    />
+                  )}
+                </Field>
+              )}
+            </>
           )}
           {groupForm && (
             <Field label="变体组名称" required>

@@ -110,6 +110,8 @@ export class AsinWriteService {
         if (error.code === 'duplicate') fail(409, '该 ASIN 在此国家中已存在');
         if (error.code === 'parent-changed')
           fail(409, 'ASIN 所属变体组已改变，请刷新后重试');
+        if (error.code === 'manual-state-changed')
+          fail(409, '人工状态已改变，请刷新后重试');
         if (error.code === 'capacity') fail(429, 'ASIN 写入繁忙，请稍后再试');
       }
       this.logger.error('ASIN 写入失败', 'AsinWriteService', {

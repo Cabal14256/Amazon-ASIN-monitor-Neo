@@ -186,6 +186,12 @@ export const groupManualBrokenRequestSchema = z
   .object({
     markedBroken: manualBrokenInput,
     reason: z.string().max(500, '原因长度不能超过500个字符').optional(),
+    expectedManualState: z
+      .object({
+        manualBroken: manualBrokenInput,
+        manualBrokenReason: z.string().max(500).nullable(),
+      })
+      .optional(),
   })
   .passthrough()
   .superRefine((value, ctx) => {
@@ -231,6 +237,15 @@ export const asinManualBrokenRequestSchema = z
     ),
     markedBroken: optionalManualBrokenInput,
     reason: z.string().max(500, '原因长度不能超过500个字符').optional(),
+    expectedManualState: z
+      .object({
+        manualBroken: manualBrokenInput,
+        manualBrokenReason: z.string().max(500).nullable(),
+        manualExcludedFromGroup: manualBrokenInput,
+        manualExcludedReason: z.string().max(500).nullable(),
+        parentManualBroken: manualBrokenInput,
+      })
+      .optional(),
   })
   .passthrough()
   .superRefine((value, ctx) => {

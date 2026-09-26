@@ -196,6 +196,57 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         '2020-01-01T08:00:00',
       );
     });
+    it('rejects a stale group or ASIN manual state after the row lock is acquired', async () => {
+      await seed();
+      const groupExpected = {
+        manualBroken: true,
+        manualBrokenReason: 'Parent reason',
+      };
+      const groupResponses = await Promise.all([
+        write('/variant-groups/g', {
+          markedBroken: false,
+          expectedManualState: groupExpected,
+        }),
+        write('/variant-groups/g', {
+          markedBroken: false,
+          expectedManualState: groupExpected,
+        }),
+      ]);
+      expect(
+        groupResponses.map((response) => response.statusCode).sort(),
+      ).toEqual([200, 409]);
+      expect(
+        groupResponses.find((response) => response.statusCode === 409)!.json()
+          .errorMessage,
+      ).toBe('人工状态已改变，请刷新后重试');
+
+      const asinExpected = {
+        manualBroken: false,
+        manualBrokenReason: null,
+        manualExcludedFromGroup: false,
+        manualExcludedReason: null,
+        parentManualBroken: false,
+      };
+      const asinResponses = await Promise.all([
+        write('/asins/a1', {
+          action: 'MARK_BROKEN',
+          reason: 'Concurrent own reason',
+          expectedManualState: asinExpected,
+        }),
+        write('/asins/a1', {
+          action: 'MARK_BROKEN',
+          reason: 'Concurrent own reason',
+          expectedManualState: asinExpected,
+        }),
+      ]);
+      expect(
+        asinResponses.map((response) => response.statusCode).sort(),
+      ).toEqual([200, 409]);
+      expect(
+        asinResponses.find((response) => response.statusCode === 409)!.json()
+          .errorMessage,
+      ).toBe('人工状态已改变，请刷新后重试');
+    });
     it.each([
       'CLEAR_SELF_MANUAL',
       'EXCLUDE_GROUP_MANUAL',

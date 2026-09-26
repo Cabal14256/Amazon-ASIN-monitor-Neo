@@ -35,6 +35,9 @@ import {
 } from '../../components/ui/surfaces';
 import { CatalogActionPanel } from './catalog-actions';
 import {
+  asinGroupManualAction,
+  asinManualAction,
+  asinManualScope,
   catalogAccessDenied,
   catalogActionAllowed,
   catalogError,
@@ -198,6 +201,7 @@ function GroupDetail({
   async function prepareAction(
     type: Exclude<CatalogAction['type'], 'create-group'>,
     childId?: string,
+    manualFamily: 'self' | 'group' = 'self',
   ) {
     if (!onAction || preparingAction || actionsDisabled) return;
     setPreparingAction(true);
@@ -213,14 +217,32 @@ function GroupDetail({
       if (childId) {
         const child = fresh.children?.find((item) => item.id === childId);
         if (!child) return;
-        onAction({
-          type: type as 'edit-asin' | 'move-asin' | 'delete-asin',
-          group: fresh,
-          child,
-        });
+        if (type === 'asin-manual')
+          (() => {
+            const action =
+              manualFamily === 'group'
+                ? asinGroupManualAction(child)
+                : asinManualAction(child);
+            if (action) onAction({ type, action, group: fresh, child });
+          })();
+        else
+          onAction({
+            type: type as
+              | 'edit-asin'
+              | 'move-asin'
+              | 'delete-asin'
+              | 'asin-notify',
+            group: fresh,
+            child,
+          });
       } else {
         onAction({
-          type: type as 'edit-group' | 'delete-group' | 'create-asin',
+          type: type as
+            | 'edit-group'
+            | 'delete-group'
+            | 'create-asin'
+            | 'group-notify'
+            | 'group-manual',
           group: fresh,
         });
       }
@@ -333,6 +355,24 @@ function GroupDetail({
                     >
                       添加 ASIN
                     </Button>
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={preparingAction || actionsDisabled}
+                      onClick={() => void prepareAction('group-notify')}
+                    >
+                      {group.feishuNotifyEnabled
+                        ? '关闭飞书通知'
+                        : '开启飞书通知'}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={preparingAction || actionsDisabled}
+                      onClick={() => void prepareAction('group-manual')}
+                    >
+                      {group.manualBroken ? '清除人工标记' : '标记人工异常'}
+                    </Button>
                   </>
                 )}
                 {canDelete && (
@@ -403,6 +443,13 @@ function GroupDetail({
                           人工标记原因：{child.manualBrokenReason}
                         </p>
                       )}
+                      {config.showManual && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          人工状态来源：{asinManualScope(child)}
+                          {child.manualExcludedReason &&
+                            ` · 排除原因：${child.manualExcludedReason}`}
+                        </p>
+                      )}
                       {(canWrite || canDelete) && (
                         <div className="mt-3 flex flex-wrap gap-2">
                           {canWrite && (
@@ -427,6 +474,49 @@ function GroupDetail({
                               >
                                 移动
                               </Button>
+                              <Button
+                                variant="secondary"
+                                size="small"
+                                disabled={preparingAction || actionsDisabled}
+                                onClick={() =>
+                                  void prepareAction('asin-notify', child.id)
+                                }
+                              >
+                                {child.feishuNotifyEnabled
+                                  ? '关闭通知'
+                                  : '开启通知'}
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                size="small"
+                                disabled={preparingAction || actionsDisabled}
+                                onClick={() =>
+                                  void prepareAction('asin-manual', child.id)
+                                }
+                              >
+                                {asinManualAction(child) === 'MARK_BROKEN'
+                                  ? '标记异常'
+                                  : '清除自身标记'}
+                              </Button>
+                              {asinGroupManualAction(child) && (
+                                <Button
+                                  variant="secondary"
+                                  size="small"
+                                  disabled={preparingAction || actionsDisabled}
+                                  onClick={() =>
+                                    void prepareAction(
+                                      'asin-manual',
+                                      child.id,
+                                      'group',
+                                    )
+                                  }
+                                >
+                                  {asinGroupManualAction(child) ===
+                                  'EXCLUDE_GROUP_MANUAL'
+                                    ? '排除组标记'
+                                    : '恢复组标记'}
+                                </Button>
+                              )}
                             </>
                           )}
                           {canDelete && (

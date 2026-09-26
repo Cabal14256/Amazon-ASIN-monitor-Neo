@@ -81,19 +81,27 @@ const manualKeys =
 export function parseGroupManual(value: unknown) {
   const result = parse(
     groupManualBrokenRequestSchema.refine(
-      manualKeys(['markedBroken', 'reason']),
+      manualKeys(['markedBroken', 'reason', 'expectedManualState']),
     ),
     value,
   );
   return {
     markedBroken: marked(result.markedBroken),
     reason: result.reason?.trim() || '',
+    ...(result.expectedManualState
+      ? {
+          expectedManualState: {
+            manualBroken: marked(result.expectedManualState.manualBroken),
+            manualBrokenReason: result.expectedManualState.manualBrokenReason,
+          },
+        }
+      : {}),
   };
 }
 export function parseAsinManual(value: unknown) {
   const result = parse(
     asinManualBrokenRequestSchema.refine(
-      manualKeys(['action', 'markedBroken', 'reason']),
+      manualKeys(['action', 'markedBroken', 'reason', 'expectedManualState']),
     ),
     value,
   );
@@ -104,6 +112,22 @@ export function parseAsinManual(value: unknown) {
         ? ('MARK_BROKEN' as const)
         : ('CLEAR_SELF_MANUAL' as const)),
     reason: result.reason?.trim() || '',
+    ...(result.expectedManualState
+      ? {
+          expectedManualState: {
+            manualBroken: marked(result.expectedManualState.manualBroken),
+            manualBrokenReason: result.expectedManualState.manualBrokenReason,
+            manualExcludedFromGroup: marked(
+              result.expectedManualState.manualExcludedFromGroup,
+            ),
+            manualExcludedReason:
+              result.expectedManualState.manualExcludedReason,
+            parentManualBroken: marked(
+              result.expectedManualState.parentManualBroken,
+            ),
+          },
+        }
+      : {}),
   };
 }
 function normalizeAsin<
