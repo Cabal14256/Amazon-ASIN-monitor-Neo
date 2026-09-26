@@ -167,6 +167,7 @@ describe('fetch and download transport boundary', () => {
       kind: 'BUSINESS',
       message: '名称已存在',
       errorCode: 409,
+      data: { private: 'fixture-secret' },
     });
     expect(JSON.stringify(error)).not.toContain('fixture-secret');
   });
