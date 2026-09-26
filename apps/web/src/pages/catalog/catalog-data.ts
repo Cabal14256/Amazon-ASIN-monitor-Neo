@@ -24,16 +24,18 @@ export function childStatus(child: CatalogChild) {
 
 export function asinManualAction(
   child: CatalogChild,
-):
-  | 'MARK_BROKEN'
-  | 'CLEAR_SELF_MANUAL'
-  | 'EXCLUDE_GROUP_MANUAL'
-  | 'CLEAR_GROUP_EXCLUSION' {
+): 'MARK_BROKEN' | 'CLEAR_SELF_MANUAL' {
+  if (child.selfManualBroken) return 'CLEAR_SELF_MANUAL';
+  return 'MARK_BROKEN';
+}
+
+export function asinGroupManualAction(
+  child: CatalogChild,
+): 'EXCLUDE_GROUP_MANUAL' | 'CLEAR_GROUP_EXCLUSION' | undefined {
   if (child.manualBrokenScope === 'GROUP_EXCLUDED')
     return 'CLEAR_GROUP_EXCLUSION';
-  if (child.selfManualBroken) return 'CLEAR_SELF_MANUAL';
   if (child.inheritedManualBroken) return 'EXCLUDE_GROUP_MANUAL';
-  return 'MARK_BROKEN';
+  return undefined;
 }
 
 export function asinManualScope(child: CatalogChild): string {

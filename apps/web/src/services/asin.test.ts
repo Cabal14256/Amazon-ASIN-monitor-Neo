@@ -276,5 +276,26 @@ describe('ASIN catalog transport', () => {
         },
       ],
     ]);
+    const budgetedRequest = vi.fn().mockResolvedValue({
+      success: true,
+      errorCode: 0,
+      data: group,
+    });
+    const budgetedHttp = {
+      request: budgetedRequest,
+    } as unknown as Pick<HttpClient, 'request'>;
+    await updateVariantGroupNotify(budgetedHttp, 'group-1', true);
+    await updateVariantGroupManual(budgetedHttp, 'group-1', {
+      markedBroken: true,
+      reason: 'fixture reason',
+    });
+    expect(budgetedRequest.mock.calls[0][1]).toMatchObject({
+      timeoutMs: 120_000,
+      maxResponseBytes: 32 * 1024 * 1024,
+    });
+    expect(budgetedRequest.mock.calls[1][1]).toMatchObject({
+      timeoutMs: 120_000,
+      maxResponseBytes: 32 * 1024 * 1024,
+    });
   });
 });

@@ -22,6 +22,10 @@ import {
 import { ApiError, type HttpClient } from '../lib/http';
 
 const ASIN_RESPONSE_LIMIT = 32 * 1024 * 1024;
+const GROUP_MUTATION_OPTIONS = {
+  timeoutMs: 120_000,
+  maxResponseBytes: ASIN_RESPONSE_LIMIT,
+} as const;
 const GROUPS = '/api/v1/variant-groups';
 const ASINS = '/api/v1/asins';
 
@@ -220,7 +224,11 @@ export async function updateVariantGroupNotify(
   return data(
     await http.request(
       `${GROUPS}/${segment(id)}/feishu-notify`,
-      { method: 'PUT', json: body(feishuNotifyRequestSchema, { enabled }) },
+      {
+        method: 'PUT',
+        json: body(feishuNotifyRequestSchema, { enabled }),
+        ...GROUP_MUTATION_OPTIONS,
+      },
       variantGroupResultSchema,
     ),
   );
@@ -234,7 +242,11 @@ export async function updateVariantGroupManual(
   return data(
     await http.request(
       `${GROUPS}/${segment(id)}/manual-broken`,
-      { method: 'PUT', json: body(groupManualBrokenRequestSchema, input) },
+      {
+        method: 'PUT',
+        json: body(groupManualBrokenRequestSchema, input),
+        ...GROUP_MUTATION_OPTIONS,
+      },
       variantGroupResultSchema,
     ),
   );

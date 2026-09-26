@@ -35,6 +35,7 @@ import {
 } from '../../components/ui/surfaces';
 import { CatalogActionPanel } from './catalog-actions';
 import {
+  asinGroupManualAction,
   asinManualAction,
   asinManualScope,
   catalogAccessDenied,
@@ -200,6 +201,7 @@ function GroupDetail({
   async function prepareAction(
     type: Exclude<CatalogAction['type'], 'create-group'>,
     childId?: string,
+    manualAction?: Extract<CatalogAction, { type: 'asin-manual' }>['action'],
   ) {
     if (!onAction || preparingAction || actionsDisabled) return;
     setPreparingAction(true);
@@ -218,7 +220,7 @@ function GroupDetail({
         if (type === 'asin-manual')
           onAction({
             type,
-            action: asinManualAction(child),
+            action: manualAction ?? asinManualAction(child),
             group: fresh,
             child,
           });
@@ -493,14 +495,27 @@ function GroupDetail({
                               >
                                 {asinManualAction(child) === 'MARK_BROKEN'
                                   ? '标记异常'
-                                  : asinManualAction(child) ===
-                                    'CLEAR_SELF_MANUAL'
-                                  ? '清除自身标记'
-                                  : asinManualAction(child) ===
-                                    'EXCLUDE_GROUP_MANUAL'
-                                  ? '排除组标记'
-                                  : '恢复组标记'}
+                                  : '清除自身标记'}
                               </Button>
+                              {asinGroupManualAction(child) && (
+                                <Button
+                                  variant="secondary"
+                                  size="small"
+                                  disabled={preparingAction || actionsDisabled}
+                                  onClick={() =>
+                                    void prepareAction(
+                                      'asin-manual',
+                                      child.id,
+                                      asinGroupManualAction(child),
+                                    )
+                                  }
+                                >
+                                  {asinGroupManualAction(child) ===
+                                  'EXCLUDE_GROUP_MANUAL'
+                                    ? '排除组标记'
+                                    : '恢复组标记'}
+                                </Button>
+                              )}
                             </>
                           )}
                           {canDelete && (

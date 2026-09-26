@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
+  asinGroupManualAction,
   asinManualAction,
   asinManualScope,
   catalogAccessDenied,
@@ -233,6 +234,15 @@ describe('shared ASIN catalog display data', () => {
         inheritedManualBroken: 1,
         manualBrokenScope: 'GROUP',
       }),
+    ).toBe('MARK_BROKEN');
+    expect(
+      asinGroupManualAction({
+        id: 'a',
+        asin: 'B00TEST',
+        country: 'US',
+        inheritedManualBroken: 1,
+        manualBrokenScope: 'GROUP',
+      }),
     ).toBe('EXCLUDE_GROUP_MANUAL');
     const excluded = {
       id: 'a',
@@ -240,7 +250,8 @@ describe('shared ASIN catalog display data', () => {
       country: 'US',
       manualBrokenScope: 'GROUP_EXCLUDED',
     };
-    expect(asinManualAction(excluded)).toBe('CLEAR_GROUP_EXCLUSION');
+    expect(asinManualAction(excluded)).toBe('MARK_BROKEN');
+    expect(asinGroupManualAction(excluded)).toBe('CLEAR_GROUP_EXCLUSION');
     expect(asinManualScope(excluded)).toBe('已排除父变体标记');
   });
 });
