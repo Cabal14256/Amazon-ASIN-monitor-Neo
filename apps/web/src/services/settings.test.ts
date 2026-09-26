@@ -24,7 +24,12 @@ describe('SettingsApi', () => {
     });
     expect(client.request).toHaveBeenCalledWith(
       '/api/v1/sp-api-configs',
-      expect.objectContaining({ method: 'PUT', json: { configs: [{ configKey: config.configKey, configValue: 'new-secret' }] } }),
+      expect.objectContaining({
+        method: 'PUT',
+        json: {
+          configs: [{ configKey: config.configKey, configValue: 'new-secret' }],
+        },
+      }),
       expect.anything(),
     );
   });
@@ -32,7 +37,9 @@ describe('SettingsApi', () => {
   it('parses masked read-only configuration without exposing a value', async () => {
     const client = http();
     client.request.mockResolvedValue({ success: true, data: [config] });
-    await expect(new SettingsApi(client).spApiConfigs()).resolves.toEqual([config]);
+    await expect(new SettingsApi(client).spApiConfigs()).resolves.toEqual([
+      config,
+    ]);
   });
 
   it('encodes Feishu country and keeps toggle values boolean', async () => {

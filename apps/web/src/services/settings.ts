@@ -5,8 +5,8 @@ import {
   rateLimiterStatusResultSchema,
   spApiDisplayConfigListResultSchema,
   toggleFeishuConfigRequestSchema,
-  updateSpApiConfigsResultSchema,
   updateSpApiConfigsRequestSchema,
+  updateSpApiConfigsResultSchema,
   type ToggleFeishuConfigRequest,
   type UpdateSpApiConfigsRequest,
 } from '@asin-monitor/contracts';
@@ -14,16 +14,24 @@ import { ApiError, type HttpClient } from '../lib/http';
 
 const CONFIG = '/api/v1/sp-api-configs';
 const FEISHU = '/api/v1/feishu-configs';
-const READ_OPTIONS = { timeoutMs: 60_000, maxResponseBytes: 8 * 1024 * 1024 } as const;
+const READ_OPTIONS = {
+  timeoutMs: 60_000,
+  maxResponseBytes: 8 * 1024 * 1024,
+} as const;
 
-function data<T>(response: { success?: boolean; data?: T }, message: string): T {
+function data<T>(
+  response: { success?: boolean; data?: T },
+  message: string,
+): T {
   if (response.success !== true || response.data === undefined)
     throw new ApiError('INVALID_RESPONSE', message);
   return response.data;
 }
 
 function checked<T>(
-  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
+  schema: {
+    safeParse(value: unknown): { success: true; data: T } | { success: false };
+  },
   value: unknown,
   message: string,
 ): T {
@@ -44,8 +52,15 @@ export class SettingsApi {
     return data(response, 'SP-API 配置响应缺少数据');
   }
 
-  async updateSpApiConfigs(input: UpdateSpApiConfigsRequest, signal?: AbortSignal) {
-    const body = checked(updateSpApiConfigsRequestSchema, input, 'SP-API 配置参数无效');
+  async updateSpApiConfigs(
+    input: UpdateSpApiConfigsRequest,
+    signal?: AbortSignal,
+  ) {
+    const body = checked(
+      updateSpApiConfigsRequestSchema,
+      input,
+      'SP-API 配置参数无效',
+    );
     const response = await this.http.request(
       CONFIG,
       { method: 'PUT', json: body, signal, ...READ_OPTIONS },
@@ -63,7 +78,10 @@ export class SettingsApi {
     return data(response, '飞书配置响应缺少数据');
   }
 
-  async upsertFeishu(input: { country: string; webhookUrl: string; enabled: boolean }, signal?: AbortSignal) {
+  async upsertFeishu(
+    input: { country: string; webhookUrl: string; enabled: boolean },
+    signal?: AbortSignal,
+  ) {
     const response = await this.http.request(
       FEISHU,
       { method: 'POST', json: input, signal, ...READ_OPTIONS },
@@ -72,8 +90,16 @@ export class SettingsApi {
     return data(response, '飞书配置保存响应无效');
   }
 
-  async toggleFeishu(country: string, input: ToggleFeishuConfigRequest, signal?: AbortSignal) {
-    const body = checked(toggleFeishuConfigRequestSchema, input, '飞书开关参数无效');
+  async toggleFeishu(
+    country: string,
+    input: ToggleFeishuConfigRequest,
+    signal?: AbortSignal,
+  ) {
+    const body = checked(
+      toggleFeishuConfigRequestSchema,
+      input,
+      '飞书开关参数无效',
+    );
     const response = await this.http.request(
       `${FEISHU}/${encodeURIComponent(country)}/toggle`,
       { method: 'PATCH', json: body, signal, ...READ_OPTIONS },
