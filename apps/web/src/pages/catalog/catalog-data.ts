@@ -103,24 +103,30 @@ export function catalogActionAllowed(
     : canWrite;
 }
 
-export function catalogEditSourceUnchanged(
+export function catalogActionSourceCurrent(
   action: CatalogAction,
   latest: CatalogGroup,
 ): boolean {
-  if (action.type === 'edit-group')
+  if (
+    action.type === 'edit-group' ||
+    action.type === 'delete-group' ||
+    action.type === 'create-asin'
+  )
     return (
+      action.group.id === latest.id &&
       action.group.name === latest.name &&
       action.group.country === latest.country &&
       action.group.site === latest.site &&
       action.group.brand === latest.brand
     );
-  if (action.type === 'edit-asin') {
+  if ('child' in action) {
     const current = latest.children?.find(
       (item) => item.id === action.child.id,
     );
+    if (!current || latest.id !== action.group.id) return false;
+    if (action.type !== 'edit-asin') return true;
     return Boolean(
-      current &&
-        action.child.asin === current.asin &&
+      action.child.asin === current.asin &&
         (action.child.name ?? '') === (current.name ?? '') &&
         action.child.country === current.country &&
         (action.child.site ?? '') === (current.site ?? '') &&

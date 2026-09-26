@@ -3,7 +3,7 @@ import { ApiError } from '../../lib/http';
 import {
   catalogAccessDenied,
   catalogActionAllowed,
-  catalogEditSourceUnchanged,
+  catalogActionSourceCurrent,
   catalogError,
   catalogWriteError,
   checkedAt,
@@ -116,28 +116,40 @@ describe('shared ASIN catalog display data', () => {
       ],
     };
     expect(
-      catalogEditSourceUnchanged({ type: 'edit-group', group }, group),
+      catalogActionSourceCurrent({ type: 'edit-group', group }, group),
     ).toBe(true);
     expect(
-      catalogEditSourceUnchanged(
+      catalogActionSourceCurrent(
         { type: 'edit-group', group },
         { ...group, brand: 'New brand' },
       ),
     ).toBe(false);
     expect(
-      catalogEditSourceUnchanged(
+      catalogActionSourceCurrent(
         { type: 'edit-asin', group, child: group.children[0] },
         group,
       ),
     ).toBe(true);
     expect(
-      catalogEditSourceUnchanged(
+      catalogActionSourceCurrent(
         { type: 'edit-asin', group, child: group.children[0] },
         { ...group, children: [] },
       ),
     ).toBe(false);
     expect(
-      catalogEditSourceUnchanged(
+      catalogActionSourceCurrent(
+        { type: 'move-asin', group, child: group.children[0] },
+        { ...group, children: [] },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'delete-asin', group, child: group.children[0] },
+        group,
+      ),
+    ).toBe(true);
+    expect(
+      catalogActionSourceCurrent(
         { type: 'edit-asin', group, child: group.children[0] },
         { ...group, children: [{ ...group.children[0], name: 'Other edit' }] },
       ),

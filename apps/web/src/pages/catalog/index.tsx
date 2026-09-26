@@ -157,6 +157,7 @@ function GroupDetail({
   onChildPageChange,
   canWrite,
   canDelete,
+  actionsDisabled,
   onAction,
   onDenied,
 }: {
@@ -167,6 +168,7 @@ function GroupDetail({
   onChildPageChange: (page: number) => void;
   canWrite?: boolean;
   canDelete?: boolean;
+  actionsDisabled?: boolean;
   onAction?: (action: CatalogAction) => void;
   onDenied?: () => void;
 }) {
@@ -197,7 +199,7 @@ function GroupDetail({
     type: Exclude<CatalogAction['type'], 'create-group'>,
     childId?: string,
   ) {
-    if (!onAction || preparingAction) return;
+    if (!onAction || preparingAction || actionsDisabled) return;
     setPreparingAction(true);
     try {
       const latest = await detail.refetch();
@@ -318,6 +320,7 @@ function GroupDetail({
                       variant="secondary"
                       size="small"
                       pending={preparingAction}
+                      disabled={actionsDisabled}
                       onClick={() => void prepareAction('edit-group')}
                     >
                       编辑变体组
@@ -325,7 +328,7 @@ function GroupDetail({
                     <Button
                       variant="secondary"
                       size="small"
-                      disabled={preparingAction}
+                      disabled={preparingAction || actionsDisabled}
                       onClick={() => void prepareAction('create-asin')}
                     >
                       添加 ASIN
@@ -336,7 +339,7 @@ function GroupDetail({
                   <Button
                     variant="destructive"
                     size="small"
-                    disabled={preparingAction}
+                    disabled={preparingAction || actionsDisabled}
                     onClick={() => void prepareAction('delete-group')}
                   >
                     删除变体组
@@ -407,7 +410,7 @@ function GroupDetail({
                               <Button
                                 variant="secondary"
                                 size="small"
-                                disabled={preparingAction}
+                                disabled={preparingAction || actionsDisabled}
                                 onClick={() =>
                                   void prepareAction('edit-asin', child.id)
                                 }
@@ -417,7 +420,7 @@ function GroupDetail({
                               <Button
                                 variant="secondary"
                                 size="small"
-                                disabled={preparingAction}
+                                disabled={preparingAction || actionsDisabled}
                                 onClick={() =>
                                   void prepareAction('move-asin', child.id)
                                 }
@@ -430,7 +433,7 @@ function GroupDetail({
                             <Button
                               variant="destructive"
                               size="small"
-                              disabled={preparingAction}
+                              disabled={preparingAction || actionsDisabled}
                               onClick={() =>
                                 void prepareAction('delete-asin', child.id)
                               }
@@ -487,6 +490,7 @@ export function GroupRows({
   onSelect,
   canWrite,
   canDelete,
+  actionsDisabled,
   onAction,
   onDenied,
 }: {
@@ -496,6 +500,7 @@ export function GroupRows({
   onSelect: (id: string) => void;
   canWrite?: boolean;
   canDelete?: boolean;
+  actionsDisabled?: boolean;
   onAction?: (action: CatalogAction) => void;
   onDenied?: () => void;
 }) {
@@ -614,6 +619,7 @@ export function GroupRows({
                   onChildPageChange={setChildPage}
                   canWrite={canWrite}
                   canDelete={canDelete}
+                  actionsDisabled={actionsDisabled}
                   onAction={onAction}
                   onDenied={onDenied}
                 />
@@ -672,6 +678,7 @@ export function GroupRows({
                         onChildPageChange={setChildPage}
                         canWrite={canWrite}
                         canDelete={canDelete}
+                        actionsDisabled={actionsDisabled}
                         onAction={onAction}
                         onDenied={onDenied}
                       />
@@ -696,6 +703,9 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const canWrite = Boolean(config.writes && access.canWriteASIN);
   const canDelete = Boolean(config.writes && access.canDeleteASIN);
   const [action, setAction] = useState<CatalogAction | null>(null);
+  const [actionSerial, setActionSerial] = useState(0);
+  const [writing, setWriting] = useState(false);
+  const writingRef = useRef(false);
   const actionRef = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
@@ -722,6 +732,17 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+
+  function openAction(next: CatalogAction) {
+    if (writingRef.current) return;
+    setActionSerial((previous) => previous + 1);
+    setAction(next);
+  }
+
+  function writingChange(next: boolean) {
+    writingRef.current = next;
+    setWriting(next);
+  }
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -779,7 +800,25 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     if (savedAction.type === 'delete-group') setSelectedId(null);
     setNotice(message);
     announce(message);
-    await runtime.queryClient.invalidateQueries({ queryKey: [config.id] });
+    await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+    await runtime.queryClient.invalidateQueries({
+      queryKey: [config.id],
+      refetchType: 'none',
+    });
+    try {
+      const fresh = await config.list(runtime.http, query);
+      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+      if (selectedId && savedAction.type !== 'delete-group') {
+        const detail = await config.detail(runtime.http, selectedId);
+        runtime.queryClient.setQueryData([config.id, 'group', selectedId], detail);
+      }
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) {
+        reportAccessDenied();
+      } else {
+        setNotice(`${message}目录刷新失败，请手动重试。`);
+      }
+    }
   }
 
   if (accessDenied)
@@ -844,19 +883,16 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           catalogActionAllowed(action, canWrite, canDelete) && (
             <div ref={actionRef} tabIndex={-1}>
               <CatalogActionPanel
-                key={`${action.type}:${
-                  'child' in action
-                    ? action.child.id
-                    : 'group' in action
-                    ? action.group.id
-                    : 'new'
-                }`}
+                key={actionSerial}
                 action={action}
                 config={config}
                 http={runtime.http}
-                close={() => setAction(null)}
+                close={() =>
+                  setAction((current) => (current === action ? null : current))
+                }
                 saved={afterWrite}
                 denied={reportAccessDenied}
+                writingChange={writingChange}
               />
             </div>
           )}
@@ -947,7 +983,8 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                 {canWrite && (
                   <Button
                     size="small"
-                    onClick={() => setAction({ type: 'create-group' })}
+                    disabled={writing}
+                    onClick={() => openAction({ type: 'create-group' })}
                   >
                     新建变体组
                   </Button>
@@ -1025,7 +1062,8 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     }}
                     canWrite={canWrite}
                     canDelete={canDelete}
-                    onAction={setAction}
+                    actionsDisabled={writing}
+                    onAction={openAction}
                     onDenied={reportAccessDenied}
                   />
                 )}

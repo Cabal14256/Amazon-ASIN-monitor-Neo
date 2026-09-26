@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { ApiError, type HttpClient } from '../../lib/http';
 import {
   catalogAccessDenied,
-  catalogEditSourceUnchanged,
+  catalogActionSourceCurrent,
   catalogWriteError,
   singleAsinCode,
 } from './catalog-data';
@@ -41,6 +41,7 @@ export function CatalogActionPanel({
   close,
   saved,
   denied,
+  writingChange,
 }: {
   action: CatalogAction;
   config: CatalogConfig;
@@ -48,6 +49,7 @@ export function CatalogActionPanel({
   close: () => void;
   saved: (message: string, action: CatalogAction) => Promise<void>;
   denied: () => void;
+  writingChange: (writing: boolean) => void;
 }) {
   const writes = config.writes;
   const group = 'group' in action ? action.group : undefined;
@@ -117,10 +119,11 @@ export function CatalogActionPanel({
       return;
     }
     setPending(true);
+    writingChange(true);
     try {
-      if (action.type === 'edit-group' || action.type === 'edit-asin') {
+      if ('group' in action) {
         const latest = await config.detail(http, action.group.id);
-        if (!catalogEditSourceUnchanged(action, latest))
+        if (!catalogActionSourceCurrent(action, latest))
           throw new ApiError('HTTP', '记录已变化', 409);
       }
       switch (action.type) {
@@ -180,6 +183,7 @@ export function CatalogActionPanel({
       setError(catalogWriteError(cause));
     } finally {
       setPending(false);
+      writingChange(false);
     }
   }
 

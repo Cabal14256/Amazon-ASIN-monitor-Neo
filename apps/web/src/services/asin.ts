@@ -102,6 +102,8 @@ export async function createVariantGroup(
       {
         method: 'POST',
         json: body(variantGroupUpsertRequestSchema, input),
+        timeoutMs: 120_000,
+        maxResponseBytes: ASIN_RESPONSE_LIMIT,
       },
       variantGroupResultSchema,
     ),
@@ -119,6 +121,8 @@ export async function updateVariantGroup(
       {
         method: 'PUT',
         json: body(variantGroupUpsertRequestSchema, input),
+        timeoutMs: 120_000,
+        maxResponseBytes: ASIN_RESPONSE_LIMIT,
       },
       variantGroupResultSchema,
     ),

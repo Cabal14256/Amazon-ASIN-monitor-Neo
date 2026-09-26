@@ -202,4 +202,20 @@ describe('ASIN catalog transport', () => {
       expect.anything(),
     );
   });
+
+  it('uses the detail response budget for full-group mutation responses', async () => {
+    const request = vi.fn().mockResolvedValue({ success: true, data: group });
+    const http = { request } as unknown as Pick<HttpClient, 'request'>;
+    const input = {
+      name: 'Fixture group', country: 'US', site: 'amazon.com', brand: 'Fixture',
+    };
+    await createVariantGroup(http, input);
+    await updateVariantGroup(http, 'group-1', input);
+    for (const call of request.mock.calls) {
+      expect(call[1]).toMatchObject({
+        timeoutMs: 120_000,
+        maxResponseBytes: 32 * 1024 * 1024,
+      });
+    }
+  });
 });
