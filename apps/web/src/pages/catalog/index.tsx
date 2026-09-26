@@ -810,7 +810,10 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
       if (selectedId && savedAction.type !== 'delete-group') {
         const detail = await config.detail(runtime.http, selectedId);
-        runtime.queryClient.setQueryData([config.id, 'group', selectedId], detail);
+        runtime.queryClient.setQueryData(
+          [config.id, 'group', selectedId],
+          detail,
+        );
       }
     } catch (cause) {
       if (catalogAccessDenied(cause)) {

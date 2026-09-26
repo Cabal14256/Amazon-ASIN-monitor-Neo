@@ -207,7 +207,10 @@ describe('ASIN catalog transport', () => {
     const request = vi.fn().mockResolvedValue({ success: true, data: group });
     const http = { request } as unknown as Pick<HttpClient, 'request'>;
     const input = {
-      name: 'Fixture group', country: 'US', site: 'amazon.com', brand: 'Fixture',
+      name: 'Fixture group',
+      country: 'US',
+      site: 'amazon.com',
+      brand: 'Fixture',
     };
     await createVariantGroup(http, input);
     await updateVariantGroup(http, 'group-1', input);
