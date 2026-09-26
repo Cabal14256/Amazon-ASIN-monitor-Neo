@@ -85,6 +85,20 @@ export function CatalogActionPanel({
     action.type === 'group-manual' || action.type === 'asin-manual';
   const manualAction =
     action.type === 'asin-manual' ? action.action : undefined;
+  const notifyEnabled =
+    action.type === 'group-notify'
+      ? group?.feishuNotifyEnabled
+      : child?.feishuNotifyEnabled;
+  const manualStatus =
+    action.type === 'group-manual'
+      ? {
+          broken: group?.isBroken ?? group?.is_broken,
+          source: group?.statusSource,
+        }
+      : {
+          broken: child?.isBroken ?? child?.autoIsBroken,
+          source: child?.statusSource,
+        };
   const [name, setName] = useState(
     groupForm ? group?.name ?? '' : child?.name ?? '',
   );
@@ -261,14 +275,10 @@ export function CatalogActionPanel({
             : moving
             ? '请确认目标组；移动会改变当前 ASIN 的归属。'
             : notifying
-            ? `确认将飞书通知${
-                group?.feishuNotifyEnabled ?? child?.feishuNotifyEnabled
-                  ? '关闭'
-                  : '开启'
-              }？`
+            ? `确认将飞书通知${notifyEnabled ? '关闭' : '开启'}？`
             : manual
             ? '操作前状态：' +
-              statusSource(group?.statusSource ?? child?.statusSource) +
+              statusSource(manualStatus.source) +
               (child ? ` · ${asinManualScope(child)}` : '')
             : '保存后重新读取目录与详情。'
         }
@@ -297,18 +307,14 @@ export function CatalogActionPanel({
           {notifying && (
             <p className="text-sm">
               当前状态：
-              {group?.feishuNotifyEnabled ?? child?.feishuNotifyEnabled
-                ? '已开启'
-                : '已关闭'}
+              {notifyEnabled ? '已开启' : '已关闭'}
             </p>
           )}
           {manual && (
             <>
               <p className="text-sm">
                 当前有效状态：
-                {group?.isBroken ?? group?.is_broken ?? child?.isBroken
-                  ? '异常'
-                  : '正常'}
+                {manualStatus.broken ? '异常' : '正常'}
               </p>
               {group?.manualBroken ||
               child?.manualBroken ||

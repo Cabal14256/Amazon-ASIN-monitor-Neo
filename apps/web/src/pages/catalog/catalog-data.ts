@@ -32,8 +32,7 @@ export function asinManualAction(
 export function asinGroupManualAction(
   child: CatalogChild,
 ): 'EXCLUDE_GROUP_MANUAL' | 'CLEAR_GROUP_EXCLUSION' | undefined {
-  if (child.manualBrokenScope === 'GROUP_EXCLUDED')
-    return 'CLEAR_GROUP_EXCLUSION';
+  if (child.manualExcludedFromGroup) return 'CLEAR_GROUP_EXCLUSION';
   if (child.inheritedManualBroken) return 'EXCLUDE_GROUP_MANUAL';
   return undefined;
 }
@@ -147,8 +146,7 @@ export function catalogActionSourceCurrent(
     return (
       action.group.id === latest.id &&
       action.group.manualBroken === latest.manualBroken &&
-      action.group.manualBrokenReason === latest.manualBrokenReason &&
-      action.group.statusSource === latest.statusSource
+      action.group.manualBrokenReason === latest.manualBrokenReason
     );
   if (
     action.type === 'edit-group' ||

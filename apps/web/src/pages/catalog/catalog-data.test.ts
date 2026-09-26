@@ -144,6 +144,24 @@ describe('shared ASIN catalog display data', () => {
         { ...group, brand: 'New brand' },
       ),
     ).toBe(false);
+    const manualGroup = {
+      ...group,
+      manualBroken: 1 as const,
+      manualBrokenReason: 'manual reason',
+      statusSource: 'MANUAL',
+    };
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'group-manual', group: manualGroup },
+        { ...manualGroup, isBroken: 0, statusSource: 'NORMAL' },
+      ),
+    ).toBe(true);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'group-manual', group: manualGroup },
+        { ...manualGroup, manualBrokenReason: 'other reason' },
+      ),
+    ).toBe(false);
     expect(
       catalogActionSourceCurrent(
         { type: 'edit-asin', group, child: group.children[0] },
@@ -249,9 +267,18 @@ describe('shared ASIN catalog display data', () => {
       asin: 'B00TEST',
       country: 'US',
       manualBrokenScope: 'GROUP_EXCLUDED',
+      manualExcludedFromGroup: 1 as const,
     };
     expect(asinManualAction(excluded)).toBe('MARK_BROKEN');
     expect(asinGroupManualAction(excluded)).toBe('CLEAR_GROUP_EXCLUSION');
     expect(asinManualScope(excluded)).toBe('已排除父变体标记');
+    expect(
+      asinGroupManualAction({
+        ...excluded,
+        selfManualBroken: 1,
+        manualBrokenScope: 'SELF',
+        manualExcludedFromGroup: 1 as const,
+      }),
+    ).toBe('CLEAR_GROUP_EXCLUSION');
   });
 });
