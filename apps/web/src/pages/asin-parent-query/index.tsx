@@ -118,24 +118,34 @@ export default function AsinParentQueryPage() {
     }
     setPending(true);
     setError(null);
-    setMessage(invalid ? `已忽略 ${invalid} 个格式无效的输入。` : null);
+    const ignoredMessage = invalid
+      ? `已忽略 ${invalid} 个格式无效的输入。`
+      : null;
+    setMessage(ignoredMessage);
     setProgress(null);
+    const controller = new AbortController();
+    waitController.current = controller;
     try {
-      const accepted = await queryParentAsins(runtime.http, { asins, country });
+      const accepted = await queryParentAsins(
+        runtime.http,
+        { asins, country },
+        controller.signal,
+      );
       if (Array.isArray(accepted)) {
         setItems(accepted);
       } else {
-        waitController.current = new AbortController();
         const task = await runtime.tasks.wait(accepted.taskId, {
           timeoutMs: 10 * 60 * 1000,
-          signal: waitController.current.signal,
+          signal: controller.signal,
           onProgress: (snapshot) => setProgress(snapshot.progress),
         });
         if (!Array.isArray(task.result))
           throw new ApiError('INVALID_RESPONSE', '父体查询任务结果无效');
         setItems(parseParentQueryItems(task.result));
       }
-      setMessage('查询完成。');
+      setMessage(
+        ignoredMessage ? `${ignoredMessage} 查询完成。` : '查询完成。',
+      );
     } catch (cause) {
       if (cause instanceof ApiError && cause.kind === 'CANCELLED') {
         setMessage('查询任务已取消。');
@@ -146,7 +156,7 @@ export default function AsinParentQueryPage() {
     } finally {
       setPending(false);
       setProgress(null);
-      waitController.current = null;
+      if (waitController.current === controller) waitController.current = null;
     }
   }
 
@@ -154,7 +164,9 @@ export default function AsinParentQueryPage() {
     if (!items.length || pending) return;
     setError(null);
     const url = URL.createObjectURL(
-      new Blob([parentQueryCsv(items)], { type: 'text/csv;charset=utf-8' }),
+      new Blob([parentQueryCsv(items, country)], {
+        type: 'text/csv;charset=utf-8',
+      }),
     );
     const link = document.createElement('a');
     link.href = url;

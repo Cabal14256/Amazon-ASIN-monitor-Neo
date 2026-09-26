@@ -107,5 +107,6 @@ describe('parent query transport', () => {
     ]);
     expect(csv).toContain('\'=HYPERLINK(""https://invalid"")');
     expect(csv).toContain('"Brand, Inc."');
+    expect(csv.split('\r\n')[0]).toContain('"国家"');
   });
 });

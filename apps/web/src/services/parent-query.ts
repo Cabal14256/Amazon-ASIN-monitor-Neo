@@ -40,7 +40,10 @@ export function parseParentQueryItems(value: unknown): ParentAsinQueryItem[] {
   return parsed.filter((item) => item.success).map((item) => item.data);
 }
 
-export function parentQueryCsv(items: readonly ParentAsinQueryItem[]): string {
+export function parentQueryCsv(
+  items: readonly ParentAsinQueryItem[],
+  country = 'US',
+): string {
   const escape = (value: unknown) => {
     const text = String(value ?? '');
     const safe = /^[\t\r ]*[=+\-@]/.test(text) ? `'${text}` : text;
@@ -48,6 +51,7 @@ export function parentQueryCsv(items: readonly ParentAsinQueryItem[]): string {
   };
   const headers = [
     'ASIN',
+    '国家',
     '父体 ASIN',
     '父体标题',
     '产品标题',
@@ -58,6 +62,7 @@ export function parentQueryCsv(items: readonly ParentAsinQueryItem[]): string {
   ];
   const rows = items.map((item) => [
     item.asin,
+    country,
     item.parentAsin,
     item.parentTitle,
     item.title,
