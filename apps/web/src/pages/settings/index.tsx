@@ -138,7 +138,9 @@ function ConfigField({
         boolean ? (
           <select
             {...control}
-            value={isEnabledBooleanConfig(value) ? 'true' : 'false'}
+            value={
+              isEnabledBooleanConfig(row.configKey, value) ? 'true' : 'false'
+            }
             disabled={!canWrite || saving}
             onChange={(event) => onChange(event.target.value)}
             className="w-full rounded-input border border-input bg-card px-4 py-3 text-sm text-foreground focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:opacity-60"

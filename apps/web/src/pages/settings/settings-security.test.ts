@@ -70,11 +70,25 @@ describe('settings credential presentation', () => {
       expect(isSupportedMonitorConcurrency(value)).toBe(false);
   });
 
-  it('normalizes Legacy boolean values shown in settings controls', () => {
+  it('only normalizes the competitor flag as its runtime does', () => {
     for (const value of ['true', 'TRUE', ' true ', '1', ' 1 '])
-      expect(isEnabledBooleanConfig(value)).toBe(true);
+      expect(isEnabledBooleanConfig('COMPETITOR_MONITOR_ENABLED', value)).toBe(
+        true,
+      );
     for (const value of ['false', ' FALSE ', '0', '', 'invalid'])
-      expect(isEnabledBooleanConfig(value)).toBe(false);
+      expect(isEnabledBooleanConfig('COMPETITOR_MONITOR_ENABLED', value)).toBe(
+        false,
+      );
+    for (const key of [
+      'SP_API_USE_AWS_SIGNATURE',
+      'ENABLE_HTML_SCRAPER_FALLBACK',
+      'ENABLE_LEGACY_CLIENT_FALLBACK',
+    ]) {
+      expect(isEnabledBooleanConfig(key, 'true')).toBe(true);
+      expect(isEnabledBooleanConfig(key, '1')).toBe(true);
+      expect(isEnabledBooleanConfig(key, 'TRUE')).toBe(false);
+      expect(isEnabledBooleanConfig(key, ' true ')).toBe(false);
+    }
   });
 
   it('keeps the first Feishu revision and rejects a stale webhook after background refetch', async () => {

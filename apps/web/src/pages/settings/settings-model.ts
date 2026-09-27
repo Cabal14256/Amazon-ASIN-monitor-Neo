@@ -62,8 +62,10 @@ export function isSupportedMonitorConcurrency(value: string) {
   return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value));
 }
 
-export function isEnabledBooleanConfig(value: string) {
-  return ['true', '1'].includes(value.trim().toLowerCase());
+export function isEnabledBooleanConfig(key: string, value: string) {
+  return key === 'COMPETITOR_MONITOR_ENABLED'
+    ? ['true', '1'].includes(value.trim().toLowerCase())
+    : value === 'true' || value === '1';
 }
 
 export interface FeishuEdit {
