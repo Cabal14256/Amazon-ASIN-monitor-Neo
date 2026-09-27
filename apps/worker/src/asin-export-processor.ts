@@ -225,7 +225,7 @@ export function createAsinExportProcessor(
             const lastChild = children[children.length - 1]!;
             childCursor = {
               id: lastChild.id,
-              createTime: lastChild.createTime,
+              createTime: lastChild.exportCursorTime,
             };
             if (children.length < MAX_ASIN_QUERY_CHILDREN) break;
           }
@@ -234,11 +234,14 @@ export function createAsinExportProcessor(
         if (processed > MAX_GROUPS)
           throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
         const lastGroup = result.groups[result.groups.length - 1];
-        if (lastGroup)
+        if (lastGroup) {
+          if (lastGroup.exportCursorTime === undefined)
+            throw new Error('EXPORT_CURSOR_INVALID');
           groupCursor = {
             id: lastGroup.id,
-            createTime: lastGroup.createTime,
+            createTime: lastGroup.exportCursorTime,
           };
+        }
         await progress(
           Math.min(90, 5 + Math.floor((processed / Math.max(total, 1)) * 85)),
           `正在生成 ASIN 导出（${processed}/${total} 组）`,

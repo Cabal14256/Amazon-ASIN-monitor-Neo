@@ -35,15 +35,20 @@ export interface AsinGroupQuery {
   pageSize: number;
 }
 export interface AsinGroupReadResult {
-  groups: (VariantGroup & { asinCount?: number; exportIsBroken?: boolean })[];
+  groups: (VariantGroup & {
+    asinCount?: number;
+    exportIsBroken?: boolean;
+    exportCursorTime?: string | null;
+  })[];
   asins: Asin[];
   total: number;
   totalASINs: number;
 }
 export interface AsinExportCursor {
   id: string;
-  createTime: Date | null;
+  createTime: string | null;
 }
+export type AsinExportChild = Asin & { exportCursorTime: string | null };
 export interface AsinQueryUnit extends RoleWriteUnit {
   list(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
   detail(groupId: string): Promise<AsinGroupReadResult>;
@@ -60,7 +65,7 @@ export interface AsinExportQueryUnit extends AsinQueryUnit {
   listExportChildren(
     groupId: string,
     cursor?: AsinExportCursor,
-  ): Promise<Asin[]>;
+  ): Promise<AsinExportChild[]>;
 }
 export interface AsinExportQueryRepositoryPort {
   read<T>(operation: (unit: AsinExportQueryUnit) => Promise<T>): Promise<T>;
@@ -138,8 +143,10 @@ function validateExportCursor(cursor?: AsinExportCursor) {
   validateGroupId(cursor.id);
   if (
     cursor.createTime !== null &&
-    (!(cursor.createTime instanceof Date) ||
-      !Number.isFinite(cursor.createTime.getTime()))
+    (typeof cursor.createTime !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/.test(
+        cursor.createTime,
+      ))
   )
     throw new AsinQueryRepositoryError('input');
 }
@@ -216,7 +223,7 @@ export class DrizzleAsinQueryUnit
   async listExportChildren(
     groupId: string,
     cursor?: AsinExportCursor,
-  ): Promise<Asin[]> {
+  ): Promise<AsinExportChild[]> {
     validateGroupId(groupId);
     validateExportCursor(cursor);
     const after = cursor
@@ -226,16 +233,21 @@ export class DrizzleAsinQueryUnit
             sql`${asins.createTime} IS NOT NULL`,
           )
         : or(
-            gt(asins.createTime, cursor.createTime),
+            sql`${asins.createTime} > (${cursor.createTime}::timestamp)`,
             and(
-              eq(asins.createTime, cursor.createTime),
+              sql`${asins.createTime} = (${cursor.createTime}::timestamp)`,
               gt(asins.id, cursor.id),
             ),
           )
       : undefined;
     this.ensureOpen();
     const children = await this.db
-      .select()
+      .select({
+        ...getTableColumns(asins),
+        exportCursorTime: sql<string | null>`${asins.createTime}::text`.as(
+          'export_cursor_time',
+        ),
+      })
       .from(asins)
       .where(and(eq(asins.variantGroupId, groupId), after))
       .orderBy(sql`${asins.createTime} ASC NULLS FIRST`, asc(asins.id))
@@ -263,10 +275,10 @@ export class DrizzleAsinQueryUnit
           ? exportCursor.createTime === null
             ? and(sql`${g.createTime} IS NULL`, lt(g.id, exportCursor.id))
             : or(
-                lt(g.createTime, exportCursor.createTime),
+                sql`${g.createTime} < (${exportCursor.createTime}::timestamp)`,
                 sql`${g.createTime} IS NULL`,
                 and(
-                  eq(g.createTime, exportCursor.createTime),
+                  sql`${g.createTime} = (${exportCursor.createTime}::timestamp)`,
                   lt(g.id, exportCursor.id),
                 ),
               )
@@ -319,11 +331,15 @@ export class DrizzleAsinQueryUnit
     const exportGroupBroken = includeChildren
       ? sql`NULL::boolean`
       : groupBroken;
+    const exportCursorTime = includeChildren
+      ? sql`NULL::text`
+      : sql`${g.createTime}::text`;
     this.ensureOpen();
     const result = await this.db.execute(sql`
       WITH selected AS MATERIALIZED (
         SELECT g.*, ${asinCount} AS asin_count,
-          ${exportGroupBroken} AS export_group_broken
+          ${exportGroupBroken} AS export_group_broken,
+          ${exportCursorTime} AS export_cursor_time
         FROM ${variantGroups} AS g WHERE ${groupWhere}
         ORDER BY ${g.createTime} DESC NULLS LAST, ${g.id} DESC
         LIMIT ${query.pageSize} OFFSET ${
@@ -349,13 +365,22 @@ export class DrizzleAsinQueryUnit
       groups: payload.groups.map((row: Record<string, unknown>) => {
         if (!includeChildren && typeof row.export_group_broken !== 'boolean')
           throw new AsinQueryRepositoryError('result');
+        if (
+          !includeChildren &&
+          row.export_cursor_time !== null &&
+          typeof row.export_cursor_time !== 'string'
+        )
+          throw new AsinQueryRepositoryError('result');
         return {
           ...hydrate(variantGroups, row),
           ...(groupId === undefined && includeChildren
             ? { asinCount: count(row.asin_count) }
             : {}),
           ...(!includeChildren
-            ? { exportIsBroken: row.export_group_broken as boolean }
+            ? {
+                exportIsBroken: row.export_group_broken as boolean,
+                exportCursorTime: row.export_cursor_time as string | null,
+              }
             : {}),
         };
       }),

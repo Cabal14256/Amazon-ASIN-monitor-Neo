@@ -69,6 +69,7 @@ const group = (id: string, name: string, broken = false) => ({
   brand: 'Fixture',
   isBroken: broken,
   createTime: new Date('2026-09-26T16:00:00.000Z'),
+  exportCursorTime: '2026-09-27 00:00:00.123456',
   updateTime: null,
   lastCheckTime: null,
 });
@@ -83,6 +84,7 @@ const asin = (id: string, parent: string, broken = false) => ({
   variantGroupId: parent,
   isBroken: broken,
   createTime: new Date('2026-09-26T16:00:00.000Z'),
+  exportCursorTime: '2026-09-27 00:00:00.123456',
   updateTime: null,
   lastCheckTime: new Date('2026-09-27T01:02:03.000Z'),
 });
@@ -316,7 +318,7 @@ describe('ASIN streaming export', () => {
     expect(h.children).toHaveBeenCalledWith('g-dense', undefined);
     expect(h.children).toHaveBeenCalledWith('g-dense', {
       id: asins[4999]!.id,
-      createTime: asins[4999]!.createTime,
+      createTime: asins[4999]!.exportCursorTime,
     });
   });
 
@@ -332,7 +334,7 @@ describe('ASIN streaming export', () => {
     expect(h.list).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ current: 1 }),
-      { id: first.id, createTime: first.createTime },
+      { id: first.id, createTime: first.exportCursorTime },
       false,
     );
   });

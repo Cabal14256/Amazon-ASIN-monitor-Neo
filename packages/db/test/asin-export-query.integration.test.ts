@@ -42,9 +42,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const asinSeed = randomUUID().replaceAll('-', '').slice(0, 8);
       try {
         for (const [id, stamp] of [
-          [firstId, '2026-09-27 04:00:00'],
-          [secondId, '2026-09-27 03:00:00'],
-          [thirdId, '2026-09-27 02:00:00'],
+          [firstId, '2026-09-27 04:00:00.123456'],
+          [secondId, '2026-09-27 04:00:00.123455'],
+          [thirdId, '2026-09-27 04:00:00.123454'],
         ])
           await pool.query(
             "INSERT INTO variant_groups(id,name,country,site,brand,create_time) VALUES($1,$1,'US','amazon.com','Fixture',$2)",
@@ -68,7 +68,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const second = await repository.read((unit) =>
           unit.listExportGroups(
             query,
-            { id: lastGroup.id, createTime: lastGroup.createTime },
+            {
+              id: lastGroup.id,
+              createTime: lastGroup.exportCursorTime!,
+            },
             false,
           ),
         );
@@ -83,7 +86,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           `INSERT INTO asins(id,asin,name,asin_type,country,site,brand,variant_group_id,create_time)
            SELECT $1 || '-' || lpad(n::text, 6, '0'),
              'Z' || $2 || lpad(n::text, 6, '0'), 'Dense', '1', 'ZZ', 'amazon.com', 'Fixture', $1,
-             '2026-09-27 00:00:00'
+             '2026-09-27 00:00:00.123456'
            FROM generate_series(1, 5001) AS n`,
           [denseId, asinSeed],
         );
@@ -101,7 +104,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const rest = await repository.read((unit) =>
           unit.listExportChildren(denseId, {
             id: lastChild.id,
-            createTime: lastChild.createTime,
+            createTime: lastChild.exportCursorTime,
           }),
         );
         expect(rest.map((child) => child.id)).toEqual([`${denseId}-005001`]);
