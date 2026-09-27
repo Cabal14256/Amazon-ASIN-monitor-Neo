@@ -254,10 +254,7 @@ describe('competitor catalog refresh and authority transitions', () => {
     );
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
-    fireEvent(
-      window,
-      new StorageEvent('storage', { key, storageArea: window.localStorage }),
-    );
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
     await screen.findAllByText('Current rival');
     expect(screen.getByRole('button', { name: '新建变体组' })).toBeTruthy();
     f.queryClient.clear();
@@ -290,9 +287,10 @@ describe('competitor catalog refresh and authority transitions', () => {
     );
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
-    fireEvent(
-      window,
-      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '已核实原操作，重读目录并恢复写入',
+      }),
     );
     await screen.findAllByText('Current rival');
     expect(screen.getByRole('button', { name: '新建变体组' })).toBeTruthy();

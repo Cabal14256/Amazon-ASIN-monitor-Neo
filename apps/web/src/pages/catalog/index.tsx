@@ -1208,11 +1208,19 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
         const current = stored
           ? readCatalogSafetyGate(stored, ownerId, config.id)
           : null;
-        if (!stored || JSON.stringify(current) !== JSON.stringify(safety)) {
-          runtime.queryClient.setQueryData(
-            safetyKey,
-            current ?? { phase: 'inspection' },
-          );
+        if (!stored) {
+          runtime.queryClient.setQueryData(safetyKey, { phase: 'inspection' });
+          return;
+        }
+        if (!current) {
+          await readAfterWrite(detailId);
+          const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+          runtime.queryClient.setQueryData(safetyKey, latest);
+          refreshed = !latest;
+          return;
+        }
+        if (JSON.stringify(current) !== JSON.stringify(safety)) {
+          runtime.queryClient.setQueryData(safetyKey, current);
           return;
         }
         await readAfterWrite(detailId);
@@ -1242,11 +1250,19 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
         const current = stored
           ? readCatalogSafetyGate(stored, ownerId, config.id)
           : null;
-        if (!stored || JSON.stringify(current) !== JSON.stringify(safety)) {
-          runtime.queryClient.setQueryData(
-            safetyKey,
-            current ?? { phase: 'inspection' },
-          );
+        if (!stored) {
+          runtime.queryClient.setQueryData(safetyKey, { phase: 'inspection' });
+          return;
+        }
+        if (!current) {
+          await readAfterWrite(null);
+          const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+          runtime.queryClient.setQueryData(safetyKey, latest);
+          reconciled = !latest;
+          return;
+        }
+        if (JSON.stringify(current) !== JSON.stringify(safety)) {
+          runtime.queryClient.setQueryData(safetyKey, current);
           return;
         }
         await readAfterWrite(null);
