@@ -134,6 +134,7 @@ describe('settings credential presentation', () => {
       'SP_API_US_LWA_CLIENT_ID',
       'SP_API_EU_LWA_CLIENT_ID',
       'SP_API_LWA_CLIENT_ID',
+      'SP_API_ROLE_ARN',
     ]) {
       expect(isEmptySensitiveReplacement(key, ' ')).toBe(true);
       expect(isEmptySensitiveReplacement(key, 'replacement-id')).toBe(false);

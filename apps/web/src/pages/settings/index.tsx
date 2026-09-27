@@ -977,23 +977,23 @@ export default function SettingsPage() {
               : '当前账号仅可读取允许展示的设置。'}
           </span>
         </div>
-        {tab === 'sp-api' && (
+        <div role="tabpanel" hidden={tab !== 'sp-api'}>
           <SpApiPanel
             api={api}
             canWrite={access.canWriteSettings}
             announce={announce}
             onDenied={onDenied}
           />
-        )}
+        </div>
         {tab === 'status' && <StatusPanel api={api} onDenied={onDenied} />}
-        {tab === 'feishu' && (
+        <div role="tabpanel" hidden={tab !== 'feishu'}>
           <FeishuPanel
             api={api}
             canWrite={access.canWriteSettings}
             announce={announce}
             onDenied={onDenied}
           />
-        )}
+        </div>
         {tab === 'backup' && <BackupPanel />}
       </div>
     </AppShell>

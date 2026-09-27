@@ -84,7 +84,9 @@ export function updateFeishuEdit(
 }
 
 export function isEmptySensitiveReplacement(key: string, value: string) {
-  return /SECRET|TOKEN|KEY|CLIENT_ID/i.test(key) && value.trim() === '';
+  return (
+    /SECRET|TOKEN|KEY|CLIENT_ID|ROLE_ARN/i.test(key) && value.trim() === ''
+  );
 }
 
 export function deniedSettingsError(...errors: unknown[]) {
