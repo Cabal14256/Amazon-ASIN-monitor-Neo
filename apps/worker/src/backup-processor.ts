@@ -524,7 +524,27 @@ async function restoreTimescaleIsolated(input: {
       },
     );
     await input.checkpoint();
-    await pool.query('SELECT timescaledb_post_restore()');
+    // Keep the restored database quiescent for operator review. Commit the
+    // transition out of restore mode and job suspension atomically, so no
+    // retention/columnstore/refresh policy can run between the two steps.
+    const finishClient = await pool.connect();
+    try {
+      await finishClient.query('BEGIN');
+      await finishClient.query('SELECT timescaledb_post_restore()');
+      await finishClient.query(
+        'SELECT public.alter_job(id::integer, scheduled => false) FROM _timescaledb_config.bgw_job WHERE id >= 1000',
+      );
+      await finishClient.query('COMMIT');
+    } catch (finishError) {
+      try {
+        await finishClient.query('ROLLBACK');
+      } catch {
+        // The staging database is deleted on every failure path below.
+      }
+      throw finishError;
+    } finally {
+      finishClient.release();
+    }
     preRestore = false;
     await pool.end();
     pool = openPool();
@@ -533,6 +553,11 @@ async function restoreTimescaleIsolated(input: {
     );
     if (normal.rows[0]?.enabled === 'on')
       throw new BackupCommandError('BACKUP_TIMESCALE_POST_RESTORE_FAILED');
+    const scheduledJobs = await pool.query(
+      'SELECT id FROM _timescaledb_config.bgw_job WHERE id >= 1000 AND scheduled IS DISTINCT FROM false LIMIT 1',
+    );
+    if (scheduledJobs.rows.length > 0)
+      throw new BackupCommandError('BACKUP_TIMESCALE_JOBS_ACTIVE');
     const restored = await readTimescaleManifest(pool);
     if (!sameTimescaleManifest(input.manifest, restored))
       throw new BackupCommandError('BACKUP_TIMESCALE_CATALOG_MISMATCH');

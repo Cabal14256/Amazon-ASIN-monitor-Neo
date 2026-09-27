@@ -28,9 +28,9 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 ## TimescaleDB 隔离恢复
 
 1. 确认 `.dump` 与 `.meta.json` 同在备份卷，元数据为 `version: 2`、`sourceEngine: timescaledb`，并含扩展版本、hypertable 和 continuous aggregate 清单。目标连接角色须有 `CREATEDB`、`CREATE EXTENSION timescaledb` 和清理隔离库所需的权限；目标实例须安装与备份相同的扩展版本。先确认数据库容量足以同时容纳在线库与隔离库。
-2. 调用 `POST /api/v1/backup/restore`，确认 `restoreMode: isolated`。Worker 在目标实例创建 `neo_restore_<primary|competitor>_<任务 ID 前 16 位十六进制>`，撤销该库对 `PUBLIC` 的连接权限，安装 TimescaleDB 扩展，调用 `timescaledb_pre_restore()`，验证恢复状态在新会话可见，再运行 `pg_restore -Fc --exit-on-error -d <隔离库>`，最后调用 `timescaledb_post_restore()`。
-3. Worker 在新会话核对恢复状态已关闭，扩展版本、hypertable 与 continuous aggregate 清单与备份元数据完全一致，才将任务标为完成。失败或取消时先尝试 `timescaledb_post_restore()`，再删除**本任务确认创建**的隔离库；数据库创建确认丢失或清理未确认时任务失败并提示人工核对，禁止把残留库当作成功恢复。数据库名可由任务 ID 确定，排查时不得删除不属于该任务的数据库。
-4. 任务完成后从结果读取 `restoredDatabase`，核对业务记录、chunk、压缩与保留策略、CAGG 数据和权限。完成状态只证明隔离恢复与目录检查成功；生产切换、连接串变更、回滚窗口及停写安排由运维另行执行。Neo 不运行 `pg_restore -j`。步骤与版本要求以 [Timescale 官方逻辑备份指南](https://docs.timescale.com/self-hosted/latest/backup-and-restore/logical-backup/) 为准。
+2. 调用 `POST /api/v1/backup/restore`，确认 `restoreMode: isolated`。Worker 在目标实例创建 `neo_restore_<primary|competitor>_<任务 ID 前 16 位十六进制>`，撤销该库对 `PUBLIC` 的连接权限，安装 TimescaleDB 扩展，调用 `timescaledb_pre_restore()`，验证恢复状态在新会话可见，再运行 `pg_restore -Fc --exit-on-error -d <隔离库>`。Worker 在同一事务中调用 `timescaledb_post_restore()` 并将 `_timescaledb_config.bgw_job` 中 `id >= 1000` 的全部用户作业设为 `scheduled = false`；若作业停用或事务提交失败，隔离库恢复失败并尝试删除。
+3. Worker 在新会话核对恢复状态已关闭、用户后台作业均未调度、扩展版本、hypertable 与 continuous aggregate 清单与备份元数据完全一致，才将任务标为完成。失败或取消时先尝试 `timescaledb_post_restore()`，再删除**本任务确认创建**的隔离库；数据库创建确认丢失或清理未确认时任务失败并提示人工核对，禁止把残留库当作成功恢复。数据库名可由任务 ID 确定，排查时不得删除不属于该任务的数据库。
+4. 任务完成后从结果读取 `restoredDatabase`，核对业务记录、chunk、压缩与保留策略、CAGG 数据和权限。隔离库中的 retention、columnstore、CAGG 刷新等用户后台作业保持停用；运维完成核对并决定切换后，按各作业的预期策略逐一显式启用。完成状态只证明隔离恢复与目录检查成功；生产切换、连接串变更、回滚窗口及停写安排由运维另行执行。Neo 不运行 `pg_restore -j`。步骤与版本要求以 [Timescale 官方逻辑备份指南](https://docs.timescale.com/self-hosted/latest/backup-and-restore/logical-backup/) 及 [迁移时停用后台作业步骤](https://docs.timescale.com/migrate/latest/dual-write-and-backfill/dual-write-from-timescaledb/) 为准。
 
 ## 自动计划
 

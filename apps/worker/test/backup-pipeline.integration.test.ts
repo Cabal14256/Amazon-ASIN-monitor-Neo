@@ -307,6 +307,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await timescalePool.query(
           `CALL refresh_continuous_aggregate('public.${cagg}', '2026-01-01T00:00:00Z'::timestamptz, '2026-01-01T01:00:00Z'::timestamptz)`,
         );
+        await timescalePool.query(
+          `SELECT add_retention_policy('public.${hypertable}', INTERVAL '100 years', schedule_interval => INTERVAL '1 day')`,
+        );
+        expect(
+          (
+            await timescalePool.query(
+              'SELECT id FROM _timescaledb_config.bgw_job WHERE id >= 1000 AND scheduled = true',
+            )
+          ).rows.length,
+        ).toBeGreaterThan(0);
         const created = await runJob(timescaleUrl, 'create', {});
         const artifact = backupTaskResultDataSchema.parse(created.result);
         expect(artifact).toMatchObject({
@@ -358,6 +368,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               )
             ).rows[0]?.enabled,
           ).not.toBe('on');
+          const restoredJobs = await restoredPool.query(
+            'SELECT id, scheduled FROM _timescaledb_config.bgw_job WHERE id >= 1000',
+          );
+          expect(restoredJobs.rows.length).toBeGreaterThan(0);
+          expect(
+            restoredJobs.rows.every((job) => job.scheduled === false),
+          ).toBe(true);
         } finally {
           await restoredPool.end();
         }
