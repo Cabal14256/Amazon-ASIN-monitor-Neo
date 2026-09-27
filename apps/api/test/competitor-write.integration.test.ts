@@ -1150,7 +1150,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               await request(
                 value.method,
                 value.path,
-                value.method === 'PUT' ? { enabled: true } : undefined,
+                value.method === 'PUT'
+                  ? { enabled: true }
+                  : value.path.startsWith('variant-groups/')
+                  ? { expectedChildIds: [] }
+                  : undefined,
               )
             ).statusCode,
           ).toBe(503);
