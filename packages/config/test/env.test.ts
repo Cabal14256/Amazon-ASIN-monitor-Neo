@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   EnvValidationError,
+  getBackupStorageDirectory,
   getDefaultEnvironmentFiles,
   getImportStorageDirectory,
   LEGACY_RECOMMENDED_ENV_VARS,
@@ -173,6 +174,55 @@ describe('loadEnv', () => {
       expect(() =>
         loadEnv({ ...validEnv, IMPORT_STORAGE_DIRECTORY: value }),
       ).toThrow(EnvValidationError);
+  });
+  it('uses one persistent backup directory, bounded commands and custom artifact limits', () => {
+    const env = loadEnv(validEnv);
+    const root = resolve(__dirname, '../../..');
+    const expected = resolve(root, 'var/neo/backups');
+    expect(getBackupStorageDirectory(env, resolve(root, 'apps/api'))).toBe(
+      expected,
+    );
+    expect(getBackupStorageDirectory(env, resolve(root, 'apps/worker'))).toBe(
+      expected,
+    );
+    const configured = resolve(root, 'artifacts/backup-storage-test');
+    expect(
+      getBackupStorageDirectory(
+        loadEnv({ ...validEnv, BACKUP_STORAGE_DIRECTORY: configured }),
+      ),
+    ).toBe(configured);
+    expect(loadEnv(validEnv).PG_DUMP_PATH).toBe('pg_dump');
+    expect(loadEnv(validEnv).PG_RESTORE_PATH).toBe('pg_restore');
+    expect(loadEnv(validEnv).BACKUP_COMMAND_TIMEOUT_MS).toBe(3_600_000);
+    expect(loadEnv(validEnv).BACKUP_MAX_BYTES).toBe(10_737_418_240);
+    for (const value of ['backups', '../backups', 'x\0y', 'C:relative'])
+      expect(() =>
+        loadEnv({ ...validEnv, BACKUP_STORAGE_DIRECTORY: value }),
+      ).toThrow(EnvValidationError);
+    for (const key of ['PG_DUMP_PATH', 'PG_RESTORE_PATH'] as const) {
+      expect(() =>
+        loadEnv({ ...validEnv, [key]: 'pg_dump --format=custom' }),
+      ).toThrow(EnvValidationError);
+      expect(() =>
+        loadEnv({ ...validEnv, [key]: 'pg_dump\n--format=custom' }),
+      ).toThrow(EnvValidationError);
+    }
+    for (const key of [
+      'BACKUP_COMMAND_TIMEOUT_MS',
+      'BACKUP_MAX_BYTES',
+    ] as const) {
+      for (const value of ['0', '-1', '1.5', 'NaN', 'Infinity'])
+        expect(() => loadEnv({ ...validEnv, [key]: value })).toThrow(
+          EnvValidationError,
+        );
+    }
+    expect(
+      loadEnv({ ...validEnv, BACKUP_COMMAND_TIMEOUT_MS: '5000' })
+        .BACKUP_COMMAND_TIMEOUT_MS,
+    ).toBe(5000);
+    expect(
+      loadEnv({ ...validEnv, BACKUP_MAX_BYTES: '1048576' }).BACKUP_MAX_BYTES,
+    ).toBe(1048576);
   });
   it('keeps batch deletion defaults, Legacy fallback/flooring and a nonzero bounded chunk size', () => {
     const defaults = loadEnv(validEnv);

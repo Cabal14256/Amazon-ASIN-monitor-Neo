@@ -11,6 +11,7 @@ import {
   AUTH_MAINTENANCE_QUEUE,
   resolveWorkerSelection,
 } from './auth-maintenance-schedules';
+import { startBackupRuntime } from './backup-runtime';
 import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
 import { startMonitorIntervalRuntime } from './monitor-interval-runtime';
@@ -84,6 +85,10 @@ async function bootstrap(): Promise<void> {
     checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startVariantCheckRuntime(env, checkQueues, () => process.exit(1))
       : undefined;
+  const backup =
+    enabled.includes('backup') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startBackupRuntime(env, () => process.exit(1))
+      : undefined;
 
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
@@ -95,6 +100,7 @@ async function bootstrap(): Promise<void> {
           (name === 'variant-check' || name === 'batch-check')
         ),
     )
+    .filter((name) => !(backup && name === 'backup'))
     .map((name) => {
       const physicalName = getPhysicalQueueName(name);
       const queue = new Queue(
@@ -115,6 +121,7 @@ async function bootstrap(): Promise<void> {
       ...(batchDelete ? [batchDelete.queue] : []),
       ...(asinImport ? [asinImport.queue] : []),
       ...(variantChecks ? variantChecks.queues : []),
+      ...(backup ? [backup.queue] : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
   watchdog.start(() => {
@@ -133,6 +140,7 @@ async function bootstrap(): Promise<void> {
         ...(batchDelete ? [batchDelete] : []),
         ...(asinImport ? [asinImport] : []),
         ...(variantChecks ? [variantChecks] : []),
+        ...(backup ? [backup] : []),
       ],
       watchdogRedis,
     });
@@ -144,7 +152,7 @@ async function bootstrap(): Promise<void> {
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode:
-      batchDelete || asinImport || variantChecks
+      batchDelete || asinImport || variantChecks || backup
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
@@ -156,13 +164,15 @@ async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
-      (variantChecks?.workers.length ?? 0),
+      (variantChecks?.workers.length ?? 0) +
+      Number(!!backup),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
     physicalQueues: [
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
       ...(intervals ? [MONITOR_INTERVAL_QUEUE] : []),
+      ...(backup ? [getPhysicalQueueName('backup')] : []),
     ],
     queueCount:
       queues.length +
@@ -170,8 +180,10 @@ async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
-      (variantChecks?.queues.length ?? 0),
-    schedulerEnabled: !!(maintenance || intervals) && env.SCHEDULER_ENABLED,
+      (variantChecks?.queues.length ?? 0) +
+      Number(!!backup),
+    schedulerEnabled:
+      !!(maintenance || intervals || backup) && env.SCHEDULER_ENABLED,
   });
 }
 

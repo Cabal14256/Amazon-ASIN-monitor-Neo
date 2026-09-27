@@ -7,6 +7,10 @@ import {
 } from '@asin-monitor/config';
 import type { VariantCheckJobData } from '@asin-monitor/contracts';
 import {
+  backupJobDataSchema,
+  type BackupJobData,
+} from '@asin-monitor/contracts';
+import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
   type BatchDeleteTaskData,
@@ -56,6 +60,10 @@ export interface ImportProducerPort {
 export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
+}
+export interface BackupProducerPort {
+  store: Pick<RedisTaskRepository, 'create'>;
+  enqueue(data: BackupJobData): Promise<void>;
 }
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
@@ -123,6 +131,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private backupQueue?: Queue;
   private readonly checkQueues = new Map<
     'variant-check' | 'batch-check',
     Queue
@@ -374,6 +383,40 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openBackup(ensureOpen: () => void): BackupProducerPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.createStore(ensureOpen),
+      enqueue: (input) =>
+        command(async () => {
+          const data = backupJobDataSchema.parse(input);
+          const queue = (this.backupQueue ??= new Queue(
+            getPhysicalQueueName('backup'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('backup', this.env)
+                .defaultJobOptions,
+            },
+          ));
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('备份队列连接异常', 'TaskQueryRuntime', {
+                reason: 'backup_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.backupQueue === queue) this.backupQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          await queue.add(data.operation, data, { jobId: data.taskId });
+        }),
+    };
+  }
   async onModuleDestroy() {
     this.closed = true;
     await Promise.allSettled(
@@ -381,6 +424,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.backupQueue ? [this.backupQueue] : []),
         ...this.checkQueues.values(),
       ].map((queue) => queue.close()),
     );

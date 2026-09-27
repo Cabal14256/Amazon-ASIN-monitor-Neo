@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   backupConfigResultSchema,
+  backupJobDataSchema,
   backupListResultSchema,
+  backupTaskResultSchema,
+  createBackupRequestSchema,
   createBackupResultSchema,
   saveBackupConfigRequestSchema,
 } from '../src/domains/backup';
@@ -73,7 +76,9 @@ describe('backup 域', () => {
       success: true,
       data: [
         {
-          filename: 'backup_20260824.sql',
+          filename: 'backup_20260824-020000-1234abcd-primary.dump',
+          format: 'custom',
+          target: 'primary',
           size: 1024,
           createdAt: '2026-08-24',
         },
@@ -86,15 +91,107 @@ describe('backup 域', () => {
     expect(
       createBackupResultSchema.parse({
         success: true,
-        data: { filename: 'b.sql', size: 1, createdAt: 't' },
+        data: {
+          filename: 'backup_20260824-020000-1234abcd-primary.dump',
+          format: 'custom',
+          target: 'primary',
+          size: 1,
+          createdAt: 't',
+        },
       }).data,
-    ).toMatchObject({ filename: 'b.sql' });
+    ).toMatchObject({
+      filename: 'backup_20260824-020000-1234abcd-primary.dump',
+      format: 'custom',
+    });
     expect(
       createBackupResultSchema.parse({
         success: true,
         data: { taskId: 'bt1', status: 'pending' },
       }).data,
     ).toMatchObject({ taskId: 'bt1' });
+  });
+
+  it('只接受 pg_dump custom 备份文件并拒绝 Legacy SQL', () => {
+    expect(() =>
+      backupListResultSchema.parse({
+        success: true,
+        data: [
+          {
+            filename: 'legacy.sql',
+            format: 'custom',
+            target: 'primary',
+            size: 1,
+            createdAt: '2026-08-24',
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      backupJobDataSchema.parse({
+        taskId: 'not-a-uuid',
+        taskType: 'backup',
+        taskSubType: 'restore',
+        operation: 'restore',
+        target: 'primary',
+        userId: 'u1',
+        createdAt: '2026-08-24T10:00:00.000Z',
+        params: { filename: 'legacy.sql' },
+      }),
+    ).toThrow();
+    expect(
+      backupJobDataSchema.parse({
+        taskId: '00000000-0000-4000-8000-000000000001',
+        taskType: 'backup',
+        taskSubType: 'restore',
+        operation: 'restore',
+        target: 'competitor',
+        userId: 'u1',
+        createdAt: '2026-08-24T10:00:00.000Z',
+        params: { filename: 'backup_20260824-020000-1234abcd-competitor.dump' },
+      }),
+    ).toMatchObject({ target: 'competitor', operation: 'restore' });
+    expect(() =>
+      backupJobDataSchema.parse({
+        taskId: '00000000-0000-4000-8000-000000000001',
+        taskType: 'backup',
+        taskSubType: 'restore',
+        operation: 'restore',
+        target: 'primary',
+        userId: 'u1',
+        createdAt: '2026-08-24T10:00:00.000Z',
+        params: {
+          filename: 'backup_20260824-020000-1234abcd-competitor.dump',
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('备份与恢复任务结果携带格式、操作和目标库', () => {
+    for (const operation of ['create', 'restore'] as const) {
+      expect(
+        backupTaskResultSchema.parse({
+          success: true,
+          data: {
+            operation,
+            format: 'custom',
+            target: 'primary',
+            filename: 'backup_20260824-020000-1234abcd-primary.dump',
+          },
+        }).data,
+      ).toMatchObject({ operation, format: 'custom', target: 'primary' });
+    }
+  });
+
+  it('表名只接受有限的 PostgreSQL 标识符', () => {
+    expect(
+      createBackupRequestSchema.parse({ tables: ['public.asins'] }).tables,
+    ).toEqual(['public.asins']);
+    expect(() =>
+      createBackupRequestSchema.parse({ tables: ['asins; DROP TABLE users'] }),
+    ).toThrow();
+    expect(() =>
+      createBackupRequestSchema.parse({ tables: Array(513).fill('asins') }),
+    ).toThrow();
   });
 
   it('备份配置含默认值形态（无记录时 id 为 null）', () => {

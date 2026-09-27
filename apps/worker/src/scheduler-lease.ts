@@ -36,6 +36,10 @@ export class SchedulerLease {
     private readonly log: Pick<typeof logger, 'warn'> = logger,
   ) {}
 
+  isOwner(): boolean {
+    return !this.stopped && this.ownsLease;
+  }
+
   start(): Promise<void> {
     if (!this.stopped) return this.pending ?? Promise.resolve();
     this.stopped = false;
