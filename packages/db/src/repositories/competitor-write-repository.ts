@@ -41,18 +41,19 @@ export class PgCompetitorWriteRepository
             ...authorization,
             createGroup: async (fields) =>
               (await business()).createGroup(fields),
-            updateGroup: async (id, fields) =>
-              (await business()).updateGroup(id, fields),
+            updateGroup: async (id, fields, expectedSource) =>
+              (await business()).updateGroup(id, fields, expectedSource),
             createAsin: async (fields) => (await business()).createAsin(fields),
             batchCreateAsins: async (items) =>
               (await business()).batchCreateAsins(items),
-            updateAsin: async (id, fields) =>
-              (await business()).updateAsin(id, fields),
+            updateAsin: async (id, fields, expectedSource) =>
+              (await business()).updateAsin(id, fields, expectedSource),
             moveAsin: async (id, target) =>
               (await business()).moveAsin(id, target),
             deleteGroup: async (id, expectedChildIds) =>
               (await business()).deleteGroup(id, expectedChildIds),
-            deleteAsin: async (id) => (await business()).deleteAsin(id),
+            deleteAsin: async (id, expectedSource) =>
+              (await business()).deleteAsin(id, expectedSource),
             updateGroupNotify: async (id, enabled) =>
               (await business()).updateGroupNotify(id, enabled),
             updateAsinNotify: async (id, enabled) =>
