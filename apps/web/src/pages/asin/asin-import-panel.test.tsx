@@ -252,6 +252,29 @@ describe('primary ASIN import page', () => {
     expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
   });
 
+  it('refreshes the catalog when another tab clears a finished import', async () => {
+    installLocks();
+    const f = fixture();
+    const key = asinImportGateKey('operator');
+    writeAsinImportGate(window.localStorage, 'operator', {
+      phase: 'accepted',
+      taskId,
+      savedAt: Date.now(),
+    });
+    window.dispatchEvent(
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await screen.findByText(`任务编号：${taskId}`);
+
+    window.localStorage.removeItem(key);
+    window.dispatchEvent(
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await screen.findByText(/上次任务编号/);
+    expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
+    expect(screen.queryByText(`任务编号：${taskId}`)).toBeNull();
+  });
+
   it.each(['completed', 'failed'])(
     'does not let a stale %s result overwrite another tab upload',
     async (status) => {

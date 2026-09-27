@@ -61,6 +61,8 @@ export function AsinImportPanel() {
   const [notice, setNotice] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const claiming = useRef(false);
+  const gateRef = useRef(gate);
+  gateRef.current = gate;
   const fileInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const owner = useRef(userId);
@@ -111,12 +113,17 @@ export function AsinImportPanel() {
         return;
       const restored = readAsinImportGate(stored, userId);
       if (request.current && !restored) return;
+      if (!restored) {
+        if (gateRef.current?.taskId) setLastTaskId(gateRef.current.taskId);
+        void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
+      }
+      gateRef.current = restored;
       setGate(restored);
       if (restored) setOpen(true);
     };
     window.addEventListener('storage', syncGate);
     return () => window.removeEventListener('storage', syncGate);
-  }, [canImport, userId]);
+  }, [canImport, runtime.queryClient, userId]);
 
   useEffect(() => {
     const result = task.data;
