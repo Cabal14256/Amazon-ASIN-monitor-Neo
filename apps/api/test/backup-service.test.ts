@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -102,6 +102,7 @@ async function fixture(maxBytes = 1024 * 1024) {
       query: vi.fn(async () => ({ rows: [] as { extversion: string }[] })),
     },
   };
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const service = new BackupService(
     {
       AUTH_DATA_AUTHORITY: 'postgresql',
@@ -111,12 +112,47 @@ async function fixture(maxBytes = 1024 * 1024) {
     repository as never,
     tasks as never,
     pools as never,
-    { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+    logger as never,
   );
-  return { directory, unit, port, tasks, scheduledStore, pools, service };
+  return {
+    directory,
+    unit,
+    port,
+    tasks,
+    scheduledStore,
+    pools,
+    logger,
+    service,
+  };
 }
 
 describe('backup API service', () => {
+  it('returns 404 only for a missing dump and logs a partial deletion failure as 500', async () => {
+    const { service, directory, logger } = await fixture();
+    await expect(service.remove(principal, filename)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(logger.error).not.toHaveBeenCalled();
+
+    const path = join(directory, filename);
+    await writeFile(path, 'PGDMPfixture');
+    await mkdir(`${path}.meta.json`);
+    await expect(service.remove(principal, filename)).rejects.toMatchObject({
+      status: 500,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      '备份操作失败',
+      'BackupService',
+      expect.objectContaining({
+        operation: 'delete',
+        code: expect.stringMatching(/^E[A-Z0-9_]+$/),
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(directory);
+    expect(logger.info).not.toHaveBeenCalled();
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('creates an authorized asynchronous task with no connection credentials in the payload', async () => {
     const { service, port } = await fixture();
     const result = await service.create(principal, {

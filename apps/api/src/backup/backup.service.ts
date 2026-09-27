@@ -46,6 +46,15 @@ function fail(status: number, message: string): never {
   );
 }
 
+function filesystemErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error))
+    return undefined;
+  const code = error.code;
+  return typeof code === 'string' && /^E[A-Z0-9_]{1,32}$/.test(code)
+    ? code
+    : undefined;
+}
+
 @Injectable()
 export class BackupService implements OnModuleDestroy {
   private active = 0;
@@ -112,6 +121,7 @@ export class BackupService implements OnModuleDestroy {
       this.logger.error('备份操作失败', 'BackupService', {
         operation,
         reason: 'backup_operation_failed',
+        code: filesystemErrorCode(error) ?? 'UNKNOWN',
       });
       fail(500, '备份操作失败');
     } finally {
@@ -353,8 +363,10 @@ export class BackupService implements OnModuleDestroy {
       await this.authorize(principal);
       try {
         await deleteBackupFile(this.directory(), filename);
-      } catch {
-        fail(404, '备份文件不存在');
+      } catch (error) {
+        if (filesystemErrorCode(error) === 'ENOENT')
+          fail(404, '备份文件不存在');
+        throw error;
       }
       this.logger.info('备份文件已删除', 'BackupService');
       return { message: '删除成功' };

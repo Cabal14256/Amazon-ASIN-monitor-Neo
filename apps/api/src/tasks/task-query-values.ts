@@ -88,7 +88,8 @@ export function serializeTask(task: TaskState | QueueTaskSnapshot): TaskInfo {
     : filename(raw.filename) ?? filename(raw.filepath);
   // Only this authenticated task's own download endpoint may be advertised.
   const downloadUrl =
-    raw.downloadUrl || raw.filepath || isCheckResult
+    task.taskType !== 'backup' &&
+    (raw.downloadUrl || raw.filepath || isCheckResult)
       ? `/api/v1/tasks/${encodeURIComponent(task.taskId)}/download`
       : null;
   if (result && typeof result === 'object' && !Array.isArray(result)) {

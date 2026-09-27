@@ -425,7 +425,7 @@ const SettingsPage: React.FC<unknown> = () => {
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(downloadUrl);
-      antdMessage.success('备份下载成功；Neo 归档包含恢复元数据');
+      antdMessage.success('备份下载成功；请核对文件格式及对应恢复环境');
     } catch (error: any) {
       message.error(error?.errorMessage || '下载备份失败');
     }
@@ -835,7 +835,7 @@ const SettingsPage: React.FC<unknown> = () => {
           <Card title="创建备份">
             <Alert
               message="备份说明"
-              description="备份将保存为 PostgreSQL 自定义格式 .dump 文件，下载时会与恢复元数据一起打包。可以选择备份所有表或指定表。"
+              description="文件格式由当前服务端决定：Neo PostgreSQL 使用 .dump，下载时连同恢复元数据打包；Legacy MySQL 使用 .sql。请在备份列表核对文件名与恢复能力。"
               type="info"
               showIcon
               style={{ marginBottom: 16 }}
