@@ -1,11 +1,15 @@
 import {
   batchCreateAsinsRequestSchema,
+  competitorAsinSourceSchema,
   competitorCreateAsinRequestSchema,
+  competitorDeleteAsinRequestSchema,
   competitorDeleteGroupRequestSchema,
   competitorFeishuNotifyRequestSchema,
+  competitorGroupSourceSchema,
   competitorGroupUpsertRequestSchema,
+  competitorGuardedUpdateAsinRequestSchema,
   competitorMoveAsinRequestSchema,
-  competitorUpdateAsinRequestSchema,
+  competitorUpdateGroupRequestSchema,
 } from '@asin-monitor/contracts';
 import { MAX_ASIN_BATCH_CREATE_ITEMS } from '@asin-monitor/db';
 import { z } from 'zod';
@@ -47,9 +51,41 @@ const groupSchema = competitorGroupUpsertRequestSchema
 const createSchema = competitorCreateAsinRequestSchema
   .extend({ ...asinFields, parentId: id })
   .strict();
-const updateSchema = competitorUpdateAsinRequestSchema
-  .extend(asinFields)
+const updateSchema = competitorGuardedUpdateAsinRequestSchema
+  .extend({
+    ...asinFields,
+    expectedSource: competitorAsinSourceSchema
+      .extend({
+        variantGroupId: id,
+        asin: required(20),
+        name: text(500).nullable(),
+        country: required(10),
+        brand: text(100).nullable(),
+        asinType: z.enum(['1', '2']).nullable(),
+        updateTime: z.string().max(50).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  })
   .strict();
+const updateGroupSchema = competitorUpdateGroupRequestSchema
+  .extend({
+    ...common,
+    name: required(255),
+    expectedSource: competitorGroupSourceSchema
+      .extend({
+        name: required(255),
+        country: required(10),
+        brand: required(100),
+        updateTime: z.string().max(50).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+const deleteAsinSchema = competitorDeleteAsinRequestSchema.extend({
+  expectedSource: updateSchema.shape.expectedSource,
+});
 const moveSchema = competitorMoveAsinRequestSchema
   .extend({ targetGroupId: id })
   .strict();
@@ -73,10 +109,14 @@ function normalizeName<T extends { name?: string | null }>(value: T) {
 }
 export const parseCompetitorGroupWrite = (value: unknown) =>
   parse(groupSchema, value);
+export const parseCompetitorGroupUpdate = (value: unknown) =>
+  parse(updateGroupSchema, value);
 export const parseCompetitorAsinCreate = (value: unknown) =>
   normalizeName(parse(createSchema, value));
 export const parseCompetitorAsinUpdate = (value: unknown) =>
   normalizeName(parse(updateSchema, value));
+export const parseCompetitorAsinDelete = (value: unknown) =>
+  parse(deleteAsinSchema, value ?? {});
 export const parseCompetitorAsinMove = (value: unknown) =>
   parse(moveSchema, value);
 export function parseCompetitorGroupDelete(value: unknown): string[] {

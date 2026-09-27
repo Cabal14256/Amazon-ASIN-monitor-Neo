@@ -266,6 +266,23 @@ describe('competitor catalog single-item controls', () => {
           country: 'DE',
           parentId: group.id,
         });
+      if (action.type === 'edit-group')
+        expect(options.json).toMatchObject({
+          expectedSource: {
+            name: group.name,
+            country: group.country,
+            brand: group.brand,
+          },
+        });
+      if (action.type === 'edit-asin' || action.type === 'delete-asin')
+        expect(options.json).toMatchObject({
+          expectedSource: {
+            variantGroupId: group.id,
+            asin: child.asin,
+            country: child.country,
+            brand: child.brand,
+          },
+        });
       if (action.type === 'move-asin') {
         expect(options.json).toEqual({ targetGroupId: target.id });
         expect(f.detail).toHaveBeenCalledWith(expect.anything(), target.id);

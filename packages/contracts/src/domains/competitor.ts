@@ -109,6 +109,23 @@ export type CompetitorGroupUpsertRequest = z.infer<
   typeof competitorGroupUpsertRequestSchema
 >;
 
+export const competitorGroupSourceSchema = z
+  .object({
+    name: z.string(),
+    country: z.string(),
+    brand: z.string(),
+    updateTime: dateTimeString.nullable().optional(),
+  })
+  .strict();
+export type CompetitorGroupSource = z.infer<typeof competitorGroupSourceSchema>;
+export const competitorUpdateGroupRequestSchema =
+  competitorGroupUpsertRequestSchema.extend({
+    expectedSource: competitorGroupSourceSchema.optional(),
+  });
+export type CompetitorUpdateGroupRequest = z.infer<
+  typeof competitorUpdateGroupRequestSchema
+>;
+
 /** The confirmed child set must be checked again under the group's delete lock. */
 export const competitorDeleteGroupRequestSchema = z
   .object({ expectedChildIds: z.array(z.string()).max(5000) })
@@ -153,6 +170,29 @@ export const competitorUpdateAsinRequestSchema = z.object({
 export type CompetitorUpdateAsinRequest = z.infer<
   typeof competitorUpdateAsinRequestSchema
 >;
+
+export const competitorAsinSourceSchema = z
+  .object({
+    variantGroupId: z.string(),
+    asin: z.string(),
+    name: z.string().nullable(),
+    country: z.string(),
+    brand: z.string().nullable(),
+    asinType: z.string().nullable(),
+    updateTime: dateTimeString.nullable().optional(),
+  })
+  .strict();
+export type CompetitorAsinSource = z.infer<typeof competitorAsinSourceSchema>;
+export const competitorGuardedUpdateAsinRequestSchema =
+  competitorUpdateAsinRequestSchema.extend({
+    expectedSource: competitorAsinSourceSchema.optional(),
+  });
+export type CompetitorGuardedUpdateAsinRequest = z.infer<
+  typeof competitorGuardedUpdateAsinRequestSchema
+>;
+export const competitorDeleteAsinRequestSchema = z
+  .object({ expectedSource: competitorAsinSourceSchema.optional() })
+  .strict();
 
 export const competitorMoveAsinRequestSchema = z.object({
   targetGroupId: z.string().min(1, '目标变体组ID为必填项'),

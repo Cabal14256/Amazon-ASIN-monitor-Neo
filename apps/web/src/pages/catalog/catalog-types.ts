@@ -1,8 +1,10 @@
 import type {
+  CompetitorAsinSource,
   CompetitorCreateAsinRequest,
   CompetitorGroupUpsertRequest,
+  CompetitorGuardedUpdateAsinRequest,
   CompetitorMoveAsinRequest,
-  CompetitorUpdateAsinRequest,
+  CompetitorUpdateGroupRequest,
   CreateAsinRequest,
   MoveAsinRequest,
   UpdateAsinRequest,
@@ -25,6 +27,7 @@ export interface CatalogChild {
   autoIsBroken?: Flag;
   statusSource?: string;
   lastCheckTime?: string | null;
+  updateTime?: string | null;
   feishuNotifyEnabled?: Flag;
   manualBrokenReason?: string | null;
   manualBroken?: Flag;
@@ -45,6 +48,7 @@ export interface CatalogGroup {
   is_broken?: Flag;
   statusSource?: string;
   lastCheckTime?: string | null;
+  updateTime?: string | null;
   last_check_time?: string | null;
   feishuNotifyEnabled?: Flag;
   manualBrokenReason?: string | null;
@@ -206,7 +210,7 @@ export interface CompetitorCatalogWrites {
   updateGroup: (
     http: Pick<HttpClient, 'request'>,
     id: string,
-    input: CompetitorGroupUpsertRequest,
+    input: CompetitorUpdateGroupRequest,
   ) => Promise<unknown>;
   deleteGroup: (
     http: Pick<HttpClient, 'request'>,
@@ -220,7 +224,7 @@ export interface CompetitorCatalogWrites {
   updateAsin: (
     http: Pick<HttpClient, 'request'>,
     id: string,
-    input: CompetitorUpdateAsinRequest,
+    input: CompetitorGuardedUpdateAsinRequest,
   ) => Promise<unknown>;
   moveAsin: (
     http: Pick<HttpClient, 'request'>,
@@ -230,5 +234,6 @@ export interface CompetitorCatalogWrites {
   deleteAsin: (
     http: Pick<HttpClient, 'request'>,
     id: string,
+    expectedSource?: CompetitorAsinSource,
   ) => Promise<unknown>;
 }

@@ -1,20 +1,24 @@
 import {
   competitorAsinRecordResultSchema,
   competitorCreateAsinRequestSchema,
+  competitorDeleteAsinRequestSchema,
   competitorDeleteAsinResultSchema,
   competitorDeleteGroupRequestSchema,
   competitorDeleteGroupResultSchema,
   competitorGroupListResultSchema,
   competitorGroupResultSchema,
   competitorGroupUpsertRequestSchema,
+  competitorGuardedUpdateAsinRequestSchema,
   competitorMoveAsinRequestSchema,
-  competitorUpdateAsinRequestSchema,
+  competitorUpdateGroupRequestSchema,
+  type CompetitorAsinSource,
   type CompetitorCreateAsinRequest,
   type CompetitorGroupListData,
   type CompetitorGroupListQuery,
   type CompetitorGroupUpsertRequest,
+  type CompetitorGuardedUpdateAsinRequest,
   type CompetitorMoveAsinRequest,
-  type CompetitorUpdateAsinRequest,
+  type CompetitorUpdateGroupRequest,
   type CompetitorVariantGroup,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
@@ -108,14 +112,14 @@ export async function createCompetitorGroup(
 export async function updateCompetitorGroup(
   http: Pick<HttpClient, 'request'>,
   id: string,
-  input: CompetitorGroupUpsertRequest,
+  input: CompetitorUpdateGroupRequest,
 ) {
   return data(
     await http.request(
       `${GROUPS}/${segment(id)}`,
       {
         method: 'PUT',
-        json: body(competitorGroupUpsertRequestSchema, input),
+        json: body(competitorUpdateGroupRequestSchema, input),
         ...GROUP_OPTIONS,
       },
       competitorGroupResultSchema,
@@ -156,12 +160,15 @@ export async function createCompetitorAsin(
 export async function updateCompetitorAsin(
   http: Pick<HttpClient, 'request'>,
   id: string,
-  input: CompetitorUpdateAsinRequest,
+  input: CompetitorGuardedUpdateAsinRequest,
 ) {
   return data(
     await http.request(
       `${ASINS}/${segment(id)}`,
-      { method: 'PUT', json: body(competitorUpdateAsinRequestSchema, input) },
+      {
+        method: 'PUT',
+        json: body(competitorGuardedUpdateAsinRequestSchema, input),
+      },
       competitorAsinRecordResultSchema,
     ),
   );
@@ -184,11 +191,17 @@ export async function moveCompetitorAsin(
 export async function deleteCompetitorAsin(
   http: Pick<HttpClient, 'request'>,
   id: string,
+  expectedSource?: CompetitorAsinSource,
 ) {
   return data(
     await http.request(
       `${ASINS}/${segment(id)}`,
-      { method: 'DELETE' },
+      {
+        method: 'DELETE',
+        json: expectedSource
+          ? body(competitorDeleteAsinRequestSchema, { expectedSource })
+          : undefined,
+      },
       competitorDeleteAsinResultSchema,
     ),
   );

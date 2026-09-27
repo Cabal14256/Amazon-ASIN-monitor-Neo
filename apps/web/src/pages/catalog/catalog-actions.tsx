@@ -41,6 +41,25 @@ function manualExpectedAsin(child: CatalogChild, group: CatalogGroup) {
     parentManualBroken: flag(group.manualBroken),
   };
 }
+function competitorExpectedGroup(group: CatalogGroup) {
+  return {
+    name: group.name,
+    country: group.country,
+    brand: group.brand,
+    updateTime: group.updateTime,
+  };
+}
+function competitorExpectedAsin(child: CatalogChild, group: CatalogGroup) {
+  return {
+    variantGroupId: group.id,
+    asin: child.asin,
+    name: child.name ?? null,
+    country: child.country,
+    brand: child.brand ?? null,
+    asinType: child.asinType == null ? null : String(child.asinType),
+    updateTime: child.updateTime,
+  };
+}
 
 function title(action: CatalogAction): string {
   switch (action.type) {
@@ -273,6 +292,7 @@ export function CatalogActionPanel({
                   name: name.trim(),
                   country: country.trim().toUpperCase(),
                   brand: brand.trim(),
+                  expectedSource: competitorExpectedGroup(action.group),
                 });
               else
                 await config.writes!.updateGroup(http, action.group.id, {
@@ -320,6 +340,10 @@ export function CatalogActionPanel({
                   country: action.group.country,
                   brand: brand.trim(),
                   asinType: asinType ? (asinType as '1' | '2') : null,
+                  expectedSource: competitorExpectedAsin(
+                    action.child,
+                    action.group,
+                  ),
                 });
               else
                 await config.writes!.updateAsin(http, action.child.id, {
@@ -337,7 +361,13 @@ export function CatalogActionPanel({
               });
               break;
             case 'delete-asin':
-              await writes.deleteAsin(http, action.child.id);
+              if (config.id === 'competitor')
+                await writes.deleteAsin(
+                  http,
+                  action.child.id,
+                  competitorExpectedAsin(action.child, action.group),
+                );
+              else await writes.deleteAsin(http, action.child.id);
               break;
             case 'group-notify':
               if (!mainWrites)

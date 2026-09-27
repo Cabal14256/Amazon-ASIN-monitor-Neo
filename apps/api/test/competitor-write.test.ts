@@ -339,6 +339,62 @@ describe('competitor writes HTTP / current primary authorization', () => {
     });
     expect(f.unit.moveAsin).toHaveBeenCalledWith('asin-119', 'group-target');
   });
+  it('passes source snapshots into locked writes and returns a conflict when they change', async () => {
+    const expectedGroup = {
+      name: 'Previous group',
+      country: 'US',
+      brand: 'Previous brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const expectedAsin = {
+      variantGroupId: 'group-119',
+      asin: 'B000000121',
+      name: null,
+      country: 'US',
+      brand: 'Own brand',
+      asinType: '2',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    expect(
+      (
+        await request(cases[1], headers, {
+          ...groupBody,
+          expectedSource: expectedGroup,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(f.unit.updateGroup).toHaveBeenCalledWith(
+      'group-119',
+      { name: 'Group', country: 'US', brand: 'Brand' },
+      expectedGroup,
+    );
+    expect(
+      (
+        await request(cases[3], headers, {
+          ...asinBody,
+          expectedSource: expectedAsin,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(f.unit.updateAsin).toHaveBeenCalledWith(
+      'asin-119',
+      expect.anything(),
+      expectedAsin,
+    );
+    expect(
+      (await request(cases[6], headers, { expectedSource: expectedAsin }))
+        .statusCode,
+    ).toBe(200);
+    expect(f.unit.deleteAsin).toHaveBeenCalledWith('asin-119', expectedAsin);
+    vi.mocked(f.unit.deleteAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[6], headers, {
+      expectedSource: expectedAsin,
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toContain('已变化');
+  });
   it('requires a distinct confirmed child set before deleting a group', async () => {
     expect(
       (
