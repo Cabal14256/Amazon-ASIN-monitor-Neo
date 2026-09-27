@@ -2,6 +2,8 @@
 
 `POST /api/v1/monitor/trigger` 只在 `AUTH_DATA_AUTHORITY=postgresql` 且当前用户拥有 `monitor:write` 时受理。body 可省略 `countries`（默认 US/UK/DE/FR/IT/ES），或提供六国中的任意非空组合；大小写和空白规范化，重复国家去重。成功返回真实 BullMQ `jobId`，本人可用任务中心查询和取消。未发现近 10 秒持续心跳的 monitor 消费者时返回 503，不创建任务。每个 API 实例同时最多处理 4 次提交；监控队列积压达到 50 个待处理、延迟或运行中的任务时返回 429。提交元数据已写而入队结果不确定时返回 500 与 `data.taskId`，先查询该 ID，勿直接重复提交。
 
+若入队前的第二次消费者或队列容量检查明确拒绝，服务会把已创建的任务元数据标为失败，再返回 503/429；如果状态写入未确认，则仍返回任务 ID 供对账。
+
 ## 升级与运行
 
 先完成主库 `0004_asin_timestamp_policy.sql`、`0006_variant_check_receipts.sql`、飞书配置升级及 Neo 权威源阶段门禁。再执行 `npm run db:upgrade:primary-monitor`，只升级主营 PostgreSQL，创建 `primary_monitor_runs` 固定组快照、`primary_monitor_notifications` 投递声明，以及 `monitor_history.monitor_task_id`。Worker 在发布消费者心跳前检查这些对象，缺失则启动失败。生产仍遵守 #48 暂缓决定：本 Issue 不改代理流量、旧 Bull4 监控入口或调度；必须另行验收后才允许生产切换。

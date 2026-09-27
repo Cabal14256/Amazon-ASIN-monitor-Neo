@@ -51,6 +51,8 @@ export class MonitorTriggerService {
     if (this.active >= 4) fail(429, '监控任务提交繁忙，请稍后再试');
     this.active++;
     let submission: string | undefined;
+    let taskCreatedAt: string | undefined;
+    let port: ReturnType<TaskQueryRuntime['openMonitor']> | undefined;
     const deadline = performance.now() + 3000;
     const ensureOpen = () => {
       if (performance.now() >= deadline)
@@ -58,7 +60,7 @@ export class MonitorTriggerService {
     };
     try {
       const countries = parsed.data!.countries ?? [...ALL_COUNTRIES];
-      const port = this.tasks.openMonitor(ensureOpen);
+      port = this.tasks.openMonitor(ensureOpen);
       await port.assertConsumer();
       await this.repository.transaction((unit) =>
         authorizeAdministration(unit, principal, 'monitor:write'),
@@ -73,6 +75,7 @@ export class MonitorTriggerService {
         title: '主营 ASIN 监控',
         message: '监控任务已创建，等待处理',
       });
+      taskCreatedAt = task.createdAt;
       await port.enqueue({
         taskId: task.taskId,
         taskType: 'monitor',
@@ -94,6 +97,41 @@ export class MonitorTriggerService {
         countries,
       };
     } catch (error) {
+      const knownRejection =
+        error instanceof Error &&
+        ['MONITOR_CONSUMER_NOT_READY', 'MONITOR_QUEUE_FULL'].includes(
+          error.message,
+        );
+      if (knownRejection && submission && taskCreatedAt && port) {
+        try {
+          const failed = await port.store.mutate(
+            submission,
+            { kind: 'failed', message: '监控任务未入队，请重新提交' },
+            {
+              userId: principal.userId,
+              taskType: 'monitor',
+              taskSubType: 'primary',
+              createdAt: taskCreatedAt,
+            },
+          );
+          if (!failed || failed.status !== 'failed')
+            throw new Error('MONITOR_REJECTION_STATE_UNCONFIRMED');
+        } catch {
+          this.logger.warn(
+            '监控任务拒绝状态写入未确认',
+            'MonitorTriggerService',
+            {
+              reason: 'monitor_rejection_state_unconfirmed',
+            },
+          );
+          throw new MonitorSubmissionUnconfirmed(submission);
+        }
+      }
+      if (knownRejection) {
+        if (error.message === 'MONITOR_CONSUMER_NOT_READY')
+          fail(503, '监控消费者尚未就绪');
+        fail(429, '监控队列已满，请稍后再试');
+      }
       if (submission) {
         this.logger.warn('监控任务提交结果未确认', 'MonitorTriggerService', {
           reason: 'monitor_enqueue_unconfirmed',
@@ -101,13 +139,6 @@ export class MonitorTriggerService {
         throw new MonitorSubmissionUnconfirmed(submission);
       }
       if (error instanceof HttpException) throw error;
-      if (
-        error instanceof Error &&
-        error.message === 'MONITOR_CONSUMER_NOT_READY'
-      )
-        fail(503, '监控消费者尚未就绪');
-      if (error instanceof Error && error.message === 'MONITOR_QUEUE_FULL')
-        fail(429, '监控队列已满，请稍后再试');
       this.logger.error('监控任务提交失败', 'MonitorTriggerService', {
         reason: 'monitor_submission_failed',
       });

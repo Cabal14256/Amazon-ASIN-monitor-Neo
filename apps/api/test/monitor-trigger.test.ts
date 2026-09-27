@@ -44,10 +44,20 @@ describe('POST /monitor/trigger', () => {
       createdAt: new Date().toISOString(),
     }),
   );
+  const mutate = vi.fn(async (taskId: string) =>
+    taskFixture({
+      taskId,
+      userId: taskUserId,
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      status: 'failed',
+      createdAt: new Date().toISOString(),
+    }),
+  );
   const enqueue = vi.fn(async (_data: PrimaryMonitorJob) => undefined);
   const runtime = {
     openMonitor: vi.fn(() => ({
-      store: { create },
+      store: { create, mutate },
       assertConsumer: consumer,
       enqueue,
     })),
@@ -128,6 +138,29 @@ describe('POST /monitor/trigger', () => {
     const response = await post({ countries: ['UK'] });
     expect(response.statusCode).toBe(429);
     expect(create).not.toHaveBeenCalled();
+  });
+  it('records a definite late queue refusal before returning its retryable status', async () => {
+    enqueue.mockRejectedValueOnce(new Error('MONITOR_QUEUE_FULL'));
+    const response = await post({ countries: ['UK'] });
+    expect(response.statusCode).toBe(429);
+    expect(create).toHaveBeenCalledOnce();
+    expect(mutate).toHaveBeenCalledWith(
+      expect.any(String),
+      { kind: 'failed', message: '监控任务未入队，请重新提交' },
+      expect.objectContaining({
+        userId: taskUserId,
+        taskType: 'monitor',
+        taskSubType: 'primary',
+      }),
+    );
+  });
+  it('returns the lookup ID when a late refusal cannot be recorded', async () => {
+    enqueue.mockRejectedValueOnce(new Error('MONITOR_CONSUMER_NOT_READY'));
+    mutate.mockRejectedValueOnce(new Error('redis unavailable'));
+    const response = await post({ countries: ['UK'] });
+    expect(response.statusCode).toBe(500);
+    expect(response.json().data.status).toBe('unknown');
+    expect(response.json().data.taskId).toMatch(/^[a-f0-9-]{36}$/);
   });
   it('returns the lookup ID if enqueue acknowledgement is uncertain', async () => {
     enqueue.mockRejectedValueOnce(new Error('redis unavailable'));

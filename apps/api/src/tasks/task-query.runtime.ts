@@ -63,7 +63,7 @@ export interface CheckProducerPort {
   enqueue(data: VariantCheckJobData): Promise<void>;
 }
 export interface MonitorProducerPort {
-  store: Pick<RedisTaskRepository, 'create'>;
+  store: Pick<RedisTaskRepository, 'create' | 'mutate'>;
   assertConsumer(): Promise<void>;
   enqueue(data: PrimaryMonitorJob): Promise<void>;
 }
