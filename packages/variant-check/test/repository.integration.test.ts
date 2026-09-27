@@ -153,7 +153,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
     };
     const pipeline = (repo: VariantCheckRepositoryPort = repository) => {
-      const check = vi.fn(async () => product());
+      const check = vi.fn(async (asin: string) => product(Number(asin.slice(-1))));
       return {
         check,
         service: new VariantCheckPipeline(
