@@ -5,7 +5,10 @@ import {
   type Env,
 } from '@asin-monitor/config';
 import type { PermissionCode } from '@asin-monitor/contracts';
-import { timescaleAggregateEvidenceManifest } from '@asin-monitor/contracts';
+import {
+  refreshAnalyticsRequestSchema,
+  timescaleAggregateEvidenceManifest,
+} from '@asin-monitor/contracts';
 import {
   formatShanghaiTimestamp,
   type RoleRepositoryPort,
@@ -22,10 +25,14 @@ import { AppLogger } from '../logger/app-logger.service';
 import { ApplicationRedisClient } from '../redis/redis.service';
 
 const ANALYTICS_PREFIX = 'analytics:v1:';
-const LAST_CLEARED_AT_KEY = 'neo:ops:analytics-cache:last-cleared-at';
 const LAST_CLEARED_AT_TTL_SECONDS = 30 * 86400;
 const QUEUE_NAMES = ['monitor', 'competitor-monitor'] as const;
 const MAX_REFRESH_RANGE_MS = 31 * 86400000;
+const MAX_REFRESH_MS = 120_000;
+const CACHE_SCAN_COUNT = 200;
+const MAX_CACHE_SCAN_PAGES = 100;
+const MAX_CACHE_KEYS = 10_000;
+const MAX_CACHE_OPERATION_MS = 5_000;
 const REFRESH_LOCK_SQL = `hashtextextended('amazon-asin-monitor:neo-ops-aggregate-refresh', 0)`;
 export const OPS_ROLE_REPOSITORY = Symbol('OPS_ROLE_REPOSITORY');
 export const OPS_QUEUE_FACTORY = Symbol('OPS_QUEUE_FACTORY');
@@ -135,30 +142,64 @@ export class OpsService {
     }
   }
 
+  private get analyticsPrefix() {
+    return `${this.env.BULL_PREFIX.trim()}:neo:${ANALYTICS_PREFIX}`;
+  }
+
+  private get lastClearedAtKey() {
+    return `${this.env.BULL_PREFIX.trim()}:neo:ops:analytics-cache:last-cleared-at`;
+  }
+
+  // SCAN runs as separate bounded Redis commands. Never traverse the whole keyspace
+  // in one Lua script, which would block all other Redis clients.
+  private async scanAnalyticsKeys(deadline: number) {
+    const keys = new Set<string>();
+    const prefix = this.analyticsPrefix;
+    let cursor = '0';
+    for (let page = 0; page < MAX_CACHE_SCAN_PAGES; page++) {
+      if (Date.now() >= deadline) return { keys: [...keys], complete: false };
+      const [nextCursor, pageKeys] = await this.redis.scan(
+        cursor,
+        `${prefix}*`,
+        CACHE_SCAN_COUNT,
+      );
+      // BULL_PREFIX is configuration, not a Redis glob. Filter literal prefixes
+      // before deletion even if the configured prefix contains glob characters.
+      for (const key of pageKeys) {
+        if (!key.startsWith(prefix)) continue;
+        if (keys.size === MAX_CACHE_KEYS && !keys.has(key))
+          return { keys: [...keys], complete: false };
+        keys.add(key);
+      }
+      if (nextCursor === '0') return { keys: [...keys], complete: true };
+      cursor = nextCursor;
+    }
+    return { keys: [...keys], complete: false };
+  }
+
   private async cacheStats() {
-    const result = await this.redis.eval(
-      `local cursor='0'; local count=0; repeat local page=redis.call('SCAN',cursor,'MATCH',ARGV[1],'COUNT',200); cursor=page[1]; count=count+#page[2]; until cursor=='0'; return count`,
-      [],
-      [`${this.env.BULL_PREFIX.trim()}:neo:${ANALYTICS_PREFIX}*`],
+    const scan = await this.scanAnalyticsKeys(
+      Date.now() + MAX_CACHE_OPERATION_MS,
     );
-    const count = typeof result === 'number' ? result : Number(result);
+    const count = scan.complete ? scan.keys.length : null;
     return {
-      activeEntries: Number.isSafeInteger(count) ? count : 0,
-      totalEntries: Number.isSafeInteger(count) ? count : 0,
+      activeEntries: count,
+      totalEntries: count,
       estimatedCacheMemoryMB: null,
+      truncated: !scan.complete,
     };
   }
 
   private async analyticsCacheStatus() {
     let lastClearedAt: string | null = null;
     try {
-      lastClearedAt = await this.redis.get(LAST_CLEARED_AT_KEY);
+      lastClearedAt = await this.redis.get(this.lastClearedAtKey);
     } catch {
       this.logger.warn('分析缓存清理时间读取失败', 'OpsService', {
         reason: 'analytics_cache_status_unavailable',
       });
     }
-    return { prefixes: [ANALYTICS_PREFIX], lastClearedAt };
+    return { prefixes: [this.analyticsPrefix], lastClearedAt };
   }
 
   async overview(principal: AuthPrincipal, reply: FastifyReply) {
@@ -204,26 +245,41 @@ export class OpsService {
   async clearCache(principal: AuthPrincipal) {
     await this.authorize(principal, ['settings:write']);
     try {
-      const removed = await this.redis.eval(
-        `local cursor='0'; local removed=0; repeat local page=redis.call('SCAN',cursor,'MATCH',ARGV[1],'COUNT',200); cursor=page[1]; if #page[2]>0 then removed=removed+redis.call('DEL',unpack(page[2])) end until cursor=='0'; return removed`,
-        [],
-        [`${this.env.BULL_PREFIX.trim()}:neo:${ANALYTICS_PREFIX}*`],
-      );
+      const deadline = Date.now() + MAX_CACHE_OPERATION_MS;
+      const scan = await this.scanAnalyticsKeys(deadline);
+      if (!scan.complete) {
+        this.logger.warn('分析缓存清理范围超限', 'OpsService', {
+          reason: 'analytics_cache_scan_limit',
+        });
+        fail(409, '分析缓存条目过多或扫描超时，请稍后重试');
+      }
+      let removed = 0;
+      for (
+        let offset = 0;
+        offset < scan.keys.length;
+        offset += CACHE_SCAN_COUNT
+      ) {
+        if (Date.now() >= deadline) fail(503, '分析缓存清理超时，请重试');
+        removed += await this.redis.unlink(
+          ...scan.keys.slice(offset, offset + CACHE_SCAN_COUNT),
+        );
+      }
       const clearedAt = new Date().toISOString();
       await this.redis.setex(
-        LAST_CLEARED_AT_KEY,
+        this.lastClearedAtKey,
         LAST_CLEARED_AT_TTL_SECONDS,
         clearedAt,
       );
       this.logger.info('分析缓存已清理', 'OpsService', {
-        removed: Number(removed) || 0,
+        removed,
       });
       return {
         success: true,
         errorCode: 0,
-        data: { prefixes: [ANALYTICS_PREFIX], clearedAt },
+        data: { prefixes: [this.analyticsPrefix], clearedAt },
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('分析缓存清理失败', 'OpsService', {
         reason: 'analytics_cache_clear_failed',
       });
@@ -234,23 +290,16 @@ export class OpsService {
   async refresh(principal: AuthPrincipal, body: unknown) {
     await this.authorize(principal, ['settings:write']);
     if (!this.env.ANALYTICS_AGG_ENABLED) fail(400, '聚合刷新未启用');
-    const input =
-      body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const parsed = refreshAnalyticsRequestSchema.safeParse(
+      body === undefined ? {} : body,
+    );
+    const input = parsed.success ? parsed.data : fail(400, '聚合刷新参数无效');
     const granularity = input.granularity;
-    if (
-      granularity !== undefined &&
-      !['hour', 'day', 'month'].includes(String(granularity))
-    )
-      fail(400, 'granularity 必须为 hour、day 或 month');
     if (this.refreshing) fail(409, '聚合刷新正在执行');
     const start =
-      typeof input.startTime === 'string'
-        ? input.startTime
-        : formatShanghaiTimestamp(new Date(Date.now() - 2 * 86400000));
-    const end =
-      typeof input.endTime === 'string'
-        ? input.endTime
-        : formatShanghaiTimestamp(new Date());
+      input.startTime ??
+      formatShanghaiTimestamp(new Date(Date.now() - 2 * 86400000));
+    const end = input.endTime ?? formatShanghaiTimestamp(new Date());
     const startMs = parseRefreshTimestamp(start);
     const endMs = parseRefreshTimestamp(end);
     if (
@@ -261,14 +310,13 @@ export class OpsService {
     )
       fail(400, '刷新时间范围无效，必须为正数且不超过 31 天');
     const targets = timescaleAggregateEvidenceManifest
-      .map((item) => item.caggRelation)
-      .filter(
-        (name: string) =>
-          !granularity || name.endsWith(`_${String(granularity)}`),
-      );
+      .filter((item) => !granularity || item.granularity === granularity)
+      .map((item) => item.caggRelation);
     this.refreshing = true;
     let client: PoolClient | undefined;
     let lockHeld = false;
+    let timeoutChanged = false;
+    const deadline = Date.now() + MAX_REFRESH_MS;
     try {
       client = await this.pools.primaryPool.connect();
       const lock = await client.query<{ acquired: boolean }>(
@@ -276,12 +324,16 @@ export class OpsService {
       );
       lockHeld = lock.rows[0]?.acquired === true;
       if (!lockHeld) fail(409, '聚合刷新正在执行');
-      await client.query("SET statement_timeout = '120s'");
-      for (const relation of targets)
+      for (const relation of targets) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) fail(503, '聚合刷新超时');
+        timeoutChanged = true;
+        await client.query(`SET statement_timeout = ${remaining}`);
         await client.query(
           'CALL public.refresh_continuous_aggregate($1::regclass,$2::timestamp,$3::timestamp,force=>true)',
           [`public.${relation}`, start, end],
         );
+      }
       this.logger.info('分析聚合刷新完成', 'OpsService', {
         count: targets.length,
       });
@@ -298,12 +350,18 @@ export class OpsService {
       return fail(503, '刷新聚合失败');
     } finally {
       if (client) {
-        await client.query('RESET statement_timeout').catch(() => undefined);
+        let discard = false;
+        if (timeoutChanged)
+          await client.query('RESET statement_timeout').catch(() => {
+            discard = true;
+          });
         if (lockHeld)
           await client
             .query(`SELECT pg_advisory_unlock(${REFRESH_LOCK_SQL})`)
-            .catch(() => undefined);
-        client.release();
+            .catch(() => {
+              discard = true;
+            });
+        client.release(discard);
       }
       this.refreshing = false;
     }

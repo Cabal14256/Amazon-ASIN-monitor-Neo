@@ -210,13 +210,15 @@
 | GET  | /audit-logs/statistics/actions   | getActionStatistics   |
 | GET  | /audit-logs/statistics/resources | getResourceStatistics |
 
-## 17. ops（3，router 级认证）
+## 17. ops（3；Legacy router 级认证，Neo 加当前权限复核）
 
-| 方法 | 路径                       | 控制器              |
-| ---- | -------------------------- | ------------------- |
-| GET  | /ops/overview              | getOpsOverview      |
-| POST | /ops/analytics/cache/clear | clearAnalyticsCache |
-| POST | /ops/analytics/refresh     | refreshAnalyticsAgg |
+| 方法 | 路径                       | Neo 权限       | 控制器              |
+| ---- | -------------------------- | -------------- | ------------------- |
+| GET  | /ops/overview              | settings:read  | getOpsOverview      |
+| POST | /ops/analytics/cache/clear | settings:write | clearAnalyticsCache |
+| POST | /ops/analytics/refresh     | settings:write | refreshAnalyticsAgg |
+
+Neo 服务端重新读取当前会话和权限；Legacy 仅有登录检查，权限收紧为有意迁移差异。
 
 ## 18. system（1）与偏差登记
 
