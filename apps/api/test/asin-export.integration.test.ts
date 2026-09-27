@@ -121,6 +121,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         .query(`INSERT INTO variant_groups(id,name,country,site,brand)
         SELECT 'g-bulk-' || n, 'Bulk-' || n, 'US', 'amazon.com', 'Fixture'
         FROM generate_series(1,120) AS n`);
+      await f.pools.primaryPool.query(
+        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g-dense','Dense','CA','amazon.ca','Fixture')",
+      );
+      await f.pools.primaryPool.query(`
+        INSERT INTO asins(id,asin,name,asin_type,country,site,brand,variant_group_id)
+        SELECT 'a-dense-' || n, 'D' || lpad(n::text, 9, '0'), 'Dense ' || n,
+          '1', 'CA', 'amazon.ca', 'Fixture', 'g-dense'
+        FROM generate_series(1,5001) AS n
+      `);
       worker = await compiled().startAsinExportRuntime(env, () => fatal());
     }, 30_000);
 
@@ -149,6 +158,35 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         if (directory) await rm(directory, { recursive: true, force: true });
       }
     });
+
+    it('exports one group with more than 5,000 child ASINs', async () => {
+      const created = await f.app.inject({
+        method: 'POST',
+        url: '/api/v1/tasks/export',
+        headers: ownerHeaders,
+        payload: { exportType: 'asin', params: { country: 'CA' } },
+      });
+      expect(created.statusCode).toBe(200);
+      const taskId = created.json().data.taskId as string;
+      const task = await eventually(async () => {
+        const current = await store.read(taskId);
+        return current?.status === 'completed' ? current : null;
+      }, 30_000);
+      expect(task.result).toMatchObject({ exportType: 'asin', rowCount: 5001 });
+      const download = await f.app.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${taskId}/download`,
+        headers: ownerHeaders,
+      });
+      expect(download.statusCode).toBe(200);
+      const ExcelJS = createRequire(
+        resolve(__dirname, '../../worker/package.json'),
+      )('exceljs');
+      const book = new ExcelJS.Workbook();
+      await book.xlsx.load(download.rawPayload);
+      expect(book.worksheets[0].rowCount).toBe(5002);
+      expect(fatal).not.toHaveBeenCalled();
+    }, 45_000);
 
     it('produces, tracks and streams a filtered Legacy-compatible workbook; denies other owners and revoked grants', async () => {
       const unsupported = await f.app.inject({

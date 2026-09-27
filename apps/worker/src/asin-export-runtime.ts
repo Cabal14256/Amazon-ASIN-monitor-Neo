@@ -4,8 +4,9 @@ import {
   type Env,
 } from '@asin-monitor/config';
 import {
+  ASIN_EXPORT_QUERY_TIMEOUT_MS,
   createPgPool,
-  PgAsinQueryRepository,
+  PgAsinExportQueryRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import { ExportArtifactStore } from '@asin-monitor/export';
@@ -40,14 +41,14 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
       env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
       2000,
     ),
-    statement_timeout: 2500,
+    statement_timeout: ASIN_EXPORT_QUERY_TIMEOUT_MS,
   });
   pool.on('error', () =>
     logger.error('ASIN 导出数据库连接异常', {
       reason: 'export_database_error',
     }),
   );
-  const repository = new PgAsinQueryRepository(pool);
+  const repository = new PgAsinExportQueryRepository(pool);
   const store = new RedisTaskRepository(
     control,
     env,

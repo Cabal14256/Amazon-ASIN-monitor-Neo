@@ -1,8 +1,8 @@
 import type { AsinExportJobData } from '@asin-monitor/contracts';
 import {
   transitionTask,
+  type AsinExportQueryRepositoryPort,
   type AsinGroupReadResult,
-  type AsinQueryRepositoryPort,
   type TaskState,
 } from '@asin-monitor/db';
 import { ExportArtifactStore } from '@asin-monitor/export';
@@ -100,20 +100,31 @@ async function harness(pages: AsinGroupReadResult[]) {
       },
     ),
   };
-  const list = vi.fn(
-    async (query: { current: number }) =>
-      pages[query.current - 1] ?? {
-        groups: [],
-        asins: [],
-        total: pages[0]?.total ?? 0,
-        totalASINs: pages[0]?.totalASINs ?? 0,
-      },
+  const list = vi.fn(async (query: { current: number }) => {
+    const selected = pages[query.current - 1];
+    return selected
+      ? { ...selected, asins: [] }
+      : {
+          groups: [],
+          asins: [],
+          total: pages[0]?.total ?? 0,
+          totalASINs: pages[0]?.totalASINs ?? 0,
+        };
+  });
+  const children = vi.fn(async (groupId: string, offset: number) =>
+    pages
+      .flatMap((page) => page.asins)
+      .filter((asin) => asin.variantGroupId === groupId)
+      .slice(offset, offset + 5000),
   );
   const repository = {
     read: async (
-      operation: (unit: { list: typeof list }) => Promise<unknown>,
-    ) => operation({ list }),
-  } as unknown as AsinQueryRepositoryPort;
+      operation: (unit: {
+        listExportGroups: typeof list;
+        listExportChildren: typeof children;
+      }) => Promise<unknown>,
+    ) => operation({ listExportGroups: list, listExportChildren: children }),
+  } as unknown as AsinExportQueryRepositoryPort;
   const options = {
     shutdownSignal: new AbortController().signal,
     isClosing: () => false,
@@ -140,6 +151,7 @@ async function harness(pages: AsinGroupReadResult[]) {
     directory,
     job,
     list,
+    children,
     options,
     processor,
     get state() {
@@ -262,6 +274,25 @@ describe('ASIN streaming export', () => {
     expect(
       (await readdir(h.directory)).filter((name) => name.endsWith('.part')),
     ).toEqual([]);
+  });
+
+  it('continues a single group across the 5,000-child database page', async () => {
+    const asins = Array.from({ length: 5001 }, (_, index) =>
+      asin(`B${String(index).padStart(9, '0')}`, 'g-dense'),
+    );
+    const h = await harness([
+      {
+        groups: [group('g-dense', 'Dense')],
+        asins,
+        total: 1,
+        totalASINs: 5001,
+      },
+    ] as unknown as AsinGroupReadResult[]);
+    await h.processor(h.job, 'token');
+    expect(h.state.status).toBe('completed');
+    expect(h.state.result).toMatchObject({ rowCount: 5001 });
+    expect(h.children).toHaveBeenCalledWith('g-dense', 0);
+    expect(h.children).toHaveBeenCalledWith('g-dense', 5000);
   });
 
   it('cleans an interrupted partial and records cancellation', async () => {

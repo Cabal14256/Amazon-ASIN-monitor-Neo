@@ -90,6 +90,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
           message: '导出任务已创建，等待处理',
         },
         2,
+        100,
       );
       taskCreatedAt = task.createdAt;
       await port.enqueue({
@@ -114,6 +115,11 @@ export class AsinExportTaskService implements OnModuleDestroy {
         error.code === 'TASK_EXPORT_LIMIT'
       )
         fail(429, '已有两个导出任务正在处理，请稍后再试');
+      if (
+        error instanceof TaskRegistryError &&
+        error.code === 'TASK_EXPORT_GLOBAL_LIMIT'
+      )
+        fail(429, '导出队列已满，请稍后再试');
       if (error instanceof ExportEnqueueRejected && taskCreatedAt && port) {
         try {
           const state = await this.tasks
@@ -131,10 +137,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
               },
             );
           if (state?.status === 'failed')
-            fail(
-              error.reason === 'queue-full' ? 429 : 503,
-              'ASIN 导出未入队，请稍后再试',
-            );
+            fail(503, 'ASIN 导出未入队，请稍后再试');
         } catch (failure) {
           if (failure instanceof HttpException) throw failure;
         }

@@ -71,6 +71,11 @@ describe('ASIN export producer', () => {
       'asin:read',
     );
     expect(result).toMatchObject({ exportType: 'asin', status: 'pending' });
+    expect(createLimitedExport).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: result.taskId }),
+      2,
+      100,
+    );
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: result.taskId,
@@ -99,14 +104,20 @@ describe('ASIN export producer', () => {
     await expect(
       service().create(principal, { exportType: 'asin' }),
     ).rejects.toMatchObject({ status: 429 });
+    createLimitedExport.mockRejectedValueOnce(
+      new TaskRegistryError('TASK_EXPORT_GLOBAL_LIMIT'),
+    );
+    await expect(
+      service().create(principal, { exportType: 'asin' }),
+    ).rejects.toMatchObject({ status: 429 });
     expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('marks definitive queue rejection failed and keeps unknown add outcomes queryable', async () => {
-    enqueue.mockRejectedValueOnce(new ExportEnqueueRejected('queue-full'));
+    enqueue.mockRejectedValueOnce(new ExportEnqueueRejected('unavailable'));
     await expect(
       service().create(principal, { exportType: 'asin' }),
-    ).rejects.toMatchObject({ status: 429 });
+    ).rejects.toMatchObject({ status: 503 });
     expect(mutate).toHaveBeenCalledWith(
       expect.any(String),
       { kind: 'failed', message: 'ASIN 导出未入队，请重试' },

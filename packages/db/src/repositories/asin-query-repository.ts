@@ -1,5 +1,6 @@
 import {
   and,
+  asc,
   eq,
   getTableColumns,
   ilike,
@@ -8,7 +9,8 @@ import {
   type SQL,
 } from 'drizzle-orm';
 import { alias, type PgTable } from 'drizzle-orm/pg-core';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
+import { createDb, type Db } from '../client';
 import {
   asins,
   sessions,
@@ -21,6 +23,8 @@ import { withAuthDatabaseDeadline } from './bounded-auth-repository';
 import { DrizzleRoleUnit, type RoleWriteUnit } from './role-repository';
 
 export const MAX_ASIN_QUERY_CHILDREN = 5000;
+export const ASIN_EXPORT_QUERY_TIMEOUT_MS = 60_000;
+const ASIN_EXPORT_TRANSACTION_TIMEOUT_MS = 65_000;
 export interface AsinGroupQuery {
   keyword?: string;
   country?: string;
@@ -29,7 +33,7 @@ export interface AsinGroupQuery {
   pageSize: number;
 }
 export interface AsinGroupReadResult {
-  groups: (VariantGroup & { asinCount?: number })[];
+  groups: (VariantGroup & { asinCount?: number; exportIsBroken?: boolean })[];
   asins: Asin[];
   total: number;
   totalASINs: number;
@@ -40,6 +44,13 @@ export interface AsinQueryUnit extends RoleWriteUnit {
 }
 export interface AsinQueryRepositoryPort {
   read<T>(operation: (unit: AsinQueryUnit) => Promise<T>): Promise<T>;
+}
+export interface AsinExportQueryUnit extends AsinQueryUnit {
+  listExportGroups(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
+  listExportChildren(groupId: string, offset: number): Promise<Asin[]>;
+}
+export interface AsinExportQueryRepositoryPort {
+  read<T>(operation: (unit: AsinExportQueryUnit) => Promise<T>): Promise<T>;
 }
 export class AsinQueryRepositoryError extends Error {
   constructor(
@@ -100,6 +111,15 @@ function validateQuery(query: AsinGroupQuery) {
   )
     throw new AsinQueryRepositoryError('input');
 }
+function validateGroupId(groupId: string) {
+  if (
+    typeof groupId !== 'string' ||
+    !groupId ||
+    [...groupId].length > 50 ||
+    /[\x00-\x1f\x7f]/.test(groupId)
+  )
+    throw new AsinQueryRepositoryError('input');
+}
 function count(value: unknown): number {
   if (typeof value !== 'string' && typeof value !== 'number')
     throw new AsinQueryRepositoryError('result');
@@ -130,7 +150,7 @@ function hydrate<T extends PgTable>(
 
 export class DrizzleAsinQueryUnit
   extends DrizzleRoleUnit
-  implements AsinQueryUnit
+  implements AsinExportQueryUnit
 {
   // Shared row/advisory locks allow concurrent readers, but still serialize
   // against committed administration, password and session changes.
@@ -161,19 +181,32 @@ export class DrizzleAsinQueryUnit
   list(query: AsinGroupQuery) {
     return this.query(query);
   }
-  detail(groupId: string) {
-    if (
-      typeof groupId !== 'string' ||
-      !groupId ||
-      [...groupId].length > 50 ||
-      /[\x00-\x1f\x7f]/.test(groupId)
-    )
+  listExportGroups(query: AsinGroupQuery) {
+    return this.query(query, undefined, false);
+  }
+  async listExportChildren(groupId: string, offset: number): Promise<Asin[]> {
+    validateGroupId(groupId);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
       throw new AsinQueryRepositoryError('input');
+    this.ensureOpen();
+    const children = await this.db
+      .select()
+      .from(asins)
+      .where(eq(asins.variantGroupId, groupId))
+      .orderBy(sql`${asins.createTime} ASC NULLS FIRST`, asc(asins.id))
+      .limit(MAX_ASIN_QUERY_CHILDREN)
+      .offset(offset);
+    this.ensureOpen();
+    return children;
+  }
+  detail(groupId: string) {
+    validateGroupId(groupId);
     return this.query({ current: 1, pageSize: 1 }, groupId);
   }
   private async query(
     query: AsinGroupQuery,
     groupId?: string,
+    includeChildren = true,
   ): Promise<AsinGroupReadResult> {
     validateQuery(query);
     const keyword = textFilter(query.keyword);
@@ -211,22 +244,33 @@ export class DrizzleAsinQueryUnit
     const asinCount = sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${
       a.variantGroupId
     }=${g.id} AND ${keyword ?? sql`true`})`;
+    const childPage = includeChildren
+      ? sql`, child_page AS MATERIALIZED (
+        SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON p.id=${
+          a.variantGroupId
+        }
+        ORDER BY ${a.variantGroupId}, ${a.createTime} ASC NULLS FIRST, ${a.id}
+        LIMIT ${MAX_ASIN_QUERY_CHILDREN + 1}
+      )`
+      : sql``;
+    const selectedChildren = includeChildren
+      ? sql`COALESCE((SELECT jsonb_agg(to_jsonb(c) ORDER BY c.variant_group_id, c.create_time ASC NULLS FIRST, c.id) FROM child_page c), '[]'::jsonb)`
+      : sql`'[]'::jsonb`;
+    const exportGroupBroken = includeChildren
+      ? sql`NULL::boolean`
+      : groupBroken;
     this.ensureOpen();
     const result = await this.db.execute(sql`
       WITH selected AS MATERIALIZED (
-        SELECT g.*, ${asinCount} AS asin_count FROM ${variantGroups} AS g WHERE ${groupWhere}
+        SELECT g.*, ${asinCount} AS asin_count,
+          ${exportGroupBroken} AS export_group_broken
+        FROM ${variantGroups} AS g WHERE ${groupWhere}
         ORDER BY ${g.createTime} DESC NULLS LAST, ${g.id} DESC
         LIMIT ${query.pageSize} OFFSET ${(query.current - 1) * query.pageSize}
-      ), child_page AS MATERIALIZED (
-        SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON p.id=${
-      a.variantGroupId
-    }
-        ORDER BY ${a.variantGroupId}, ${a.createTime} ASC NULLS FIRST, ${a.id}
-        LIMIT ${MAX_ASIN_QUERY_CHILDREN + 1}
-      )
+      ) ${childPage}
       SELECT ${total} AS total, ${totalASINs} AS total_asins,
         COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.create_time DESC NULLS LAST, p.id DESC) FROM selected p), '[]'::jsonb) AS groups,
-        COALESCE((SELECT jsonb_agg(to_jsonb(c) ORDER BY c.variant_group_id, c.create_time ASC NULLS FIRST, c.id) FROM child_page c), '[]'::jsonb) AS asins
+        ${selectedChildren} AS asins
     `);
     this.ensureOpen();
     const payload = result.rows[0];
@@ -240,10 +284,19 @@ export class DrizzleAsinQueryUnit
     if (payload.asins.length > MAX_ASIN_QUERY_CHILDREN)
       throw new AsinQueryRepositoryError('too-many-children');
     return {
-      groups: payload.groups.map((row: Record<string, unknown>) => ({
-        ...hydrate(variantGroups, row),
-        ...(groupId === undefined ? { asinCount: count(row.asin_count) } : {}),
-      })),
+      groups: payload.groups.map((row: Record<string, unknown>) => {
+        if (!includeChildren && typeof row.export_group_broken !== 'boolean')
+          throw new AsinQueryRepositoryError('result');
+        return {
+          ...hydrate(variantGroups, row),
+          ...(groupId === undefined
+            ? { asinCount: count(row.asin_count) }
+            : {}),
+          ...(!includeChildren
+            ? { exportIsBroken: row.export_group_broken as boolean }
+            : {}),
+        };
+      }),
       asins: payload.asins.map((row) => hydrate(asins, row)),
       total: count(payload.total),
       totalASINs: count(payload.total_asins),
@@ -259,6 +312,84 @@ export class PgAsinQueryRepository implements AsinQueryRepositoryPort {
     try {
       return await withAsinDatabaseTransaction(this.pool, (db, ensureOpen) =>
         operation(new DrizzleAsinQueryUnit(db, ensureOpen)),
+      );
+    } finally {
+      this.active--;
+    }
+  }
+}
+
+/** Export reads have their own bounded connection and transaction lifetime. */
+export async function withAsinExportDatabaseTransaction<T>(
+  pool: Pool,
+  operation: (db: Db, ensureOpen: () => void) => Promise<T>,
+): Promise<T> {
+  const client: PoolClient = await pool.connect();
+  let destroyed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let connectionError!: (error: Error) => void;
+  const connectionFailure = new Promise<never>((_resolve, reject) => {
+    connectionError = reject;
+  });
+  client.on('error', connectionError);
+  const destroy = () => {
+    if (destroyed) return;
+    destroyed = true;
+    client.release(true);
+  };
+  const ensureOpen = () => {
+    if (destroyed) throw new Error('ASIN_EXPORT_QUERY_TIMEOUT');
+  };
+  try {
+    return await Promise.race([
+      connectionFailure,
+      (async () => {
+        await client.query('BEGIN READ ONLY');
+        ensureOpen();
+        await client.query(
+          `SET LOCAL statement_timeout = ${ASIN_EXPORT_QUERY_TIMEOUT_MS}`,
+        );
+        ensureOpen();
+        await client.query(
+          'SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)',
+        );
+        ensureOpen();
+        const result = await operation(createDb(client), ensureOpen);
+        ensureOpen();
+        await client.query('COMMIT');
+        return result;
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          destroy();
+          reject(new Error('ASIN_EXPORT_QUERY_TIMEOUT'));
+        }, ASIN_EXPORT_TRANSACTION_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    destroy();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    client.removeListener('error', connectionError);
+    if (!destroyed) client.release();
+  }
+}
+
+export class PgAsinExportQueryRepository
+  implements AsinExportQueryRepositoryPort
+{
+  private active = 0;
+  constructor(private readonly pool: Pool) {}
+  async read<T>(
+    operation: (unit: AsinExportQueryUnit) => Promise<T>,
+  ): Promise<T> {
+    if (this.active >= 2) throw new AsinQueryRepositoryError('capacity');
+    this.active++;
+    try {
+      return await withAsinExportDatabaseTransaction(
+        this.pool,
+        (db, ensureOpen) => operation(new DrizzleAsinQueryUnit(db, ensureOpen)),
       );
     } finally {
       this.active--;

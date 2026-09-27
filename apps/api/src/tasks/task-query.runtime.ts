@@ -66,7 +66,7 @@ export interface ExportProducerPort {
   enqueue(data: AsinExportJobData): Promise<void>;
 }
 export class ExportEnqueueRejected extends Error {
-  constructor(readonly reason: 'queue-full' | 'unavailable' | 'invalid') {
+  constructor(readonly reason: 'unavailable' | 'invalid') {
     super(`EXPORT_ENQUEUE_${reason.toUpperCase().replace('-', '_')}`);
   }
 }
@@ -426,16 +426,6 @@ export class TaskQueryRuntime implements OnModuleDestroy {
             await queue.close().catch(() => undefined);
             throw error;
           }
-          ensureOpen();
-          const counts = await queue.getJobCounts(
-            'waiting',
-            'active',
-            'delayed',
-          );
-          if (
-            Object.values(counts).reduce((sum, value) => sum + value, 0) >= 100
-          )
-            throw new ExportEnqueueRejected('queue-full');
           ensureOpen();
         } catch (error) {
           if (error instanceof ExportEnqueueRejected) throw error;
