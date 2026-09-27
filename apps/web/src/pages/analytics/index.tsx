@@ -48,16 +48,20 @@ import {
   latestPeakIntervals,
   metric,
   monthlyRowsInRange,
+  monthsInRange,
   overviewAsinMetric,
   overviewStatisticsQuery,
   peakHoursQuery,
   percent,
+  periodDetailPageRows,
   periodDetailsQuery,
   periodPageCount,
+  periodSummaryQuery,
   rowText,
   selectOverviewSummary,
   sumAbnormalSeriesByPeriod,
   type AnalyticsFilters,
+  type PeriodFilters,
   type PeriodIdentity,
 } from './analytics-data';
 
@@ -271,30 +275,57 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
     stats.data,
     allCountries.data,
   );
+  const summaryPending = filters.country
+    ? stats.isPending
+    : allCountries.isPending && stats.isPending;
+  const summaryError = filters.country
+    ? stats.error
+    : allCountries.error && stats.error;
   return (
     <div className="space-y-5">
-      {summary && (
-        <MetricCards
-          values={[
-            {
-              label: '总检查次数',
-              value: count(summary.totalChecks),
-              hint: '当前时间范围',
-            },
-            {
-              label: '异常次数',
-              value: count(summary.brokenCount),
-              hint: `${percent(summary.ratioAllTime)} 时长异常率`,
-            },
-            {
-              label: '异常时长',
-              value: hours(summary.abnormalDurationHours),
-              hint: `总时长 ${hours(summary.totalDurationHours)}`,
-            },
-            overviewAsinMetric(summary),
-          ]}
-        />
-      )}
+      <QueryPanel
+        title="范围指标"
+        description={
+          filters.country ? `${filters.country} 站点统计` : '全部国家统计'
+        }
+        pending={summaryPending}
+        error={summaryError}
+        retry={() => {
+          if (filters.country) void stats.refetch();
+          else {
+            void allCountries.refetch();
+            void stats.refetch();
+          }
+        }}
+      >
+        {summary ? (
+          <MetricCards
+            values={[
+              {
+                label: '总检查次数',
+                value: count(summary.totalChecks),
+                hint: '当前时间范围',
+              },
+              {
+                label: '异常次数',
+                value: count(summary.brokenCount),
+                hint: `${percent(summary.ratioAllTime)} 时长异常率`,
+              },
+              {
+                label: '异常时长',
+                value: hours(summary.abnormalDurationHours),
+                hint: `总时长 ${hours(summary.totalDurationHours)}`,
+              },
+              overviewAsinMetric(summary),
+            ]}
+          />
+        ) : (
+          <EmptyState
+            title="暂无范围指标"
+            description="当前范围尚无统计结果。"
+          />
+        )}
+      </QueryPanel>
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(20rem,1fr)]">
         <QueryPanel
           title="异常时长趋势"
@@ -383,6 +414,14 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
 function Rankings({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
   const query = analyticsCountryQuery(filters);
+  const [periodFilterDraft, setPeriodFilterDraft] = useState<PeriodFilters>({
+    site: '',
+    brand: '',
+  });
+  const [periodFilters, setPeriodFilters] = useState<PeriodFilters>({
+    site: '',
+    brand: '',
+  });
   const [pageSelection, setPageSelection] = useState<{
     filters: AnalyticsFilters;
     page: number;
@@ -392,6 +431,10 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
     filters: AnalyticsFilters;
     page: number;
     period: PeriodIdentity;
+  } | null>(null);
+  const [detailPageSelection, setDetailPageSelection] = useState<{
+    selection: typeof selection;
+    page: number;
   } | null>(null);
   const selectedPeriod =
     selection?.filters === filters && selection.page === page
@@ -424,16 +467,11 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
       ),
   });
   const periods = useQuery({
-    queryKey: ['analytics', 'period-summary', filters, page],
+    queryKey: ['analytics', 'period-summary', filters, periodFilters, page],
     queryFn: ({ signal }) =>
       getPeriodSummary(
         runtime.http,
-        {
-          ...query,
-          timeSlotGranularity: filters.groupBy,
-          current: page,
-          pageSize: 20,
-        },
+        periodSummaryQuery(filters, periodFilters, page),
         signal,
       ),
   });
@@ -447,6 +485,11 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
   const totalPages = periodPageCount(
     periods.data?.total ?? 0,
     periods.data?.pageSize ?? 20,
+  );
+  const detailTotalPages = periodPageCount(details.data?.length ?? 0, 50);
+  const detailPage = Math.min(
+    detailPageSelection?.selection === selection ? detailPageSelection.page : 1,
+    detailTotalPages,
   );
   return (
     <div className="space-y-5">
@@ -516,6 +559,46 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
           error={periods.error}
           retry={() => void periods.refetch()}
         >
+          <div className="mb-4 flex flex-wrap items-end gap-3">
+            <Field label="站点">
+              {(control) => (
+                <Input
+                  {...control}
+                  value={periodFilterDraft.site}
+                  onChange={(event) =>
+                    setPeriodFilterDraft((previous) => ({
+                      ...previous,
+                      site: event.target.value,
+                    }))
+                  }
+                />
+              )}
+            </Field>
+            <Field label="品牌">
+              {(control) => (
+                <Input
+                  {...control}
+                  value={periodFilterDraft.brand}
+                  onChange={(event) =>
+                    setPeriodFilterDraft((previous) => ({
+                      ...previous,
+                      brand: event.target.value,
+                    }))
+                  }
+                />
+              )}
+            </Field>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setPeriodFilters(periodFilterDraft);
+                setPageSelection(null);
+                setSelection(null);
+              }}
+            >
+              筛选周期
+            </Button>
+          </div>
           <Table
             headers={['国家', '站点', '品牌', '异常时长', '时间槽']}
             rows={(periods.data?.list ?? []).map((row) => [
@@ -570,15 +653,45 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
         >
           <Table
             headers={['时间槽', '总时长', '异常时长', '异常率']}
-            rows={(details.data ?? [])
-              .slice(0, 50)
-              .map((row) => [
+            rows={periodDetailPageRows(details.data ?? [], detailPage).map(
+              (row) => [
                 rowText(row, 'timeSlot', 'time_slot'),
                 hours(row.totalDurationHours),
                 hours(row.abnormalDurationHours),
                 percent(row.ratioAllTime),
-              ])}
+              ],
+            )}
           />
+          {detailTotalPages > 1 && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+              <span>
+                第 {detailPage} / {detailTotalPages} 页 · 共{' '}
+                {details.data?.length ?? 0} 个时间槽
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  size="small"
+                  disabled={details.isPending || detailPage <= 1}
+                  onClick={() =>
+                    setDetailPageSelection({ selection, page: detailPage - 1 })
+                  }
+                >
+                  上一页
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="small"
+                  disabled={details.isPending || detailPage >= detailTotalPages}
+                  onClick={() =>
+                    setDetailPageSelection({ selection, page: detailPage + 1 })
+                  }
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          )}
         </QueryPanel>
       ) : (
         <Card>
@@ -606,12 +719,19 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
   });
   const month = useQuery({
     queryKey: ['analytics', 'monthly', filters],
-    queryFn: ({ signal }) =>
-      getMonthlyBreakdown(
-        runtime.http,
-        { ...query, month: filters.startTime.slice(0, 7) },
-        signal,
-      ),
+    queryFn: async ({ signal }) => {
+      const months = monthsInRange(filters.startTime, filters.endTime);
+      const results = await Promise.all(
+        months.map((month) =>
+          getMonthlyBreakdown(
+            runtime.http,
+            { country: query.country, month },
+            signal,
+          ),
+        ),
+      );
+      return results.flatMap((result) => result.rows);
+    },
   });
   const areas = useQuery({
     queryKey: ['analytics', 'peak-mark-areas', filters],
@@ -635,12 +755,8 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
   const peakData = peak.data;
   const monthlyRows = useMemo(
     () =>
-      monthlyRowsInRange(
-        month.data?.rows ?? [],
-        filters.startTime,
-        filters.endTime,
-      ),
-    [month.data?.rows, filters.startTime, filters.endTime],
+      monthlyRowsInRange(month.data ?? [], filters.startTime, filters.endTime),
+    [month.data, filters.startTime, filters.endTime],
   );
   const abnormalRows = useMemo(
     () => sumAbnormalSeriesByPeriod(abnormal.data?.data ?? []),
@@ -698,7 +814,7 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
         </QueryPanel>
         <QueryPanel
           title="异常时长曲线"
-          description="异常统计同时提供汇总和可选的时间序列。"
+          description="异常时长按所选时间范围自动选择小时、日或月粒度，与上方趋势粒度筛选独立。"
           pending={abnormal.isPending}
           error={abnormal.error}
           retry={() => void abnormal.refetch()}
@@ -716,13 +832,7 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
       <div className="grid gap-5 xl:grid-cols-2">
         <QueryPanel
           title="月度异常拆分"
-          description={
-            month.data
-              ? `${month.data.month} · 平均异常率 ${percent(
-                  month.data.summary.averageRatio,
-                )}`
-              : '按日展开月度异常时长。'
-          }
+          description="按日展开所选范围内每个自然月的异常时长。"
           pending={month.isPending}
           error={month.error}
           retry={() => void month.refetch()}

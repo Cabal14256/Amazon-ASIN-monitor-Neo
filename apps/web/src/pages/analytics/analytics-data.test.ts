@@ -10,12 +10,15 @@ import {
   initialAnalyticsFilters,
   latestPeakIntervals,
   monthlyRowsInRange,
+  monthsInRange,
   overviewAsinMetric,
   overviewStatisticsQuery,
   peakHoursQuery,
   percent,
+  periodDetailPageRows,
   periodDetailsQuery,
   periodPageCount,
+  periodSummaryQuery,
   selectOverviewSummary,
   sumAbnormalSeriesByPeriod,
 } from './analytics-data';
@@ -43,6 +46,14 @@ describe('analytics page filters and display values', () => {
   it('makes later period summary pages reachable', () => {
     expect(periodPageCount(0, 20)).toBe(1);
     expect(periodPageCount(41, 20)).toBe(3);
+  });
+
+  it('pages all returned time slots instead of dropping those after the first 50', () => {
+    const slots = Array.from({ length: 115 }, (_, index) => index);
+    expect(periodDetailPageRows(slots, 1)).toEqual(slots.slice(0, 50));
+    expect(periodDetailPageRows(slots, 2)).toEqual(slots.slice(50, 100));
+    expect(periodDetailPageRows(slots, 3)).toEqual(slots.slice(100));
+    expect(periodPageCount(slots.length, 50)).toBe(3);
   });
 
   const timezone = process.env.TZ;
@@ -149,6 +160,41 @@ describe('analytics page filters and display values', () => {
       endTime: filters.endTime,
       timeSlotGranularity: 'week',
     });
+  });
+
+  it('applies trimmed site and brand filters to the period summary request', () => {
+    const filters = {
+      country: 'UK',
+      startTime: '2026-09-01 00:00:00',
+      endTime: '2026-09-10 23:59:59',
+      groupBy: 'day' as const,
+    };
+    expect(
+      periodSummaryQuery(filters, { site: ' Shop A ', brand: ' Brand A ' }, 2),
+    ).toEqual({
+      country: 'UK',
+      startTime: filters.startTime,
+      endTime: filters.endTime,
+      site: 'Shop A',
+      brand: 'Brand A',
+      timeSlotGranularity: 'day',
+      current: 2,
+      pageSize: 20,
+    });
+  });
+
+  it('enumerates every intersecting month and bounds multi-month queries', () => {
+    expect(monthsInRange('2026-12-30 00:00:00', '2027-02-02 00:00:00')).toEqual(
+      ['2026-12', '2027-01', '2027-02'],
+    );
+    expect(
+      applyAnalyticsFilters({
+        country: '',
+        startTime: '2025-01-01T00:00',
+        endTime: '2026-01-01T00:00',
+        groupBy: 'day',
+      }),
+    ).toMatchObject({ ok: false, error: '分析范围最多可跨 12 个自然月。' });
   });
 
   it('combines ASIN rows into one abnormal-duration point per time period', () => {

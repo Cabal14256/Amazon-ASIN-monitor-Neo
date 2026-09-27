@@ -158,7 +158,6 @@ describe('monitor analytics views / actual Legacy oracle', () => {
     'FR',
     'ES',
     'IT',
-    'EU',
     'us',
     'JP',
   ].flatMap((country) =>
@@ -185,6 +184,17 @@ describe('monitor analytics views / actual Legacy oracle', () => {
     ]);
     expect(results[0][0].areas[0][0].xAxis).toBe('2024-02-29 02:00');
     expect(results[0][0].areas).toHaveLength(4);
+  });
+
+  it('includes UK and the other European peak regions for the combined EU filter', () => {
+    const areas = buildMonitorPeakMarkAreas({
+      country: 'EU',
+      groupBy: 'hour',
+      startTime: '2024-02-29 14:15:00',
+      endTime: '2024-03-01 01:00:00',
+    });
+    expect(areas.map((area) => area.name)).toEqual(['UK', 'EU_OTHER']);
+    expect(areas.every((area) => area.areas.length > 0)).toBe(true);
   });
 
   it.each(['UTC', 'America/New_York', 'Asia/Shanghai'])(
@@ -231,12 +241,12 @@ describe('monitor analytics views / actual Legacy oracle', () => {
         endTime: '2100-01-01',
       }),
     ).toThrow(RangeError);
-    expect(
+    expect(() =>
       buildMonitorPeakMarkAreas({
         startTime: '1900-01-01',
         endTime: '2100-01-01',
         country: 'EU',
       }),
-    ).toEqual([]);
+    ).toThrow(RangeError);
   });
 });

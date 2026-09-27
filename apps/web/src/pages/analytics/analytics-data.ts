@@ -21,6 +21,8 @@ export type AnalyticsFilters = {
 };
 
 export type PeriodIdentity = { country: string; site: string; brand: string };
+export type PeriodFilters = { site: string; brand: string };
+const MAX_ANALYTICS_MONTHS = 12;
 
 export type AbnormalSeriesPoint = {
   timePeriod: string;
@@ -58,6 +60,21 @@ export function periodDetailsQuery(
     startTime: filters.startTime,
     endTime: filters.endTime,
     timeSlotGranularity: filters.groupBy,
+  };
+}
+
+export function periodSummaryQuery(
+  filters: AnalyticsFilters,
+  periodFilters: PeriodFilters,
+  page: number,
+) {
+  return {
+    ...analyticsCountryQuery(filters),
+    site: periodFilters.site.trim() || undefined,
+    brand: periodFilters.brand.trim() || undefined,
+    timeSlotGranularity: filters.groupBy,
+    current: page,
+    pageSize: 20,
   };
 }
 
@@ -99,6 +116,20 @@ export function monthlyRowsInRange<T extends { date: string }>(
   return rows.filter((row) => row.date >= startDay && row.date <= endDay);
 }
 
+export function monthsInRange(startTime: string, endTime: string) {
+  const [startYear, startMonth] = startTime.slice(0, 7).split('-').map(Number);
+  const [endYear, endMonth] = endTime.slice(0, 7).split('-').map(Number);
+  const start = startYear * 12 + startMonth - 1;
+  const end = endYear * 12 + endMonth - 1;
+  const months: string[] = [];
+  for (let value = start; value <= end; value++) {
+    months.push(
+      `${Math.floor(value / 12)}-${String((value % 12) + 1).padStart(2, '0')}`,
+    );
+  }
+  return months;
+}
+
 export function initialAnalyticsFilters(): AnalyticsFilters {
   const endTime = formatBeijingNow('YYYY-MM-DDTHH:mm');
   const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -115,6 +146,8 @@ export function applyAnalyticsFilters(
     return { ok: false, error: '请输入有效的上海时间范围。' };
   if (startTime > endTime)
     return { ok: false, error: '结束时间应不早于开始时间。' };
+  if (monthsInRange(startTime, endTime).length > MAX_ANALYTICS_MONTHS)
+    return { ok: false, error: '分析范围最多可跨 12 个自然月。' };
   return {
     ok: true,
     value: { ...filters, startTime, endTime },
@@ -165,6 +198,10 @@ export function overviewAsinMetric(summary: {
 
 export function periodPageCount(total: number, pageSize: number) {
   return Math.max(1, Math.ceil(total / pageSize));
+}
+
+export function periodDetailPageRows<T>(rows: readonly T[], page: number) {
+  return rows.slice((page - 1) * 50, page * 50);
 }
 
 export function selectOverviewSummary<Selected, Global>(
