@@ -152,6 +152,7 @@ export const monitorHistory = pgTable(
     ),
     checkResult: jsonb('check_result').$type<Record<string, unknown>>(),
     notificationSent: boolean('notification_sent').default(false),
+    monitorTaskId: varchar('monitor_task_id', { length: 36 }),
     createTime: timestampColumn('create_time').default(localTimestamp),
   },
   (table) => [
@@ -192,6 +193,11 @@ export const monitorHistory = pgTable(
       .where(
         sql`${table.isBroken} = true AND ${table.notificationSent} = false`,
       ),
+    index('idx_monitor_history_monitor_task_country').on(
+      table.monitorTaskId,
+      table.country,
+      table.notificationSent,
+    ),
   ],
 );
 

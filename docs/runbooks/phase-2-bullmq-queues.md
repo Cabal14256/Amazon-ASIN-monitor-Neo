@@ -1,6 +1,6 @@
 # P2-T2a：Neo 队列策略与接入边界
 
-八类 Queue 策略已完成；PostgreSQL 权威源下，入口现已注册认证维护及[主营批量删除](./phase-2-asin-batch-delete.md)的真实 Processor。其余七类业务队列仍只创建 Queue 资源，不消费任务，不能将看门狗健康等同于业务迁移完成。已注册业务入口显示 `mode=business-worker` 和实际处理器数；纯骨架选择仍显示 queue-scaffold。后续域需验证 payload 后接入实际 Processor，不允许用空回调完成任务。
+八类 Queue 策略已完成；PostgreSQL 权威源下，认证维护、主营批量删除、导入、变体检查及[主营手动监控](./phase-2-primary-monitor.md)已有真实 Processor。其他业务队列仍可能只有 Queue 资源，不能将看门狗健康等同于业务迁移完成。已注册业务入口显示 `mode=business-worker` 和实际处理器数；纯骨架选择仍显示 queue-scaffold。后续域需验证 payload 后接入实际 Processor，不允许用空回调完成任务。
 
 ## 八类队列基线
 

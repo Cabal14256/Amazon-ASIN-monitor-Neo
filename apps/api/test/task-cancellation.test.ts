@@ -178,7 +178,7 @@ describe('owned task cancellation HTTP', () => {
       expect(port.store.mutate).not.toHaveBeenCalled();
     },
   );
-  it.each(['variant-check', 'monitor', 'competitor', 'unknown'])(
+  it.each(['variant-check', 'competitor', 'unknown'])(
     'refuses unsupported %s, matching the Legacy cancel map',
     async (type) => {
       task!.taskType = type;

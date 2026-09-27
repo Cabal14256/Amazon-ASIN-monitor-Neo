@@ -5,10 +5,15 @@ import {
 } from '@asin-monitor/config';
 import {
   createPgPool,
+  PgPrimaryMonitorRepository,
   PgSpApiConfigurationRepository,
   PgVariantCheckRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
+import {
+  createFeishuNotifications,
+  type FeishuNotifications,
+} from '@asin-monitor/notify';
 import {
   DatabaseConfigSource,
   NodeHttpTransport,
@@ -18,12 +23,13 @@ import { VariantCheckRuntime } from '@asin-monitor/variant-check';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { logger } from './logger';
+import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantCheckProcessor } from './variant-check-processor';
 
-type CheckQueue = 'variant-check' | 'batch-check';
+type CheckQueue = 'variant-check' | 'batch-check' | 'monitor';
 /** Actual BullMQ consumers. All catalog/quota/task commands use a fail-fast
  * non-replaying connection; BullMQ alone owns its blocking/retry connections. */
 export async function startVariantCheckRuntime(
@@ -35,7 +41,9 @@ export async function startVariantCheckRuntime(
   if (
     env.AUTH_DATA_AUTHORITY !== 'postgresql' ||
     !selected.length ||
-    selected.some((name) => !['variant-check', 'batch-check'].includes(name))
+    selected.some(
+      (name) => !['variant-check', 'batch-check', 'monitor'].includes(name),
+    )
   )
     throw new Error(
       'Variant checks require PostgreSQL authority and selected queues',
@@ -62,9 +70,21 @@ export async function startVariantCheckRuntime(
     ),
     statement_timeout: 1500,
   });
+  const competitorPool = selected.includes('monitor')
+    ? createPgPool(env.COMPETITOR_DATABASE_URL, {
+        max: 2,
+        connectionTimeoutMillis: 2000,
+        statement_timeout: 1500,
+      })
+    : undefined;
   pool.on('error', () =>
     logger.error('检查数据库连接异常', {
       reason: 'variant_check_database_error',
+    }),
+  );
+  competitorPool?.on('error', () =>
+    logger.error('竞品通知配置数据库连接异常', {
+      reason: 'monitor_notification_database_error',
     }),
   );
   const shutdown = new AbortController();
@@ -73,12 +93,14 @@ export async function startVariantCheckRuntime(
   let source: DatabaseConfigSource | undefined,
     spApi: SpApiRuntime | undefined,
     runtime: VariantCheckRuntime | undefined;
+  let notifications: FeishuNotifications | undefined;
   let transport: NodeHttpTransport | undefined,
     htmlTransport: NodeHttpTransport | undefined;
   let closing = false,
     cleanupRunning = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined,
-    cleanupTimer: ReturnType<typeof setInterval> | undefined;
+    cleanupTimer: ReturnType<typeof setInterval> | undefined,
+    monitorReadyTimer: ReturnType<typeof setInterval> | undefined;
   const ensureOpen = () => {
     if (closing) throw new Error('Variant check startup stopped');
   };
@@ -86,7 +108,9 @@ export async function startVariantCheckRuntime(
     closing = true;
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
+    if (monitorReadyTimer) clearInterval(monitorReadyTimer);
     runtime?.close();
+    notifications?.close();
     spApi?.close();
     source?.close();
     transport?.close();
@@ -94,6 +118,16 @@ export async function startVariantCheckRuntime(
   };
   try {
     const repository = new PgVariantCheckRepository(pool);
+    const monitorRepository = selected.includes('monitor')
+      ? new PgPrimaryMonitorRepository(pool)
+      : undefined;
+    if (competitorPool)
+      notifications = createFeishuNotifications({
+        primaryPool: pool,
+        competitorPool,
+        authority: () => env.AUTH_DATA_AUTHORITY,
+        logger,
+      });
     const configRepository = new PgSpApiConfigurationRepository(pool);
     source = new DatabaseConfigSource(environment, async (signal) =>
       Object.fromEntries(
@@ -155,6 +189,7 @@ export async function startVariantCheckRuntime(
       ensureOpen();
       // Require the primary completion-table upgrade before registering consumers.
       await repository.transaction((unit) => unit.purgeExpiredReceipts());
+      if (monitorRepository) await monitorRepository.assertReady();
       ensureOpen();
       for (const name of new Set(selected)) {
         const queue = new Queue(
@@ -169,32 +204,49 @@ export async function startVariantCheckRuntime(
         );
         await queue.waitUntilReady();
         ensureOpen();
-        const worker = new Worker(
-          getPhysicalQueueName(name),
-          createVariantCheckProcessor(business.executor, store, {
-            taskType: name,
-            shutdownSignal: shutdown.signal,
-            assertJobLock: async (job, token) => {
-              if (
-                !token ||
-                !job.id ||
-                (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
-              )
-                throw new Error('CHECK_JOB_LOCK_LOST');
-            },
-            updateProgress: async (job, value) => {
-              const current = await queue.getJob(job.id!);
-              if (
-                !current ||
-                current.data?.createdAt !== job.data.createdAt ||
-                current.data?.userId !== job.data.userId
-              )
-                throw new Error('CHECK_JOB_IDENTITY_CHANGED');
-              await current.updateProgress(value);
-            },
-          }),
-          { ...getWorkerOptions(name, env, connection), autorun: false },
-        );
+        const assertJobLock = async (job: { id?: string }, token?: string) => {
+          if (
+            !token ||
+            !job.id ||
+            (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
+          )
+            throw new Error('CHECK_JOB_LOCK_LOST');
+        };
+        const updateProgress = async (
+          job: { id?: string; data: unknown },
+          value: number,
+        ) => {
+          const current = await queue.getJob(job.id!);
+          if (
+            !current ||
+            current.data?.createdAt !==
+              (job.data as { createdAt?: string }).createdAt ||
+            current.data?.userId !== (job.data as { userId?: string }).userId
+          )
+            throw new Error('CHECK_JOB_IDENTITY_CHANGED');
+          await current.updateProgress(value);
+        };
+        const processor =
+          name === 'monitor'
+            ? createPrimaryMonitorProcessor({
+                pipeline: business.pipeline,
+                repository: monitorRepository!,
+                store,
+                notifications: notifications!,
+                shutdownSignal: shutdown.signal,
+                assertJobLock,
+                updateProgress,
+              })
+            : createVariantCheckProcessor(business.executor, store, {
+                taskType: name,
+                shutdownSignal: shutdown.signal,
+                assertJobLock,
+                updateProgress,
+              });
+        const worker = new Worker(getPhysicalQueueName(name), processor, {
+          ...getWorkerOptions(name, env, connection),
+          autorun: false,
+        });
         workers.push(worker);
         worker.on('error', () =>
           logger.warn('检查消费者连接异常', {
@@ -223,6 +275,21 @@ export async function startVariantCheckRuntime(
           onFatal();
         }
       });
+    if (selected.includes('monitor')) {
+      const readyKey = `${getNeoQueuePrefix(env)}:monitor:consumer:ready`;
+      const heartbeat = async () => {
+        if (!closing) await control.set(readyKey, '1', 'EX', 10);
+      };
+      await heartbeat();
+      monitorReadyTimer = setInterval(() => {
+        void heartbeat().catch(() =>
+          logger.warn('监控消费者心跳未确认', {
+            reason: 'monitor_heartbeat_failed',
+          }),
+        );
+      }, 3000);
+      monitorReadyTimer.unref();
+    }
     const cleanup = async () => {
       if (closing || cleanupRunning) return;
       cleanupRunning = true;
@@ -231,6 +298,10 @@ export async function startVariantCheckRuntime(
           unit.purgeExpiredReceipts(),
         );
         if (removed) logger.info('过期检查结果已清理', { removed });
+        if (monitorRepository) {
+          const runs = await monitorRepository.purgeExpiredRuns();
+          if (runs) logger.info('过期监控快照已清理', { runs });
+        }
       } catch {
         if (!closing)
           logger.warn('检查结果清理暂不可用', {
@@ -257,6 +328,7 @@ export async function startVariantCheckRuntime(
             await Promise.allSettled([
               ...queues.map((queue) => queue.close()),
               pool.end(),
+              competitorPool?.end(),
             ]);
             control.disconnect(false);
           }
@@ -271,6 +343,7 @@ export async function startVariantCheckRuntime(
       ...workers.map((worker) => worker.close(true)),
       ...queues.map((queue) => queue.close()),
       pool.end(),
+      competitorPool?.end(),
     ]);
     throw new Error('Variant check initialization failed');
   } finally {
