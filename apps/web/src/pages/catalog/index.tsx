@@ -33,6 +33,7 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
+import { ApiError } from '../../lib/http';
 import { CatalogActionPanel } from './catalog-actions';
 import {
   asinGroupManualAction,
@@ -88,11 +89,13 @@ function GroupCard({
   config,
   selected,
   onSelect,
+  disabled,
 }: {
   group: CatalogGroup;
   config: CatalogConfig;
   selected: boolean;
   onSelect: () => void;
+  disabled?: boolean;
 }) {
   return (
     <li className="rounded-control border border-border bg-card p-4 sm:p-5">
@@ -115,6 +118,7 @@ function GroupCard({
           variant="secondary"
           size="small"
           aria-expanded={selected}
+          disabled={disabled}
           onClick={onSelect}
         >
           {selected ? '收起详情' : '查看 ASIN'}
@@ -695,6 +699,7 @@ export function GroupRows({
             variant="secondary"
             size="small"
             aria-expanded={selectedId === row.original.id}
+            disabled={actionsDisabled}
             onClick={() => toggleGroup(row.original.id)}
           >
             {selectedId === row.original.id ? '收起' : '查看'}
@@ -702,7 +707,7 @@ export function GroupRows({
         ),
       },
     ],
-    [config, selectedId, toggleGroup],
+    [actionsDisabled, config, selectedId, toggleGroup],
   );
   const table = useTable({
     features: TABLE_FEATURES,
@@ -721,6 +726,7 @@ export function GroupRows({
               config={config}
               selected={selectedId === row.id}
               onSelect={() => toggleGroup(row.id)}
+              disabled={actionsDisabled}
             />
             {selectedId === row.id && (
               <li>
@@ -863,6 +869,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (writingRef.current) return;
     setAction(null);
     setSelectedId(null);
     setQuery({
@@ -874,6 +881,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     });
   }
   function changePage(next: number) {
+    if (writingRef.current) return;
     setAction(null);
     setSelectedId(null);
     setQuery((previous) => ({ ...previous, current: next }));
@@ -908,6 +916,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const reportAccessDenied = useCallback(() => {
     setAccessDenied(true);
     setAction(null);
+    setSelectedId(null);
     setNotice(null);
     setRefreshRequired(null);
     if (recheckActive.current) return;
@@ -930,6 +939,39 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       reportAccessDenied();
   }, [groups.error, groups.isError, reportAccessDenied]);
 
+  async function readAfterWrite(detailId: string | null) {
+    const detailRequest = detailId
+      ? config.detail(runtime.http, detailId).then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+      : Promise.resolve(null);
+    const [fresh, detailResult] = await Promise.all([
+      config.list(runtime.http, query),
+      detailRequest,
+    ]);
+    const stillListed = Boolean(
+      detailId && fresh.list.some((item) => item.id === detailId),
+    );
+    if (
+      detailResult &&
+      !detailResult.ok &&
+      !(
+        !stillListed &&
+        detailResult.error instanceof ApiError &&
+        detailResult.error.status === 404
+      )
+    )
+      throw detailResult.error;
+    runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+    if (detailId && stillListed && detailResult?.ok)
+      runtime.queryClient.setQueryData(
+        [config.id, 'group', detailId],
+        detailResult.value,
+      );
+    else if (detailId && !stillListed) setSelectedId(null);
+  }
+
   async function afterWrite(message: string, savedAction: CatalogAction) {
     if (savedAction.type === 'delete-group') setSelectedId(null);
     const detailId = savedAction.type === 'delete-group' ? null : selectedId;
@@ -940,17 +982,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
         queryKey: [config.id],
         refetchType: 'none',
       });
-      const [fresh, detail] = await Promise.all([
-        config.list(runtime.http, query),
-        detailId ? config.detail(runtime.http, detailId) : null,
-      ]);
-      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
-      if (detailId && detail) {
-        runtime.queryClient.setQueryData(
-          [config.id, 'group', detailId],
-          detail,
-        );
-      }
+      await readAfterWrite(detailId);
       setRefreshRequired(null);
       if (message) {
         setNotice(message);
@@ -969,16 +1001,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     if (!refreshRequired) return;
     const { message, detailId } = refreshRequired;
     try {
-      const [fresh, detail] = await Promise.all([
-        config.list(runtime.http, query),
-        detailId ? config.detail(runtime.http, detailId) : null,
-      ]);
-      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
-      if (detailId && detail)
-        runtime.queryClient.setQueryData(
-          [config.id, 'group', detailId],
-          detail,
-        );
+      await readAfterWrite(detailId);
       setRefreshRequired(null);
       if (message) {
         setNotice(message);
@@ -1044,6 +1067,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
               variant="secondary"
               size="small"
               pending={groups.isFetching}
+              disabled={writing}
               onClick={() => {
                 void groups.refetch();
               }}
@@ -1097,6 +1121,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                   <Input
                     {...control}
                     value={keyword}
+                    disabled={writing}
                     maxLength={200}
                     onChange={(event) => setKeyword(event.target.value)}
                     placeholder="变体组名称、编号或 ASIN"
@@ -1108,13 +1133,18 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                   <Input
                     {...control}
                     value={country}
+                    disabled={writing}
                     maxLength={10}
                     onChange={(event) => setCountry(event.target.value)}
                     placeholder="例如 US"
                   />
                 )}
               </Field>
-              <Button type="submit" className="w-full md:w-auto">
+              <Button
+                type="submit"
+                disabled={writing}
+                className="w-full md:w-auto"
+              >
                 <Search aria-hidden="true" />
                 查询
               </Button>
@@ -1131,7 +1161,9 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     <FilterChip
                       key={value}
                       selected={status === value}
+                      disabled={writing}
                       onClick={() => {
+                        if (writingRef.current) return;
                         setStatus(value);
                         setAction(null);
                         setSelectedId(null);
@@ -1178,9 +1210,11 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                   每页{' '}
                   <select
                     aria-label="每页数量"
+                    disabled={writing}
                     className="rounded-control border border-input bg-card px-3 py-2"
                     value={query.pageSize ?? 10}
                     onChange={(event) => {
+                      if (writingRef.current) return;
                       setAction(null);
                       setSelectedId(null);
                       setQuery((previous) => ({
@@ -1242,6 +1276,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     config={config}
                     selectedId={selectedId}
                     onSelect={(id) => {
+                      if (writingRef.current) return;
                       setAction(null);
                       setSelectedId(selectedId === id ? null : id);
                     }}
@@ -1260,7 +1295,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     <Button
                       variant="secondary"
                       size="small"
-                      disabled={current <= 1}
+                      disabled={writing || current <= 1}
                       onClick={() => changePage(current - 1)}
                     >
                       <ChevronLeft aria-hidden="true" />
@@ -1269,7 +1304,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     <Button
                       variant="secondary"
                       size="small"
-                      disabled={current >= pages}
+                      disabled={writing || current >= pages}
                       onClick={() => changePage(current + 1)}
                     >
                       下一页

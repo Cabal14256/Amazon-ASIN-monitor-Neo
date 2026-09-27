@@ -174,6 +174,26 @@ describe('competitor catalog refresh and authority transitions', () => {
     f.queryClient.clear();
   });
 
+  it.each([401, 403])(
+    'collapses a revoked group detail after a %s response',
+    async (status) => {
+      const list = vi
+        .fn()
+        .mockResolvedValueOnce(listData(original))
+        .mockResolvedValueOnce(listData(updated));
+      const f = fixture(list, vi.fn());
+      f.detail.mockRejectedValueOnce(new ApiError('HTTP', 'private', status));
+      await screen.findAllByText('Original rival');
+      fireEvent.click(screen.getAllByRole('button', { name: '查看' })[0]);
+      await waitFor(() => expect(f.clearUserWork).toHaveBeenCalledOnce());
+      await screen.findAllByText('Current rival');
+      expect(screen.queryByRole('button', { name: '收起' })).toBeNull();
+      expect(screen.queryByText('Original rival')).toBeNull();
+      expect(f.identity.refresh).toHaveBeenCalledOnce();
+      f.queryClient.clear();
+    },
+  );
+
   it('hides old data and avoids a success notice when the write outcome is uncertain', async () => {
     const list = vi
       .fn()
@@ -193,6 +213,69 @@ describe('competitor catalog refresh and authority transitions', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
     await screen.findAllByText('Current rival');
     expect(f.announce).not.toHaveBeenCalled();
+    f.queryClient.clear();
+  });
+
+  it('finishes refresh when a concurrent delete removes the selected group', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listData(original))
+      .mockResolvedValueOnce({ ...listData(original), list: [], total: 0 });
+    const f = fixture(
+      list,
+      vi.fn(async () => updated),
+    );
+    await screen.findAllByText('Original rival');
+    fireEvent.click(screen.getAllByRole('button', { name: '查看' })[0]);
+    await waitFor(() => expect(f.detail).toHaveBeenCalled());
+    f.detail.mockRejectedValueOnce(new ApiError('HTTP', 'gone', 404));
+    await create();
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toContain(
+        '新建变体组已完成',
+      ),
+    );
+    expect(screen.queryByText('Original rival')).toBeNull();
+    expect(screen.queryByRole('button', { name: '收起' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    f.queryClient.clear();
+  });
+
+  it('keeps the catalog selection and filters fixed during a write', async () => {
+    let finishWrite: ((value: typeof original) => void) | undefined;
+    const createGroup = vi.fn(
+      () =>
+        new Promise<typeof original>((resolve) => {
+          finishWrite = resolve;
+        }),
+    );
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listData(original))
+      .mockResolvedValueOnce(listData(updated));
+    const f = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    await create();
+    await waitFor(() => expect(createGroup).toHaveBeenCalledOnce());
+    expect(screen.getByRole('button', { name: '查询' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    expect(screen.getByRole('button', { name: '异常' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    expect(screen.getByRole('combobox', { name: '每页数量' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    expect(screen.getAllByRole('button', { name: '查看' })[0]).toHaveProperty(
+      'disabled',
+      true,
+    );
+    finishWrite?.(original);
+    await screen.findAllByText('Current rival');
+    expect(f.announce).toHaveBeenCalledWith('新建变体组已完成。');
     f.queryClient.clear();
   });
 
