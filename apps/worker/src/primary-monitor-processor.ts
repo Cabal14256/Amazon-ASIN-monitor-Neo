@@ -165,6 +165,8 @@ export function createPrimaryMonitorProcessor(
       return state;
     };
     let committed = false;
+    let finalResult: Record<string, unknown> | undefined;
+    let cancellationAccepted = false;
     try {
       await check();
       await options.store.mutate(
@@ -261,7 +263,6 @@ export function createPrimaryMonitorProcessor(
         if (index + 1 < data.countries.length)
           await delay(500, undefined, { signal: controller.signal });
       }
-      await check();
       const totalChecked = Object.values(countryResults).reduce(
         (n, row) => n + row.totalGroups,
         0,
@@ -286,16 +287,45 @@ export function createPrimaryMonitorProcessor(
         ),
         notificationResults,
       };
-      await options.store.mutate(
+      // All PostgreSQL receipts and country notification claims are already
+      // committed. A failed Redis acknowledgement must not reclassify this
+      // fully completed business run as a definitive failure.
+      finalResult = result;
+      await check();
+      const state = await options.store.mutate(
         data.taskId,
         { kind: 'completed', result, message: '监控任务已完成' },
         identity,
       );
+      if (
+        state?.cancelRequestedAt ||
+        state?.status === 'cancelling' ||
+        state?.status === 'cancelled'
+      ) {
+        cancellationAccepted = true;
+        if (state.status !== 'cancelled')
+          await options.store.mutate(
+            data.taskId,
+            { kind: 'cancelled', message: '监控任务已取消，已提交的结果保留' },
+            identity,
+          );
+        return { cancelled: true };
+      }
+      if (state?.status !== 'completed')
+        throw new Error('MONITOR_FINAL_STATUS_UNCONFIRMED');
       logger.info('主营监控任务完成', { totalChecked, totalBroken });
       return result;
     } catch (error) {
       const cancelled =
         error instanceof Error && error.message === 'MONITOR_CANCELLED';
+      if (finalResult && !cancelled) {
+        // BullMQ persists the returned result; the task query reconciler can
+        // recover the Redis task state from that owned completed queue job.
+        logger.warn('监控业务已完成，最终任务状态待对账', {
+          reason: 'monitor_final_status_unconfirmed',
+        });
+        return cancellationAccepted ? { cancelled: true } : finalResult;
+      }
       const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
       try {
         await options.assertJobLock(job, token);

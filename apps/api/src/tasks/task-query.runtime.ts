@@ -27,6 +27,7 @@ import { Queue, QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { withMonitorAdmission } from './monitor-admission';
 import {
   cancelQueuedTask,
   type CancellationOutcome,
@@ -42,6 +43,7 @@ export const TASK_QUERY_QUEUES = [
   'backup',
   'variant-check',
 ] as const satisfies readonly QueueName[];
+const MONITOR_QUEUE_MAX_IN_FLIGHT = 50;
 export interface TaskQueryPort {
   store: Pick<RedisTaskRepository, 'read' | 'listUser' | 'mutate'>;
   findJob(taskId: string, taskType?: string): Promise<QueueTaskSnapshot | null>;
@@ -422,33 +424,59 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       ensureOpen();
       return queue;
     };
-    const assertConsumer = async () => {
-      await command(async () => {
-        const ready = await this.redis.get(
-          `${getNeoQueuePrefix(this.env)}:monitor:consumer:ready`,
-        );
-        if (ready !== '1') throw new Error('MONITOR_CONSUMER_NOT_READY');
-        const queue = await readyQueue();
-        const counts = await queue.getJobCounts(
-          'waiting',
-          'delayed',
-          'active',
-          'paused',
-          'prioritized',
-        );
-        if (Object.values(counts).reduce((sum, count) => sum + count, 0) >= 50)
-          throw new Error('MONITOR_QUEUE_FULL');
-      });
+    const assertAvailable = async (queue: Queue) => {
+      const ready = await this.redis.get(
+        `${getNeoQueuePrefix(this.env)}:monitor:consumer:ready`,
+      );
+      if (ready !== '1') throw new Error('MONITOR_CONSUMER_NOT_READY');
+      const counts = await queue.getJobCounts(
+        'waiting',
+        'delayed',
+        'active',
+        'paused',
+        'prioritized',
+      );
+      if (
+        Object.values(counts).reduce((sum, count) => sum + count, 0) >=
+        MONITOR_QUEUE_MAX_IN_FLIGHT
+      )
+        throw new Error('MONITOR_QUEUE_FULL');
+      ensureOpen();
     };
+    const assertConsumer = async () =>
+      command(async () => assertAvailable(await readyQueue()));
     return {
       store: this.createStore(ensureOpen),
       assertConsumer,
       enqueue: async (raw) => {
         const data = primaryMonitorJobSchema.parse(raw);
         await command(async () => {
-          await assertConsumer();
           const queue = await readyQueue();
-          await queue.add('primary-monitor', data, { jobId: data.taskId });
+          await withMonitorAdmission(
+            {
+              redis: this.redis,
+              key: `${getNeoQueuePrefix(this.env)}:monitor:admission-lock`,
+              ensureOpen,
+              onReleaseFailure: () =>
+                this.logger.warn(
+                  '监控队列准入锁释放未确认',
+                  'TaskQueryRuntime',
+                  {
+                    reason: 'monitor_admission_release_unconfirmed',
+                  },
+                ),
+            },
+            async (assertOwned) => {
+              await assertAvailable(queue);
+              await assertOwned();
+              await queue.add('primary-monitor', data, { jobId: data.taskId });
+              try {
+                await assertOwned();
+              } catch {
+                throw new Error('MONITOR_ADMISSION_UNCONFIRMED');
+              }
+            },
+          );
         });
       },
     };

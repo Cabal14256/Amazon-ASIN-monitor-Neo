@@ -268,6 +268,57 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await worker.close(true);
       }
     }
+    it('admits only one final monitor slot across independent API runtimes', async () => {
+      const queue = await queueFor('monitor');
+      const createdAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 7 * 86400_000).toISOString();
+      const data = (taskId: string) => ({
+        taskId,
+        taskType: 'monitor' as const,
+        taskSubType: 'primary' as const,
+        userId: owner.userId,
+        createdAt,
+        expiresAt,
+        countries: ['US' as const],
+      });
+      await queue.addBulk(
+        Array.from({ length: 49 }, () => {
+          const taskId = randomUUID();
+          return {
+            name: 'primary-monitor',
+            data: data(taskId),
+            opts: { jobId: taskId },
+          };
+        }),
+      );
+      await redis.set(
+        `${getNeoQueuePrefix(env)}:monitor:consumer:ready`,
+        '1',
+        'EX',
+        30,
+      );
+      const other = new TaskQueryRuntime(env, f.logger as unknown as AppLogger);
+      try {
+        const attempts = await Promise.allSettled(
+          Array.from({ length: 8 }, (_, index) =>
+            (index % 2 ? other : runtime)
+              .openMonitor(() => undefined)
+              .enqueue(data(randomUUID())),
+          ),
+        );
+        expect(
+          attempts.filter((item) => item.status === 'fulfilled'),
+        ).toHaveLength(1);
+        expect(
+          attempts
+            .filter((item) => item.status === 'rejected')
+            .map((item) => (item as PromiseRejectedResult).reason?.message),
+        ).toEqual(Array(7).fill('MONITOR_QUEUE_FULL'));
+        expect((await queue.getJobCounts('waiting')).waiting).toBe(50);
+      } finally {
+        await other.onModuleDestroy();
+      }
+    });
     it('returns only current owner and filters the complete index before limit', async () => {
       await create('active-old');
       await create('foreign', 'export', (await login()).userId);

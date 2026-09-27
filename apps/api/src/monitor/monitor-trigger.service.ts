@@ -99,9 +99,12 @@ export class MonitorTriggerService {
     } catch (error) {
       const knownRejection =
         error instanceof Error &&
-        ['MONITOR_CONSUMER_NOT_READY', 'MONITOR_QUEUE_FULL'].includes(
-          error.message,
-        );
+        [
+          'MONITOR_CONSUMER_NOT_READY',
+          'MONITOR_QUEUE_FULL',
+          'MONITOR_ADMISSION_BUSY',
+          'MONITOR_ADMISSION_LOST',
+        ].includes(error.message);
       if (knownRejection && submission && taskCreatedAt && port) {
         try {
           const failed = await port.store.mutate(
@@ -130,7 +133,14 @@ export class MonitorTriggerService {
       if (knownRejection) {
         if (error.message === 'MONITOR_CONSUMER_NOT_READY')
           fail(503, '监控消费者尚未就绪');
-        fail(429, '监控队列已满，请稍后再试');
+        if (error.message === 'MONITOR_ADMISSION_LOST')
+          fail(503, '监控队列暂不可用，请稍后再试');
+        fail(
+          429,
+          error.message === 'MONITOR_ADMISSION_BUSY'
+            ? '监控任务提交繁忙，请稍后再试'
+            : '监控队列已满，请稍后再试',
+        );
       }
       if (submission) {
         this.logger.warn('监控任务提交结果未确认', 'MonitorTriggerService', {

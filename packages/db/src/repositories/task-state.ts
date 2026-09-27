@@ -99,6 +99,14 @@ export function transitionTask(
     )
       return task;
   } else if (isTerminalTaskStatus(task.status)) return task;
+  // A monitor can finish its last country while cancellation is racing with
+  // the final acknowledgement. The shared CAS must honor the accepted cancel.
+  if (
+    change.kind === 'completed' &&
+    task.taskType === 'monitor' &&
+    (task.cancelRequestedAt || task.status === 'cancelling')
+  )
+    return task;
   const timestamp = new Date(
     Math.max(now.getTime(), Date.parse(task.updatedAt) + 1),
   ).toISOString();
@@ -134,14 +142,17 @@ export function transitionTask(
       break;
     case 'failed':
       if (
-        ['variant-check', 'batch-check'].includes(task.taskType) &&
+        ['variant-check', 'batch-check', 'monitor'].includes(task.taskType) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';
         next.cancelledAt = timestamp;
         next.completedAt = timestamp;
         next.error = null;
-        next.message = '检查任务已取消，已提交的检查结果保留';
+        next.message =
+          task.taskType === 'monitor'
+            ? '监控任务已取消，已提交的结果保留'
+            : '检查任务已取消，已提交的检查结果保留';
         break;
       }
       next.status = 'failed';

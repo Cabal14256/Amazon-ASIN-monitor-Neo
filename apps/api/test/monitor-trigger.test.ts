@@ -154,6 +154,29 @@ describe('POST /monitor/trigger', () => {
       }),
     );
   });
+  it.each([
+    ['MONITOR_ADMISSION_BUSY', 429],
+    ['MONITOR_ADMISSION_LOST', 503],
+  ] as const)(
+    'records definite %s admission rejection before responding',
+    async (reason, status) => {
+      enqueue.mockRejectedValueOnce(new Error(reason));
+      const response = await post({ countries: ['UK'] });
+      expect(response.statusCode).toBe(status);
+      expect(mutate).toHaveBeenCalledWith(
+        expect.any(String),
+        { kind: 'failed', message: '监控任务未入队，请重新提交' },
+        expect.any(Object),
+      );
+    },
+  );
+  it('returns the task ID if admission is lost after BullMQ add', async () => {
+    enqueue.mockRejectedValueOnce(new Error('MONITOR_ADMISSION_UNCONFIRMED'));
+    const response = await post({ countries: ['UK'] });
+    expect(response.statusCode).toBe(500);
+    expect(response.json().data.status).toBe('unknown');
+    expect(mutate).not.toHaveBeenCalled();
+  });
   it('returns the lookup ID when a late refusal cannot be recorded', async () => {
     enqueue.mockRejectedValueOnce(new Error('MONITOR_CONSUMER_NOT_READY'));
     mutate.mockRejectedValueOnce(new Error('redis unavailable'));

@@ -131,6 +131,7 @@ function fixture() {
     claimNotification,
     completeNotification,
     sendCountry,
+    store,
     requestCancellation: () => {
       state = transitionTask(state, { kind: 'cancel-request' }, new Date());
     },
@@ -247,6 +248,38 @@ describe('primary monitor BullMQ processor', () => {
     expect(f.state.status).toBe('cancelled');
     expect(f.checkGroup).toHaveBeenCalledTimes(1);
     expect(f.sendCountry).not.toHaveBeenCalled();
+  });
+  it('keeps a fully committed final attempt recoverable when Redis completion fails', async () => {
+    const f = fixture();
+    f.job.attemptsMade = 2;
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'completed') throw new Error('Redis unavailable');
+      return mutate(id, change);
+    });
+    const output = await f.processor(f.job, 'fixture-lock');
+    expect(output).toMatchObject({ totalChecked: 2, totalBroken: 1 });
+    expect(f.state.status).toBe('processing');
+    expect(
+      f.store.mutate.mock.calls.map(([, change]) => change.kind),
+    ).not.toContain('failed');
+    expect(f.sendCountry).toHaveBeenCalledTimes(2);
+  });
+  it('honors cancellation accepted between the final check and completion CAS', async () => {
+    const f = fixture();
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'completed') f.requestCancellation();
+      return mutate(id, change);
+    });
+    expect(await f.processor(f.job, 'fixture-lock')).toEqual({
+      cancelled: true,
+    });
+    expect(f.state.status).toBe('cancelled');
+    expect(f.state.result).toBeNull();
+    expect(
+      f.store.mutate.mock.calls.map(([, change]) => change.kind),
+    ).toContain('cancelled');
   });
   it('isolates a deleted group but does not notify or report partial work as success', async () => {
     const f = fixture();
