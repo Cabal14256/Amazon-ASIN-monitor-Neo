@@ -229,10 +229,11 @@ jobs:
 
       - name: Apply Feishu revision upgrade twice after final snapshot migration
         run: |
+          docker cp packages/db/docker/apply-feishu-revision.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-feishu-revision.sh"
           docker cp packages/db/migrations/0013_feishu_revision.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0013_feishu_revision.sql"
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "INSERT INTO public.feishu_config(country,webhook_url) VALUES ('CAS164','https://example.invalid/cas-164')"
-          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0013_feishu_revision.sql
-          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0013_feishu_revision.sql
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.sql
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.sql
           revision_before="$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT revision FROM public.feishu_config WHERE country='CAS164'")"
           test -n "$revision_before"
 
@@ -243,8 +244,8 @@ jobs:
         run: |
           docker cp packages/db/migrations/0013_feishu_revision.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0013_feishu_revision.rollback.sql"
           revision_before="$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT revision FROM public.feishu_config WHERE country='CAS164'")"
-          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0013_feishu_revision.rollback.sql
-          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0013_feishu_revision.sql
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.rollback.sql
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.sql
           revision_after="$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT revision FROM public.feishu_config WHERE country='CAS164' AND webhook_url='https://example.invalid/cas-164'")"
           test -n "$revision_after"
           test "$revision_before" != "$revision_after"

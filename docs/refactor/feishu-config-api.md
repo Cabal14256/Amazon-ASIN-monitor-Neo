@@ -35,7 +35,15 @@ GET 详情和 toggle 的查询阶段仅把精确大写 UK/DE/FR/IT/ES 映射为 
 
 API 服务每进程限制 8 个正在执行的配置操作，仓库限制 16 个包含连接池等待的事务；超量返回 429。连接获取使用现有应用池期限，获得连接后事务总期限 2 秒、单条 SQL 1.5 秒。数据库失败返回固定 500；不返回部分结果。
 
-最终 Legacy 数据导入后，在主营 PostgreSQL 数据库运行 `packages/db/migrations/0013_feishu_revision.sql`；它对已有行补齐 UUID，设置新行默认值和非空约束，可重复执行。先部署数据库升级，再部署要求 `expectedRevision` 的 Neo API 和客户端。禁止直接修改冻结的 `0000_baseline.sql`。回滚时先停止 Neo CAS 写入客户端与 API，再运行 `packages/db/migrations/0013_feishu_revision.rollback.sql`，它只删除 revision 列并保留 Webhook 行；旧 Neo API 无法在回滚后的表上运行。Legacy 生产入口保持可用。未调用真实 Webhook。
+最终 Legacy 数据导入后，在主营 PostgreSQL 数据库运行 `packages/db/migrations/0013_feishu_revision.sql`；它对已有行补齐 UUID，设置新行默认值和非空约束，可重复执行。Compose 环境先运行 `corepack pnpm db:up` 更新已有容器的挂载，再执行 `corepack pnpm db:upgrade:feishu-revision`。外部环境使用受控连接执行 `psql -X -v ON_ERROR_STOP=1 --dbname <主营库> --file packages/db/migrations/0013_feishu_revision.sql`，不在命令或日志中放入凭据。先完成数据库升级，再部署要求 `expectedRevision` 的 Neo API 和客户端。禁止直接修改冻结的 `0000_baseline.sql`。
+
+回滚时先停止 Neo CAS 写入客户端与 API，再在 Compose 环境执行：
+
+```sh
+docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-feishu-revision.sh /opt/asin-monitor/0013_feishu_revision.rollback.sql
+```
+
+回滚仅删除 revision 列并保留 Webhook 行；新版 Neo API 无法在回滚后的表上运行。Legacy 生产入口保持可用。未调用真实 Webhook。
 
 ## 验证方法
 
