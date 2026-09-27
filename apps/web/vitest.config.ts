@@ -9,6 +9,7 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    environmentOptions: { jsdom: { url: 'https://app.test/' } },
     include: ['src/**/*.test.{ts,tsx}'],
   },
 });

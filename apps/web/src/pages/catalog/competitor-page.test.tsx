@@ -38,7 +38,10 @@ const listData = (group: typeof original) => ({
   pageSize: 10,
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 function fixture(
   list: ReturnType<typeof vi.fn>,
@@ -256,6 +259,42 @@ describe('competitor catalog refresh and authority transitions', () => {
     expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
     expect(createGroup).toHaveBeenCalledOnce();
     f.queryClient.clear();
+  });
+
+  it('restores an uncertain create after a full app reload until explicit reread and reconciliation', async () => {
+    const list = vi.fn().mockResolvedValue(listData(original));
+    const createGroup = vi.fn(async () => {
+      throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
+    });
+    const first = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    await create();
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    first.unmount();
+    first.queryClient.clear();
+
+    const second = fixture(list, createGroup);
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toContain('写入结果未确认');
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('结果仍未确认'),
+    );
+    second.unmount();
+    second.queryClient.clear();
+
+    const third = fixture(list, createGroup);
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '已核实原操作，重读目录并恢复写入',
+      }),
+    );
+    await screen.findByRole('button', { name: '新建变体组' });
+    expect(createGroup).toHaveBeenCalledOnce();
+    third.queryClient.clear();
   });
 
   it('does not unlock an uncertain create from an unrelated filtered reread', async () => {

@@ -48,6 +48,13 @@ import {
   statusOf,
   statusSource,
 } from './catalog-data';
+import {
+  catalogSafetyKey,
+  catalogSafetyStorage,
+  readCatalogSafetyGate,
+  writeCatalogSafetyGate,
+  type CatalogSafetyGate,
+} from './catalog-safety-gate';
 import type {
   CatalogAction,
   CatalogConfig,
@@ -60,15 +67,6 @@ const CHILD_PAGE_SIZE = 50;
 const TABLE_FEATURES = tableFeatures({});
 type StatusFilter = 'ALL' | 'BROKEN' | 'NORMAL';
 const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
-type CatalogSafetyGate =
-  | {
-      phase: 'refresh';
-      message: string | null;
-      detailId: string | null;
-      createUncertain: boolean;
-    }
-  | { phase: 'inspection' };
-
 function Notice({
   title,
   error,
@@ -833,11 +831,24 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     queryKey: safetyKey,
     queryFn: () => null,
     enabled: false,
-    initialData: null,
+    initialData: () => {
+      if (!ownerId || !config.writes) return null;
+      const stored = catalogSafetyStorage();
+      return stored
+        ? readCatalogSafetyGate(stored, ownerId, config.id)
+        : { phase: 'inspection' };
+    },
     gcTime: Infinity,
   }).data;
-  const setSafety = (next: CatalogSafetyGate | null) =>
-    runtime.queryClient.setQueryData(safetyKey, next);
+  const setSafety = (next: CatalogSafetyGate | null) => {
+    const stored = catalogSafetyStorage();
+    const saved =
+      stored && writeCatalogSafetyGate(stored, ownerId, config.id, next);
+    runtime.queryClient.setQueryData(
+      safetyKey,
+      saved ? next : { phase: 'inspection' },
+    );
+  };
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
@@ -867,6 +878,24 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  useEffect(() => {
+    if (!ownerId || !config.writes) return;
+    const syncSafety = (event: StorageEvent) => {
+      const stored = catalogSafetyStorage();
+      if (
+        !stored ||
+        event.storageArea !== stored ||
+        event.key !== catalogSafetyKey(ownerId, config.id)
+      )
+        return;
+      runtime.queryClient.setQueryData(
+        safetyKey,
+        readCatalogSafetyGate(stored, ownerId, config.id),
+      );
+    };
+    window.addEventListener('storage', syncSafety);
+    return () => window.removeEventListener('storage', syncSafety);
+  }, [config.id, config.writes, ownerId, runtime.queryClient, safetyKey]);
   useEffect(() => {
     if (!action) return;
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -1052,6 +1081,18 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     }
   }
 
+  async function reconcileCreate() {
+    if (safety?.phase !== 'inspection') return;
+    try {
+      await readAfterWrite(null);
+      setSafety(null);
+      setNotice('目录已重新读取，请仅在确认原新建记录后继续写入。');
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) reportAccessDenied();
+      else setNotice('目录重读失败，写入仍暂停，请稍后重试。');
+    }
+  }
+
   if (accessDenied)
     return (
       <AppShell title={config.title}>
@@ -1119,12 +1160,18 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
         </section>
 
         {safety?.phase === 'inspection' && (
-          <p
-            role="alert"
-            className="rounded-control bg-status-warning-soft p-4 text-sm text-status-warning"
-          >
-            新建操作的结果仍未确认。可继续筛选和查看目录，本次会话的目录写入已暂停，避免重复创建。请先核实新记录。
-          </p>
+          <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
+            <p role="alert">
+              新建操作的结果仍未确认。可继续筛选和查看目录；写入已暂停，浏览器刷新后仍会保留此状态。请先核实新记录。
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => void reconcileCreate()}
+            >
+              已核实原操作，重读目录并恢复写入
+            </Button>
+          </div>
         )}
         {notice && (
           <p
