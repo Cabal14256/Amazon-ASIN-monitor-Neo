@@ -48,10 +48,12 @@ import {
   latestPeakIntervals,
   metric,
   monthlyRowsInRange,
+  overviewAsinMetric,
   overviewStatisticsQuery,
   peakHoursQuery,
   percent,
   periodDetailsQuery,
+  periodPageCount,
   rowText,
   selectOverviewSummary,
   sumAbnormalSeriesByPeriod,
@@ -289,13 +291,7 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
               value: hours(summary.abnormalDurationHours),
               hint: `总时长 ${hours(summary.totalDurationHours)}`,
             },
-            {
-              label: '受影响 ASIN',
-              value: count(summary.brokenAsinsDedup ?? summary.asinCount),
-              hint: `监控 ASIN ${count(
-                summary.totalAsinsDedup ?? summary.asinCount,
-              )}`,
-            },
+            overviewAsinMetric(summary),
           ]}
         />
       )}
@@ -387,12 +383,20 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
 function Rankings({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
   const query = analyticsCountryQuery(filters);
+  const [pageSelection, setPageSelection] = useState<{
+    filters: AnalyticsFilters;
+    page: number;
+  } | null>(null);
+  const page = pageSelection?.filters === filters ? pageSelection.page : 1;
   const [selection, setSelection] = useState<{
     filters: AnalyticsFilters;
+    page: number;
     period: PeriodIdentity;
   } | null>(null);
   const selectedPeriod =
-    selection?.filters === filters ? selection.period : null;
+    selection?.filters === filters && selection.page === page
+      ? selection.period
+      : null;
   const detailParams = selectedPeriod
     ? periodDetailsQuery(filters, selectedPeriod)
     : null;
@@ -420,14 +424,14 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
       ),
   });
   const periods = useQuery({
-    queryKey: ['analytics', 'period-summary', filters],
+    queryKey: ['analytics', 'period-summary', filters, page],
     queryFn: ({ signal }) =>
       getPeriodSummary(
         runtime.http,
         {
           ...query,
           timeSlotGranularity: filters.groupBy,
-          current: 1,
+          current: page,
           pageSize: 20,
         },
         signal,
@@ -440,6 +444,10 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
           getPeriodSummaryDetails(runtime.http, detailParams, signal)
       : skipToken,
   });
+  const totalPages = periodPageCount(
+    periods.data?.total ?? 0,
+    periods.data?.pageSize ?? 20,
+  );
   return (
     <div className="space-y-5">
       <div className="grid gap-5 xl:grid-cols-2">
@@ -519,12 +527,35 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
                 key="details"
                 variant="secondary"
                 size="small"
-                onClick={() => setSelection({ filters, period: row })}
+                onClick={() => setSelection({ filters, page, period: row })}
               >
                 查看明细
               </Button>,
             ])}
           />
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span>
+              第 {page} / {totalPages} 页 · 共 {periods.data?.total ?? 0} 组
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                size="small"
+                disabled={periods.isPending || page <= 1}
+                onClick={() => setPageSelection({ filters, page: page - 1 })}
+              >
+                上一页
+              </Button>
+              <Button
+                variant="secondary"
+                size="small"
+                disabled={periods.isPending || page >= totalPages}
+                onClick={() => setPageSelection({ filters, page: page + 1 })}
+              >
+                下一页
+              </Button>
+            </div>
+          </div>
         </QueryPanel>
       </div>
       {selectedPeriod ? (

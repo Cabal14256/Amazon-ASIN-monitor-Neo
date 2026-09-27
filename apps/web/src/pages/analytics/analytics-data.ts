@@ -5,6 +5,7 @@ import { historyWallTime } from '../monitor-history/history-data';
 export const COUNTRIES = [
   { value: '', label: '全部国家' },
   { value: 'US', label: '美国 / US' },
+  { value: 'EU', label: '欧洲 / EU' },
   { value: 'UK', label: '英国 / UK' },
   { value: 'DE', label: '德国 / DE' },
   { value: 'FR', label: '法国 / FR' },
@@ -142,6 +143,28 @@ export function count(value: unknown): string {
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(
     integerMetric(value),
   );
+}
+
+export function overviewAsinMetric(summary: {
+  asinCount?: number;
+  totalAsinsDedup?: number;
+  brokenAsinsDedup?: number;
+}) {
+  if (summary.brokenAsinsDedup === undefined)
+    return {
+      label: '监控 ASIN',
+      value: count(summary.asinCount),
+      hint: '当前筛选范围',
+    };
+  return {
+    label: '受影响 ASIN',
+    value: count(summary.brokenAsinsDedup),
+    hint: `监控 ASIN ${count(summary.totalAsinsDedup)}`,
+  };
+}
+
+export function periodPageCount(total: number, pageSize: number) {
+  return Math.max(1, Math.ceil(total / pageSize));
 }
 
 export function selectOverviewSummary<Selected, Global>(

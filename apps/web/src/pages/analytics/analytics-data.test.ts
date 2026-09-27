@@ -6,18 +6,45 @@ import {
   analyticsError,
   applyAnalyticsFilters,
   count,
+  COUNTRIES,
   initialAnalyticsFilters,
   latestPeakIntervals,
   monthlyRowsInRange,
+  overviewAsinMetric,
   overviewStatisticsQuery,
   peakHoursQuery,
   percent,
   periodDetailsQuery,
+  periodPageCount,
   selectOverviewSummary,
   sumAbnormalSeriesByPeriod,
 } from './analytics-data';
 
 describe('analytics page filters and display values', () => {
+  it('keeps the combined Europe filter available', () => {
+    expect(COUNTRIES.some((country) => country.value === 'EU')).toBe(true);
+  });
+
+  it('distinguishes monitored ASINs from affected ASINs in the KPI', () => {
+    expect(overviewAsinMetric({ asinCount: 12 })).toEqual({
+      label: '监控 ASIN',
+      value: '12',
+      hint: '当前筛选范围',
+    });
+    expect(
+      overviewAsinMetric({ totalAsinsDedup: 12, brokenAsinsDedup: 3 }),
+    ).toEqual({
+      label: '受影响 ASIN',
+      value: '3',
+      hint: '监控 ASIN 12',
+    });
+  });
+
+  it('makes later period summary pages reachable', () => {
+    expect(periodPageCount(0, 20)).toBe(1);
+    expect(periodPageCount(41, 20)).toBe(3);
+  });
+
   const timezone = process.env.TZ;
   afterEach(() => {
     if (timezone === undefined) delete process.env.TZ;
