@@ -335,7 +335,9 @@ describe('competitor catalog refresh and authority transitions', () => {
       new StorageEvent('storage', { key, storageArea: window.localStorage }),
     );
     await screen.findByText('第 1 / 1 页 · 共 10 组');
-    expect(screen.getByRole('heading', { name: 'Original rival' })).toBeTruthy();
+    expect(
+      screen.getByRole('heading', { name: 'Original rival' }),
+    ).toBeTruthy();
     expect(list).toHaveBeenNthCalledWith(3, expect.anything(), {
       current: 2,
       pageSize: 10,
