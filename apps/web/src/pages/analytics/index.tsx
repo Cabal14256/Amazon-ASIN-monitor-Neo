@@ -36,12 +36,14 @@ import {
   getStatisticsByVariantGroup,
 } from '../../services/monitor-analytics';
 import {
+  abnormalSummaryPageRows,
   analyticsCountryQuery,
   analyticsError,
   applyAnalyticsFilters,
   count,
   COUNTRIES,
   dateLabel,
+  durationSummaryQuery,
   hours,
   initialAnalyticsFilters,
   integerMetric,
@@ -60,7 +62,9 @@ import {
   rowText,
   selectOverviewSummary,
   sumAbnormalSeriesByPeriod,
+  variantGroupHistoryHref,
   type AnalyticsFilters,
+  type DurationSummaryGranularity,
   type PeriodFilters,
   type PeriodIdentity,
 } from './analytics-data';
@@ -78,6 +82,7 @@ function QueryPanel({
   pending,
   error,
   retry,
+  control,
   children,
 }: {
   title: string;
@@ -85,6 +90,7 @@ function QueryPanel({
   pending: boolean;
   error: unknown;
   retry: () => void;
+  control?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -93,15 +99,18 @@ function QueryPanel({
         title={title}
         description={description}
         action={
-          <Button
-            variant="ghost"
-            size="small"
-            pending={pending}
-            onClick={retry}
-          >
-            <RefreshCw aria-hidden="true" />
-            刷新
-          </Button>
+          <div className="flex flex-wrap items-end gap-3">
+            {control}
+            <Button
+              variant="ghost"
+              size="small"
+              pending={pending}
+              onClick={retry}
+            >
+              <RefreshCw aria-hidden="true" />
+              刷新
+            </Button>
+          </div>
         }
       />
       <CardContent>
@@ -234,12 +243,39 @@ function Table({ headers, rows }: { headers: string[]; rows: ReactNode[][] }) {
   );
 }
 
+function VariantGroupCell({ row }: { row: Record<string, unknown> }) {
+  const label = rowText(row, 'variant_group_name', 'variant_group_id');
+  const href = variantGroupHistoryHref(row.variant_group_id);
+  return href ? (
+    <a
+      href={href}
+      className="font-medium text-module-analytics underline underline-offset-4 hover:opacity-75"
+    >
+      {label}
+    </a>
+  ) : (
+    label
+  );
+}
+
 function Overview({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
+  const [globalDurationGranularity, setGlobalDurationGranularity] =
+    useState<DurationSummaryGranularity>('hour');
+  const [regionDurationGranularity, setRegionDurationGranularity] =
+    useState<DurationSummaryGranularity>('hour');
   const range = {
     startTime: filters.startTime,
     endTime: filters.endTime,
   };
+  const globalDurationQuery = durationSummaryQuery(
+    filters,
+    globalDurationGranularity,
+  );
+  const regionDurationQuery = durationSummaryQuery(
+    filters,
+    regionDurationGranularity,
+  );
   const query = analyticsCountryQuery(filters);
   const statisticsQuery = overviewStatisticsQuery(filters);
   const stats = useQuery({
@@ -262,13 +298,14 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
       getStatisticsByCountry(runtime.http, range, signal),
   });
   const allCountries = useQuery({
-    queryKey: ['analytics', 'all-countries-summary', range],
+    queryKey: ['analytics', 'all-countries-summary', globalDurationQuery],
     queryFn: ({ signal }) =>
-      getAllCountriesSummary(runtime.http, range, signal),
+      getAllCountriesSummary(runtime.http, globalDurationQuery, signal),
   });
   const regions = useQuery({
-    queryKey: ['analytics', 'region-summary', range],
-    queryFn: ({ signal }) => getRegionSummary(runtime.http, range, signal),
+    queryKey: ['analytics', 'region-summary', regionDurationQuery],
+    queryFn: ({ signal }) =>
+      getRegionSummary(runtime.http, regionDurationQuery, signal),
   });
   const summary = selectOverviewSummary(
     filters.country,
@@ -370,6 +407,25 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
           pending={allCountries.isPending}
           error={allCountries.error}
           retry={() => void allCountries.refetch()}
+          control={
+            <Field label="全局时长粒度">
+              {(field) => (
+                <select
+                  {...field}
+                  className="rounded-input border border-input bg-card px-3 py-2 text-sm"
+                  value={globalDurationGranularity}
+                  onChange={(event) =>
+                    setGlobalDurationGranularity(
+                      event.target.value as DurationSummaryGranularity,
+                    )
+                  }
+                >
+                  <option value="hour">小时</option>
+                  <option value="day">天</option>
+                </select>
+              )}
+            </Field>
+          }
         >
           {allCountries.data ? (
             <dl className="grid gap-4 sm:grid-cols-2">
@@ -395,6 +451,25 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
           pending={regions.isPending}
           error={regions.error}
           retry={() => void regions.refetch()}
+          control={
+            <Field label="区域时长粒度">
+              {(field) => (
+                <select
+                  {...field}
+                  className="rounded-input border border-input bg-card px-3 py-2 text-sm"
+                  value={regionDurationGranularity}
+                  onChange={(event) =>
+                    setRegionDurationGranularity(
+                      event.target.value as DurationSummaryGranularity,
+                    )
+                  }
+                >
+                  <option value="hour">小时</option>
+                  <option value="day">天</option>
+                </select>
+              )}
+            </Field>
+          }
         >
           <Table
             headers={['区域', '总时长', '异常时长', '异常率']}
@@ -524,7 +599,7 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
           <Table
             headers={['变体组', '国家', '异常 ASIN', '异常时长', '异常率']}
             rows={(asinGroup.data ?? []).map((row) => [
-              rowText(row, 'variant_group_name', 'variant_group_id'),
+              <VariantGroupCell row={row} />,
               rowText(row, 'country'),
               count(row.brokenAsinsDedup),
               hours(row.abnormalDurationHours),
@@ -546,7 +621,7 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
             rows={(groups.data ?? [])
               .slice(0, 30)
               .map((row) => [
-                rowText(row, 'variant_group_name', 'variant_group_id'),
+                <VariantGroupCell row={row} />,
                 count(row.total_checks),
                 count(row.broken_count),
               ])}
@@ -710,6 +785,12 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
 
 function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
+  const [summaryPageSelection, setSummaryPageSelection] = useState<{
+    filters: AnalyticsFilters;
+    page: number;
+  } | null>(null);
+  const summaryPage =
+    summaryPageSelection?.filters === filters ? summaryPageSelection.page : 1;
   const query = analyticsCountryQuery(filters);
   const peakQuery = peakHoursQuery(filters);
   const peak = useQuery({
@@ -762,6 +843,9 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
     () => sumAbnormalSeriesByPeriod(abnormal.data?.data ?? []),
     [abnormal.data?.data],
   );
+  const abnormalSummary = abnormal.data?.summary ?? [];
+  const summaryTotalPages = periodPageCount(abnormalSummary.length, 50);
+  const visibleSummaryPage = Math.min(summaryPage, summaryTotalPages);
   const peakMetrics: { label: string; value: string; Icon: typeof Clock3 }[] =
     peakData
       ? [
@@ -918,16 +1002,53 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
               '平均异常时长',
               '最大异常时间',
             ]}
-            rows={abnormal.data.summary
-              .slice(0, 50)
-              .map((row) => [
-                rowText(row, 'asin'),
-                rowText(row, 'country'),
-                count(row.abnormalCount),
-                hours(row.averageAbnormalDuration),
-                dateLabel(row.maxAbnormalTime),
-              ])}
+            rows={abnormalSummaryPageRows(
+              abnormalSummary,
+              visibleSummaryPage,
+            ).map((row) => [
+              rowText(row, 'asin'),
+              rowText(row, 'country'),
+              count(row.abnormalCount),
+              hours(row.averageAbnormalDuration),
+              dateLabel(row.maxAbnormalTime),
+            ])}
           />
+          {summaryTotalPages > 1 && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+              <span className="text-muted-foreground">
+                第 {visibleSummaryPage} / {summaryTotalPages} 页 · 共{' '}
+                {abnormalSummary.length} 个 ASIN
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  size="small"
+                  disabled={visibleSummaryPage <= 1}
+                  onClick={() =>
+                    setSummaryPageSelection({
+                      filters,
+                      page: visibleSummaryPage - 1,
+                    })
+                  }
+                >
+                  上一页
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="small"
+                  disabled={visibleSummaryPage >= summaryTotalPages}
+                  onClick={() =>
+                    setSummaryPageSelection({
+                      filters,
+                      page: visibleSummaryPage + 1,
+                    })
+                  }
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
+          )}
         </QueryPanel>
       ) : null}
     </div>

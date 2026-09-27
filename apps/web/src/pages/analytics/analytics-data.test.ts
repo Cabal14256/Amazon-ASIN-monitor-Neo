@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { formatBeijingNow } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 import {
+  abnormalSummaryPageRows,
   analyticsCountryQuery,
   analyticsError,
   applyAnalyticsFilters,
   count,
   COUNTRIES,
+  durationSummaryQuery,
   initialAnalyticsFilters,
   latestPeakIntervals,
   monthlyRowsInRange,
@@ -21,6 +23,7 @@ import {
   periodSummaryQuery,
   selectOverviewSummary,
   sumAbnormalSeriesByPeriod,
+  variantGroupHistoryHref,
 } from './analytics-data';
 
 describe('analytics page filters and display values', () => {
@@ -54,6 +57,54 @@ describe('analytics page filters and display values', () => {
     expect(periodDetailPageRows(slots, 2)).toEqual(slots.slice(50, 100));
     expect(periodDetailPageRows(slots, 3)).toEqual(slots.slice(100));
     expect(periodPageCount(slots.length, 50)).toBe(3);
+  });
+
+  it('pages every abnormal ASIN summary, including rows after the first 50', () => {
+    const summaries = Array.from({ length: 121 }, (_, index) => ({
+      asin: `ASIN-${index + 1}`,
+    }));
+    expect(abnormalSummaryPageRows(summaries, 1)).toEqual(
+      summaries.slice(0, 50),
+    );
+    expect(abnormalSummaryPageRows(summaries, 2)).toEqual(
+      summaries.slice(50, 100),
+    );
+    expect(abnormalSummaryPageRows(summaries, 3)).toEqual(summaries.slice(100));
+    expect(periodPageCount(summaries.length, 50)).toBe(3);
+  });
+
+  it('keeps duration summary granularity independent of the page trend filter', () => {
+    const filters = {
+      country: 'UK',
+      startTime: '2026-08-01 00:00:00',
+      endTime: '2026-09-10 23:59:59',
+      groupBy: 'month' as const,
+    };
+    expect(durationSummaryQuery(filters, 'hour')).toEqual({
+      startTime: filters.startTime,
+      endTime: filters.endTime,
+      timeSlotGranularity: 'hour',
+    });
+    expect(durationSummaryQuery(filters, 'day')).toEqual({
+      startTime: filters.startTime,
+      endTime: filters.endTime,
+      timeSlotGranularity: 'day',
+    });
+  });
+
+  it('encodes variant group IDs for the monitor-history drill-down', () => {
+    const href = variantGroupHistoryHref('Group A/& 中文');
+    expect(href).toBe(
+      '/monitor-history?type=group&id=Group%20A%2F%26%20%E4%B8%AD%E6%96%87',
+    );
+    expect(new URLSearchParams(href!.split('?')[1]).get('id')).toBe(
+      'Group A/& 中文',
+    );
+    expect(variantGroupHistoryHref(42)).toBe(
+      '/monitor-history?type=group&id=42',
+    );
+    expect(variantGroupHistoryHref('')).toBeNull();
+    expect(variantGroupHistoryHref('bad\nvalue')).toBeNull();
   });
 
   const timezone = process.env.TZ;

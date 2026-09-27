@@ -22,6 +22,7 @@ export type AnalyticsFilters = {
 
 export type PeriodIdentity = { country: string; site: string; brand: string };
 export type PeriodFilters = { site: string; brand: string };
+export type DurationSummaryGranularity = 'hour' | 'day';
 const MAX_ANALYTICS_MONTHS = 12;
 
 export type AbnormalSeriesPoint = {
@@ -40,6 +41,17 @@ export function analyticsCountryQuery(filters: AnalyticsFilters) {
 
 export function overviewStatisticsQuery(filters: AnalyticsFilters) {
   return { ...analyticsCountryQuery(filters), checkType: 'ASIN' };
+}
+
+export function durationSummaryQuery(
+  filters: AnalyticsFilters,
+  timeSlotGranularity: DurationSummaryGranularity,
+) {
+  return {
+    startTime: filters.startTime,
+    endTime: filters.endTime,
+    timeSlotGranularity,
+  };
 }
 
 export function peakHoursQuery(filters: AnalyticsFilters) {
@@ -202,6 +214,28 @@ export function periodPageCount(total: number, pageSize: number) {
 
 export function periodDetailPageRows<T>(rows: readonly T[], page: number) {
   return rows.slice((page - 1) * 50, page * 50);
+}
+
+export function abnormalSummaryPageRows<T>(rows: readonly T[], page: number) {
+  return rows.slice((page - 1) * 50, page * 50);
+}
+
+export function variantGroupHistoryHref(value: unknown): string | null {
+  const id =
+    typeof value === 'string'
+      ? value
+      : typeof value === 'number' && Number.isSafeInteger(value)
+      ? String(value)
+      : null;
+  if (
+    !id?.trim() ||
+    [...id].length > 50 ||
+    [...id].some(
+      (char) => char.charCodeAt(0) <= 31 || char.charCodeAt(0) === 127,
+    )
+  )
+    return null;
+  return `/monitor-history?type=group&id=${encodeURIComponent(id)}`;
 }
 
 export function selectOverviewSummary<Selected, Global>(
