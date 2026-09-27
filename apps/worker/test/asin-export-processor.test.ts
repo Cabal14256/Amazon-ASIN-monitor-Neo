@@ -381,6 +381,24 @@ describe('ASIN streaming export', () => {
       result: null,
     });
   });
+
+  it('keeps cancellation when it arrives between a capacity failure read and CAS', async () => {
+    const h = await harness([
+      { groups: [], asins: [], total: 10_001, totalASINs: 0 },
+    ] as unknown as AsinGroupReadResult[]);
+    h.onMutation((change) => {
+      if (change.kind === 'failed') {
+        h.setState(
+          transitionTask(h.state, { kind: 'cancel-request' }, new Date()),
+        );
+      }
+    });
+    await expect(h.processor(h.job, 'token')).resolves.toMatchObject({
+      cancelled: true,
+    });
+    expect(h.state).toMatchObject({ status: 'cancelled', error: null });
+    expect(await readdir(h.directory)).toEqual([]);
+  });
 });
 
 it('renders fixed Legacy records with Shanghai wall time before the streaming writer', () => {

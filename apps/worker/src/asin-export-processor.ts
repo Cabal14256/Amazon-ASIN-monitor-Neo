@@ -293,8 +293,13 @@ export function createAsinExportProcessor(
         if (
           error instanceof ExportCapacityError ||
           job.attemptsMade + 1 >= (job.opts.attempts ?? 1)
-        )
-          await mutate({ kind: 'failed', message: 'ASIN 导出失败，请重试' });
+        ) {
+          const next = await mutate({
+            kind: 'failed',
+            message: 'ASIN 导出失败，请重试',
+          });
+          if (next.status === 'cancelled') return cancelledResult;
+        }
       } catch {
         log.warn('ASIN 导出失败状态写入未确认', {
           reason: 'export_status_unconfirmed',

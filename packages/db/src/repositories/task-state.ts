@@ -143,14 +143,18 @@ export function transitionTask(
       break;
     case 'failed':
       if (
-        ['variant-check', 'batch-check'].includes(task.taskType) &&
+        (['variant-check', 'batch-check'].includes(task.taskType) ||
+          (task.taskType === 'export' && task.taskSubType === 'asin')) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';
         next.cancelledAt = timestamp;
         next.completedAt = timestamp;
         next.error = null;
-        next.message = '检查任务已取消，已提交的检查结果保留';
+        next.message =
+          task.taskType === 'export'
+            ? '导出任务已取消'
+            : '检查任务已取消，已提交的检查结果保留';
         break;
       }
       next.status = 'failed';

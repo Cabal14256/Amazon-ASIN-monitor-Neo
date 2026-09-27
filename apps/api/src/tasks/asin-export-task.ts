@@ -81,11 +81,17 @@ export class AsinExportTaskService implements OnModuleDestroy {
         await authorizeAdministration(unit, principal, 'asin:read');
       });
       const deadline = performance.now() + 3000;
-      port = this.tasks.openExport(() => {
-        if (closed || performance.now() >= deadline)
-          throw new Error('EXPORT_ENQUEUE_DEADLINE');
-      });
-      submissionStarted = true;
+      port = this.tasks.openExport(
+        () => {
+          if (closed || performance.now() >= deadline)
+            throw new Error('EXPORT_ENQUEUE_DEADLINE');
+        },
+        () => {
+          // Readiness/validation failures before EVAL are definitive. Once
+          // EVAL starts, a lost acknowledgement may have committed the task.
+          submissionStarted = true;
+        },
+      );
       const task = await port.store.createLimitedExport(
         {
           taskId,

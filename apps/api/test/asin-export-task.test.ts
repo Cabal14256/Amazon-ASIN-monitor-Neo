@@ -18,16 +18,32 @@ vi.mock('../src/auth/administration-authorization', () => ({
 
 const principal = { userId: 'owner', sessionId: 'session' } as AuthPrincipal;
 const createdAt = '2026-09-27T00:00:00.000Z';
-const createLimitedExport = vi.fn(async (input: { taskId: string }) => ({
-  ...input,
-  createdAt,
-}));
+const createLimitedExport = vi.fn(
+  async (
+    input: { taskId: string },
+    _perUserLimit: number,
+    _globalLimit: number,
+  ) => ({
+    ...input,
+    createdAt,
+  }),
+);
 const enqueue = vi.fn(async () => undefined);
 const mutate = vi.fn(async () => ({ status: 'failed' }));
-const openExport = vi.fn(() => ({
-  store: { createLimitedExport, mutate },
-  enqueue,
-}));
+const openExport = vi.fn(
+  (_ensureOpen: () => void, onCreateWriteStarted?: () => void) => ({
+    store: {
+      createLimitedExport: (
+        ...args: Parameters<typeof createLimitedExport>
+      ) => {
+        onCreateWriteStarted?.();
+        return createLimitedExport(...args);
+      },
+      mutate,
+    },
+    enqueue,
+  }),
+);
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const pools = { primaryPool: {} };
 
@@ -149,5 +165,38 @@ describe('ASIN export producer', () => {
       status: 'unknown',
     });
     expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a Redis readiness failure before task creation but preserves uncertain EVAL outcomes', async () => {
+    openExport.mockImplementationOnce(() => ({
+      store: {
+        createLimitedExport: vi.fn(async () => {
+          throw new Error('Redis not ready before EVAL');
+        }),
+        mutate,
+      },
+      enqueue,
+    }));
+    await expect(
+      service().create(principal, { exportType: 'asin' }),
+    ).rejects.toMatchObject({ status: 500 });
+    expect(enqueue).not.toHaveBeenCalled();
+
+    openExport.mockImplementationOnce((_ensureOpen, onWrite) => ({
+      store: {
+        createLimitedExport: vi.fn(async () => {
+          onWrite?.();
+          throw new Error('Redis EVAL acknowledgement lost');
+        }),
+        mutate,
+      },
+      enqueue,
+    }));
+    await expect(
+      service().create(principal, { exportType: 'asin' }),
+    ).resolves.toMatchObject({
+      taskId: expect.any(String),
+      status: 'unknown',
+    });
   });
 });

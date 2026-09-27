@@ -211,13 +211,19 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         command(() => cancelQueuedTask(this.redis, this.env, task)),
     };
   }
-  private createStore(ensureOpen: () => void): RedisTaskRepository {
+  private createStore(
+    ensureOpen: () => void,
+    beforeEval?: () => void,
+  ): RedisTaskRepository {
     const command = this.command(ensureOpen);
     // This is the exact four-command subset used by RedisTaskRepository, never an unrestricted client.
     const redis: TaskRedisPort = {
       get: (key: string) => command(() => this.redis.get(key)),
       eval: (script: string, keyCount: number, ...args: (string | number)[]) =>
-        command(() => this.redis.eval(script, keyCount, ...args)),
+        command(() => {
+          beforeEval?.();
+          return this.redis.eval(script, keyCount, ...args);
+        }),
       zrevrange: (key: string, start: number, end: number) =>
         command(() => this.redis.zrevrange(key, start, end)),
       mget: (...keys: string[]) => command(() => this.redis.mget(...keys)),
@@ -393,9 +399,12 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
-  openExport(ensureOpen: () => void): ExportProducerPort {
+  openExport(
+    ensureOpen: () => void,
+    onCreateWriteStarted?: () => void,
+  ): ExportProducerPort {
     return {
-      store: this.createStore(ensureOpen),
+      store: this.createStore(ensureOpen, onCreateWriteStarted),
       enqueue: async (input) => {
         const parsed = asinExportJobDataSchema.safeParse(input);
         if (!parsed.success) throw new ExportEnqueueRejected('invalid');

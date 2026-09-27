@@ -71,39 +71,59 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
   let closing = false;
   let worker: Worker | undefined;
   let cleanupTimer: ReturnType<typeof setInterval> | undefined;
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
   const shutdown = new AbortController();
+  const ensureStarting = () => {
+    if (closing) throw new Error('EXPORT_STARTUP_STOPPED');
+  };
   try {
-    await control.connect();
-    await queue.waitUntilReady();
-    worker = new Worker(
-      getPhysicalQueueName('export'),
-      createAsinExportProcessor(repository, store, artifacts, {
-        shutdownSignal: shutdown.signal,
-        isClosing: () => closing,
-        assertJobLock: async (job, token) => {
-          if (
-            !token ||
-            !job.id ||
-            (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
-          )
-            throw new Error('EXPORT_JOB_LOCK_LOST');
-        },
-        updateProgress: async (job, value) => {
-          const current = await queue.getJob(job.id!);
-          if (!current) throw new Error('EXPORT_JOB_MISSING');
-          await current.updateProgress(value);
-        },
+    await Promise.race([
+      (async () => {
+        await control.connect();
+        ensureStarting();
+        await queue.waitUntilReady();
+        ensureStarting();
+        worker = new Worker(
+          getPhysicalQueueName('export'),
+          createAsinExportProcessor(repository, store, artifacts, {
+            shutdownSignal: shutdown.signal,
+            isClosing: () => closing,
+            assertJobLock: async (job, token) => {
+              if (
+                !token ||
+                !job.id ||
+                (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
+              )
+                throw new Error('EXPORT_JOB_LOCK_LOST');
+            },
+            updateProgress: async (job, value) => {
+              const current = await queue.getJob(job.id!);
+              if (!current) throw new Error('EXPORT_JOB_MISSING');
+              await current.updateProgress(value);
+            },
+          }),
+          {
+            ...getWorkerOptions('export', env, connection),
+            concurrency: Math.min(2, env.EXPORT_QUEUE_WORKER_CONCURRENCY),
+            autorun: false,
+          },
+        );
+        worker.on('error', () =>
+          logger.warn('ASIN 导出消费者连接异常', {
+            reason: 'export_worker_error',
+          }),
+        );
+        await worker.waitUntilReady();
+        ensureStarting();
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        startupTimer = setTimeout(
+          () => reject(new Error('EXPORT_STARTUP_TIMEOUT')),
+          5000,
+        );
       }),
-      {
-        ...getWorkerOptions('export', env, connection),
-        concurrency: Math.min(2, env.EXPORT_QUEUE_WORKER_CONCURRENCY),
-        autorun: false,
-      },
-    );
-    worker.on('error', () =>
-      logger.warn('ASIN 导出消费者连接异常', { reason: 'export_worker_error' }),
-    );
-    await worker.waitUntilReady();
+    ]);
+    const activeWorker = worker!;
     const cleanup = async () => {
       const deadline = performance.now() + 2000;
       try {
@@ -129,7 +149,7 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     cleanupTimer = setInterval(() => void cleanup(), 60_000);
     cleanupTimer.unref();
     void cleanup();
-    void worker.run().catch(() => {
+    void activeWorker.run().catch(() => {
       if (!closing) {
         logger.error('ASIN 导出消费者停止运行', {
           reason: 'export_worker_stopped',
@@ -140,13 +160,13 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     let closed: Promise<void> | undefined;
     return {
       queue,
-      worker,
+      worker: activeWorker,
       close(): Promise<void> {
         closing = true;
         shutdown.abort();
         if (cleanupTimer) clearInterval(cleanupTimer);
         closed ??= (async () => {
-          await worker!.close();
+          await activeWorker.close();
           await Promise.allSettled([queue.close(), pool.end()]);
           control.disconnect(false);
         })();
@@ -157,8 +177,10 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     closing = true;
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
-    await Promise.allSettled([worker?.close(true), queue.close(), pool.end()]);
     control.disconnect(false);
+    await Promise.allSettled([worker?.close(true), queue.close(), pool.end()]);
     throw new Error('ASIN export runtime initialization failed');
+  } finally {
+    if (startupTimer) clearTimeout(startupTimer);
   }
 }

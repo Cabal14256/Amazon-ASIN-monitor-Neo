@@ -394,6 +394,37 @@ describe('Redis task registry behavior', () => {
       result: null,
     });
   });
+  it('finalizes an ASIN export cancellation that races with failure', async () => {
+    const { repository, redis, rows } = fixture();
+    const task = await repository.create({ ...input, taskSubType: 'asin' });
+    const key = `fixture:neo:task:meta:${task.taskId}`;
+    await repository.mutate(task.taskId, { kind: 'processing' }, task);
+    const beforeFailure = (await repository.read(task.taskId))!;
+    redis.eval.mockImplementationOnce(async () => {
+      rows.set(
+        key,
+        JSON.stringify(
+          transitionTask(
+            beforeFailure,
+            { kind: 'cancel-request' },
+            new Date(beforeFailure.updatedAt),
+          ),
+        ),
+      );
+      return 0;
+    });
+    const failed = await repository.mutate(
+      task.taskId,
+      { kind: 'failed', message: 'Export exhausted retries' },
+      task,
+    );
+    expect(failed).toMatchObject({
+      status: 'cancelled',
+      error: null,
+      result: null,
+      revision: 3,
+    });
+  });
   it.each(['completed', 'failed', 'cancelled'] as const)(
     'first %s terminal state wins and does not refresh TTL',
     async (status) => {
