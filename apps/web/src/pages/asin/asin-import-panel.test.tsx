@@ -148,6 +148,7 @@ afterEach(() => {
   window.localStorage.clear();
   Reflect.deleteProperty(window.navigator, 'locks');
   taskSnapshot.current = undefined;
+  vi.restoreAllMocks();
 });
 
 describe('primary ASIN import page', () => {
@@ -178,6 +179,42 @@ describe('primary ASIN import page', () => {
       window.localStorage.getItem(asinImportGateKey('operator')),
     ).toBeNull();
     expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
+  });
+
+  it('shows the confirmed task ID and warns when saving the accepted gate fails', async () => {
+    installLocks();
+    const originalSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key,
+      value,
+    ) {
+      if (value.includes('"phase":"accepted"'))
+        throw new DOMException('Storage quota exceeded', 'QuotaExceededError');
+      originalSetItem.call(this, key, value);
+    });
+    const f = fixture();
+    chooseFile();
+    await screen.findByText(
+      '任务已受理，但浏览器未能保存任务编号。请立即记录下方编号并到任务中心核实；刷新页面后编号可能丢失。',
+    );
+    expect(screen.getByText(`任务编号：${taskId}`)).toBeTruthy();
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toContain('sending');
+    expect(
+      screen.getByRole('button', { name: '上传并创建导入任务' }),
+    ).toHaveProperty('disabled', true);
+    expect(f.request).toHaveBeenCalledOnce();
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '已核实原任务，允许重新导入',
+      }),
+    );
+    await screen.findByText('请确认原任务不会继续写入后再重新导入。');
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toBeNull();
   });
 
   it('keeps an uncertain lock after local cancellation and does not repeat the upload', async () => {

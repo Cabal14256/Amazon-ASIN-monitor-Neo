@@ -254,11 +254,23 @@ export function AsinImportPanel() {
             taskId: result.taskId,
             savedAt: Date.now(),
           };
-          writeAsinImportGate(stored, userId, accepted);
+          const persisted = writeAsinImportGate(stored, userId, accepted);
           if (owner.current !== userId || !mounted.current) return;
-          setGate(accepted);
+          setGate(
+            persisted
+              ? accepted
+              : {
+                  ...accepted,
+                  phase: 'uncertain',
+                  savedAt: claim.gate.savedAt,
+                },
+          );
           setLastTaskId(result.taskId);
-          setNotice('文件已受理为异步任务，等待任务中心确认处理结果。');
+          setNotice(
+            persisted
+              ? '文件已受理为异步任务，等待任务中心确认处理结果。'
+              : '任务已受理，但浏览器未能保存任务编号。请立即记录下方编号并到任务中心核实；刷新页面后编号可能丢失。',
+          );
           setFile(null);
           if (fileInput.current) fileInput.current.value = '';
         } catch (error) {
@@ -313,7 +325,14 @@ export function AsinImportPanel() {
         const current = readAsinImportGate(stored, userId);
         if (
           stored.getItem(key) !== previousRaw ||
-          JSON.stringify(current) !== JSON.stringify(expected)
+          (JSON.stringify(current) !== JSON.stringify(expected) &&
+            !(
+              expected.phase === 'uncertain' &&
+              expected.taskId &&
+              current?.phase === 'uncertain' &&
+              current.taskId === null &&
+              current.savedAt === expected.savedAt
+            ))
         )
           return 'changed' as const;
         return writeAsinImportGate(stored, userId, null)
