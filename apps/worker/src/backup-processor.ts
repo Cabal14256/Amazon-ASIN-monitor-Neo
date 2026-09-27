@@ -95,6 +95,9 @@ export function commandEnvironment(
     decodeURIComponent(url.password),
     defaults.PGPASSWORD,
   );
+  const passfile = !password ? defaults.PGPASSFILE : undefined;
+  if (passfile && (passfile.length > 1024 || /[\0\r\n]/.test(passfile)))
+    throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
   if (
     !database ||
     !host ||
@@ -130,6 +133,7 @@ export function commandEnvironment(
     PGPORT: port,
     PGUSER: user,
     ...(password ? { PGPASSWORD: password } : {}),
+    ...(passfile ? { PGPASSFILE: passfile } : {}),
     PGDATABASE: database,
     ...(sslMode ? { PGSSLMODE: sslMode } : {}),
     ...(url.searchParams.has('sslrootcert')
@@ -887,6 +891,7 @@ export function createBackupProcessor(
     let progressBytes = 0;
     let artifactPath: string | undefined;
     let metadataPartialPath: string | undefined;
+    let metadataPublishedPath: string | undefined;
     let publishedStagingDatabase: string | undefined;
     let committedInPlaceRestore:
       | {
@@ -999,14 +1004,10 @@ export function createBackupProcessor(
         )
           throw new BackupCommandError('BACKUP_TIMESCALE_SCHEMA_CHANGED');
         await chmod(partial, 0o600);
-        await progress(100, '备份完成');
-        await rename(partial, output);
-        // A valid dump is now discoverable. Keep it for operator reconciliation
-        // if the following Redis completion acknowledgement is ambiguous.
-        artifactPath = undefined;
+        await progress(96, '正在校验备份文件');
         const digest = sourceManifest
           ? undefined
-          : await archiveSha256(output, async () => {
+          : await archiveSha256(partial, async () => {
               await check();
               await lock.ensureHeld();
             });
@@ -1045,6 +1046,13 @@ export function createBackupProcessor(
         });
         await rename(metadataPartialPath, `${output}.meta.json`);
         metadataPartialPath = undefined;
+        metadataPublishedPath = `${output}.meta.json`;
+        // The final dump name is the API's discovery boundary. Publish it
+        // only after its complete sidecar exists; a failed rename removes the
+        // orphan sidecar and partial archive in the catch path.
+        await rename(partial, output);
+        artifactPath = undefined;
+        metadataPublishedPath = undefined;
         const result = {
           operation: 'create' as const,
           filename,
@@ -1248,6 +1256,8 @@ export function createBackupProcessor(
       if (artifactPath) await unlink(artifactPath).catch(() => undefined);
       if (metadataPartialPath)
         await unlink(metadataPartialPath).catch(() => undefined);
+      if (metadataPublishedPath)
+        await unlink(metadataPublishedPath).catch(() => undefined);
       if (committedInPlaceRestore) {
         log.error('PostgreSQL 恢复事务已提交，但完成确认失败', {
           target: data.target,

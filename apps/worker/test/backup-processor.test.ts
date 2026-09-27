@@ -259,6 +259,26 @@ describe('backup command boundary', () => {
     });
     expect(inherited.PGHOSTADDR).toBeUndefined();
     expect(inherited.PGSERVICE).toBeUndefined();
+    const customPassfile = commandEnvironment(
+      'postgresql://app@localhost/main',
+      {
+        PGPASSFILE: '/run/secrets/postgres.pgpass',
+        PGSERVICE: 'wrong-service',
+      },
+    );
+    expect(customPassfile.PGPASSFILE).toBe('/run/secrets/postgres.pgpass');
+    expect(customPassfile.PGPASSWORD).toBeUndefined();
+    expect(customPassfile.PGSERVICE).toBeUndefined();
+    expect(
+      commandEnvironment('postgresql://app:explicit@localhost/main', {
+        PGPASSFILE: '/run/secrets/postgres.pgpass',
+      }).PGPASSFILE,
+    ).toBeUndefined();
+    expect(() =>
+      commandEnvironment('postgresql://app@localhost/main', {
+        PGPASSFILE: 'invalid\npath',
+      }),
+    ).toThrow('BACKUP_DATABASE_URL_INVALID');
     const override = commandEnvironment(
       'postgresql://explicit:pass@localhost/main?host=query-host&port=6001',
       defaults,

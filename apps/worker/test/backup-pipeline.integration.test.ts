@@ -11,7 +11,7 @@ import {
 } from '@asin-monitor/db';
 import type { Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -64,6 +64,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         target?: 'primary' | 'competitor';
         cancelAtProgress?: number;
         onProgress?: (value: number, taskId: string) => Promise<void>;
+        onDigestCheckpoint?: (taskId: string) => Promise<void>;
         failConfirmation?: boolean;
       } = {},
     ) {
@@ -111,15 +112,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           return next;
         }),
       };
+      let digestStarted = false;
+      let digestObserved = false;
       const processor = createBackupProcessor(
         store,
         {
           env: env(databaseUrl),
           shutdownSignal: shutdown.signal,
           isClosing: () => false,
-          assertJobLock: vi.fn(async () => undefined),
+          assertJobLock: vi.fn(async () => {
+            if (digestStarted && !digestObserved) {
+              digestObserved = true;
+              await options.onDigestCheckpoint?.(taskId);
+            }
+          }),
           updateProgress: vi.fn(async (_job: Job, value: number) => {
             await options.onProgress?.(value, taskId);
+            if (value === 96) digestStarted = true;
             if (value !== options.cancelAtProgress) return;
             states.set(
               taskId,
@@ -365,7 +374,27 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     }, 120000);
 
     it('restores a full plain-PG archive into a clean isolated database', async () => {
-      const created = await runJob(scratchUrl, 'create', {});
+      const taskId = randomUUID();
+      let checkedPublication = false;
+      const created = await runJob(
+        scratchUrl,
+        'create',
+        {},
+        {
+          taskId,
+          onDigestCheckpoint: async () => {
+            const names = (await readdir(directory)).filter((name) =>
+              name.includes(taskId.slice(0, 8)),
+            );
+            expect(names.some((name) => name.endsWith('.dump.partial'))).toBe(
+              true,
+            );
+            expect(names.some((name) => name.endsWith('.dump'))).toBe(false);
+            checkedPublication = true;
+          },
+        },
+      );
+      expect(checkedPublication).toBe(true);
       const artifact = backupTaskResultDataSchema.parse(created.result);
       if (!artifact.filename) throw new Error('No full backup artifact');
       const metadata = JSON.parse(

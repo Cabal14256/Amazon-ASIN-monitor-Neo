@@ -8,7 +8,11 @@ import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import type { FastifyReply, FastifyRequest, RouteOptions } from 'fastify';
 import { Readable } from 'node:stream';
 import { auditBody, auditText } from './audit-data';
-import { auditAction, type AuditAction } from './audit-mapping';
+import {
+  auditAction,
+  auditBackupBody,
+  type AuditAction,
+} from './audit-mapping';
 import type { AuditService } from './audit.service';
 
 const CONTEXT = Symbol('auditContext');
@@ -35,7 +39,10 @@ function capture(request: AuditRequest): void {
   if (request[CONTEXT]) return;
   const path = request.routeOptions.url;
   if (!path) return;
-  const body = auditBody(request.body);
+  const sanitized = auditBody(request.body);
+  const body = path.startsWith('/api/v1/backup')
+    ? auditBackupBody(path, sanitized)
+    : sanitized;
   const action = auditAction(
     request.method,
     path,
