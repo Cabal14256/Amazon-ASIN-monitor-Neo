@@ -67,6 +67,14 @@ describe('settings credential presentation', () => {
     expect(isEmptySensitiveReplacement('SP_API_REFRESH_TOKEN', '   ')).toBe(
       true,
     );
+    for (const key of [
+      'SP_API_US_LWA_CLIENT_ID',
+      'SP_API_EU_LWA_CLIENT_ID',
+      'SP_API_LWA_CLIENT_ID',
+    ]) {
+      expect(isEmptySensitiveReplacement(key, ' ')).toBe(true);
+      expect(isEmptySensitiveReplacement(key, 'replacement-id')).toBe(false);
+    }
     expect(
       isEmptySensitiveReplacement('SP_API_US_LWA_CLIENT_SECRET', 'new-value'),
     ).toBe(false);

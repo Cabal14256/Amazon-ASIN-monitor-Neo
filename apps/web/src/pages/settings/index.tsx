@@ -589,7 +589,7 @@ function FeishuPanel({
                       label="Webhook 地址"
                       hint={
                         canWrite
-                          ? '未修改地址时可以单独切换状态；新地址不能为空。'
+                          ? '未修改地址时可以单独切换状态；新地址须为有效的 HTTPS URL。'
                           : '服务端已隐藏完整地址。'
                       }
                     >

@@ -212,6 +212,24 @@ describe('SettingsApi', () => {
     expect(client.request).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'not-a-url',
+    'http://open.feishu.cn/open-apis/bot/v2/hook/example',
+    'https://user:password@open.feishu.cn/hook',
+    'https://open.feishu.cn/hook#fragment',
+  ])(
+    'rejects an invalid webhook replacement before any request: %s',
+    async (url) => {
+      const client = http();
+      await expect(
+        new SettingsApi(client).saveFeishuChange('EU', feishu, {
+          webhookUrl: url,
+        }),
+      ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+      expect(client.request).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects a webhook replacement when another admin changed the row', async () => {
     const client = http();
     client.request.mockResolvedValue({

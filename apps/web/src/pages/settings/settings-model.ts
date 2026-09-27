@@ -63,7 +63,7 @@ export function isSupportedMonitorConcurrency(value: string) {
 }
 
 export function isEmptySensitiveReplacement(key: string, value: string) {
-  return isSensitiveConfigKey(key) && value.trim() === '';
+  return /SECRET|TOKEN|KEY|CLIENT_ID/i.test(key) && value.trim() === '';
 }
 
 export function deniedSettingsError(...errors: unknown[]) {

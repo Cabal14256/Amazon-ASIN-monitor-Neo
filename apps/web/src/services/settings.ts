@@ -59,6 +59,21 @@ function feishuRevision(row: FeishuConfig | undefined) {
     : null;
 }
 
+function validWebhookUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' &&
+      Boolean(url.hostname) &&
+      !url.username &&
+      !url.password &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 function data<T>(
   response: { success?: boolean; data?: T },
   message: string,
@@ -201,6 +216,8 @@ export class SettingsApi {
     }
     if (!draft.webhookUrl.trim())
       throw new ApiError('INVALID_INPUT', '飞书 Webhook 地址不能为空');
+    if (!validWebhookUrl(draft.webhookUrl))
+      throw new ApiError('INVALID_INPUT', '请输入有效的 HTTPS Webhook 地址');
     const latest = (await this.feishuConfigs(signal)).find(
       (row) => feishuCountryKey(row.country) === feishuCountryKey(country),
     );
