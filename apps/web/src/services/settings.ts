@@ -43,6 +43,11 @@ export interface FeishuDraft {
   enabled?: boolean;
 }
 
+/** Imported Legacy country keys may differ in case or have trailing spaces. */
+export function feishuCountryKey(country: string) {
+  return country.trimEnd().toUpperCase();
+}
+
 function feishuRevision(row: FeishuConfig | undefined) {
   return row
     ? JSON.stringify([
@@ -166,13 +171,38 @@ export class SettingsApi {
           'INVALID_INPUT',
           '启用飞书通知前必须填写 Webhook 地址',
         );
-      await this.toggleFeishu(country, { enabled: draft.enabled }, signal);
+      try {
+        await this.toggleFeishu(
+          original.country,
+          { enabled: draft.enabled },
+          signal,
+        );
+      } catch (error) {
+        if (
+          draft.enabled !== false ||
+          !(error instanceof ApiError) ||
+          error.status !== 404 ||
+          error.errorCode !== 404
+        )
+          throw error;
+        // Legacy commits a disable, then its enabled-only read returns 404.
+        // A missing row also returns 404, so confirm the original row is still
+        // present and disabled before treating this response as success.
+        const latest = (await this.feishuConfigs(signal)).find(
+          (row) => feishuCountryKey(row.country) === feishuCountryKey(country),
+        );
+        if (
+          latest?.id !== original.id ||
+          (latest.enabled !== false && latest.enabled !== 0)
+        )
+          throw error;
+      }
       return;
     }
     if (!draft.webhookUrl.trim())
       throw new ApiError('INVALID_INPUT', '飞书 Webhook 地址不能为空');
     const latest = (await this.feishuConfigs(signal)).find(
-      (row) => row.country === country,
+      (row) => feishuCountryKey(row.country) === feishuCountryKey(country),
     );
     if (feishuRevision(original) !== feishuRevision(latest))
       throw new ApiError(
@@ -183,7 +213,7 @@ export class SettingsApi {
       );
     await this.upsertFeishu(
       {
-        country,
+        country: latest?.country ?? country,
         webhookUrl: draft.webhookUrl,
         enabled:
           draft.enabled ??

@@ -1,4 +1,5 @@
 import type { SpApiDisplayConfig } from '@asin-monitor/contracts';
+import { ApiError } from '../../lib/http';
 
 export const SETTINGS_CONFIG_GROUPS = [
   {
@@ -50,6 +51,19 @@ export const SETTINGS_CONFIG_GROUPS = [
 export const SETTINGS_CONFIG_KEYS = SETTINGS_CONFIG_GROUPS.flatMap(
   (group) => group.keys,
 );
+
+export const SCHEDULE_MINUTE_OPTIONS = ['15', '30', '60'] as const;
+export function isSupportedScheduleMinutes(value: string) {
+  return SCHEDULE_MINUTE_OPTIONS.some((option) => option === value);
+}
+
+export function deniedSettingsError(...errors: unknown[]) {
+  return errors.find(
+    (error): error is ApiError =>
+      error instanceof ApiError &&
+      (error.status === 403 || error.errorCode === 403),
+  );
+}
 
 export function isSensitiveConfigKey(key: string) {
   return /SECRET|TOKEN|KEY/i.test(key);

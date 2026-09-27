@@ -1,6 +1,7 @@
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
-import { SettingsApi } from './settings';
+import { ApiError } from '../lib/http';
+import { feishuCountryKey, SettingsApi } from './settings';
 
 const config = {
   configKey: 'SP_API_US_LWA_CLIENT_SECRET',
@@ -138,6 +139,67 @@ describe('SettingsApi', () => {
     );
   });
 
+  it('accepts the committed disable 404 only after confirming the same row is disabled', async () => {
+    const client = http();
+    client.request
+      .mockRejectedValueOnce(new ApiError('HTTP', '配置不存在', 404, 404))
+      .mockResolvedValueOnce({
+        success: true,
+        data: [{ ...feishu, country: 'eu  ', enabled: 0 }],
+      });
+    await new SettingsApi(client).saveFeishuChange(
+      'EU',
+      { ...feishu, country: 'eu  ', webhookUrl: '***REDACTED***' },
+      { enabled: false },
+    );
+    expect(client.request).toHaveBeenNthCalledWith(
+      1,
+      '/api/v1/feishu-configs/eu%20%20/toggle',
+      expect.objectContaining({ method: 'PATCH', json: { enabled: false } }),
+      expect.anything(),
+    );
+    expect(client.request).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/feishu-configs',
+      expect.objectContaining({ signal: undefined }),
+      expect.anything(),
+    );
+  });
+
+  it('keeps a disable 404 when the row is gone or remains enabled', async () => {
+    for (const rows of [[], [feishu]]) {
+      const client = http();
+      client.request
+        .mockRejectedValueOnce(new ApiError('HTTP', '配置不存在', 404, 404))
+        .mockResolvedValueOnce({ success: true, data: rows });
+      await expect(
+        new SettingsApi(client).saveFeishuChange(
+          'EU',
+          { ...feishu, webhookUrl: '***REDACTED***' },
+          { enabled: false },
+        ),
+      ).rejects.toMatchObject({ status: 404 });
+    }
+  });
+
+  it('never reconciles an enable 404 or unrelated disable failure', async () => {
+    for (const [enabled, error] of [
+      [true, new ApiError('HTTP', '配置不存在', 404, 404)],
+      [false, new ApiError('HTTP', '未授权', 403, 403)],
+    ] as const) {
+      const client = http();
+      client.request.mockRejectedValueOnce(error);
+      await expect(
+        new SettingsApi(client).saveFeishuChange(
+          'EU',
+          { ...feishu, webhookUrl: '***REDACTED***' },
+          { enabled },
+        ),
+      ).rejects.toBe(error);
+      expect(client.request).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('does not enable a Feishu row that has no webhook', async () => {
     const client = http();
     await expect(
@@ -183,6 +245,33 @@ describe('SettingsApi', () => {
         method: 'POST',
         json: {
           country: 'EU',
+          webhookUrl: 'https://open.feishu.cn/new-hook',
+          enabled: true,
+        },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('matches imported country keys during webhook revision check', async () => {
+    const imported = { ...feishu, country: 'eu  ' };
+    const client = http();
+    client.request
+      .mockResolvedValueOnce({ success: true, data: [imported] })
+      .mockResolvedValueOnce({ success: true, data: null });
+    expect(feishuCountryKey(imported.country)).toBe('EU');
+    await new SettingsApi(client).saveFeishuChange(
+      'EU',
+      { ...imported, webhookUrl: '***REDACTED***' },
+      { webhookUrl: 'https://open.feishu.cn/new-hook' },
+    );
+    expect(client.request).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/feishu-configs',
+      expect.objectContaining({
+        method: 'POST',
+        json: {
+          country: 'eu  ',
           webhookUrl: 'https://open.feishu.cn/new-hook',
           enabled: true,
         },

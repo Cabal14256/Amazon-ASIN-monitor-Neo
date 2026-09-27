@@ -22,9 +22,16 @@ import { Field, Input } from '../../components/ui/field';
 import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
-import { SettingsApi, type FeishuDraft } from '../../services/settings';
 import {
+  feishuCountryKey,
+  SettingsApi,
+  type FeishuDraft,
+} from '../../services/settings';
+import {
+  deniedSettingsError,
   isSensitiveConfigKey,
+  isSupportedScheduleMinutes,
+  SCHEDULE_MINUTE_OPTIONS,
   SETTINGS_CONFIG_GROUPS,
   visibleConfigValue,
 } from './settings-model';
@@ -38,8 +45,8 @@ const BOOLEAN_KEYS = new Set([
   'ENABLE_HTML_SCRAPER_FALLBACK',
   'ENABLE_LEGACY_CLIENT_FALLBACK',
 ]);
-const NUMBER_KEYS = new Set([
-  'MONITOR_MAX_CONCURRENT_GROUP_CHECKS',
+const NUMBER_KEYS = new Set(['MONITOR_MAX_CONCURRENT_GROUP_CHECKS']);
+const SCHEDULE_KEYS = new Set([
   'MONITOR_US_SCHEDULE_MINUTES',
   'MONITOR_EU_SCHEDULE_MINUTES',
 ]);
@@ -49,10 +56,7 @@ function failureMessage(error: unknown) {
 }
 
 function permissionDenied(error: unknown) {
-  return (
-    error instanceof ApiError &&
-    (error.status === 403 || error.errorCode === 403)
-  );
+  return Boolean(deniedSettingsError(error));
 }
 
 function isEnabled(value: FeishuConfig['enabled'] | undefined) {
@@ -113,6 +117,7 @@ function ConfigField({
   const sensitive = isSensitiveConfigKey(row.configKey);
   const boolean = BOOLEAN_KEYS.has(row.configKey);
   const number = NUMBER_KEYS.has(row.configKey);
+  const schedule = SCHEDULE_KEYS.has(row.configKey);
   return (
     <Field
       label={row.description || row.configKey}
@@ -135,6 +140,25 @@ function ConfigField({
           >
             <option value="true">开启</option>
             <option value="false">关闭</option>
+          </select>
+        ) : schedule ? (
+          <select
+            {...control}
+            value={value}
+            disabled={!canWrite || saving}
+            onChange={(event) => onChange(event.target.value)}
+            className="w-full rounded-input border border-input bg-card px-4 py-3 text-sm text-foreground focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:opacity-60"
+          >
+            {!isSupportedScheduleMinutes(value) && (
+              <option value={value} disabled>
+                当前值无效，请选择有效间隔
+              </option>
+            )}
+            {SCHEDULE_MINUTE_OPTIONS.map((minutes) => (
+              <option key={minutes} value={minutes}>
+                {minutes} 分钟
+              </option>
+            ))}
           </select>
         ) : (
           <Input
@@ -215,6 +239,19 @@ function SpApiPanel({
         description: row.description,
       }));
     if (!configs.length) return;
+    if (
+      configs.some(
+        (row) =>
+          SCHEDULE_KEYS.has(row.configKey) &&
+          !isSupportedScheduleMinutes(row.configValue),
+      )
+    ) {
+      setNotice({
+        tone: 'error',
+        message: '监控间隔仅支持 15、30 或 60 分钟。',
+      });
+      return;
+    }
     savingRef.current = true;
     setSaving(true);
     void (async () => {
@@ -377,7 +414,7 @@ function FeishuPanel({
   });
   const rows = useMemo(() => query.data ?? [], [query.data]);
   const byCountry = useMemo(
-    () => new Map(rows.map((row) => [row.country, row])),
+    () => new Map(rows.map((row) => [feishuCountryKey(row.country), row])),
     [rows],
   );
   useEffect(() => {
@@ -574,7 +611,13 @@ function FeishuPanel({
   );
 }
 
-function StatusPanel({ api }: { api: SettingsApi }) {
+function StatusPanel({
+  api,
+  onDenied,
+}: {
+  api: SettingsApi;
+  onDenied: (error: unknown) => void;
+}) {
   const [hours, setHours] = useState(24);
   const quota = useQuery({
     queryKey: ['settings', 'quota'],
@@ -586,6 +629,12 @@ function StatusPanel({ api }: { api: SettingsApi }) {
     queryFn: ({ signal }) => api.errors(hours, signal),
     refetchInterval: 30_000,
   });
+  const quotaDeniedError = quota.isError ? quota.error : null;
+  const statsDeniedError = errors.isError ? errors.error : null;
+  useEffect(() => {
+    const denied = deniedSettingsError(quotaDeniedError, statsDeniedError);
+    if (denied) onDenied(denied);
+  }, [onDenied, quotaDeniedError, statsDeniedError]);
   const errorTypes = Object.entries(errors.data?.byType ?? {}).sort(
     (a, b) => b[1].count - a[1].count,
   );
@@ -880,7 +929,7 @@ export default function SettingsPage() {
             onDenied={onDenied}
           />
         )}
-        {tab === 'status' && <StatusPanel api={api} />}
+        {tab === 'status' && <StatusPanel api={api} onDenied={onDenied} />}
         {tab === 'feishu' && (
           <FeishuPanel
             api={api}
