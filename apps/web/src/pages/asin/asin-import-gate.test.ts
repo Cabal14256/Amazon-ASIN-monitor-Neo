@@ -90,8 +90,8 @@ describe('ASIN import retry gate', () => {
       }
     };
     const results = await Promise.all([
-      claimAsinImportGate(storage, 'user-a', exclusive),
-      claimAsinImportGate(storage, 'user-a', exclusive),
+      exclusive('user-a', () => claimAsinImportGate(storage, 'user-a')),
+      exclusive('user-a', () => claimAsinImportGate(storage, 'user-a')),
     ]);
     expect(results.map((result) => result.kind)).toEqual([
       'claimed',
@@ -100,5 +100,25 @@ describe('ASIN import retry gate', () => {
     expect(results[1]).toMatchObject({
       gate: { phase: 'uncertain', taskId: null },
     });
+  });
+
+  it('uses the time after waiting for the lock when reading another tab claim', async () => {
+    const storage = new MemoryStorage();
+    let time = 100;
+    const exclusive = async <T>(_name: string, action: () => T) => {
+      await Promise.resolve();
+      writeAsinImportGate(storage, 'user-a', {
+        phase: 'accepted',
+        taskId: 'b2b5894c-5802-4c9f-a1bd-9a20263d270a',
+        savedAt: 200,
+      });
+      time = 201;
+      return action();
+    };
+    expect(
+      await exclusive('user-a', () =>
+        claimAsinImportGate(storage, 'user-a', () => time),
+      ),
+    ).toMatchObject({ kind: 'blocked', gate: { phase: 'accepted' } });
   });
 });

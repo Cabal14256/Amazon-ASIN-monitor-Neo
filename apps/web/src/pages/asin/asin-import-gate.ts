@@ -58,25 +58,23 @@ export type AsinImportClaim =
   | { kind: 'blocked'; gate: AsinImportGate }
   | { kind: 'unavailable' };
 
-/** A browser Web Lock serializes the localStorage check and claim across tabs. */
-export async function claimAsinImportGate(
+/** Call only while holding the browser Web Lock for this owner. */
+export function claimAsinImportGate(
   storage: Pick<Storage, 'getItem' | 'removeItem' | 'setItem'>,
   owner: string,
-  exclusive: <T>(name: string, action: () => T) => Promise<T>,
-  now = Date.now(),
-): Promise<AsinImportClaim> {
-  return exclusive(asinImportGateKey(owner), (): AsinImportClaim => {
-    const existing = readAsinImportGate(storage, owner, now);
-    if (existing) return { kind: 'blocked', gate: existing };
-    const gate: AsinImportGate = {
-      phase: 'sending',
-      taskId: null,
-      savedAt: now,
-    };
-    return writeAsinImportGate(storage, owner, gate)
-      ? { kind: 'claimed', gate }
-      : { kind: 'unavailable' };
-  });
+  clock: () => number = Date.now,
+): AsinImportClaim {
+  const now = clock();
+  const existing = readAsinImportGate(storage, owner, now);
+  if (existing) return { kind: 'blocked', gate: existing };
+  const gate: AsinImportGate = {
+    phase: 'sending',
+    taskId: null,
+    savedAt: now,
+  };
+  return writeAsinImportGate(storage, owner, gate)
+    ? { kind: 'claimed', gate }
+    : { kind: 'unavailable' };
 }
 
 export function writeAsinImportGate(

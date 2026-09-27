@@ -189,91 +189,113 @@ export function AsinImportPanel() {
     claiming.current = true;
     setBusy(true);
     setNotice(null);
-    let claim: Awaited<ReturnType<typeof claimAsinImportGate>>;
     try {
-      claim = await claimAsinImportGate(stored, userId, (name, action) =>
-        locks.request(name, action),
-      );
+      await locks.request(asinImportGateKey(userId), async () => {
+        if (
+          owner.current !== userId ||
+          !importAllowed.current ||
+          !mounted.current
+        )
+          return;
+        const claim = claimAsinImportGate(stored, userId);
+        if (claim.kind !== 'claimed') {
+          if (claim.kind === 'blocked') {
+            setGate(claim.gate);
+            setOpen(true);
+            setNotice('已有导入请求待核实，请先查看任务中心。');
+          } else setNotice('无法保存导入状态，请检查浏览器本地存储权限。');
+          return;
+        }
+        const controller = new AbortController();
+        request.current = controller;
+        setLastTaskId(null);
+        setGate(claim.gate);
+        try {
+          const result = await submitAsinImport(
+            runtime.http,
+            file,
+            controller.signal,
+          );
+          const accepted: AsinImportGate = {
+            phase: 'accepted',
+            taskId: result.taskId,
+            savedAt: Date.now(),
+          };
+          writeAsinImportGate(stored, userId, accepted);
+          if (owner.current !== userId || !mounted.current) return;
+          setGate(accepted);
+          setLastTaskId(result.taskId);
+          setNotice('文件已受理为异步任务，等待任务中心确认处理结果。');
+          setFile(null);
+          if (fileInput.current) fileInput.current.value = '';
+        } catch (error) {
+          const unknownId = uncertainAsinImportTaskId(error);
+          const uncertain = !definiteRejection(error);
+          const nextGate: AsinImportGate | null = uncertain
+            ? { phase: 'uncertain', taskId: unknownId, savedAt: Date.now() }
+            : null;
+          writeAsinImportGate(stored, userId, nextGate);
+          if (owner.current !== userId || !mounted.current) return;
+          setGate(nextGate);
+          if (uncertain) {
+            setFile(null);
+            if (fileInput.current) fileInput.current.value = '';
+          }
+          setNotice(
+            uncertain
+              ? '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。'
+              : publicError(error),
+          );
+          if (error instanceof ApiError && error.status === 403)
+            void identity.refresh();
+        } finally {
+          if (request.current === controller) request.current = null;
+        }
+      });
     } catch {
       if (mounted.current) {
-        setBusy(false);
         setNotice('无法取得浏览器导入锁，请稍后重试。');
       }
-      return;
     } finally {
       claiming.current = false;
-    }
-    if (
-      owner.current !== userId ||
-      !importAllowed.current ||
-      !mounted.current
-    ) {
-      if (claim.kind === 'claimed') writeAsinImportGate(stored, userId, null);
       if (mounted.current) setBusy(false);
-      return;
-    }
-    if (claim.kind !== 'claimed') {
-      if (claim.kind === 'blocked') {
-        setGate(claim.gate);
-        setOpen(true);
-        setNotice('已有导入请求待核实，请先查看任务中心。');
-      } else setNotice('无法保存导入状态，请检查浏览器本地存储权限。');
-      setBusy(false);
-      return;
-    }
-    const controller = new AbortController();
-    request.current = controller;
-    setNotice(null);
-    setLastTaskId(null);
-    setGate(claim.gate);
-    try {
-      const result = await submitAsinImport(
-        runtime.http,
-        file,
-        controller.signal,
-      );
-      if (owner.current !== userId || !mounted.current) return;
-      const accepted: AsinImportGate = {
-        phase: 'accepted',
-        taskId: result.taskId,
-        savedAt: Date.now(),
-      };
-      writeAsinImportGate(stored, userId, accepted);
-      setGate(accepted);
-      setLastTaskId(result.taskId);
-      setNotice('文件已受理为异步任务，等待任务中心确认处理结果。');
-      setFile(null);
-      if (fileInput.current) fileInput.current.value = '';
-    } catch (error) {
-      const unknownId = uncertainAsinImportTaskId(error);
-      const uncertain = !definiteRejection(error);
-      const nextGate: AsinImportGate | null = uncertain
-        ? { phase: 'uncertain', taskId: unknownId, savedAt: Date.now() }
-        : null;
-      writeAsinImportGate(stored, userId, nextGate);
-      if (owner.current !== userId || !mounted.current) return;
-      setGate(nextGate);
-      if (uncertain) {
-        setFile(null);
-        if (fileInput.current) fileInput.current.value = '';
-      }
-      setNotice(
-        uncertain
-          ? '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。'
-          : publicError(error),
-      );
-      if (error instanceof ApiError && error.status === 403)
-        void identity.refresh();
-    } finally {
-      if (request.current === controller) request.current = null;
-      if (owner.current === userId && mounted.current) setBusy(false);
     }
   }
 
-  function unlockAfterReconciliation() {
+  async function unlockAfterReconciliation() {
     const stored = storage();
-    if (!stored || !writeAsinImportGate(stored, userId, null)) {
+    const locks = navigator.locks;
+    if (!stored || !locks || !gate) {
       setNotice('无法清除导入锁，请检查浏览器本地存储权限。');
+      return;
+    }
+    const expected = gate;
+    let result: 'changed' | 'cleared' | 'unavailable';
+    try {
+      const key = asinImportGateKey(userId);
+      const previousRaw = stored.getItem(key);
+      result = await locks.request(key, () => {
+        const current = readAsinImportGate(stored, userId);
+        if (
+          stored.getItem(key) !== previousRaw ||
+          JSON.stringify(current) !== JSON.stringify(expected)
+        )
+          return 'changed' as const;
+        return writeAsinImportGate(stored, userId, null)
+          ? ('cleared' as const)
+          : ('unavailable' as const);
+      });
+    } catch {
+      result = 'unavailable';
+    }
+    if (owner.current !== userId || !mounted.current) return;
+    if (result !== 'cleared') {
+      setGate(readAsinImportGate(stored, userId));
+      setNotice(
+        result === 'changed'
+          ? '原任务状态已变化，请重新核实后再解锁。'
+          : '无法清除导入锁，请检查浏览器本地存储权限。',
+      );
       return;
     }
     setGate(null);
@@ -393,7 +415,7 @@ export function AsinImportPanel() {
                   <Button
                     variant="secondary"
                     size="small"
-                    onClick={unlockAfterReconciliation}
+                    onClick={() => void unlockAfterReconciliation()}
                   >
                     已核实原任务，允许重新导入
                   </Button>
