@@ -15,6 +15,7 @@ import {
 import { isTerminalTask } from '../../services/tasks';
 import {
   asinImportGateKey,
+  claimAsinImportGate,
   readAsinImportGate,
   writeAsinImportGate,
   type AsinImportGate,
@@ -59,10 +60,13 @@ export function AsinImportPanel() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
+  const claiming = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const owner = useRef(userId);
   owner.current = userId;
+  const importAllowed = useRef(canImport);
+  importAllowed.current = canImport;
   const taskId = gate?.taskId ?? lastTaskId ?? undefined;
   const task = useTaskQuery(
     runtime,
@@ -163,7 +167,7 @@ export function AsinImportPanel() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file || gate || request.current || !userId) return;
+    if (!file || gate || claiming.current || request.current || !userId) return;
     try {
       validateAsinImportFile(file);
     } catch (error) {
@@ -175,28 +179,53 @@ export function AsinImportPanel() {
       setNotice('浏览器本地存储不可用，无法安全记录导入状态。');
       return;
     }
-    const previous = readAsinImportGate(stored, userId);
-    if (previous) {
-      setGate(previous);
-      setOpen(true);
-      setNotice('已有导入请求待核实，请先查看任务中心。');
+    const locks = navigator.locks;
+    if (!locks) {
+      setNotice(
+        '浏览器不支持安全的跨标签导入锁，请使用支持 Web Locks 的浏览器。',
+      );
       return;
     }
-    const next: AsinImportGate = {
-      phase: 'sending',
-      taskId: null,
-      savedAt: Date.now(),
-    };
-    if (!writeAsinImportGate(stored, userId, next)) {
-      setNotice('无法保存导入状态，请检查浏览器本地存储权限。');
+    claiming.current = true;
+    setBusy(true);
+    setNotice(null);
+    let claim: Awaited<ReturnType<typeof claimAsinImportGate>>;
+    try {
+      claim = await claimAsinImportGate(stored, userId, (name, action) =>
+        locks.request(name, action),
+      );
+    } catch {
+      if (mounted.current) {
+        setBusy(false);
+        setNotice('无法取得浏览器导入锁，请稍后重试。');
+      }
+      return;
+    } finally {
+      claiming.current = false;
+    }
+    if (
+      owner.current !== userId ||
+      !importAllowed.current ||
+      !mounted.current
+    ) {
+      if (claim.kind === 'claimed') writeAsinImportGate(stored, userId, null);
+      if (mounted.current) setBusy(false);
+      return;
+    }
+    if (claim.kind !== 'claimed') {
+      if (claim.kind === 'blocked') {
+        setGate(claim.gate);
+        setOpen(true);
+        setNotice('已有导入请求待核实，请先查看任务中心。');
+      } else setNotice('无法保存导入状态，请检查浏览器本地存储权限。');
+      setBusy(false);
       return;
     }
     const controller = new AbortController();
     request.current = controller;
-    setBusy(true);
     setNotice(null);
     setLastTaskId(null);
-    setGate(next);
+    setGate(claim.gate);
     try {
       const result = await submitAsinImport(
         runtime.http,
@@ -243,7 +272,10 @@ export function AsinImportPanel() {
 
   function unlockAfterReconciliation() {
     const stored = storage();
-    if (stored) writeAsinImportGate(stored, userId, null);
+    if (!stored || !writeAsinImportGate(stored, userId, null)) {
+      setNotice('无法清除导入锁，请检查浏览器本地存储权限。');
+      return;
+    }
     setGate(null);
     setLastTaskId(null);
     setFile(null);
@@ -253,9 +285,7 @@ export function AsinImportPanel() {
 
   function downloadTemplate() {
     const header = '\uFEFF变体组名称,国家,站点,品牌,ASIN,ASIN类型,ASIN名称\r\n';
-    const url = URL.createObjectURL(
-      new Blob([header], { type: 'text/csv;charset=utf-8' }),
-    );
+    const url = URL.createObjectURL(new Blob([header], { type: 'text/csv' }));
     const link = document.createElement('a');
     link.href = url;
     link.download = 'ASIN导入模板.csv';

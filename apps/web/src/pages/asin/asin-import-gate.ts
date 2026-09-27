@@ -5,7 +5,6 @@ export interface AsinImportGate {
 }
 
 const KEY_PREFIX = 'neo:asin-import:';
-const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const TASK_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -33,8 +32,7 @@ export function readAsinImportGate(
       (gate.phase === 'accepted' && gate.taskId === null) ||
       typeof gate.savedAt !== 'number' ||
       !Number.isFinite(gate.savedAt) ||
-      gate.savedAt > now ||
-      now - gate.savedAt > MAX_AGE_MS
+      gate.savedAt > now
     )
       throw new Error('invalid');
     return {
@@ -53,6 +51,32 @@ export function readAsinImportGate(
     }
     return null;
   }
+}
+
+export type AsinImportClaim =
+  | { kind: 'claimed'; gate: AsinImportGate }
+  | { kind: 'blocked'; gate: AsinImportGate }
+  | { kind: 'unavailable' };
+
+/** A browser Web Lock serializes the localStorage check and claim across tabs. */
+export async function claimAsinImportGate(
+  storage: Pick<Storage, 'getItem' | 'removeItem' | 'setItem'>,
+  owner: string,
+  exclusive: <T>(name: string, action: () => T) => Promise<T>,
+  now = Date.now(),
+): Promise<AsinImportClaim> {
+  return exclusive(asinImportGateKey(owner), (): AsinImportClaim => {
+    const existing = readAsinImportGate(storage, owner, now);
+    if (existing) return { kind: 'blocked', gate: existing };
+    const gate: AsinImportGate = {
+      phase: 'sending',
+      taskId: null,
+      savedAt: now,
+    };
+    return writeAsinImportGate(storage, owner, gate)
+      ? { kind: 'claimed', gate }
+      : { kind: 'unavailable' };
+  });
 }
 
 export function writeAsinImportGate(

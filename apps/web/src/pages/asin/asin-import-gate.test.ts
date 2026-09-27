@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { readAsinImportGate, writeAsinImportGate } from './asin-import-gate';
+import {
+  claimAsinImportGate,
+  readAsinImportGate,
+  writeAsinImportGate,
+} from './asin-import-gate';
 
 class MemoryStorage {
   private readonly entries = new Map<string, string>();
@@ -31,7 +35,7 @@ describe('ASIN import retry gate', () => {
     expect(readAsinImportGate(storage, 'user-b', time + 1000)).toBeNull();
   });
 
-  it('keeps an accepted task ID and discards expired or invalid entries', () => {
+  it('keeps an accepted task ID until explicit reconciliation and discards invalid entries', () => {
     const storage = new MemoryStorage();
     const time = Date.UTC(2026, 8, 27);
     const taskId = 'b2b5894c-5802-4c9f-a1bd-9a20263d270a';
@@ -45,7 +49,7 @@ describe('ASIN import retry gate', () => {
     );
     expect(
       readAsinImportGate(storage, 'user-a', time + 8 * 86400_000),
-    ).toBeNull();
+    ).toMatchObject({ phase: 'accepted', taskId });
     storage.setItem(
       'neo:asin-import:user-a',
       JSON.stringify({ phase: 'accepted', taskId: '../unsafe', savedAt: time }),
@@ -67,5 +71,34 @@ describe('ASIN import retry gate', () => {
         savedAt: Date.now(),
       }),
     ).toBe(false);
+  });
+
+  it('serializes two tabs claiming the same user import', async () => {
+    const storage = new MemoryStorage();
+    let prior = Promise.resolve();
+    const exclusive = async <T>(_name: string, action: () => T): Promise<T> => {
+      const before = prior;
+      let release!: () => void;
+      prior = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await before;
+      try {
+        return action();
+      } finally {
+        release();
+      }
+    };
+    const results = await Promise.all([
+      claimAsinImportGate(storage, 'user-a', exclusive),
+      claimAsinImportGate(storage, 'user-a', exclusive),
+    ]);
+    expect(results.map((result) => result.kind)).toEqual([
+      'claimed',
+      'blocked',
+    ]);
+    expect(results[1]).toMatchObject({
+      gate: { phase: 'uncertain', taskId: null },
+    });
   });
 });

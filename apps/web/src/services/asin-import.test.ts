@@ -34,6 +34,7 @@ describe('ASIN import transport', () => {
         const form = options!.body as FormData;
         expect(form.getAll('file')).toHaveLength(1);
         expect((form.get('file') as File).name).toBe('items.csv');
+        expect((form.get('file') as File).type).toBe('text/csv');
         expect(form.get('useAsync')).toBe('true');
         expect(new Headers(options?.headers).has('content-type')).toBe(false);
         return jsonResponse({
@@ -120,5 +121,24 @@ describe('ASIN import transport', () => {
         new File(['data'], 'items.csv'),
       ),
     ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+  });
+
+  it('sends the API-supported XLSX MIME even when the browser reports none', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, options) => {
+      const form = options!.body as FormData;
+      expect((form.get('file') as File).type).toBe(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      return jsonResponse({
+        success: true,
+        errorCode: 0,
+        data: { taskId, status: 'pending' },
+      });
+    });
+    await submitAsinImport(
+      client('/api', fetcher),
+      new File(['xlsx fixture'], 'items.xlsx'),
+    );
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 });

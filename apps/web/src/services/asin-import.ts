@@ -21,7 +21,15 @@ export async function submitAsinImport(
 ) {
   validateAsinImportFile(file);
   const form = new FormData();
-  form.append('file', file, file.name);
+  const mimeType = /\.xlsx$/i.test(file.name)
+    ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    : 'text/csv';
+  // Browser and OS MIME guesses vary; the server still validates file contents.
+  form.append(
+    'file',
+    new File([file], file.name, { type: mimeType }),
+    file.name,
+  );
   form.append('useAsync', 'true');
   const response = await http.request(
     '/api/v1/variant-groups/import-excel',
