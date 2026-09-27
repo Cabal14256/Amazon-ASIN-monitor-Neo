@@ -1,5 +1,6 @@
 import { getPhysicalQueueName, type Env } from '@asin-monitor/config';
 import {
+  BACKUP_SCHEDULER_USER_ID,
   backupJobDataSchema,
   type BackupTarget,
 } from '@asin-monitor/contracts';
@@ -18,8 +19,6 @@ import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { SchedulerLease } from './scheduler-lease';
-
-const SYSTEM_USER = 'system:backup-scheduler';
 
 export function scheduledBackupTaskId(
   prefix: string,
@@ -48,7 +47,7 @@ export async function enqueueScheduledBackups(
     try {
       task = await store.create({
         taskId,
-        userId: SYSTEM_USER,
+        userId: BACKUP_SCHEDULER_USER_ID,
         taskType: 'backup',
         taskSubType: 'create',
         title: `自动备份（${target}）`,
@@ -60,7 +59,7 @@ export async function enqueueScheduledBackups(
       task = await store.read(taskId);
       if (
         !task ||
-        task.userId !== SYSTEM_USER ||
+        task.userId !== BACKUP_SCHEDULER_USER_ID ||
         task.taskType !== 'backup' ||
         task.taskSubType !== 'create'
       )
@@ -72,7 +71,7 @@ export async function enqueueScheduledBackups(
       taskSubType: 'create',
       operation: 'create',
       target,
-      userId: SYSTEM_USER,
+      userId: BACKUP_SCHEDULER_USER_ID,
       createdAt: task.createdAt,
       params: {},
     });

@@ -1,4 +1,7 @@
-import { variantCheckResultReferenceSchema } from '@asin-monitor/contracts';
+import {
+  backupInPlaceRestoreResultSchema,
+  variantCheckResultReferenceSchema,
+} from '@asin-monitor/contracts';
 import { z } from 'zod';
 import { parseVariantCheckOperation } from '../domain/variant-check-receipt';
 
@@ -60,6 +63,18 @@ const mutationSchema = z.discriminatedUnion('kind', [
     message,
   }),
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
+  z.object({
+    kind: z.literal('restore-committed'),
+    result: backupInPlaceRestoreResultSchema.extend({
+      verification: z.literal('unconfirmed'),
+    }),
+  }),
+  z.object({
+    kind: z.literal('restore-confirmed'),
+    result: backupInPlaceRestoreResultSchema.extend({
+      verification: z.literal('confirmed'),
+    }),
+  }),
   // Only callers that confirmed the immutable PostgreSQL receipt may use this.
   z.object({
     kind: z.literal('check-completed'),
@@ -80,7 +95,24 @@ export function transitionTask(
   now: Date,
 ): TaskState {
   const change = mutationSchema.parse(mutation);
-  if (change.kind === 'check-completed') {
+  if (
+    change.kind === 'restore-committed' ||
+    change.kind === 'restore-confirmed'
+  ) {
+    if (task.taskType !== 'backup' || task.taskSubType !== 'restore')
+      throw new Error('BACKUP_RESTORE_TASK_INVALID');
+    const previous = backupInPlaceRestoreResultSchema.safeParse(task.result);
+    if (change.kind === 'restore-confirmed') {
+      if (
+        task.status !== 'completed' ||
+        !previous.success ||
+        previous.data.verification !== 'unconfirmed' ||
+        previous.data.filename !== change.result.filename ||
+        previous.data.target !== change.result.target
+      )
+        return task;
+    } else if (previous.success && task.status === 'completed') return task;
+  } else if (change.kind === 'check-completed') {
     const { kind: _kind, version: _version, ...reference } = change.result;
     parseVariantCheckOperation({
       ...reference,
@@ -125,12 +157,23 @@ export function transitionTask(
       break;
     case 'completed':
     case 'check-completed':
+    case 'restore-committed':
+    case 'restore-confirmed':
       next.status = 'completed';
       next.progress = 100;
       next.completedAt = timestamp;
       next.result = change.result ?? null;
       next.error = null;
-      next.message = change.message ?? '任务已完成';
+      if (
+        change.kind === 'restore-committed' ||
+        change.kind === 'restore-confirmed'
+      )
+        next.cancelledAt = null;
+      next.message =
+        change.kind === 'restore-committed' ||
+        change.kind === 'restore-confirmed'
+          ? change.result.message
+          : change.message ?? '任务已完成';
       break;
     case 'failed':
       if (

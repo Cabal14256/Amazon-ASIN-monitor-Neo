@@ -69,7 +69,13 @@ async function fixture() {
     },
     enqueue: vi.fn(async () => undefined),
   };
-  const tasks = { openBackup: vi.fn(() => port) };
+  const scheduledStore = {
+    listUser: vi.fn(async () => [] as Record<string, unknown>[]),
+  };
+  const tasks = {
+    openBackup: vi.fn(() => port),
+    open: vi.fn(() => ({ store: scheduledStore })),
+  };
   const pools = {
     primaryPool: {
       query: vi.fn(async () => ({ rows: [] as { extversion: string }[] })),
@@ -88,7 +94,7 @@ async function fixture() {
     pools as never,
     { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
   );
-  return { directory, unit, port, tasks, pools, service };
+  return { directory, unit, port, tasks, scheduledStore, pools, service };
 }
 
 describe('backup API service', () => {
@@ -150,6 +156,64 @@ describe('backup API service', () => {
     expect(port.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ operation: 'restore', target: 'primary' }),
     );
+  });
+
+  it('downloads only an artifact accompanied by verified restore metadata', async () => {
+    const { service, directory } = await fixture();
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await expect(service.download(principal, filename)).rejects.toMatchObject({
+      status: 409,
+    });
+    await writeMetadata(directory, 'postgresql', 2);
+    await expect(service.download(principal, filename)).resolves.toMatchObject({
+      filename,
+      metadata: { version: 2, sourceEngine: 'postgresql' },
+    });
+  });
+
+  it('bounds both database capability probes and exposes scheduled runs only to administrators', async () => {
+    const { service, directory, unit, pools, tasks, scheduledStore } =
+      await fixture();
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'postgresql', 2);
+    await service.list(principal);
+    for (const pool of [pools.primaryPool, pools.competitorPool])
+      expect(pool.query).toHaveBeenCalledWith(
+        expect.objectContaining({ query_timeout: 1500 }),
+      );
+    scheduledStore.listUser.mockResolvedValueOnce([
+      {
+        taskId: 'scheduled-1',
+        userId: 'system:backup-scheduler',
+        taskType: 'backup',
+        taskSubType: 'create',
+        title: '自动备份（primary）',
+        status: 'failed',
+        progress: 33,
+        message: '备份任务失败',
+        error: '备份任务失败',
+        result: null,
+        createdAt,
+        updatedAt: createdAt,
+        startedAt: createdAt,
+        completedAt: createdAt,
+        cancelRequestedAt: null,
+        cancelledAt: null,
+        revision: 3,
+      },
+    ]);
+    await expect(service.scheduledTasks(principal)).resolves.toMatchObject([
+      { taskId: 'scheduled-1', status: 'failed' },
+    ]);
+    expect(scheduledStore.listUser).toHaveBeenCalledWith(
+      'system:backup-scheduler',
+      { limit: 50 },
+    );
+    unit.operatorPermissionCodes.mockResolvedValueOnce([]);
+    await expect(service.scheduledTasks(principal)).rejects.toMatchObject({
+      status: 403,
+    });
+    expect(tasks.open).toHaveBeenCalledTimes(1);
   });
 
   it('rechecks current permission and does not enqueue after revocation', async () => {

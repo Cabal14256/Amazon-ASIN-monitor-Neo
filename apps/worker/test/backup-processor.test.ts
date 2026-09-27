@@ -143,6 +143,26 @@ describe('backup command boundary', () => {
     await expect(running).rejects.toThrow('BACKUP_COMMAND_CANCELLED');
   });
 
+  it('recognizes a zero pg_restore exit despite a late progress failure', async () => {
+    const run = () =>
+      processCommand(
+        process.execPath,
+        ['-e', 'process.exit(0)'],
+        { ...process.env },
+        {
+          ...options(new AbortController().signal),
+          timeoutMs: 3000,
+          pollIntervalMs: 5,
+          checkpoint: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            throw new Error('progress store unavailable');
+          },
+          zeroExitIsCommitted: true,
+        },
+      );
+    await expect(run()).resolves.toBeUndefined();
+  });
+
   it('terminates on oversized output instead of waiting for command timeout', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-command-'));
     try {
@@ -197,7 +217,7 @@ describe('backup command boundary', () => {
     }
   });
 
-  it('does not reuse inherited PostgreSQL credentials', () => {
+  it('uses the same PG defaults as node-postgres before isolating libpq', () => {
     const env = commandEnvironment(
       'postgresql://backup-user:backup-pass@[::1]:5433/main?sslmode=require',
     );
@@ -209,9 +229,38 @@ describe('backup command boundary', () => {
       PGDATABASE: 'main',
       PGSSLMODE: 'require',
     });
-    const withoutPassword = commandEnvironment('postgresql://localhost/main');
-    expect(withoutPassword.PGPASSWORD).toBeUndefined();
-    expect(withoutPassword.PGPORT).toBeUndefined();
+    const defaults = {
+      PGHOST: 'db.internal',
+      PGPORT: '5544',
+      PGUSER: 'app_user',
+      PGPASSWORD: 'app_secret',
+      PGDATABASE: 'app_db',
+      PGSSLMODE: 'verify-full',
+      PGHOSTADDR: 'wrong-host',
+      PGSERVICE: 'wrong-service',
+    };
+    const inherited = commandEnvironment('postgresql:///', defaults);
+    expect(inherited).toMatchObject({
+      PGHOST: 'db.internal',
+      PGPORT: '5544',
+      PGUSER: 'app_user',
+      PGPASSWORD: 'app_secret',
+      PGDATABASE: 'app_db',
+      PGSSLMODE: 'verify-full',
+    });
+    expect(inherited.PGHOSTADDR).toBeUndefined();
+    expect(inherited.PGSERVICE).toBeUndefined();
+    const override = commandEnvironment(
+      'postgresql://explicit:pass@localhost/main?host=query-host&port=6001',
+      defaults,
+    );
+    expect(override).toMatchObject({
+      PGHOST: 'query-host',
+      PGPORT: '6001',
+      PGUSER: 'explicit',
+      PGPASSWORD: 'pass',
+      PGDATABASE: 'main',
+    });
   });
 
   it('passes the database name to pg_restore without putting credentials in argv', () => {

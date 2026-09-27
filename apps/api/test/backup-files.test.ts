@@ -80,4 +80,27 @@ describe('backup file boundary', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('returns the bounded description stored in a v2 sidecar', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+    try {
+      await writeFile(join(directory, filename), 'PGDMPfixture');
+      await writeFile(
+        join(directory, `${filename}.meta.json`),
+        JSON.stringify({
+          version: 2,
+          filename,
+          target: 'primary',
+          sourceEngine: 'postgresql',
+          description: 'automated recovery point',
+        }),
+      );
+      expect(await listBackupFiles(directory)).toMatchObject([
+        { filename, description: 'automated recovery point' },
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

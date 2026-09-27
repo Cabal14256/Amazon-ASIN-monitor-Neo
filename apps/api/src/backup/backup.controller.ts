@@ -13,10 +13,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { createReadStream } from 'node:fs';
 import { AuthenticationGuard } from '../auth/authentication.guard';
 import { PermissionsGuard } from '../auth/permissions.guard';
 import { RequirePermissions } from '../auth/require-permissions.decorator';
+import { backupBundle } from './backup-bundle';
 import { BackupService } from './backup.service';
 
 @Controller('backup')
@@ -78,12 +78,26 @@ export class BackupController {
   ) {
     const result = await this.backups.download(request.auth!, filename);
     reply.header('Cache-Control', 'no-store');
-    reply.header('Content-Type', 'application/octet-stream');
+    reply.header('Content-Type', 'application/x-tar');
     reply.header(
       'Content-Disposition',
-      `attachment; filename="${encodeURIComponent(result.filename)}"`,
+      `attachment; filename="${encodeURIComponent(
+        result.filename.replace(/\.dump$/, '.tar'),
+      )}"`,
     );
-    return new StreamableFile(createReadStream(result.path));
+    return new StreamableFile(
+      await backupBundle(result.path, result.filename, result.metadata),
+    );
+  }
+
+  @Get('scheduled-tasks')
+  @Header('Cache-Control', 'no-store')
+  async scheduledTasks(@Req() request: FastifyRequest) {
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.backups.scheduledTasks(request.auth!),
+    };
   }
 
   @Get('config')

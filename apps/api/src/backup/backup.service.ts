@@ -1,5 +1,6 @@
 import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
 import {
+  BACKUP_SCHEDULER_USER_ID,
   backupJobDataSchema,
   createBackupRequestSchema,
   restoreBackupRequestSchema,
@@ -19,11 +20,13 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import type { QueryConfig } from 'pg';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
+import { serializeTask } from '../tasks/task-query-values';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
 import {
   backupFilenameTarget,
@@ -71,9 +74,14 @@ export class BackupService implements OnModuleDestroy {
   private async capability(target: BackupTarget) {
     const pool =
       target === 'primary' ? this.pools.primaryPool : this.pools.competitorPool;
-    const result = await pool.query(
-      "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'",
-    );
+    // The shared pool has a bounded acquisition timeout. Give the catalog
+    // query its own deadline so an established stalled session cannot hold a
+    // backup API slot or make the list endpoint wait indefinitely.
+    const query = {
+      text: "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'",
+      query_timeout: 1500,
+    } as QueryConfig & { query_timeout: number };
+    const result = await pool.query<{ extversion: string }>(query);
     if (
       result.rows.length > 1 ||
       (result.rows.length === 1 &&
@@ -293,6 +301,32 @@ export class BackupService implements OnModuleDestroy {
     });
   }
 
+  scheduledTasks(principal: AuthPrincipal) {
+    return this.run('scheduled-tasks', async () => {
+      await this.authorize(principal);
+      const deadline = performance.now() + 3000;
+      const port = this.tasks.open(() => {
+        if (performance.now() >= deadline)
+          throw new Error('BACKUP_SCHEDULE_QUERY_DEADLINE');
+      });
+      const tasks = await port.store.listUser(BACKUP_SCHEDULER_USER_ID, {
+        limit: 50,
+      });
+      return tasks
+        .filter(
+          (task) =>
+            task.userId === BACKUP_SCHEDULER_USER_ID &&
+            task.taskType === 'backup' &&
+            task.taskSubType === 'create',
+        )
+        .map((task) => ({
+          ...serializeTask(task),
+          canCancel: false,
+          downloadUrl: null,
+        }));
+    });
+  }
+
   async download(principal: AuthPrincipal, filename: string) {
     return this.run('download', async () => {
       await this.authorize(principal);
@@ -302,7 +336,9 @@ export class BackupService implements OnModuleDestroy {
       } catch {
         fail(404, '备份文件不存在');
       }
-      return { path, filename };
+      const metadata = await readBackupMetadata(this.directory(), filename);
+      if (!metadata) fail(409, '备份元数据未验证，无法下载可恢复归档');
+      return { path, filename, metadata };
     });
   }
 

@@ -5,6 +5,18 @@ declare namespace API {
     size?: number;
     createdAt?: string;
     modifiedAt?: string;
+    description?: string;
+    restoreSupported?: boolean;
+    restoreMode?: 'isolated' | 'in-place';
+  };
+
+  type BackupScheduledTask = {
+    taskId: string;
+    title: string;
+    status: string;
+    message: string;
+    createdAt: string;
+    completedAt?: string | null;
   };
 
   type BackupConfig = {

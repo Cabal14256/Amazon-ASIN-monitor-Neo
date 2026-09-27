@@ -64,14 +64,44 @@ function targetUrl(env: Env, target: BackupJobData['target']): string {
 
 export function commandEnvironment(
   connectionString: string,
+  defaults: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const url = new URL(connectionString);
   if (!['postgres:', 'postgresql:'].includes(url.protocol))
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
-  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
-  if (!database || !url.hostname)
+  // node-postgres resolves each missing URL field from PG* before its own
+  // defaults. Resolve the same values before clearing libpq's inherited PG*.
+  const parameter = (name: string, fromUrl?: string, fallback?: string) =>
+    url.searchParams.get(name) || fromUrl || fallback || undefined;
+  const user = parameter(
+    'user',
+    decodeURIComponent(url.username),
+    defaults.PGUSER ||
+      (process.platform === 'win32' ? defaults.USERNAME : defaults.USER),
+  );
+  const database = parameter(
+    'database',
+    decodeURIComponent(url.pathname.replace(/^\//, '')),
+    defaults.PGDATABASE || user,
+  );
+  const host = parameter('host', url.hostname, defaults.PGHOST || 'localhost');
+  const port = parameter('port', url.port, defaults.PGPORT || '5432');
+  const password = parameter(
+    'password',
+    decodeURIComponent(url.password),
+    defaults.PGPASSWORD,
+  );
+  if (
+    !database ||
+    !host ||
+    !user ||
+    !port ||
+    !/^\d+$/.test(port) ||
+    Number(port) < 1 ||
+    Number(port) > 65_535
+  )
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
-  const sslMode = url.searchParams.get('sslmode');
+  const sslMode = url.searchParams.get('sslmode') || defaults.PGSSLMODE;
   if (
     sslMode &&
     ![
@@ -84,8 +114,7 @@ export function commandEnvironment(
     ].includes(sslMode)
   )
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
-  // Libpq falls back to inherited PG* values when one is absent. Clear them so
-  // a URL without a password/port cannot silently select another database.
+  // Drop unrelated libpq controls (PGSERVICE, PGHOSTADDR, PGOPTIONS, etc.).
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) => !key.toUpperCase().startsWith('PG'),
@@ -93,10 +122,10 @@ export function commandEnvironment(
   );
   return {
     ...inherited,
-    PGHOST: url.hostname.replace(/^\[|\]$/g, ''),
-    ...(url.port ? { PGPORT: url.port } : {}),
-    ...(url.username ? { PGUSER: decodeURIComponent(url.username) } : {}),
-    ...(url.password ? { PGPASSWORD: decodeURIComponent(url.password) } : {}),
+    PGHOST: host.replace(/^\[|\]$/g, ''),
+    PGPORT: port,
+    PGUSER: user,
+    ...(password ? { PGPASSWORD: password } : {}),
     PGDATABASE: database,
     ...(sslMode ? { PGSSLMODE: sslMode } : {}),
     ...(url.searchParams.has('sslrootcert')
@@ -202,6 +231,8 @@ export function processCommand(
     checkpoint: () => Promise<void>;
     onProgress: (bytes: number) => Promise<void>;
     pollIntervalMs?: number;
+    /** A zero pg_restore exit means its single transaction committed. */
+    zeroExitIsCommitted?: boolean;
   },
 ): Promise<void> {
   return new Promise((resolvePromise, reject) => {
@@ -262,7 +293,8 @@ export function processCommand(
       void (async () => {
         await pollingTask;
         if (settled) return;
-        if (stopError) finish(stopError);
+        if (options.zeroExitIsCommitted && code === 0 && !signal) finish();
+        else if (stopError) finish(stopError);
         else if (code === 0) finish();
         else
           finish(
@@ -654,6 +686,18 @@ export function createBackupProcessor(
     let artifactPath: string | undefined;
     let metadataPartialPath: string | undefined;
     let publishedStagingDatabase: string | undefined;
+    let committedInPlaceRestore:
+      | {
+          operation: 'restore';
+          format: 'custom';
+          filename: string;
+          target: BackupJobData['target'];
+          restoreMode: 'in-place';
+          targetDatabaseChanged: true;
+          verification: 'unconfirmed';
+          message: string;
+        }
+      | undefined;
     let targetLock:
       | Awaited<ReturnType<typeof acquireBackupTargetLock>>
       | undefined;
@@ -763,6 +807,9 @@ export function createBackupProcessor(
           target: data.target,
           sourceEngine: lock.hasTimescale ? 'timescaledb' : 'postgresql',
           ...(sourceManifest ? { timescale: sourceManifest } : {}),
+          ...(data.params.description
+            ? { description: data.params.description }
+            : {}),
         });
         metadataPartialPath = `${output}.meta.json.partial`;
         await writeFile(metadataPartialPath, JSON.stringify(metadata), {
@@ -781,6 +828,9 @@ export function createBackupProcessor(
           format: 'custom' as const,
           sourceEngine: metadata.sourceEngine,
           restoreSupported: true,
+          ...(metadata.version === 2 && metadata.description
+            ? { description: metadata.description }
+            : {}),
         };
         const completed = await mutate({
           kind: 'completed',
@@ -869,6 +919,7 @@ export function createBackupProcessor(
           timeoutMs,
           maxBytes,
           signal: controller.signal,
+          zeroExitIsCommitted: true,
           checkpoint: async () => {
             await check();
             await lock.ensureHeld();
@@ -878,28 +929,60 @@ export function createBackupProcessor(
           },
         },
       );
+      // pg_restore --single-transaction has committed when the process exits
+      // successfully. Persist that point of no return before any post-restore
+      // lock, health, progress, or cancellation checks can fail.
+      committedInPlaceRestore = {
+        operation: 'restore',
+        format: 'custom',
+        filename,
+        target: data.target,
+        restoreMode: 'in-place',
+        targetDatabaseChanged: true,
+        verification: 'unconfirmed',
+        message: '数据库恢复事务已提交，健康检查尚未确认；请核对数据库状态',
+      };
+      await mutate({
+        kind: 'restore-committed',
+        result: committedInPlaceRestore,
+      });
       await lock.ensureHeld();
       await healthCheck(options.env, data.target);
-      await progress(100, '恢复完成');
       const completed = await mutate({
-        kind: 'completed',
+        kind: 'restore-confirmed',
         result: {
-          operation: 'restore',
-          format: 'custom',
+          ...committedInPlaceRestore,
+          verification: 'confirmed',
           message: '恢复完成',
-          filename,
-          target: data.target,
-          restoreMode: 'in-place',
-          targetDatabaseChanged: true,
         },
-        message: '恢复完成',
       });
+      await options.updateProgress(job, 100);
       log.info('PostgreSQL 恢复任务完成', { target: data.target });
       return completed.result;
     } catch (error) {
       if (artifactPath) await unlink(artifactPath).catch(() => undefined);
       if (metadataPartialPath)
         await unlink(metadataPartialPath).catch(() => undefined);
+      if (committedInPlaceRestore) {
+        log.error('PostgreSQL 恢复事务已提交，但完成确认失败', {
+          target: data.target,
+          reason: 'backup_restore_postcommit_unconfirmed',
+        });
+        try {
+          const state = await mutate({
+            kind: 'restore-committed',
+            result: committedInPlaceRestore,
+          });
+          if (state.status === 'completed') return state.result;
+        } catch {
+          log.warn('已提交恢复任务状态写入未确认', {
+            reason: 'backup_restore_commit_status_unconfirmed',
+          });
+        }
+        throw new UnrecoverableError(
+          '数据库恢复事务已提交，但任务状态或健康检查未确认；请人工核对数据库',
+        );
+      }
       if (error instanceof TaskStopped) {
         if (error.state.status === 'cancelled') return cancelledResult;
         if (error.state.status === 'completed') return error.state.result;

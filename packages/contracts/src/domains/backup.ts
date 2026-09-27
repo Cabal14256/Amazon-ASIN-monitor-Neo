@@ -1,12 +1,13 @@
 import { z } from 'zod';
 
 import { resultSchema } from '../envelope';
+import { taskInfoSchema } from './tasks';
 
 /**
- * backup 域契约（7 端点）。
+ * backup 域契约（含管理员计划任务视图）。
  * 来源：server/src/controllers/backupController.js、
  * services/backupService.js、models/BackupConfig.js 实读（2026-08-24）。
- * 注意：GET /backup/:filename/download 为 pg_dump custom 文件流（非 JSON）。
+ * 注意：GET /backup/:filename/download 为包含 custom dump 和验证过的元数据的 tar 流（非 JSON）。
  * Neo 仅接受 PostgreSQL `pg_dump --format=custom` 产物；Legacy MySQL
  * `.sql` 文件可以保留用于历史审计，但不能通过 Neo 恢复端点导入。
  */
@@ -25,6 +26,7 @@ export const backupArtifactFormatSchema = z.literal(BACKUP_ARTIFACT_FORMAT);
 export type BackupArtifactFormat = z.infer<typeof backupArtifactFormatSchema>;
 export const backupSourceEngineSchema = z.enum(['postgresql', 'timescaledb']);
 export const backupRestoreModeSchema = z.enum(['in-place', 'isolated']);
+export const BACKUP_SCHEDULER_USER_ID = 'system:backup-scheduler';
 
 /**
  * Only final artifacts emitted by the Neo worker are addressable. This also
@@ -71,6 +73,7 @@ export const backupArtifactMetadataSchema = z.union([
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),
+      description: z.string().max(500).optional(),
     })
     .strict(),
   z
@@ -80,9 +83,13 @@ export const backupArtifactMetadataSchema = z.union([
       target: backupTargetSchema,
       sourceEngine: z.literal('timescaledb'),
       timescale: backupTimescaleManifestSchema,
+      description: z.string().max(500).optional(),
     })
     .strict(),
 ]);
+export type BackupArtifactMetadata = z.infer<
+  typeof backupArtifactMetadataSchema
+>;
 
 const backupTimeSchema = z
   .string()
@@ -103,6 +110,7 @@ export const backupFileSchema = z
     sourceEngine: backupSourceEngineSchema.optional(),
     metadataVersion: z.union([z.literal(1), z.literal(2)]).optional(),
     sourceExtensionVersion: z.string().optional(),
+    description: z.string().max(500).optional(),
   })
   .passthrough();
 export type BackupFile = z.infer<typeof backupFileSchema>;
@@ -280,6 +288,10 @@ export const restoreBackupResultSchema = resultSchema(
 
 /** GET /backup data */
 export const backupListResultSchema = resultSchema(z.array(backupFileSchema));
+/** GET /backup/scheduled-tasks data */
+export const backupScheduledTasksResultSchema = resultSchema(
+  z.array(taskInfoSchema),
+);
 
 /** DELETE /backup/:filename data */
 export const deleteBackupResultSchema = resultSchema(
@@ -307,6 +319,8 @@ export const backupTaskResultDataSchema = z
       .regex(/^neo_restore_(?:primary|competitor)_[a-f0-9]{16}$/)
       .optional(),
     targetDatabaseChanged: z.boolean().optional(),
+    verification: z.enum(['unconfirmed', 'confirmed']).optional(),
+    description: z.string().max(500).optional(),
     sourceEngine: backupSourceEngineSchema.optional(),
   })
   .passthrough()
@@ -324,8 +338,23 @@ export const backupTaskResultDataSchema = z
   });
 export const backupTaskResultSchema = resultSchema(backupTaskResultDataSchema);
 
+/** A committed in-place transaction is a terminal result, even while its
+ * post-restore health probe is still pending. */
+export const backupInPlaceRestoreResultSchema = z
+  .object({
+    operation: z.literal('restore'),
+    format: backupArtifactFormatSchema,
+    filename: backupFilenameSchema,
+    target: backupTargetSchema,
+    restoreMode: z.literal('in-place'),
+    targetDatabaseChanged: z.literal(true),
+    verification: z.enum(['unconfirmed', 'confirmed']),
+    message: z.string().min(1).max(2000),
+  })
+  .strict();
+
 /**
- * GET /backup/:filename/download：pg_dump custom 文件流（非 JSON），
+ * GET /backup/:filename/download：含 dump 与 .meta.json 的 tar 流（非 JSON），
  * 契约仅登记。
  */
 export const backupDownloadResultSchema = resultSchema(z.unknown());

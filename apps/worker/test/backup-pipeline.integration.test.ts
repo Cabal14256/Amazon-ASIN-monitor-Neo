@@ -56,12 +56,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     async function runJob(
       databaseUrl: string,
       operation: 'create' | 'restore',
-      params: { tables?: string[]; filename?: string },
+      params: { tables?: string[]; filename?: string; description?: string },
       options: {
         taskId?: string;
         target?: 'primary' | 'competitor';
         cancelAtProgress?: number;
         onProgress?: (value: number, taskId: string) => Promise<void>;
+        failConfirmation?: boolean;
       } = {},
     ) {
       const taskId = options.taskId ?? randomUUID();
@@ -99,6 +100,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const store = {
         read: vi.fn(async (id: string) => states.get(id) ?? null),
         mutate: vi.fn(async (id: string, change: TaskMutation) => {
+          if (options.failConfirmation && change.kind === 'restore-confirmed')
+            throw new Error('simulated confirmation failure');
           const current = states.get(id);
           if (!current) return null;
           const next = transitionTask(current, change, new Date());
@@ -201,14 +204,24 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
       const created = await runJob(scratchUrl, 'create', {
         tables: [`public.${tableA}`, `public.${tableB}`],
+        description: 'plain PostgreSQL recovery point',
       });
       const artifact = backupTaskResultDataSchema.parse(created.result);
       expect(artifact).toMatchObject({
         operation: 'create',
         restoreSupported: true,
+        description: 'plain PostgreSQL recovery point',
       });
       if (!artifact.filename)
         throw new Error('No backup artifact was returned');
+      expect(
+        JSON.parse(
+          await readFile(
+            join(directory, `${artifact.filename}.meta.json`),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ description: 'plain PostgreSQL recovery point' });
 
       await scratchPool.query(`UPDATE public.${tableA} SET note = 'mutated-a'`);
       await scratchPool.query(`UPDATE public.${tableB} SET note = 'mutated-b'`);
@@ -216,6 +229,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         filename: artifact.filename,
       });
       expect(restored.state.status).toBe('completed');
+      expect(restored.result).toMatchObject({
+        targetDatabaseChanged: true,
+        verification: 'confirmed',
+      });
       expect(
         (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
           .note,
@@ -245,6 +262,25 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         (await scratchPool.query(`SELECT note FROM public.${tableB}`)).rows[0]
           .note,
       ).toBe('after-failure-b');
+
+      await scratchPool.query(`DROP TABLE public.${blocker}`);
+      const uncertain = await runJob(
+        scratchUrl,
+        'restore',
+        { filename: artifact.filename },
+        { failConfirmation: true },
+      );
+      expect(uncertain.state).toMatchObject({
+        status: 'completed',
+        result: {
+          targetDatabaseChanged: true,
+          verification: 'unconfirmed',
+        },
+      });
+      expect(
+        (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
+          .note,
+      ).toBe('original-a');
 
       await writeFile(
         join(directory, `${artifact.filename}.meta.json`),

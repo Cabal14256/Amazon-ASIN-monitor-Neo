@@ -106,6 +106,7 @@ export async function listBackupFiles(
         target,
         format: 'custom',
         sourceEngine: metadata?.sourceEngine,
+        description: metadata?.version === 2 ? metadata.description : undefined,
         metadataVersion: metadata?.version,
         sourceExtensionVersion:
           metadata?.version === 2 && metadata.sourceEngine === 'timescaledb'
