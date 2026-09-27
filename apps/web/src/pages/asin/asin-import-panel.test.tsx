@@ -196,7 +196,7 @@ describe('primary ASIN import page', () => {
       await screen.findByRole('button', { name: '取消本地上传' }),
     );
     await screen.findByText(
-      '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。',
+      '提交状态未确认，请按提交时间和文件到任务中心核实，避免重复导入。',
     );
     expect(
       window.localStorage.getItem(asinImportGateKey('operator')),
@@ -249,5 +249,52 @@ describe('primary ASIN import page', () => {
     expect(
       window.localStorage.getItem(asinImportGateKey('operator')),
     ).toContain('uncertain');
+    expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
   });
+
+  it.each(['completed', 'failed'])(
+    'does not let a stale %s result overwrite another tab upload',
+    async (status) => {
+      let release!: () => void;
+      const requested = vi.fn(
+        async <T,>(_name: string, callback: () => Promise<T> | T) => {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return callback();
+        },
+      );
+      Object.defineProperty(window.navigator, 'locks', {
+        configurable: true,
+        value: { request: requested },
+      });
+      const f = fixture();
+      writeAsinImportGate(window.localStorage, 'operator', {
+        phase: 'accepted',
+        taskId,
+        savedAt: Date.now(),
+      });
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: asinImportGateKey('operator'),
+          storageArea: window.localStorage,
+        }),
+      );
+      await screen.findByText(`任务编号：${taskId}`);
+      taskSnapshot.current = task(status);
+      f.rerender();
+      await waitFor(() => expect(requested).toHaveBeenCalledOnce());
+      const nextTaskId = 'a161cbe4-e935-4613-9af9-f90c3ef3d313';
+      writeAsinImportGate(window.localStorage, 'operator', {
+        phase: 'accepted',
+        taskId: nextTaskId,
+        savedAt: Date.now(),
+      });
+      release();
+      await screen.findByText(`任务编号：${nextTaskId}`);
+      expect(
+        window.localStorage.getItem(asinImportGateKey('operator')),
+      ).toContain(nextTaskId);
+    },
+  );
 });

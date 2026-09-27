@@ -130,29 +130,55 @@ export function AsinImportPanel() {
     )
       return;
     const stored = storage();
-    setLastTaskId(taskId);
+    const locks = navigator.locks;
+    if (!stored || !locks) {
+      setNotice('无法保存导入任务状态，请检查浏览器本地存储和跨标签锁。');
+      return;
+    }
+    let active = true;
     const message =
       result.status === 'completed'
         ? '导入任务已完成，请核对任务中心的成功、失败行与报告。'
         : result.status === 'cancelled'
         ? '导入任务已取消，可能已有部分行提交；请核对后再决定是否重试。'
         : '导入任务失败，可能已有部分行提交；请核对后再决定是否重试。';
-    if (result.status === 'completed') {
-      if (stored) writeAsinImportGate(stored, userId, null);
-      setGate(null);
-    } else {
-      const unresolved: AsinImportGate = {
-        phase: 'uncertain',
-        taskId,
-        savedAt: Date.now(),
-      };
-      if (stored) writeAsinImportGate(stored, userId, unresolved);
-      setGate(unresolved);
-    }
-    setNotice(message);
-    announce(message);
-    if (result.status === 'completed')
-      void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
+    void locks
+      .request(asinImportGateKey(userId), () => {
+        const persisted = readAsinImportGate(stored, userId);
+        if (persisted?.phase !== 'accepted' || persisted.taskId !== taskId)
+          return { kind: 'changed' as const, gate: persisted };
+        const nextGate: AsinImportGate | null =
+          result.status === 'completed'
+            ? null
+            : { phase: 'uncertain', taskId, savedAt: Date.now() };
+        return writeAsinImportGate(stored, userId, nextGate)
+          ? { kind: 'settled' as const, gate: nextGate }
+          : { kind: 'unavailable' as const };
+      })
+      .then((transition) => {
+        if (!active || owner.current !== userId || !mounted.current) return;
+        if (transition.kind === 'changed') {
+          setGate(transition.gate);
+          if (transition.gate) setOpen(true);
+          return;
+        }
+        if (transition.kind === 'unavailable') {
+          setNotice('无法保存导入任务状态，请检查浏览器本地存储权限。');
+          return;
+        }
+        setLastTaskId(taskId);
+        setGate(transition.gate);
+        setNotice(message);
+        announce(message);
+        void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
+      })
+      .catch(() => {
+        if (active && owner.current === userId && mounted.current)
+          setNotice('无法取得浏览器导入锁，请稍后重试。');
+      });
+    return () => {
+      active = false;
+    };
   }, [
     announce,
     gate?.phase,
@@ -243,7 +269,9 @@ export function AsinImportPanel() {
           }
           setNotice(
             uncertain
-              ? '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。'
+              ? unknownId
+                ? '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。'
+                : '提交状态未确认，请按提交时间和文件到任务中心核实，避免重复导入。'
               : publicError(error),
           );
           if (error instanceof ApiError && error.status === 403)

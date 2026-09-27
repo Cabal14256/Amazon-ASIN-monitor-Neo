@@ -15,7 +15,6 @@ export function asinImportGateKey(owner: string) {
 export function readAsinImportGate(
   storage: Pick<Storage, 'getItem' | 'removeItem'>,
   owner: string,
-  now = Date.now(),
 ): AsinImportGate | null {
   if (!owner) return null;
   try {
@@ -31,8 +30,7 @@ export function readAsinImportGate(
         (typeof gate.taskId !== 'string' || !TASK_ID.test(gate.taskId))) ||
       (gate.phase === 'accepted' && gate.taskId === null) ||
       typeof gate.savedAt !== 'number' ||
-      !Number.isFinite(gate.savedAt) ||
-      gate.savedAt > now
+      !Number.isFinite(gate.savedAt)
     )
       throw new Error('invalid');
     return {
@@ -65,7 +63,7 @@ export function claimAsinImportGate(
   clock: () => number = Date.now,
 ): AsinImportClaim {
   const now = clock();
-  const existing = readAsinImportGate(storage, owner, now);
+  const existing = readAsinImportGate(storage, owner);
   if (existing) return { kind: 'blocked', gate: existing };
   const gate: AsinImportGate = {
     phase: 'sending',

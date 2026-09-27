@@ -27,12 +27,12 @@ describe('ASIN import retry gate', () => {
       taskId: null,
       savedAt: time,
     });
-    expect(readAsinImportGate(storage, 'user-a', time + 1000)).toEqual({
+    expect(readAsinImportGate(storage, 'user-a')).toEqual({
       phase: 'uncertain',
       taskId: null,
       savedAt: time,
     });
-    expect(readAsinImportGate(storage, 'user-b', time + 1000)).toBeNull();
+    expect(readAsinImportGate(storage, 'user-b')).toBeNull();
   });
 
   it('keeps an accepted task ID until explicit reconciliation and discards invalid entries', () => {
@@ -44,17 +44,26 @@ describe('ASIN import retry gate', () => {
       taskId,
       savedAt: time,
     });
-    expect(readAsinImportGate(storage, 'user-a', time + 1000)?.taskId).toBe(
+    expect(readAsinImportGate(storage, 'user-a')?.taskId).toBe(taskId);
+    expect(readAsinImportGate(storage, 'user-a')).toMatchObject({
+      phase: 'accepted',
       taskId,
-    );
-    expect(
-      readAsinImportGate(storage, 'user-a', time + 8 * 86400_000),
-    ).toMatchObject({ phase: 'accepted', taskId });
+    });
     storage.setItem(
       'neo:asin-import:user-a',
       JSON.stringify({ phase: 'accepted', taskId: '../unsafe', savedAt: time }),
     );
-    expect(readAsinImportGate(storage, 'user-a', time + 1000)).toBeNull();
+    expect(readAsinImportGate(storage, 'user-a')).toBeNull();
+  });
+
+  it('keeps a valid gate when the local clock is behind its saved timestamp', () => {
+    const storage = new MemoryStorage();
+    writeAsinImportGate(storage, 'user-a', {
+      phase: 'accepted',
+      taskId: 'b2b5894c-5802-4c9f-a1bd-9a20263d270a',
+      savedAt: Date.now() + 86400_000,
+    });
+    expect(readAsinImportGate(storage, 'user-a')?.phase).toBe('accepted');
   });
 
   it('refuses an upload when the browser cannot persist its retry gate', () => {
