@@ -214,6 +214,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           removeOnFail: false,
         });
       }
+      if (type === 'monitor') {
+        if (!userId) throw new Error('Monitor fixture requires an owner');
+        const createdAt = new Date().toISOString();
+        return (await queueFor(type)).add(
+          'primary-monitor',
+          {
+            taskId: id,
+            userId,
+            taskType: 'monitor',
+            taskSubType: 'primary',
+            createdAt,
+            expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+            countries: ['US'],
+          },
+          { jobId: id, removeOnComplete: false, removeOnFail: false },
+        );
+      }
       return (await queueFor(type)).add(
         'fixture',
         {
@@ -300,7 +317,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(await store.read(id)).toBeNull();
       },
     );
-    it.each(['variant-check', 'batch-check'] as const)(
+    it.each(['variant-check', 'batch-check', 'monitor'] as const)(
       'rejects an incomplete %s queue payload without recreating metadata',
       async (type) => {
         const id = randomUUID();
