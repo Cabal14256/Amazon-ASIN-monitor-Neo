@@ -9,6 +9,21 @@ const createdAt = '2026-09-27T00:00:00.000Z';
 const filename = 'backup_20260927-020000-abcdef01-primary.dump';
 const directories: string[] = [];
 
+async function writeMetadata(
+  directory: string,
+  sourceEngine: 'postgresql' | 'timescaledb',
+) {
+  await writeFile(
+    join(directory, `${filename}.meta.json`),
+    JSON.stringify({
+      version: 1,
+      filename,
+      target: 'primary',
+      sourceEngine,
+    }),
+  );
+}
+
 afterEach(async () => {
   await Promise.all(
     directories
@@ -45,6 +60,14 @@ async function fixture() {
     enqueue: vi.fn(async () => undefined),
   };
   const tasks = { openBackup: vi.fn(() => port) };
+  const pools = {
+    primaryPool: {
+      query: vi.fn(async () => ({ rows: [{ enabled: false }] })),
+    },
+    competitorPool: {
+      query: vi.fn(async () => ({ rows: [{ enabled: false }] })),
+    },
+  };
   const service = new BackupService(
     {
       AUTH_DATA_AUTHORITY: 'postgresql',
@@ -52,9 +75,10 @@ async function fixture() {
     } as never,
     repository as never,
     tasks as never,
-    { info: vi.fn(), error: vi.fn() } as never,
+    pools as never,
+    { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
   );
-  return { directory, unit, port, tasks, service };
+  return { directory, unit, port, tasks, pools, service };
 }
 
 describe('backup API service', () => {
@@ -103,6 +127,12 @@ describe('backup API service', () => {
     await writeFile(join(directory, filename), 'PGDMPfixture');
     await expect(
       service.restore(principal, { filename }),
+    ).rejects.toMatchObject({
+      status: 409,
+    });
+    await writeMetadata(directory, 'postgresql');
+    await expect(
+      service.restore(principal, { filename }),
     ).resolves.toMatchObject({
       status: 'pending',
     });
@@ -116,6 +146,40 @@ describe('backup API service', () => {
     unit.operatorPermissionCodes.mockResolvedValueOnce([]);
     await expect(service.create(principal, {})).rejects.toMatchObject({
       status: 403,
+    });
+    expect(port.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('marks Timescale artifacts unrestorable and rejects restore and selective dumps', async () => {
+    const { service, port, directory, pools } = await fixture();
+    pools.primaryPool.query.mockResolvedValue({ rows: [{ enabled: true }] });
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'timescaledb');
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, sourceEngine: 'timescaledb', restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(
+      service.create(principal, { tables: ['public.monitor_history'] }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(port.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('rejects a Timescale artifact even when the target is plain PostgreSQL', async () => {
+    const { service, port, directory } = await fixture();
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'timescaledb');
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({
+      status: 409,
     });
     expect(port.enqueue).not.toHaveBeenCalled();
   });

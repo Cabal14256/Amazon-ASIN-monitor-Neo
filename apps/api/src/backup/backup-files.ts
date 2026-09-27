@@ -1,7 +1,15 @@
-import { lstat, mkdir, open, readdir, unlink } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  unlink,
+} from 'node:fs/promises';
 import { basename, resolve, sep } from 'node:path';
 
 import {
+  backupArtifactMetadataSchema,
   backupFileSchema,
   type BackupFile,
   type BackupTarget,
@@ -52,6 +60,25 @@ export async function inspectBackupFile(path: string) {
   return details;
 }
 
+export async function readBackupMetadata(directory: string, filename: string) {
+  const target = backupFilenameTarget(filename);
+  try {
+    const path = `${safeBackupPath(directory, filename)}.meta.json`;
+    const details = await lstat(path);
+    if (!details.isFile() || details.size > 4096) return null;
+    const parsed = backupArtifactMetadataSchema.safeParse(
+      JSON.parse(await readFile(path, 'utf8')),
+    );
+    return parsed.success &&
+      parsed.data.filename === filename &&
+      parsed.data.target === target
+      ? parsed.data
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function listBackupFiles(
   directory: string,
 ): Promise<BackupFile[]> {
@@ -68,6 +95,7 @@ export async function listBackupFiles(
       continue;
     }
     const target = backupFilenameTarget(entry.name);
+    const metadata = await readBackupMetadata(directory, entry.name);
     files.push(
       backupFileSchema.parse({
         filename: entry.name,
@@ -75,6 +103,7 @@ export async function listBackupFiles(
         createdAt: details.birthtime.toISOString(),
         target,
         format: 'custom',
+        sourceEngine: metadata?.sourceEngine,
       }),
     );
   }
@@ -87,5 +116,9 @@ export async function deleteBackupFile(
   directory: string,
   filename: string,
 ): Promise<void> {
-  await unlink(safeBackupPath(directory, filename));
+  const path = safeBackupPath(directory, filename);
+  await unlink(path);
+  await unlink(`${path}.meta.json`).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
 }

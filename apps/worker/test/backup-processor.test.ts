@@ -13,6 +13,7 @@ import {
   commandEnvironment,
   createBackupProcessor,
   processCommand,
+  restoreCommandArgs,
 } from '../src/backup-processor';
 
 const data: BackupJobData = {
@@ -170,5 +171,15 @@ describe('backup command boundary', () => {
     const withoutPassword = commandEnvironment('postgresql://localhost/main');
     expect(withoutPassword.PGPASSWORD).toBeUndefined();
     expect(withoutPassword.PGPORT).toBeUndefined();
+  });
+
+  it('passes the database name to pg_restore without putting credentials in argv', () => {
+    const environment = commandEnvironment(
+      'postgresql://restore_user:private_password@localhost/backup_ci',
+    );
+    const args = restoreCommandArgs(environment.PGDATABASE!, '/tmp/test.dump');
+    expect(args).toContain('--dbname=backup_ci');
+    expect(args).toContain('--single-transaction');
+    expect(args.join(' ')).not.toContain('private_password');
   });
 });

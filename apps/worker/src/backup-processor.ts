@@ -1,5 +1,6 @@
 import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
 import {
+  backupArtifactMetadataSchema,
   backupJobDataSchema,
   type BackupJobData,
 } from '@asin-monitor/contracts';
@@ -17,9 +18,11 @@ import {
   lstat,
   mkdir,
   open,
+  readFile,
   rename,
   stat,
   unlink,
+  writeFile,
 } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { logger } from './logger';
@@ -114,6 +117,21 @@ function commandPath(value: string | undefined, fallback: string): string {
 
 function validTable(value: string): boolean {
   return /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?$/.test(value);
+}
+
+export function restoreCommandArgs(database: string, input: string): string[] {
+  if (!database || database.includes('\0'))
+    throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
+  return [
+    '--exit-on-error',
+    '--single-transaction',
+    '--clean',
+    '--if-exists',
+    '--no-owner',
+    '--no-acl',
+    `--dbname=${database}`,
+    input,
+  ];
 }
 
 export function processCommand(
@@ -248,9 +266,67 @@ async function healthCheck(env: Env, target: BackupJobData['target']) {
     statement_timeout: 2000,
   });
   try {
-    await pool.query('SELECT 1');
+    const expected = commandEnvironment(targetUrl(env, target)).PGDATABASE;
+    const result = await pool.query('SELECT current_database() AS database');
+    if (!expected || result.rows[0]?.database !== expected)
+      throw new BackupCommandError('BACKUP_TARGET_MISMATCH');
   } finally {
     await pool.end();
+  }
+}
+
+/** Session-level advisory lock shared by every Neo backup/restore worker. */
+export async function acquireBackupTargetLock(
+  env: Env,
+  target: BackupJobData['target'],
+) {
+  const pool = createPgPool(targetUrl(env, target), {
+    max: 1,
+    connectionTimeoutMillis: Math.min(
+      env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+      2000,
+    ),
+    statement_timeout: 2000,
+  });
+  try {
+    const client = await pool.connect();
+    try {
+      const acquired = await client.query(
+        'SELECT pg_try_advisory_lock(1313165122, 161) AS acquired',
+      );
+      if (acquired.rows[0]?.acquired !== true)
+        throw new BackupCommandError('BACKUP_TARGET_BUSY');
+      const extension = await client.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS enabled",
+      );
+      const lockedClient = client;
+      let released = false;
+      return {
+        hasTimescale: extension.rows[0]?.enabled === true,
+        async ensureHeld() {
+          if (released) throw new BackupCommandError('BACKUP_TARGET_LOCK_LOST');
+          await lockedClient.query('SELECT 1');
+        },
+        async release() {
+          if (released) return;
+          released = true;
+          try {
+            await lockedClient.query(
+              'SELECT pg_advisory_unlock(1313165122, 161)',
+            );
+          } finally {
+            lockedClient.release();
+            await pool.end();
+          }
+        },
+      };
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+  } catch (error) {
+    await pool.end();
+    throw error;
   }
 }
 
@@ -313,6 +389,10 @@ export function createBackupProcessor(
     };
     let progressBytes = 0;
     let artifactPath: string | undefined;
+    let metadataPartialPath: string | undefined;
+    let targetLock:
+      | Awaited<ReturnType<typeof acquireBackupTargetLock>>
+      | undefined;
     const progress = async (value: number, message: string) => {
       await check();
       await mutate({ kind: 'progress', progress: value, message });
@@ -323,6 +403,16 @@ export function createBackupProcessor(
       if (initial.startedAt || initial.status === 'processing')
         throw new BackupCommandError('BACKUP_TASK_INTERRUPTED');
       await mutate({ kind: 'processing', message: '备份任务开始处理' });
+      const lock = await acquireBackupTargetLock(options.env, data.target);
+      targetLock = lock;
+      if (data.operation === 'restore' && lock.hasTimescale)
+        throw new BackupCommandError('BACKUP_TIMESCALE_RESTORE_UNSUPPORTED');
+      if (
+        data.operation === 'create' &&
+        data.params.tables?.length &&
+        lock.hasTimescale
+      )
+        throw new BackupCommandError('BACKUP_TIMESCALE_TABLE_DUMP_UNSUPPORTED');
       const directory = resolve(getBackupStorageDirectory(options.env));
       await mkdir(directory, { recursive: true });
       const databaseUrl = targetUrl(options.env, data.target);
@@ -375,6 +465,7 @@ export function createBackupProcessor(
             signal: controller.signal,
             checkpoint: async () => {
               await check();
+              await lock.ensureHeld();
             },
             onProgress: async (bytes) => {
               progressBytes = bytes;
@@ -386,12 +477,27 @@ export function createBackupProcessor(
           },
         );
         const details = await assertCustomDump(partial, maxBytes);
+        await lock.ensureHeld();
         await chmod(partial, 0o600);
         await progress(100, '备份完成');
         await rename(partial, output);
         // A valid dump is now discoverable. Keep it for operator reconciliation
         // if the following Redis completion acknowledgement is ambiguous.
         artifactPath = undefined;
+        const metadata = backupArtifactMetadataSchema.parse({
+          version: 1,
+          filename,
+          target: data.target,
+          sourceEngine: lock.hasTimescale ? 'timescaledb' : 'postgresql',
+        });
+        metadataPartialPath = `${output}.meta.json.partial`;
+        await writeFile(metadataPartialPath, JSON.stringify(metadata), {
+          encoding: 'utf8',
+          flag: 'wx',
+          mode: 0o600,
+        });
+        await rename(metadataPartialPath, `${output}.meta.json`);
+        metadataPartialPath = undefined;
         const result = {
           operation: 'create' as const,
           filename,
@@ -399,6 +505,8 @@ export function createBackupProcessor(
           createdAt: details.birthtime.toISOString(),
           target: data.target,
           format: 'custom' as const,
+          sourceEngine: metadata.sourceEngine,
+          restoreSupported: !lock.hasTimescale,
         };
         const completed = await mutate({
           kind: 'completed',
@@ -423,18 +531,26 @@ export function createBackupProcessor(
       const input = resolve(directory, basename(filename));
       artifactPath = undefined;
       await assertCustomDump(input, maxBytes);
+      let metadata;
+      try {
+        const sidecar = `${input}.meta.json`;
+        const details = await lstat(sidecar);
+        if (!details.isFile() || details.size > 4096)
+          throw new Error('BACKUP_METADATA_INVALID');
+        metadata = backupArtifactMetadataSchema.parse(
+          JSON.parse(await readFile(sidecar, 'utf8')),
+        );
+      } catch {
+        throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
+      }
+      if (metadata.filename !== filename || metadata.target !== data.target)
+        throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
+      if (metadata.sourceEngine !== 'postgresql')
+        throw new BackupCommandError('BACKUP_TIMESCALE_RESTORE_UNSUPPORTED');
       await progress(5, '正在恢复 PostgreSQL 备份');
       await processCommand(
         commandPath(options.env.PG_RESTORE_PATH, 'pg_restore'),
-        [
-          '--exit-on-error',
-          '--single-transaction',
-          '--clean',
-          '--if-exists',
-          '--no-owner',
-          '--no-acl',
-          input,
-        ],
+        restoreCommandArgs(environment.PGDATABASE!, input),
         environment,
         {
           timeoutMs,
@@ -442,12 +558,14 @@ export function createBackupProcessor(
           signal: controller.signal,
           checkpoint: async () => {
             await check();
+            await lock.ensureHeld();
           },
           onProgress: async () => {
             await progress(50, '正在执行 PostgreSQL 恢复');
           },
         },
       );
+      await lock.ensureHeld();
       await healthCheck(options.env, data.target);
       await progress(100, '恢复完成');
       const completed = await mutate({
@@ -465,6 +583,8 @@ export function createBackupProcessor(
       return completed.result;
     } catch (error) {
       if (artifactPath) await unlink(artifactPath).catch(() => undefined);
+      if (metadataPartialPath)
+        await unlink(metadataPartialPath).catch(() => undefined);
       if (error instanceof TaskStopped) {
         if (error.state.status === 'cancelled') return cancelledResult;
         if (error.state.status === 'completed') return error.state.result;
@@ -477,7 +597,20 @@ export function createBackupProcessor(
         }
         throw new UnrecoverableError('备份任务已停止');
       }
-      const message = '备份任务失败，请核实数据库状态和备份文件';
+      const message =
+        error instanceof BackupCommandError &&
+        error.reason === 'BACKUP_TIMESCALE_RESTORE_UNSUPPORTED'
+          ? 'TimescaleDB 不支持通过 Neo 接口原位恢复，请在隔离库按运行手册恢复'
+          : error instanceof BackupCommandError &&
+            error.reason === 'BACKUP_TIMESCALE_TABLE_DUMP_UNSUPPORTED'
+          ? 'TimescaleDB 不支持通过 Neo 接口按表备份，请创建完整数据库备份'
+          : error instanceof BackupCommandError &&
+            error.reason === 'BACKUP_TARGET_BUSY'
+          ? '目标数据库正在执行备份或恢复，请稍后重试'
+          : error instanceof BackupCommandError &&
+            error.reason === 'BACKUP_METADATA_UNVERIFIED'
+          ? '备份文件来源未验证，禁止通过 Neo 自动恢复'
+          : '备份任务失败，请核实数据库状态和备份文件';
       let cancelled = false;
       try {
         await options.assertJobLock(job, token);
@@ -499,6 +632,13 @@ export function createBackupProcessor(
       if (cancelled) return cancelledResult;
       throw new UnrecoverableError(message);
     } finally {
+      try {
+        await targetLock?.release();
+      } catch {
+        log.warn('备份目标数据库锁释放未确认', {
+          reason: 'backup_target_unlock_unconfirmed',
+        });
+      }
       options.shutdownSignal.removeEventListener('abort', shutdown);
     }
   };

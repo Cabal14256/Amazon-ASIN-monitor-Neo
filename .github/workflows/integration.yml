@@ -326,6 +326,12 @@ jobs:
           pnpm --filter @asin-monitor/worker build
           pnpm --filter @asin-monitor/worker exec vitest run test/auth-maintenance.integration.test.ts test/auth-maintenance-entry.integration.test.ts --no-file-parallelism
 
+      - name: Install PostgreSQL client for real backup and restore checks
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+
+      - name: Verify Neo backup commands against isolated PostgreSQL and TimescaleDB
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-pipeline.integration.test.ts
+
       - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
         run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts
 

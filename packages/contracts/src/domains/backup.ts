@@ -23,6 +23,7 @@ export type BackupTarget = z.infer<typeof backupTargetSchema>;
 export const BACKUP_ARTIFACT_FORMAT = 'custom' as const;
 export const backupArtifactFormatSchema = z.literal(BACKUP_ARTIFACT_FORMAT);
 export type BackupArtifactFormat = z.infer<typeof backupArtifactFormatSchema>;
+export const backupSourceEngineSchema = z.enum(['postgresql', 'timescaledb']);
 
 /**
  * Only final artifacts emitted by the Neo worker are addressable. This also
@@ -39,6 +40,17 @@ export const backupFilenameSchema = z
   );
 export type BackupFilename = z.infer<typeof backupFilenameSchema>;
 
+/** Sidecar written atomically with each new dump. Missing metadata is unsafe
+ * for automated restore, including artifacts from an older Neo deployment. */
+export const backupArtifactMetadataSchema = z
+  .object({
+    version: z.literal(1),
+    filename: backupFilenameSchema,
+    target: backupTargetSchema,
+    sourceEngine: backupSourceEngineSchema,
+  })
+  .strict();
+
 const backupTimeSchema = z
   .string()
   .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'backupTime 必须为 HH:mm');
@@ -52,6 +64,9 @@ export const backupFileSchema = z
     target: backupTargetSchema,
     size: z.number().int().nonnegative(),
     createdAt: z.string(),
+    // False until the API verifies that the target is plain PostgreSQL.
+    restoreSupported: z.boolean().default(false),
+    sourceEngine: backupSourceEngineSchema.optional(),
   })
   .passthrough();
 export type BackupFile = z.infer<typeof backupFileSchema>;
@@ -248,6 +263,8 @@ export const backupTaskResultDataSchema = z
     files: z.unknown().optional(),
     result: z.unknown().optional(),
     message: z.string().optional(),
+    restoreSupported: z.boolean().optional(),
+    sourceEngine: backupSourceEngineSchema.optional(),
   })
   .passthrough();
 export const backupTaskResultSchema = resultSchema(backupTaskResultDataSchema);

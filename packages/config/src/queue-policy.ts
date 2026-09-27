@@ -51,6 +51,9 @@ const POLICIES: Record<QueueName, QueuePolicy> = {
   },
   backup: {
     ...standard,
+    // Restore is destructive; automatic redelivery cannot prove the prior
+    // attempt left no changes. Operators inspect the task before resubmitting.
+    attempts: 1,
     duration: 2000,
     concurrencyKey: 'BACKUP_QUEUE_WORKER_CONCURRENCY',
   },

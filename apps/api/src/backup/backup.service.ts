@@ -5,6 +5,7 @@ import {
   restoreBackupRequestSchema,
   saveBackupConfigRequestSchema,
   type BackupJobData,
+  type BackupTarget,
 } from '@asin-monitor/contracts';
 import {
   BackupConfigError,
@@ -21,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
+import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
 import {
@@ -28,6 +30,7 @@ import {
   deleteBackupFile,
   inspectBackupFile,
   listBackupFiles,
+  readBackupMetadata,
   resolveBackupPath,
 } from './backup-files';
 
@@ -50,6 +53,8 @@ export class BackupService implements OnModuleDestroy {
     @Inject(BACKUP_CONFIG_REPOSITORY)
     private readonly configs: BackupConfigRepositoryPort,
     @Inject(TaskQueryRuntime) private readonly tasks: TaskQueryRuntime,
+    @Inject(ApplicationDatabasePools)
+    private readonly pools: ApplicationDatabasePools,
     @Inject(AppLogger) private readonly logger: AppLogger,
   ) {}
 
@@ -61,6 +66,17 @@ export class BackupService implements OnModuleDestroy {
     return this.configs.transaction(async (unit) => {
       await authorizeAdministration(unit, principal, 'settings:write');
     });
+  }
+
+  private async hasTimescale(target: BackupTarget): Promise<boolean> {
+    const pool =
+      target === 'primary' ? this.pools.primaryPool : this.pools.competitorPool;
+    const result = await pool.query(
+      "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS enabled",
+    );
+    if (typeof result.rows[0]?.enabled !== 'boolean')
+      throw new Error('BACKUP_CAPABILITY_UNCONFIRMED');
+    return result.rows[0].enabled;
   }
 
   private async run<T>(
@@ -144,6 +160,11 @@ export class BackupService implements OnModuleDestroy {
       if (input.useAsync === false || input.useAsync === 'false')
         return fail(400, 'Neo 备份必须使用异步任务');
       await this.authorize(principal);
+      if (input.tables?.length && (await this.hasTimescale(target)))
+        return fail(
+          409,
+          'TimescaleDB 不支持通过 Neo 接口按表备份，请创建完整数据库备份',
+        );
       const task = await this.enqueue(principal, {
         taskType: 'backup',
         taskSubType: 'create',
@@ -183,6 +204,20 @@ export class BackupService implements OnModuleDestroy {
       } catch {
         return fail(404, '备份文件不存在或格式无效');
       }
+      const metadata = await readBackupMetadata(
+        this.directory(),
+        input.filename,
+      );
+      if (metadata?.sourceEngine !== 'postgresql')
+        return fail(
+          409,
+          '备份文件来源未验证或包含 TimescaleDB 数据，禁止通过 Neo 自动恢复',
+        );
+      if (await this.hasTimescale(target))
+        return fail(
+          409,
+          'TimescaleDB 不支持通过 Neo 接口原位恢复，请在隔离库按运行手册恢复',
+        );
       const task = await this.enqueue(principal, {
         taskType: 'backup',
         taskSubType: 'restore',
@@ -200,7 +235,27 @@ export class BackupService implements OnModuleDestroy {
   list(principal: AuthPrincipal) {
     return this.run('list', async () => {
       await this.authorize(principal);
-      return listBackupFiles(this.directory());
+      const files = await listBackupFiles(this.directory());
+      const [primaryTimescale, competitorTimescale] = await Promise.allSettled([
+        this.hasTimescale('primary'),
+        this.hasTimescale('competitor'),
+      ]);
+      if (
+        primaryTimescale.status === 'rejected' ||
+        competitorTimescale.status === 'rejected'
+      )
+        this.logger.warn('备份恢复能力未确认', 'BackupService', {
+          reason: 'backup_restore_capability_unconfirmed',
+        });
+      return files.map((file) => ({
+        ...file,
+        restoreSupported:
+          file.sourceEngine === 'postgresql' &&
+          (file.target === 'primary'
+            ? primaryTimescale.status === 'fulfilled' && !primaryTimescale.value
+            : competitorTimescale.status === 'fulfilled' &&
+              !competitorTimescale.value),
+      }));
     });
   }
 
