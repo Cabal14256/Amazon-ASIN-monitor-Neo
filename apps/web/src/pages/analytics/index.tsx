@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { skipToken, useQuery } from '@tanstack/react-query';
 import {
   BarChart3,
   Clock3,
@@ -7,7 +7,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -36,6 +36,7 @@ import {
   getStatisticsByVariantGroup,
 } from '../../services/monitor-analytics';
 import {
+  analyticsCountryQuery,
   analyticsError,
   applyAnalyticsFilters,
   count,
@@ -46,10 +47,16 @@ import {
   integerMetric,
   latestPeakIntervals,
   metric,
+  monthlyRowsInRange,
+  overviewStatisticsQuery,
+  peakHoursQuery,
   percent,
+  periodDetailsQuery,
   rowText,
   selectOverviewSummary,
+  sumAbnormalSeriesByPeriod,
   type AnalyticsFilters,
+  type PeriodIdentity,
 } from './analytics-data';
 
 type Tab = 'overview' | 'rankings' | 'peak';
@@ -227,13 +234,12 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
     startTime: filters.startTime,
     endTime: filters.endTime,
   };
-  const query = {
-    country: filters.country || undefined,
-    ...range,
-  };
+  const query = analyticsCountryQuery(filters);
+  const statisticsQuery = overviewStatisticsQuery(filters);
   const stats = useQuery({
-    queryKey: ['analytics', 'statistics', query],
-    queryFn: ({ signal }) => getMonitorStatistics(runtime.http, query, signal),
+    queryKey: ['analytics', 'statistics', statisticsQuery],
+    queryFn: ({ signal }) =>
+      getMonitorStatistics(runtime.http, statisticsQuery, signal),
   });
   const byTime = useQuery({
     queryKey: ['analytics', 'by-time', filters],
@@ -343,10 +349,10 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
               {[
                 ['高峰时长', hours(allCountries.data.peakDurationHours)],
                 ['低峰时长', hours(allCountries.data.lowDurationHours)],
-                ['高峰异常率', percent(allCountries.data.globalPeakRate)],
-                ['低峰异常率', percent(allCountries.data.globalLowRate)],
-                ['ASIN 覆盖率', percent(allCountries.data.ratioAllAsin)],
-                ['时间覆盖率', percent(allCountries.data.ratioAllTime)],
+                ['高峰异常时长占比', percent(allCountries.data.globalPeakRate)],
+                ['低峰异常时长占比', percent(allCountries.data.globalLowRate)],
+                ['ASIN 平均异常率', percent(allCountries.data.ratioAllAsin)],
+                ['异常时长占比', percent(allCountries.data.ratioAllTime)],
               ].map(([label, value]) => (
                 <div key={label}>
                   <dt className="text-xs text-muted-foreground">{label}</dt>
@@ -369,7 +375,7 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
               rowText(row, 'region', 'regionCode'),
               hours(row.totalDurationHours),
               hours(row.abnormalDurationHours),
-              percent(row.globalPeakRate ?? row.ratioAllTime),
+              percent(row.ratioAllTime),
             ])}
           />
         </QueryPanel>
@@ -380,11 +386,16 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
 
 function Rankings({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
-  const query = {
-    country: filters.country || undefined,
-    startTime: filters.startTime,
-    endTime: filters.endTime,
-  };
+  const query = analyticsCountryQuery(filters);
+  const [selection, setSelection] = useState<{
+    filters: AnalyticsFilters;
+    period: PeriodIdentity;
+  } | null>(null);
+  const selectedPeriod =
+    selection?.filters === filters ? selection.period : null;
+  const detailParams = selectedPeriod
+    ? periodDetailsQuery(filters, selectedPeriod)
+    : null;
   const asinCountry = useQuery({
     queryKey: ['analytics', 'asin-by-country', filters],
     queryFn: ({ signal }) =>
@@ -413,14 +424,21 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
     queryFn: ({ signal }) =>
       getPeriodSummary(
         runtime.http,
-        { ...query, current: 1, pageSize: 20 },
+        {
+          ...query,
+          timeSlotGranularity: filters.groupBy,
+          current: 1,
+          pageSize: 20,
+        },
         signal,
       ),
   });
   const details = useQuery({
-    queryKey: ['analytics', 'period-summary-details', filters],
-    queryFn: ({ signal }) =>
-      getPeriodSummaryDetails(runtime.http, query, signal),
+    queryKey: ['analytics', 'period-summary-details', detailParams],
+    queryFn: detailParams
+      ? ({ signal }) =>
+          getPeriodSummaryDetails(runtime.http, detailParams, signal)
+      : skipToken,
   });
   return (
     <div className="space-y-5">
@@ -491,51 +509,69 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
           retry={() => void periods.refetch()}
         >
           <Table
-            headers={['国家', '站点', '品牌', '异常时长']}
+            headers={['国家', '站点', '品牌', '异常时长', '时间槽']}
             rows={(periods.data?.list ?? []).map((row) => [
               rowText(row, 'country'),
               rowText(row, 'site'),
               rowText(row, 'brand'),
               hours(row.abnormalDurationHours),
+              <Button
+                key="details"
+                variant="secondary"
+                size="small"
+                onClick={() => setSelection({ filters, period: row })}
+              >
+                查看明细
+              </Button>,
             ])}
           />
         </QueryPanel>
       </div>
-      <QueryPanel
-        title="周期时间槽明细"
-        description="用于定位周期内异常集中出现的时段。"
-        pending={details.isPending}
-        error={details.error}
-        retry={() => void details.refetch()}
-      >
-        <Table
-          headers={['时间槽', '总时长', '异常时长', '异常率']}
-          rows={(details.data ?? [])
-            .slice(0, 50)
-            .map((row) => [
-              rowText(row, 'timeSlot', 'time_slot'),
-              hours(row.totalDurationHours),
-              hours(row.abnormalDurationHours),
-              percent(row.ratioAllTime),
-            ])}
-        />
-      </QueryPanel>
+      {selectedPeriod ? (
+        <QueryPanel
+          title="周期时间槽明细"
+          description={`${selectedPeriod.country} / ${
+            selectedPeriod.site || '无站点'
+          } / ${selectedPeriod.brand || '无品牌'} · ${filters.groupBy} 粒度`}
+          pending={details.isPending}
+          error={details.error}
+          retry={() => void details.refetch()}
+        >
+          <Table
+            headers={['时间槽', '总时长', '异常时长', '异常率']}
+            rows={(details.data ?? [])
+              .slice(0, 50)
+              .map((row) => [
+                rowText(row, 'timeSlot', 'time_slot'),
+                hours(row.totalDurationHours),
+                hours(row.abnormalDurationHours),
+                percent(row.ratioAllTime),
+              ])}
+          />
+        </QueryPanel>
+      ) : (
+        <Card>
+          <CardHeader title="周期时间槽明细" />
+          <CardContent>
+            <EmptyState
+              title="选择一条周期摘要"
+              description="点击上表中的“查看明细”，按该国家、站点和品牌读取时间槽。"
+            />
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
 
 function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
-  const country = filters.country || 'US';
-  const query = {
-    country,
-    startTime: filters.startTime,
-    endTime: filters.endTime,
-  };
+  const query = analyticsCountryQuery(filters);
+  const peakQuery = peakHoursQuery(filters);
   const peak = useQuery({
-    queryKey: ['analytics', 'peak-hours', query],
+    queryKey: ['analytics', 'peak-hours', peakQuery],
     queryFn: ({ signal }) =>
-      getPeakHoursStatistics(runtime.http, query, signal),
+      getPeakHoursStatistics(runtime.http, peakQuery, signal),
   });
   const month = useQuery({
     queryKey: ['analytics', 'monthly', filters],
@@ -566,8 +602,19 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
       ),
   });
   const peakData = peak.data;
-  const monthlyRows = month.data?.rows ?? [];
-  const abnormalRows = abnormal.data?.data ?? [];
+  const monthlyRows = useMemo(
+    () =>
+      monthlyRowsInRange(
+        month.data?.rows ?? [],
+        filters.startTime,
+        filters.endTime,
+      ),
+    [month.data?.rows, filters.startTime, filters.endTime],
+  );
+  const abnormalRows = useMemo(
+    () => sumAbnormalSeriesByPeriod(abnormal.data?.data ?? []),
+    [abnormal.data?.data],
+  );
   const peakMetrics: { label: string; value: string; Icon: typeof Clock3 }[] =
     peakData
       ? [
@@ -597,7 +644,7 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
     <div className="space-y-5">
       <div className="grid gap-5 xl:grid-cols-2">
         <QueryPanel
-          title={`${country} 高峰与低峰`}
+          title={`${peakQuery.country} 高峰与低峰`}
           description="按国家和上海本地时间计算高峰差异。"
           pending={peak.isPending}
           error={peak.error}
@@ -626,7 +673,7 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
           retry={() => void abnormal.refetch()}
         >
           <Bars
-            rows={abnormalRows as Record<string, unknown>[]}
+            rows={abnormalRows}
             label={(row) => dateLabel(row.timePeriod)}
             value={(row) => metric(row.abnormalDuration)}
             valueLabel={(row) =>

@@ -19,6 +19,85 @@ export type AnalyticsFilters = {
   groupBy: 'hour' | 'day' | 'week' | 'month';
 };
 
+export type PeriodIdentity = { country: string; site: string; brand: string };
+
+export type AbnormalSeriesPoint = {
+  timePeriod: string;
+  abnormalDuration: number;
+  totalDuration: number;
+};
+
+export function analyticsCountryQuery(filters: AnalyticsFilters) {
+  return {
+    country: filters.country || undefined,
+    startTime: filters.startTime,
+    endTime: filters.endTime,
+  };
+}
+
+export function overviewStatisticsQuery(filters: AnalyticsFilters) {
+  return { ...analyticsCountryQuery(filters), checkType: 'ASIN' };
+}
+
+export function peakHoursQuery(filters: AnalyticsFilters) {
+  return {
+    ...analyticsCountryQuery(filters),
+    country: filters.country || 'US',
+  };
+}
+
+export function periodDetailsQuery(
+  filters: AnalyticsFilters,
+  period: PeriodIdentity,
+) {
+  return {
+    country: period.country,
+    site: period.site,
+    brand: period.brand,
+    startTime: filters.startTime,
+    endTime: filters.endTime,
+    timeSlotGranularity: filters.groupBy,
+  };
+}
+
+export function sumAbnormalSeriesByPeriod(
+  rows: readonly AbnormalSeriesPoint[],
+) {
+  const periods = new Map<
+    string,
+    { timePeriod: string; abnormalDuration: number; totalDuration: number }
+  >();
+  for (const row of rows) {
+    const period = periods.get(row.timePeriod) ?? {
+      timePeriod: row.timePeriod,
+      abnormalDuration: 0,
+      totalDuration: 0,
+    };
+    period.abnormalDuration += row.abnormalDuration;
+    period.totalDuration += row.totalDuration;
+    periods.set(row.timePeriod, period);
+  }
+  return [...periods.values()]
+    .sort((left, right) => left.timePeriod.localeCompare(right.timePeriod))
+    .map((period) => ({
+      ...period,
+      abnormalRatio:
+        period.totalDuration > 0
+          ? (period.abnormalDuration / period.totalDuration) * 100
+          : 0,
+    }));
+}
+
+export function monthlyRowsInRange<T extends { date: string }>(
+  rows: readonly T[],
+  startTime: string,
+  endTime: string,
+) {
+  const startDay = startTime.slice(0, 10);
+  const endDay = endTime.slice(0, 10);
+  return rows.filter((row) => row.date >= startDay && row.date <= endDay);
+}
+
 export function initialAnalyticsFilters(): AnalyticsFilters {
   const endTime = formatBeijingNow('YYYY-MM-DDTHH:mm');
   const start = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
