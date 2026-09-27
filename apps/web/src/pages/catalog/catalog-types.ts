@@ -211,6 +211,7 @@ export interface CompetitorCatalogWrites {
   deleteGroup: (
     http: Pick<HttpClient, 'request'>,
     id: string,
+    expectedChildIds: string[],
   ) => Promise<unknown>;
   createAsin: (
     http: Pick<HttpClient, 'request'>,

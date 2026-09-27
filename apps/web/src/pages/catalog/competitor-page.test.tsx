@@ -42,6 +42,7 @@ const listData = (group: typeof original) => ({
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  Reflect.deleteProperty(window.navigator, 'locks');
 });
 
 function fixture(
@@ -50,6 +51,28 @@ function fixture(
   deleteGroup?: ReturnType<typeof vi.fn>,
   createAsin?: ReturnType<typeof vi.fn>,
 ) {
+  let prior = Promise.resolve();
+  Object.defineProperty(window.navigator, 'locks', {
+    configurable: true,
+    value: {
+      request: async <T,>(
+        _name: string,
+        callback: () => Promise<T> | T,
+      ): Promise<T> => {
+        const before = prior;
+        let release!: () => void;
+        prior = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await before;
+        try {
+          return await callback();
+        } finally {
+          release();
+        }
+      },
+    },
+  });
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -141,6 +164,60 @@ async function create() {
 }
 
 describe('competitor catalog refresh and authority transitions', () => {
+  it('persists a provisional create gate before dispatch and restores it after a page reload', async () => {
+    const list = vi.fn().mockResolvedValue(listData(original));
+    const createGroup = vi.fn(
+      () => new Promise<typeof original>(() => undefined),
+    );
+    const first = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    await create();
+    await waitFor(() => expect(createGroup).toHaveBeenCalledOnce());
+    expect(
+      window.localStorage.getItem(catalogSafetyKey('operator', 'competitor')),
+    ).toContain('createUncertain');
+    first.unmount();
+    first.queryClient.clear();
+    const second = fixture(list, createGroup);
+    expect(screen.getByRole('alert').textContent).toContain('写入结果未确认');
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    second.queryClient.clear();
+  });
+
+  it('does not clear another tab uncertain create when an earlier write settles', async () => {
+    let finishWrite!: (value: typeof original) => void;
+    const createGroup = vi.fn(
+      () =>
+        new Promise<typeof original>((resolve) => {
+          finishWrite = resolve;
+        }),
+    );
+    const list = vi.fn().mockResolvedValue(listData(original));
+    const f = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    await create();
+    await waitFor(() => expect(createGroup).toHaveBeenCalledOnce());
+    const otherGate = {
+      phase: 'refresh',
+      message: null,
+      detailId: null,
+      createUncertain: true,
+      operationId: 'other-tab',
+    };
+    window.localStorage.setItem(
+      catalogSafetyKey('operator', 'competitor'),
+      JSON.stringify(otherGate),
+    );
+    finishWrite(original);
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    expect(
+      window.localStorage.getItem(catalogSafetyKey('operator', 'competitor')),
+    ).toBe(JSON.stringify(otherGate));
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    f.queryClient.clear();
+  });
   it('clears stale state on a cross-tab gate and only unlocks after a successful reread', async () => {
     const list = vi
       .fn()

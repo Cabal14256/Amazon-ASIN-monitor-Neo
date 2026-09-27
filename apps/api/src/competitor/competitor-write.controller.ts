@@ -65,12 +65,13 @@ export class CompetitorWriteController {
   async deleteGroup(
     @Req() request: FastifyRequest,
     @Param('groupId') id: string,
+    @Body() body: unknown,
   ) {
     this.assertOrigin(request);
     return {
       success: true,
       errorCode: 0,
-      data: await this.service.deleteGroup(request.auth!, id),
+      data: await this.service.deleteGroup(request.auth!, id, body),
     };
   }
   @Delete('asins/:asinId')

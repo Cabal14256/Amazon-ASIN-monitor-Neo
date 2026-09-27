@@ -4,8 +4,9 @@ export type CatalogSafetyGate =
       message: string | null;
       detailId: string | null;
       createUncertain: boolean;
+      operationId?: string;
     }
-  | { phase: 'inspection' };
+  | { phase: 'inspection'; operationId?: string };
 
 export function catalogSafetyKey(owner: string, source: string): string {
   return `neo:catalog-write-safety:${encodeURIComponent(
@@ -42,7 +43,18 @@ export function readCatalogSafetyGate(
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('invalid');
     const gate = value as Record<string, unknown>;
-    if (gate.phase === 'inspection') return { phase: 'inspection' };
+    if (
+      gate.operationId !== undefined &&
+      (typeof gate.operationId !== 'string' ||
+        !/^[a-z0-9-]{1,80}$/i.test(gate.operationId))
+    )
+      throw new Error('invalid');
+    const operationId =
+      typeof gate.operationId === 'string'
+        ? { operationId: gate.operationId }
+        : {};
+    if (gate.phase === 'inspection')
+      return { phase: 'inspection', ...operationId };
     if (
       gate.phase !== 'refresh' ||
       (gate.message !== null &&
@@ -57,6 +69,7 @@ export function readCatalogSafetyGate(
       message: gate.message,
       detailId: gate.detailId,
       createUncertain: gate.createUncertain,
+      ...operationId,
     };
   } catch {
     try {

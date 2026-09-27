@@ -232,3 +232,16 @@ export function singleAsinCode(value: string): string | null {
   const code = value.trim().toUpperCase();
   return /^[A-Z0-9]{10}$/.test(code) ? code : null;
 }
+
+export function competitorAsinCode(value: string): string | null {
+  if (
+    value.length > 40 ||
+    [...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || code === 127;
+    })
+  )
+    return null;
+  const code = value.trim().toUpperCase();
+  return code && code.length <= 40 && [...code].length <= 20 ? code : null;
+}

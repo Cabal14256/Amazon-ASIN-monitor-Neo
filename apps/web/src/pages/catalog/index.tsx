@@ -840,14 +840,66 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     },
     gcTime: Infinity,
   }).data;
-  const setSafety = (next: CatalogSafetyGate | null) => {
+  const setSafety = (
+    next: CatalogSafetyGate | null,
+    expected?: CatalogSafetyGate,
+  ): boolean => {
     const stored = catalogSafetyStorage();
+    const current = stored
+      ? readCatalogSafetyGate(stored, ownerId, config.id)
+      : null;
+    if (expected && JSON.stringify(current) !== JSON.stringify(expected)) {
+      runtime.queryClient.setQueryData(
+        safetyKey,
+        current ?? { phase: 'inspection' },
+      );
+      return false;
+    }
     const saved =
       stored && writeCatalogSafetyGate(stored, ownerId, config.id, next);
     runtime.queryClient.setQueryData(
       safetyKey,
       saved ? next : { phase: 'inspection' },
     );
+    return Boolean(saved);
+  };
+  const runWithCatalogLock = async (work: () => Promise<void>) => {
+    if (!navigator.locks)
+      throw new ApiError(
+        'INVALID_INPUT',
+        '浏览器不支持安全的跨标签写入锁，请使用支持 Web Locks 的浏览器。',
+      );
+    await navigator.locks.request(catalogSafetyKey(ownerId, config.id), work);
+  };
+  const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {
+    const stored = catalogSafetyStorage();
+    if (!stored)
+      throw new ApiError(
+        'INVALID_INPUT',
+        '浏览器本地存储不可用，无法安全提交。',
+      );
+    const existing = readCatalogSafetyGate(stored, ownerId, config.id);
+    if (existing) {
+      runtime.queryClient.setQueryData(safetyKey, existing);
+      throw new ApiError('INVALID_INPUT', '已有写入结果待核实，请先重读目录。');
+    }
+    const gate: CatalogSafetyGate = {
+      phase: 'refresh',
+      message: null,
+      detailId:
+        candidate.type === 'delete-group' || candidate.type === 'create-group'
+          ? null
+          : candidate.group.id,
+      createUncertain:
+        candidate.type === 'create-group' || candidate.type === 'create-asin',
+      operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    };
+    if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate))
+      throw new ApiError(
+        'INVALID_INPUT',
+        '无法保存写入状态，请检查浏览器本地存储权限。',
+      );
+    return gate;
   };
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
@@ -888,6 +940,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   });
   useEffect(() => {
     if (!ownerId || !config.writes) return;
+    let active = true;
     const syncSafety = (event: StorageEvent) => {
       const stored = catalogSafetyStorage();
       if (
@@ -920,6 +973,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           await clearCatalogCache();
           const fresh = await config.list(runtime.http, query);
           if (
+            !active ||
             revision !== crossTabSafetyRevision.current ||
             readCatalogSafetyGate(stored, ownerId, config.id)
           )
@@ -935,7 +989,10 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       })();
     };
     window.addEventListener('storage', syncSafety);
-    return () => window.removeEventListener('storage', syncSafety);
+    return () => {
+      active = false;
+      window.removeEventListener('storage', syncSafety);
+    };
   }, [clearCatalogCache, config, ownerId, query, runtime, safetyKey]);
   useEffect(() => {
     if (!action) return;
@@ -1017,22 +1074,29 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     void recheckAccess();
   }, [recheckAccess, runtime, safetyKey]);
 
-  async function reportUncertainWrite(uncertainAction: CatalogAction) {
+  async function reportUncertainWrite(
+    uncertainAction: CatalogAction,
+    claim: CatalogSafetyGate,
+  ) {
     setSelectedId(null);
     setAction(null);
     setNotice(null);
-    setSafety({
-      phase: 'refresh',
-      message: null,
-      detailId:
-        uncertainAction.type === 'delete-group' ||
-        uncertainAction.type === 'create-group'
-          ? null
-          : uncertainAction.group.id,
-      createUncertain:
-        uncertainAction.type === 'create-group' ||
-        uncertainAction.type === 'create-asin',
-    });
+    setSafety(
+      {
+        phase: 'refresh',
+        message: null,
+        detailId:
+          uncertainAction.type === 'delete-group' ||
+          uncertainAction.type === 'create-group'
+            ? null
+            : uncertainAction.group.id,
+        createUncertain:
+          uncertainAction.type === 'create-group' ||
+          uncertainAction.type === 'create-asin',
+        operationId: claim.operationId,
+      },
+      claim,
+    );
     await clearCatalogCache();
   }
 
@@ -1088,20 +1152,26 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     else if (detailId && !stillListed) setSelectedId(null);
   }
 
-  async function afterWrite(message: string, savedAction: CatalogAction) {
+  async function afterWrite(
+    message: string,
+    savedAction: CatalogAction,
+    claim: CatalogSafetyGate,
+  ) {
     if (savedAction.type === 'delete-group') setSelectedId(null);
     const detailId = savedAction.type === 'delete-group' ? null : selectedId;
     setNotice(null);
-    setSafety({
+    const refreshedGate: CatalogSafetyGate = {
       phase: 'refresh',
       message,
       detailId,
       createUncertain: false,
-    });
+      operationId: claim.operationId,
+    };
+    if (!setSafety(refreshedGate, claim)) return;
     try {
       await clearCatalogCache();
       await readAfterWrite(detailId);
-      setSafety(null);
+      setSafety(null, refreshedGate);
       if (message) {
         setNotice(message);
         announce(message);
@@ -1116,9 +1186,29 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   async function retryAfterWrite() {
     if (safety?.phase !== 'refresh') return;
     const { message, detailId, createUncertain } = safety;
+    let refreshed = false;
     try {
-      await readAfterWrite(detailId);
-      setSafety(createUncertain ? { phase: 'inspection' } : null);
+      await runWithCatalogLock(async () => {
+        const stored = catalogSafetyStorage();
+        const current = stored
+          ? readCatalogSafetyGate(stored, ownerId, config.id)
+          : null;
+        if (!stored || JSON.stringify(current) !== JSON.stringify(safety)) {
+          runtime.queryClient.setQueryData(
+            safetyKey,
+            current ?? { phase: 'inspection' },
+          );
+          return;
+        }
+        await readAfterWrite(detailId);
+        refreshed = setSafety(
+          createUncertain
+            ? { phase: 'inspection', operationId: safety.operationId }
+            : null,
+          safety,
+        );
+      });
+      if (!refreshed) return;
       if (message) {
         setNotice(message);
         announce(message);
@@ -1130,9 +1220,24 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
 
   async function reconcileCreate() {
     if (safety?.phase !== 'inspection') return;
+    let reconciled = false;
     try {
-      await readAfterWrite(null);
-      setSafety(null);
+      await runWithCatalogLock(async () => {
+        const stored = catalogSafetyStorage();
+        const current = stored
+          ? readCatalogSafetyGate(stored, ownerId, config.id)
+          : null;
+        if (!stored || JSON.stringify(current) !== JSON.stringify(safety)) {
+          runtime.queryClient.setQueryData(
+            safetyKey,
+            current ?? { phase: 'inspection' },
+          );
+          return;
+        }
+        await readAfterWrite(null);
+        reconciled = setSafety(null, safety);
+      });
+      if (!reconciled) return;
       setNotice('目录已重新读取，请仅在确认原新建记录后继续写入。');
     } catch (cause) {
       if (catalogAccessDenied(cause)) reportAccessDenied();
@@ -1244,6 +1349,11 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                 denied={reportAccessDenied}
                 uncertain={reportUncertainWrite}
                 writingChange={writingChange}
+                runExclusive={runWithCatalogLock}
+                beginWrite={beginWrite}
+                releaseWrite={(claim) => {
+                  setSafety(null, claim);
+                }}
               />
             </div>
           )}

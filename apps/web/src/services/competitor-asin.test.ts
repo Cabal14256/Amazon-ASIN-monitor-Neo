@@ -148,7 +148,7 @@ describe('competitor catalog transport', () => {
       };
       await createCompetitorGroup(http, groupInput);
       await updateCompetitorGroup(http, group.id, groupInput);
-      await deleteCompetitorGroup(http, group.id);
+      await deleteCompetitorGroup(http, group.id, ['competitor-child-1']);
       await createCompetitorAsin(http, { ...childInput, parentId: group.id });
       await updateCompetitorAsin(http, 'competitor-child-1', childInput);
       await moveCompetitorAsin(http, 'competitor-child-1', {
@@ -172,6 +172,9 @@ describe('competitor catalog transport', () => {
       expect(
         fetcher.mock.calls.every(([url]) => !String(url).includes('/api/api/')),
       ).toBe(true);
+      expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body))).toEqual({
+        expectedChildIds: ['competitor-child-1'],
+      });
       for (const [, options] of fetcher.mock.calls) {
         if (!options?.body) continue;
         expect(JSON.parse(String(options.body))).not.toHaveProperty('site');
@@ -204,7 +207,9 @@ describe('competitor catalog transport', () => {
   it('rejects a success envelope without write data and budgets full group responses', async () => {
     const request = vi.fn().mockResolvedValue({ success: true });
     const http = { request } as unknown as Pick<HttpClient, 'request'>;
-    await expect(deleteCompetitorGroup(http, group.id)).rejects.toMatchObject({
+    await expect(
+      deleteCompetitorGroup(http, group.id, []),
+    ).rejects.toMatchObject({
       kind: 'INVALID_RESPONSE',
     });
     request.mockResolvedValue({ success: true, data: group });

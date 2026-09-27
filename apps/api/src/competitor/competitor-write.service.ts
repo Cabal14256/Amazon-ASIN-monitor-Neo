@@ -26,6 +26,7 @@ import {
   parseCompetitorAsinMove,
   parseCompetitorAsinUpdate,
   parseCompetitorBatchCreate,
+  parseCompetitorGroupDelete,
   parseCompetitorGroupWrite,
   parseCompetitorNotify,
   parseCompetitorWriteId,
@@ -123,6 +124,8 @@ export class CompetitorWriteService implements OnModuleDestroy {
           fail(409, '该 ASIN 在此国家中已存在，请刷新后重试');
         if (error.code === 'parent-changed')
           fail(409, 'ASIN 所属竞品组已改变，请刷新后重试');
+        if (error.code === 'members-changed')
+          fail(409, '竞品组成员已变化，请刷新后重新确认删除');
         if (error.code === 'timestamp-policy') {
           this.logger.warn('竞品写入策略未就绪', 'CompetitorWriteService', {
             reason: 'competitor_write_policy_required',
@@ -215,9 +218,12 @@ export class CompetitorWriteService implements OnModuleDestroy {
       ),
     );
   }
-  deleteGroup(principal: AuthPrincipal, id: unknown) {
+  deleteGroup(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'delete-group', async (unit) => {
-      await unit.deleteGroup(parseCompetitorWriteId(id));
+      await unit.deleteGroup(
+        parseCompetitorWriteId(id),
+        parseCompetitorGroupDelete(body),
+      );
       return '删除成功';
     });
   }

@@ -2,6 +2,7 @@ import {
   competitorAsinRecordResultSchema,
   competitorCreateAsinRequestSchema,
   competitorDeleteAsinResultSchema,
+  competitorDeleteGroupRequestSchema,
   competitorDeleteGroupResultSchema,
   competitorGroupListResultSchema,
   competitorGroupResultSchema,
@@ -125,11 +126,15 @@ export async function updateCompetitorGroup(
 export async function deleteCompetitorGroup(
   http: Pick<HttpClient, 'request'>,
   id: string,
+  expectedChildIds: string[],
 ) {
   return data(
     await http.request(
       `${GROUPS}/${segment(id)}`,
-      { method: 'DELETE' },
+      {
+        method: 'DELETE',
+        json: body(competitorDeleteGroupRequestSchema, { expectedChildIds }),
+      },
       competitorDeleteGroupResultSchema,
     ),
   );

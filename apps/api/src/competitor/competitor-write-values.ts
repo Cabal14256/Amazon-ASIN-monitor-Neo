@@ -1,6 +1,7 @@
 import {
   batchCreateAsinsRequestSchema,
   competitorCreateAsinRequestSchema,
+  competitorDeleteGroupRequestSchema,
   competitorFeishuNotifyRequestSchema,
   competitorGroupUpsertRequestSchema,
   competitorMoveAsinRequestSchema,
@@ -52,6 +53,9 @@ const updateSchema = competitorUpdateAsinRequestSchema
 const moveSchema = competitorMoveAsinRequestSchema
   .extend({ targetGroupId: id })
   .strict();
+const deleteGroupSchema = competitorDeleteGroupRequestSchema
+  .extend({ expectedChildIds: z.array(id).max(5000) })
+  .strict();
 function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
   if (
     !value ||
@@ -75,6 +79,12 @@ export const parseCompetitorAsinUpdate = (value: unknown) =>
   normalizeName(parse(updateSchema, value));
 export const parseCompetitorAsinMove = (value: unknown) =>
   parse(moveSchema, value);
+export function parseCompetitorGroupDelete(value: unknown): string[] {
+  const { expectedChildIds } = parse(deleteGroupSchema, value);
+  if (new Set(expectedChildIds).size !== expectedChildIds.length)
+    throw new CompetitorWriteInputError();
+  return expectedChildIds;
+}
 export function parseCompetitorBatchCreate(value: unknown): unknown[] {
   const items = (value as { items?: unknown } | null)?.items;
   if (!Array.isArray(items) || !items.length)

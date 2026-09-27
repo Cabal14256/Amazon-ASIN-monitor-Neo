@@ -38,7 +38,7 @@ export interface CompetitorWriteUnit
   ): Promise<CompetitorAsin>;
   moveAsin(id: string, targetGroupId: string): Promise<CompetitorAsin>;
   batchCreateAsins(items: unknown[]): Promise<BatchCreateAsinsData>;
-  deleteGroup(id: string): Promise<void>;
+  deleteGroup(id: string, expectedChildIds: string[]): Promise<void>;
   deleteAsin(id: string): Promise<void>;
   updateGroupNotify(
     id: string,
@@ -61,6 +61,7 @@ export class CompetitorWriteError extends Error {
       | 'asin-not-found'
       | 'validation'
       | 'parent-changed'
+      | 'members-changed'
       | 'duplicate'
       | 'timestamp-policy',
     readonly publicMessage?: string,

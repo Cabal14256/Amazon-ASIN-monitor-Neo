@@ -12,12 +12,19 @@ import {
   catalogWriteOutcomeUncertain,
   checkedAt,
   childStatus,
+  competitorAsinCode,
   groupStatus,
   singleAsinCode,
   statusSource,
 } from './catalog-data';
 
 describe('shared ASIN catalog display data', () => {
+  it('normalizes competitor identifiers up to 20 characters while keeping primary ASINs strict', () => {
+    expect(competitorAsinCode(' retail-code-2026 ')).toBe('RETAIL-CODE-2026');
+    expect(competitorAsinCode(' x '.repeat(11))).toBeNull();
+    expect(competitorAsinCode('item\ncode')).toBeNull();
+    expect(singleAsinCode('retail-code-2026')).toBeNull();
+  });
   it('uses effective status before the stored automatic flag', () => {
     expect(
       groupStatus({

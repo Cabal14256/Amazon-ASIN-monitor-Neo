@@ -74,6 +74,14 @@ function actionFixture(action: CatalogAction) {
       denied={denied}
       uncertain={uncertain}
       writingChange={writingChange}
+      runExclusive={async (work) => work()}
+      beginWrite={() => ({
+        phase: 'refresh',
+        message: null,
+        detailId: null,
+        createUncertain: false,
+      })}
+      releaseWrite={vi.fn()}
     />,
   );
   return {
@@ -89,6 +97,17 @@ function actionFixture(action: CatalogAction) {
 }
 
 describe('competitor catalog single-item controls', () => {
+  it('accepts a competitor identifier beyond the primary ten-character domain', async () => {
+    const f = actionFixture({ type: 'create-asin', group });
+    const input = screen.getAllByLabelText(/^ASIN/)[0];
+    expect(input).toHaveProperty('maxLength', 40);
+    fireEvent.change(input, { target: { value: 'retail-code-2026' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(f.saved).toHaveBeenCalledOnce());
+    expect(f.request.mock.calls[0][1]?.json).toMatchObject({
+      asin: 'RETAIL-CODE-2026',
+    });
+  });
   it('keeps the shared detail read-only without write/delete grants', async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -281,11 +300,10 @@ describe('competitor catalog single-item controls', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
     await waitFor(() =>
-      expect(f.uncertain).toHaveBeenCalledWith({
-        type: 'delete-asin',
-        group,
-        child,
-      }),
+      expect(f.uncertain).toHaveBeenCalledWith(
+        { type: 'delete-asin', group, child },
+        expect.objectContaining({ phase: 'refresh' }),
+      ),
     );
     expect(f.saved).not.toHaveBeenCalled();
     expect(f.close).not.toHaveBeenCalled();

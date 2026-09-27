@@ -109,6 +109,14 @@ export type CompetitorGroupUpsertRequest = z.infer<
   typeof competitorGroupUpsertRequestSchema
 >;
 
+/** The confirmed child set must be checked again under the group's delete lock. */
+export const competitorDeleteGroupRequestSchema = z
+  .object({ expectedChildIds: z.array(z.string()).max(5000) })
+  .strict();
+export type CompetitorDeleteGroupRequest = z.infer<
+  typeof competitorDeleteGroupRequestSchema
+>;
+
 // The Legacy controller treats these falsy values as an unspecified type.
 const competitorAsinTypeInputSchema = z
   .union([

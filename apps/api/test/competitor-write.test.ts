@@ -66,7 +66,7 @@ const cases = [
   {
     method: 'DELETE',
     url: '/competitor/variant-groups/group-119',
-    body: undefined,
+    body: { expectedChildIds: ['asin-119'] },
     action: 'deleteGroup',
   },
   {
@@ -338,6 +338,41 @@ describe('competitor writes HTTP / current primary authorization', () => {
       parentId: 'group-119',
     });
     expect(f.unit.moveAsin).toHaveBeenCalledWith('asin-119', 'group-target');
+  });
+  it('requires a distinct confirmed child set before deleting a group', async () => {
+    expect(
+      (
+        await app.http.inject({
+          method: 'DELETE',
+          url: '/api/v1/competitor/variant-groups/group-119',
+          headers,
+        })
+      ).statusCode,
+    ).toBe(400);
+    for (const body of [
+      {},
+      { expectedChildIds: 'asin-119' },
+      { expectedChildIds: ['asin-119', 'asin-119'] },
+      { expectedChildIds: [''] },
+    ]) {
+      expect((await request(cases[5], headers, body)).statusCode).toBe(400);
+    }
+    expect(f.unit.deleteGroup).not.toHaveBeenCalled();
+    expect((await request(cases[5])).statusCode).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', ['asin-119']);
+  });
+  it('reports changed group membership as a conflict without exposing child IDs', async () => {
+    vi.mocked(f.unit.deleteGroup).mockRejectedValue(
+      new CompetitorWriteError('members-changed'),
+    );
+    const response = await request(cases[5]);
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      success: false,
+      errorCode: 409,
+      errorMessage: '竞品组成员已变化，请刷新后重新确认删除',
+    });
+    expect(response.body).not.toContain('asin-119');
   });
   it.each(cases.filter((value) => value.method !== 'DELETE'))(
     'rejects invalid bodies without writes on $action',

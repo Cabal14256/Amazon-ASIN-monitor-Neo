@@ -250,7 +250,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const response = await request(
           value.method,
           value.path,
-          value.method === 'PUT' ? { enabled: true } : undefined,
+          value.method === 'PUT'
+            ? { enabled: true }
+            : value.path.startsWith('variant-groups/')
+            ? { expectedChildIds: [] }
+            : undefined,
         );
         const source = await value.source();
         expect(response.statusCode).toBe(404);
@@ -274,7 +278,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             await request(
               value.method,
               value.path,
-              value.method === 'PUT' ? { enabled: true } : undefined,
+              value.method === 'PUT'
+                ? { enabled: true }
+                : value.path.startsWith('variant-groups/')
+                ? { expectedChildIds: ['a1'] }
+                : undefined,
             )
           ).statusCode,
         ).toBe(403);
@@ -289,7 +297,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await history();
       const before = await snapshot(),
         savedHistory = await histories();
-      const response = await request('DELETE', 'variant-groups/g1'),
+      const response = await request('DELETE', 'variant-groups/g1', {
+          expectedChildIds: ['a1'],
+        }),
         source = await legacy.deleteGroup('g1');
       expect(response.statusCode).toBe(200);
       expect(response.headers['cache-control']).toBe('no-store');
@@ -417,7 +427,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await legacy.updateAsinNotify('ASIN', { enabled: true }),
       );
       expect(response.json().data.variantGroupId).toBe('Gróup ');
-      const deleted = await request('DELETE', 'variant-groups/GROUP');
+      const deleted = await request('DELETE', 'variant-groups/GROUP', {
+        expectedChildIds: ['Ásin '],
+      });
       expect(deleted.statusCode).toBe(200);
       complete(deleted.json(), (await legacy.deleteGroup('GROUP')).body);
       expect(await snapshot()).toEqual({ groups: [], asins: [] });
@@ -457,9 +469,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "CREATE FUNCTION fail_competitor_child_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.id='a2' THEN RAISE EXCEPTION 'private-child-delete'; END IF; RETURN OLD; END $$; CREATE TRIGGER fail_competitor_child_delete AFTER DELETE ON competitor_asins FOR EACH ROW EXECUTE FUNCTION fail_competitor_child_delete()",
       );
       try {
-        expect((await request('DELETE', 'variant-groups/g1')).statusCode).toBe(
-          500,
-        );
+        expect(
+          (
+            await request('DELETE', 'variant-groups/g1', {
+              expectedChildIds: ['a1', 'a2'],
+            })
+          ).statusCode,
+        ).toBe(500);
         expect(await snapshot()).toEqual(before);
         expect(await histories()).toEqual(savedHistory);
       } finally {
@@ -467,9 +483,58 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           'DROP TRIGGER fail_competitor_child_delete ON competitor_asins; DROP FUNCTION fail_competitor_child_delete()',
         );
       }
-      expect((await request('DELETE', 'variant-groups/g1')).statusCode).toBe(
-        200,
-      );
+      expect(
+        (
+          await request('DELETE', 'variant-groups/g1', {
+            expectedChildIds: ['a1', 'a2'],
+          })
+        ).statusCode,
+      ).toBe(200);
+    });
+    it('rejects deletion when a child is added after confirmation but before the group lock', async () => {
+      await group('g1');
+      await asin('a1');
+      const blocker = await f.pools.competitorPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+        );
+        pending = Promise.resolve(
+          request('DELETE', 'variant-groups/g1', {
+            expectedChildIds: ['a1'],
+          }),
+        );
+        await blocked(blocker);
+        await blocker.query(
+          "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES('a2','B0000000A2','US','Own brand','g1')",
+        );
+        await blocker.query('COMMIT');
+        const response = await pending;
+        expect(response.statusCode).toBe(409);
+        expect(response.json().errorMessage).toBe(
+          '竞品组成员已变化，请刷新后重新确认删除',
+        );
+        expect((await snapshot()).groups).toEqual([
+          expect.objectContaining({ id: 'g1' }),
+        ]);
+        expect((await snapshot()).asins).toEqual([
+          expect.objectContaining({ id: 'a1' }),
+          expect.objectContaining({ id: 'a2' }),
+        ]);
+        expect(
+          (
+            await request('DELETE', 'variant-groups/g1', {
+              expectedChildIds: ['a1', 'a2'],
+            })
+          ).statusCode,
+        ).toBe(200);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        await pending?.catch(() => {});
+      }
     });
     it('does not delete a child moved while waiting for the original parent lock', async () => {
       await group('g1');

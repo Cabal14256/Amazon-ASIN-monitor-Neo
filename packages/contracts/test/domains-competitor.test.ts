@@ -4,6 +4,7 @@ import {
   competitorBatchCheckResultSchema,
   competitorCheckResultSchema,
   competitorDeleteAsinResultSchema,
+  competitorDeleteGroupRequestSchema,
   competitorDeleteGroupResultSchema,
   competitorGroupListResultSchema,
   competitorGroupUpsertRequestSchema,
@@ -149,6 +150,20 @@ describe('competitor 域', () => {
   });
 
   it('竞对组与 ASIN 单项删除返回字符串 data', () => {
+    expect(
+      competitorDeleteGroupRequestSchema.parse({
+        expectedChildIds: ['ca1', 'ca2'],
+      }),
+    ).toEqual({ expectedChildIds: ['ca1', 'ca2'] });
+    expect(competitorDeleteGroupRequestSchema.safeParse({}).success).toBe(
+      false,
+    );
+    expect(
+      competitorDeleteGroupRequestSchema.safeParse({
+        expectedChildIds: [],
+        site: 'DE',
+      }).success,
+    ).toBe(false);
     expect(
       competitorDeleteGroupResultSchema.parse({
         success: true,
