@@ -108,6 +108,20 @@ export class SpApiConfigService {
       const changes = normalizeSpApiConfigUpdates(body);
       const rows = await this.repository.transaction(async (unit) => {
         await authorizeAdministration(unit, principal, 'settings:write');
+        const concurrency = changes.find(
+          (change) =>
+            change.configKey === 'MONITOR_MAX_CONCURRENT_GROUP_CHECKS',
+        );
+        if (
+          concurrency &&
+          (!/^[1-9]\d*$/.test(concurrency.configValue) ||
+            Number(concurrency.configValue) >
+              this.env.MAX_ALLOWED_CONCURRENT_GROUP_CHECKS)
+        )
+          fail(
+            400,
+            `监控并发必须为 1–${this.env.MAX_ALLOWED_CONCURRENT_GROUP_CHECKS} 的整数`,
+          );
         return (await unit.upsertConfiguration(changes)).map(publicRecord);
       });
       this.logger.info('SP-API 配置更新成功', 'SpApiConfigService', {

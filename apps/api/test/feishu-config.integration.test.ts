@@ -132,6 +132,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     // and run on separate clocks; historical timestamps/nulls remain byte-exact.
     function canonical(value: unknown): unknown {
       return JSON.parse(JSON.stringify(value), (key, item) => {
+        if (key === 'revision') return undefined;
         if (
           !['createTime', 'updateTime', 'create_time', 'update_time'].includes(
             key,
@@ -157,6 +158,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).rows;
     const mysqlRows = () =>
       legacy.query('SELECT * FROM feishu_config ORDER BY id');
+    async function revision(country: string): Promise<string | null> {
+      const rows = await f.pools.primaryPool.query<{ revision: string }>(
+        'SELECT revision FROM feishu_config WHERE rtrim(country) COLLATE public.neo_import_group_ci = rtrim($1)',
+        [country],
+      );
+      return rows.rows[0]?.revision ?? null;
+    }
     async function seed(country = 'US', enabled: number | null = 1) {
       await legacy.query(
         "INSERT INTO feishu_config(country,webhook_url,enabled,create_time,update_time) VALUES(?,?,?,'2024-02-29 00:00:00',NULL)",
@@ -178,7 +186,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           : method === 'PATCH'
           ? 'toggleFeishuConfig'
           : 'upsertFeishuConfig';
-      const actual = await request(method, country, payload),
+      const neoPayload =
+        (method === 'POST' || method === 'PUT') && payload
+          ? {
+              ...payload,
+              expectedRevision: await revision(
+                (payload as { country: string }).country,
+              ),
+            }
+          : payload;
+      const actual = await request(method, country, neoPayload),
         expected = await oracle(operation, payload, country);
       expect(actual.statusCode).toBe(expected.statusCode);
       expect(actual.headers['cache-control']).toBe('no-store');
@@ -361,33 +378,150 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         if (pending) await pending;
       }
     });
-    it('serializes equivalent concurrent inserts to one identity', async () => {
+    it('allows only one equivalent concurrent create from distinct admin sessions', async () => {
       const users = await Promise.all([user(), user(), user()]);
       const results = await Promise.all(
         ['US', 'us', 'US '].map((country, i) =>
           request(
             'POST',
             undefined,
-            { country, webhookUrl: `${webhook}/${i}` },
+            { country, webhookUrl: `${webhook}/${i}`, expectedRevision: null },
             users[i]!.headers,
           ),
         ),
       );
-      expect(results.map((result) => result.statusCode)).toEqual([
-        200, 200, 200,
-      ]);
-      expect(new Set(results.map((result) => result.json().data.id)).size).toBe(
-        1,
-      );
+      expect(
+        results.filter((result) => result.statusCode === 200),
+      ).toHaveLength(1);
+      expect(
+        results.filter((result) => result.statusCode === 409),
+      ).toHaveLength(2);
       const rows = await pgRows();
       expect(rows).toHaveLength(1);
       expect([`${webhook}/0`, `${webhook}/1`, `${webhook}/2`]).toContain(
         rows[0].webhook_url,
       );
     });
+    it('commits exactly one of two admin writes carrying the same revision', async () => {
+      await seed();
+      const expectedRevision = await revision('US');
+      const admins = await Promise.all([user(), user()]);
+      const responses = await Promise.all(
+        admins.map((admin, index) =>
+          request(
+            'POST',
+            undefined,
+            {
+              country: 'US',
+              webhookUrl: `${webhook}/parallel-${index}`,
+              expectedRevision,
+            },
+            admin.headers,
+          ),
+        ),
+      );
+      expect(
+        responses.filter((response) => response.statusCode === 200),
+      ).toHaveLength(1);
+      expect(
+        responses.filter((response) => response.statusCode === 409),
+      ).toHaveLength(1);
+      const conflict = responses.find(
+        (response) => response.statusCode === 409,
+      )!;
+      expect(conflict.json()).toMatchObject({
+        errorCode: 409,
+        errorMessage: '配置已变更，请刷新后重试',
+      });
+      expect(conflict.body).not.toContain(webhook);
+      const winner = responses.findIndex(
+        (response) => response.statusCode === 200,
+      );
+      expect((await pgRows())[0].webhook_url).toBe(
+        `${webhook}/parallel-${winner}`,
+      );
+      const committedRevision = await revision('US');
+      expect(committedRevision).not.toBe(expectedRevision);
+      expect(responses[winner].json().data.revision).toBe(committedRevision);
+      expect(
+        (
+          await request('POST', undefined, {
+            country: 'US',
+            webhookUrl: `${webhook}/old-client`,
+          })
+        ).statusCode,
+      ).toBe(409);
+      expect((await pgRows())[0].webhook_url).toBe(
+        `${webhook}/parallel-${winner}`,
+      );
+    });
+    it('rejects stale writes after toggle, delete and recreate without ABA', async () => {
+      await seed();
+      const firstRevision = await revision('US');
+      const disabled = await request('PATCH', 'US', { enabled: false });
+      expect(disabled.statusCode).toBe(404);
+      const toggledRevision = await revision('US');
+      expect(toggledRevision).not.toBe(firstRevision);
+      const stale = await request('POST', undefined, {
+        country: 'US',
+        webhookUrl: `${webhook}/stale`,
+        expectedRevision: firstRevision,
+      });
+      expect(stale.statusCode).toBe(409);
+      expect((await pgRows())[0]).toMatchObject({
+        webhook_url: webhook,
+        enabled: 0,
+      });
+      expect((await request('DELETE', 'US')).statusCode).toBe(200);
+      expect(
+        (
+          await request('POST', undefined, {
+            country: 'US',
+            webhookUrl: `${webhook}/premature`,
+            expectedRevision: firstRevision,
+          })
+        ).statusCode,
+      ).toBe(409);
+      const recreated = await request('POST', undefined, {
+        country: 'US',
+        webhookUrl: `${webhook}/fresh`,
+        expectedRevision: null,
+      });
+      expect(recreated.statusCode).toBe(200);
+      expect(recreated.json().data.revision).not.toBe(firstRevision);
+      expect(recreated.json().data.revision).not.toBe(toggledRevision);
+      expect(
+        (
+          await request('POST', undefined, {
+            country: 'US',
+            webhookUrl: `${webhook}/resurrect`,
+            expectedRevision: firstRevision,
+          })
+        ).statusCode,
+      ).toBe(409);
+      expect((await pgRows())[0].webhook_url).toBe(`${webhook}/fresh`);
+    });
+    it('checks current authorization before comparing revisions', async () => {
+      await seed();
+      const expectedRevision = await revision('US');
+      const before = await pgRows();
+      await f.pools.primaryPool.query(
+        'DELETE FROM user_roles WHERE user_id=$1',
+        [operator.userId],
+      );
+      const response = await request('POST', undefined, {
+        country: 'US',
+        webhookUrl: `${webhook}/denied`,
+        expectedRevision,
+      });
+      expect(response.statusCode).toBe(403);
+      expect(await pgRows()).toEqual(before);
+      expect(await revision('US')).toBe(expectedRevision);
+    });
     it('rolls back SQL failures and redacts audit, logger and error responses', async () => {
       await seed();
       const before = await pgRows(),
+        beforeRevision = await revision('US'),
         rejected = `${webhook}/reject-private-fixture-115`;
       await f.pools.primaryPool.query(
         "CREATE FUNCTION reject_feishu_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.webhook_url LIKE '%reject-private-fixture-115%' THEN RAISE EXCEPTION 'reject-private-fixture-115'; END IF; RETURN NEW; END $$",
@@ -398,9 +532,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const result = await request('POST', undefined, {
         country: 'US',
         webhookUrl: rejected,
+        expectedRevision: beforeRevision,
       });
       expect(result.statusCode).toBe(500);
       expect(await pgRows()).toEqual(before);
+      expect(await revision('US')).toBe(beforeRevision);
       await f.audit.flush();
       const audits = (
         await f.pools.primaryPool.query(

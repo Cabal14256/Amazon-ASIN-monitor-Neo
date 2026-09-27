@@ -1,10 +1,11 @@
 import {
+  feishuRevisionSchema,
   toggleFeishuConfigRequestSchema,
   upsertFeishuConfigRequestSchema,
 } from '@asin-monitor/contracts';
 
 export class FeishuConfigurationError extends Error {
-  constructor(readonly reason: 'input' | 'result' | 'capacity') {
+  constructor(readonly reason: 'input' | 'result' | 'capacity' | 'conflict') {
     super('Feishu configuration operation could not be completed');
   }
 }
@@ -31,6 +32,7 @@ export interface FeishuConfigurationChange {
   country: string;
   webhookUrl: string;
   enabled: boolean;
+  expectedRevision?: string | null;
 }
 export function feishuConfigurationChange(
   raw: unknown,
@@ -42,6 +44,7 @@ export function feishuConfigurationChange(
     webhookUrl: boundedText(result.data.webhookUrl, 500),
     enabled:
       result.data.enabled === undefined ? true : Boolean(result.data.enabled),
+    expectedRevision: result.data.expectedRevision,
   };
 }
 export function feishuEnabled(raw: unknown): boolean {
@@ -52,6 +55,7 @@ export interface FeishuConfigurationRow {
   id: number;
   country: string;
   webhookUrl: string;
+  revision: string;
   enabled: boolean | null;
   createTime: Date | null;
   updateTime: Date | null;
@@ -66,6 +70,7 @@ export function validateFeishuRow(
     [...row.country].length > 10 ||
     typeof row.webhookUrl !== 'string' ||
     [...row.webhookUrl].length > 500 ||
+    !feishuRevisionSchema.safeParse(row.revision).success ||
     (row.enabled !== null && typeof row.enabled !== 'boolean') ||
     [row.createTime, row.updateTime].some(
       (value) =>
@@ -88,6 +93,7 @@ export function displayFeishuConfiguration(
   const common = {
     id: row.id,
     country: row.country,
+    revision: row.revision,
     enabled:
       row.enabled === null ? null : row.enabled ? (1 as const) : (0 as const),
   };

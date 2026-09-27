@@ -506,11 +506,13 @@ function targetHypertableDimensions(
 
 function tableSpec(table: PgTable): TableMigrationSpec {
   const tableName = getTableName(table);
-  // The final Legacy snapshot predates Neo-only 0012. Do not demand its
-  // monitor task link from MySQL or from the pre-upgrade PostgreSQL baseline.
+  // The frozen snapshot target predates Neo-only monitor and Feishu upgrades.
+  // Neither the monitor task link nor the Feishu revision exists in MySQL or
+  // in the pre-upgrade PostgreSQL baseline.
   const columns = Object.values(getTableColumns(table)).filter(
     (column) =>
-      tableName !== 'monitor_history' || column.name !== 'monitor_task_id',
+      (tableName !== 'monitor_history' || column.name !== 'monitor_task_id') &&
+      (tableName !== 'feishu_config' || column.name !== 'revision'),
   );
   // Snapshot import validates Legacy and the frozen 0000/0001 target BEFORE
   // runtime upgrades. 0008 widens ID# keys only after this final import gate;
