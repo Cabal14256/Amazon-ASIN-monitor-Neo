@@ -1,4 +1,4 @@
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { Pool } from 'pg';
 import {
   feishuConfigurationChange,
@@ -84,17 +84,25 @@ class DrizzleFeishuConfigurationUnit
     const input = feishuConfigurationChange(change),
       existing = await this.exact(input.country);
     this.ensureOpen();
+    if (existing ? !input.expectedRevision : input.expectedRevision != null)
+      throw new FeishuConfigurationError('conflict');
     const currentTime = sql`CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai'`;
     const values = {
       webhookUrl: input.webhookUrl,
       enabled: input.enabled,
       updateTime: currentTime,
+      revision: sql`pg_catalog.gen_random_uuid()`,
     };
     const [row] = existing
       ? await this.db
           .update(feishuConfig)
           .set(values)
-          .where(eq(feishuConfig.id, existing.id))
+          .where(
+            and(
+              eq(feishuConfig.id, existing.id),
+              eq(feishuConfig.revision, input.expectedRevision!),
+            ),
+          )
           .returning()
       : await this.db
           .insert(feishuConfig)
@@ -103,9 +111,10 @@ class DrizzleFeishuConfigurationUnit
             ...values,
             createTime: currentTime,
           })
+          .onConflictDoNothing()
           .returning();
     this.ensureOpen();
-    if (!row) throw new FeishuConfigurationError('result');
+    if (!row) throw new FeishuConfigurationError('conflict');
     return validateFeishuRow(row);
   }
   async delete(country: string) {
@@ -125,6 +134,7 @@ class DrizzleFeishuConfigurationUnit
       .set({
         enabled,
         updateTime: sql`CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai'`,
+        revision: sql`pg_catalog.gen_random_uuid()`,
       })
       .where(matches(country));
     this.ensureOpen();

@@ -100,9 +100,14 @@ export function drizzleTableNames(tables: readonly PgTable[]): string[] {
 export function drizzleColumnKeys(tables: readonly PgTable[]): string[] {
   return tables
     .flatMap((table) =>
-      Object.values(getTableColumns(table)).map(
-        (column) => `${getTableName(table)}.${column.name}`,
-      ),
+      Object.values(getTableColumns(table))
+        // Baseline fixture is compared before post-import runtime upgrades.
+        .filter(
+          (column) =>
+            getTableName(table) !== 'feishu_config' ||
+            column.name !== 'revision',
+        )
+        .map((column) => `${getTableName(table)}.${column.name}`),
     )
     .sort();
 }
