@@ -17,6 +17,7 @@ const feishu = {
   id: 7,
   country: 'EU',
   webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/private-key',
+  revision: '11111111-1111-4111-8111-111111111111',
   enabled: 1 as const,
   createTime: null,
   updateTime: '2026-09-26T12:00:00.000Z',
@@ -234,7 +235,8 @@ describe('SettingsApi', () => {
     const client = http();
     client.request.mockResolvedValue({
       success: true,
-      data: [{ ...feishu, updateTime: '2026-09-26T12:00:01.000Z' }],
+      // Wall-clock timestamps may be identical when two writes are close.
+      data: [{ ...feishu, revision: '22222222-2222-4222-8222-222222222222' }],
     });
     await expect(
       new SettingsApi(client).saveFeishuChange(
@@ -265,6 +267,7 @@ describe('SettingsApi', () => {
           country: 'EU',
           webhookUrl: 'https://open.feishu.cn/new-hook',
           enabled: true,
+          expectedRevision: feishu.revision,
         },
       }),
       expect.anything(),
@@ -292,10 +295,70 @@ describe('SettingsApi', () => {
           country: 'eu  ',
           webhookUrl: 'https://open.feishu.cn/new-hook',
           enabled: true,
+          expectedRevision: feishu.revision,
         },
       }),
       expect.anything(),
     );
+  });
+
+  it('marks a new Feishu row as create-only', async () => {
+    const client = http();
+    client.request
+      .mockResolvedValueOnce({ success: true, data: [] })
+      .mockResolvedValueOnce({ success: true, data: null });
+    await new SettingsApi(client).saveFeishuChange('US', undefined, {
+      webhookUrl: 'https://open.feishu.cn/new-hook',
+    });
+    expect(client.request).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/feishu-configs',
+      expect.objectContaining({
+        method: 'POST',
+        json: {
+          country: 'US',
+          webhookUrl: 'https://open.feishu.cn/new-hook',
+          enabled: false,
+          expectedRevision: null,
+        },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('fails closed when an existing Neo row has no revision', async () => {
+    const client = http();
+    const oldRow = { ...feishu, revision: undefined };
+    client.request.mockResolvedValue({ success: true, data: [oldRow] });
+    await expect(
+      new SettingsApi(client).saveFeishuChange(
+        'EU',
+        { ...oldRow, webhookUrl: '***REDACTED***' },
+        { webhookUrl: 'https://open.feishu.cn/new-hook' },
+      ),
+    ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+    expect(client.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an atomic server conflict after a matching preflight without retrying', async () => {
+    const client = http();
+    const draft = { webhookUrl: 'https://open.feishu.cn/new-hook' };
+    client.request
+      .mockResolvedValueOnce({ success: true, data: [feishu] })
+      .mockRejectedValueOnce(
+        new ApiError('HTTP', '配置已变更，请刷新后重试', 409, 409),
+      );
+    await expect(
+      new SettingsApi(client).saveFeishuChange(
+        'EU',
+        { ...feishu, webhookUrl: '***REDACTED***' },
+        draft,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('输入已保留'),
+    });
+    expect(client.request).toHaveBeenCalledTimes(2);
   });
 
   it('rejects error windows outside the server contract', async () => {
