@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +9,13 @@ const principal = { userId: 'backup-admin', sessionId: 'session-1' } as never;
 const createdAt = '2026-09-27T00:00:00.000Z';
 const filename = 'backup_20260927-020000-abcdef01-primary.dump';
 const directories: string[] = [];
+const archiveSha256 = createHash('sha256').update('PGDMPfixture').digest('hex');
+const databaseSettings = {
+  encoding: 'UTF8',
+  lcCollate: 'C.UTF-8',
+  lcCtype: 'C.UTF-8',
+  localeProvider: 'libc',
+};
 
 async function writeMetadata(
   directory: string,
@@ -25,6 +33,8 @@ async function writeMetadata(
       ...(version === 3 && sourceEngine === 'postgresql'
         ? {
             scope,
+            archiveSha256,
+            databaseSettings,
             ...(scope === 'selective' ? { tables: ['public.asins'] } : {}),
           }
         : {}),
@@ -35,6 +45,7 @@ async function writeMetadata(
               hypertables: ['public.monitor_history'],
               continuousAggregates: ['public.monitor_hourly'],
             },
+            databaseSettings,
           }
         : {}),
     }),
@@ -204,6 +215,29 @@ describe('backup API service', () => {
     expect(port.enqueue).toHaveBeenCalledTimes(1);
   });
 
+  it('does not offer a plain restore when its v3 sidecar lacks an archive digest or source database settings', async () => {
+    const { service, port, directory } = await fixture();
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'postgresql', 3, 'selective');
+    const path = join(directory, `${filename}.meta.json`);
+    const valid = JSON.parse(await readFile(path, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    for (const field of ['archiveSha256', 'databaseSettings']) {
+      const invalid = { ...valid };
+      delete invalid[field];
+      await writeFile(path, JSON.stringify(invalid));
+      await expect(service.list(principal)).resolves.toMatchObject([
+        { filename, restoreSupported: false },
+      ]);
+      await expect(
+        service.restore(principal, { filename }),
+      ).rejects.toMatchObject({ status: 409 });
+    }
+    expect(port.enqueue).not.toHaveBeenCalled();
+  });
+
   it('downloads only an artifact accompanied by verified restore metadata', async () => {
     const { service, directory } = await fixture();
     await writeFile(join(directory, filename), 'PGDMPfixture');
@@ -311,6 +345,29 @@ describe('backup API service', () => {
     expect(port.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ operation: 'restore', target: 'primary' }),
     );
+  });
+
+  it('does not offer isolated Timescale recovery from an older sidecar without source locale', async () => {
+    const { service, port, directory, pools } = await fixture();
+    pools.primaryPool.query.mockResolvedValue({
+      rows: [{ extversion: '2.29.2' }],
+    });
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'timescaledb', 2);
+    const path = join(directory, `${filename}.meta.json`);
+    const invalid = JSON.parse(await readFile(path, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete invalid.databaseSettings;
+    await writeFile(path, JSON.stringify(invalid));
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(port.enqueue).not.toHaveBeenCalled();
   });
 
   it('fails closed when the Timescale extension version differs from the archive', async () => {

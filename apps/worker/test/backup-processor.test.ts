@@ -16,6 +16,7 @@ import {
   commandEnvironment,
   connectionForDatabase,
   createBackupProcessor,
+  createStagingDatabaseSql,
   processCommand,
   readBackupArtifactMetadataFile,
   restoreCommandArgs,
@@ -205,6 +206,12 @@ describe('backup command boundary', () => {
           ),
           continuousAggregates: [],
         },
+        databaseSettings: {
+          encoding: 'UTF8',
+          lcCollate: 'C',
+          lcCtype: 'C',
+          localeProvider: 'libc',
+        },
       };
       const serialized = JSON.stringify(metadata);
       expect(Buffer.byteLength(serialized)).toBeGreaterThan(4096);
@@ -304,5 +311,46 @@ describe('backup command boundary', () => {
     expect(() =>
       timescaleExtensionCreateSql("2.22.0'; DROP DATABASE online; --"),
     ).toThrow('BACKUP_TIMESCALE_VERSION_INVALID');
+  });
+  it('creates staging with archived libc and ICU text settings using escaped literals', () => {
+    const name = 'neo_restore_primary_1000000000004000';
+    expect(
+      createStagingDatabaseSql(name, {
+        encoding: 'UTF8',
+        lcCollate: 'C.UTF-8',
+        lcCtype: 'C.UTF-8',
+        localeProvider: 'libc',
+      }),
+    ).toBe(
+      `CREATE DATABASE "${name}" TEMPLATE template0 ENCODING E'UTF8' LC_COLLATE E'C.UTF-8' LC_CTYPE E'C.UTF-8' LOCALE_PROVIDER libc`,
+    );
+    expect(
+      createStagingDatabaseSql(name, {
+        encoding: 'UTF8',
+        lcCollate: 'C',
+        lcCtype: 'C',
+        localeProvider: 'icu',
+        icuLocale: "en-US@collation=standard'\\safe",
+        icuRules: '&a < b',
+      }),
+    ).toContain("ICU_LOCALE E'en-US@collation=standard\\'\\\\safe'");
+    expect(
+      createStagingDatabaseSql(name, {
+        encoding: 'UTF8',
+        lcCollate: 'C',
+        lcCtype: 'C',
+        localeProvider: 'icu',
+        icuLocale: 'en-US',
+        icuRules: '&a < b',
+      }),
+    ).toContain("ICU_RULES E'&a < b'");
+    expect(() =>
+      createStagingDatabaseSql(name, {
+        encoding: 'UTF8',
+        lcCollate: 'C\nDROP DATABASE online',
+        lcCtype: 'C',
+        localeProvider: 'libc',
+      }),
+    ).toThrow();
   });
 });

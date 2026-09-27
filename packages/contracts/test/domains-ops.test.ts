@@ -74,11 +74,19 @@ describe('tasks 域', () => {
 
 describe('backup 域', () => {
   it('distinguishes full and selective PostgreSQL artifacts in v3 metadata', () => {
+    const databaseSettings = {
+      encoding: 'UTF8',
+      lcCollate: 'en_US.utf8',
+      lcCtype: 'en_US.utf8',
+      localeProvider: 'libc',
+    };
     const base = {
       version: 3,
       filename: 'backup_20260824-020000-1234abcd-primary.dump',
       target: 'primary',
       sourceEngine: 'postgresql',
+      archiveSha256: 'a'.repeat(64),
+      databaseSettings,
     };
     expect(
       backupArtifactMetadataSchema.parse({ ...base, scope: 'full' }),
@@ -92,6 +100,15 @@ describe('backup 域', () => {
     ).toMatchObject({ scope: 'selective', tables: ['public.asins'] });
     expect(() => backupArtifactMetadataSchema.parse(base)).toThrow();
     for (const invalid of [
+      { ...base, scope: 'full', archiveSha256: undefined },
+      { ...base, scope: 'full', archiveSha256: 'b'.repeat(63) },
+      { ...base, scope: 'full', archiveSha256: 'G'.repeat(64) },
+      { ...base, scope: 'full', databaseSettings: undefined },
+      {
+        ...base,
+        scope: 'full',
+        databaseSettings: { ...databaseSettings, lcCollate: 'C\nDROP' },
+      },
       { ...base, scope: 'full', tables: ['public.asins'] },
       { ...base, scope: 'selective' },
       { ...base, scope: 'selective', tables: [] },
@@ -105,6 +122,14 @@ describe('backup 域', () => {
       filename: 'backup_20260824-020000-1234abcd-primary.dump',
       target: 'primary',
       sourceEngine: 'timescaledb',
+      databaseSettings: {
+        encoding: 'UTF8',
+        lcCollate: 'en-US-x-icu',
+        lcCtype: 'en-US-x-icu',
+        localeProvider: 'icu',
+        icuLocale: 'en-US',
+        icuRules: '&a < b',
+      },
       timescale: {
         extensionVersion: '2.29.2',
         hypertables: ['public.monitor_history'],
@@ -116,6 +141,12 @@ describe('backup 域', () => {
     );
     expect(() =>
       backupArtifactMetadataSchema.parse({ ...metadata, timescale: undefined }),
+    ).toThrow();
+    expect(() =>
+      backupArtifactMetadataSchema.parse({
+        ...metadata,
+        databaseSettings: undefined,
+      }),
     ).toThrow();
     expect(
       restoreBackupResultSchema.parse({

@@ -33,6 +33,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     const tableA = `backup_restore_a_${scratchName.slice(-12)}`;
     const tableB = `backup_restore_b_${scratchName.slice(-12)}`;
     const blocker = `backup_restore_blocker_${scratchName.slice(-12)}`;
+    const partitioned = `backup_partition_${scratchName.slice(-12)}`;
+    const partition = `${partitioned}_small`;
     const states = new Map<string, TaskState>();
     let adminPool: ReturnType<typeof createPgPool>;
     let scratchPool: ReturnType<typeof createPgPool>;
@@ -174,6 +176,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await scratchPool.query(
         `INSERT INTO public.${tableB} VALUES (1, 'original-b')`,
       );
+      await scratchPool.query(
+        `CREATE TABLE public.${partitioned} (id integer, note text NOT NULL) PARTITION BY RANGE (id)`,
+      );
+      await scratchPool.query(
+        `CREATE TABLE public.${partition} PARTITION OF public.${partitioned} FOR VALUES FROM (0) TO (100)`,
+      );
+      await scratchPool.query(
+        `INSERT INTO public.${partitioned} VALUES (1, 'partition-original')`,
+      );
     }, 30000);
 
     afterAll(async () => {
@@ -188,6 +199,14 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     it('serializes sessions, restores real data, and rolls back a failed restore', async () => {
       const first = await acquireBackupTargetLock(env(scratchUrl), 'primary');
       try {
+        const independent = await acquireBackupTargetLock(
+          {
+            ...env(scratchUrl),
+            COMPETITOR_DATABASE_URL: sourceUrl,
+          },
+          'competitor',
+        );
+        await independent.release();
         await expect(
           acquireBackupTargetLock(env(scratchUrl), 'primary'),
         ).rejects.toThrow('BACKUP_TARGET_BUSY');
@@ -300,6 +319,51 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).rejects.toThrow('备份文件来源数据库类型与恢复目标不一致');
     }, 120000);
 
+    it('includes partition descendants and their rows in selective archives', async () => {
+      const created = await runJob(scratchUrl, 'create', {
+        tables: [`public.${partitioned}`],
+      });
+      const artifact = backupTaskResultDataSchema.parse(created.result);
+      if (!artifact.filename) throw new Error('No partition backup artifact');
+      await scratchPool.query(
+        `UPDATE public.${partitioned} SET note = 'partition-mutated'`,
+      );
+      const restored = await runJob(scratchUrl, 'restore', {
+        filename: artifact.filename,
+      });
+      expect(restored.state.status).toBe('completed');
+      expect(
+        (await scratchPool.query(`SELECT note FROM public.${partitioned}`))
+          .rows[0].note,
+      ).toBe('partition-original');
+      expect(
+        (await scratchPool.query(`SELECT note FROM public.${partition}`))
+          .rows[0].note,
+      ).toBe('partition-original');
+      const metadataPath = join(directory, `${artifact.filename}.meta.json`);
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+      await writeFile(
+        metadataPath,
+        JSON.stringify({
+          ...metadata,
+          databaseSettings: {
+            ...metadata.databaseSettings,
+            lcCollate: `${metadata.databaseSettings.lcCollate}-different`,
+          },
+        }),
+      );
+      await scratchPool.query(
+        `UPDATE public.${partitioned} SET note = 'partition-newer'`,
+      );
+      await expect(
+        runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+      ).rejects.toThrow('恢复目标数据库的字符集或排序规则与备份不一致');
+      expect(
+        (await scratchPool.query(`SELECT note FROM public.${partitioned}`))
+          .rows[0].note,
+      ).toBe('partition-newer');
+    }, 120000);
+
     it('restores a full plain-PG archive into a clean isolated database', async () => {
       const created = await runJob(scratchUrl, 'create', {});
       const artifact = backupTaskResultDataSchema.parse(created.result);
@@ -311,6 +375,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ),
       );
       expect(metadata).toMatchObject({ version: 3, scope: 'full' });
+      expect(metadata.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
       const original = (
         await scratchPool.query(`SELECT note FROM public.${tableA}`)
       ).rows[0].note;
@@ -339,6 +404,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         stagedUrl.pathname = `/${restoredDatabase}`;
         const stagedPool = createPgPool(stagedUrl.toString(), { max: 1 });
         try {
+          const databaseSettingsSql =
+            'SELECT encoding, datcollate, datctype, datlocprovider, daticulocale, daticurules FROM pg_database WHERE datname = current_database()';
+          expect((await stagedPool.query(databaseSettingsSql)).rows[0]).toEqual(
+            (await scratchPool.query(databaseSettingsSql)).rows[0],
+          );
           expect(
             (await stagedPool.query('SELECT current_database() AS name'))
               .rows[0].name,
@@ -368,6 +438,25 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             ])
           ).rows[0].extra,
         ).not.toBeNull();
+
+        // A syntactically valid selective sidecar for a different archive
+        // cannot make a full dump run --clean against the online database.
+        await writeFile(
+          join(directory, `${artifact.filename}.meta.json`),
+          JSON.stringify({
+            ...metadata,
+            scope: 'selective',
+            tables: [`public.${tableA}`],
+            archiveSha256: '0'.repeat(64),
+          }),
+        );
+        await expect(
+          runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+        ).rejects.toThrow('备份文件与元数据不匹配');
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
+            .note,
+        ).toBe('online-newer');
       } finally {
         if (restoredDatabase)
           await adminPool.query(

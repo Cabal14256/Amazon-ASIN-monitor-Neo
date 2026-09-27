@@ -64,8 +64,54 @@ export const backupTimescaleManifestSchema = z
 export type BackupTimescaleManifest = z.infer<
   typeof backupTimescaleManifestSchema
 >;
+/** Settings needed to rebuild an isolated database with source text semantics. */
+const backupLocaleSettingSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => !/[\x00-\x1f\x7f]/.test(value));
+export const backupDatabaseSettingsSchema = z.discriminatedUnion(
+  'localeProvider',
+  [
+    z
+      .object({
+        encoding: z
+          .string()
+          .min(1)
+          .max(32)
+          .regex(/^[A-Z0-9_]+$/),
+        lcCollate: backupLocaleSettingSchema,
+        lcCtype: backupLocaleSettingSchema,
+        localeProvider: z.literal('libc'),
+      })
+      .strict(),
+    z
+      .object({
+        encoding: z
+          .string()
+          .min(1)
+          .max(32)
+          .regex(/^[A-Z0-9_]+$/),
+        lcCollate: backupLocaleSettingSchema,
+        lcCtype: backupLocaleSettingSchema,
+        localeProvider: z.literal('icu'),
+        icuLocale: backupLocaleSettingSchema,
+        icuRules: z
+          .string()
+          .min(1)
+          .max(64 * 1024)
+          .refine((value) => !value.includes('\0'))
+          .optional(),
+      })
+      .strict(),
+  ],
+);
+export type BackupDatabaseSettings = z.infer<
+  typeof backupDatabaseSettingsSchema
+>;
 /** Bounds metadata reads while accommodating the largest valid Timescale manifest. */
 export const BACKUP_ARTIFACT_METADATA_MAX_BYTES = 16 * 1024 * 1024;
+const backupArchiveSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const backupTableNameSchema = z
   .string()
   .max(128)
@@ -88,6 +134,7 @@ export const backupArtifactMetadataSchema = z.union([
       target: backupTargetSchema,
       sourceEngine: z.literal('timescaledb'),
       timescale: backupTimescaleManifestSchema,
+      databaseSettings: backupDatabaseSettingsSchema,
       description: z.string().max(500).optional(),
     })
     .strict(),
@@ -98,6 +145,8 @@ export const backupArtifactMetadataSchema = z.union([
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),
       scope: z.literal('full'),
+      archiveSha256: backupArchiveSha256Schema,
+      databaseSettings: backupDatabaseSettingsSchema,
       description: z.string().max(500).optional(),
     })
     .strict(),
@@ -109,6 +158,8 @@ export const backupArtifactMetadataSchema = z.union([
       sourceEngine: z.literal('postgresql'),
       scope: z.literal('selective'),
       tables: z.array(backupTableNameSchema).min(1).max(512),
+      archiveSha256: backupArchiveSha256Schema,
+      databaseSettings: backupDatabaseSettingsSchema,
       description: z.string().max(500).optional(),
     })
     .strict(),

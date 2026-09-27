@@ -60,6 +60,12 @@ describe('backup file boundary', () => {
         filename,
         target: 'primary',
         sourceEngine: 'timescaledb',
+        databaseSettings: {
+          encoding: 'UTF8',
+          lcCollate: 'C.UTF-8',
+          lcCtype: 'C.UTF-8',
+          localeProvider: 'libc',
+        },
         timescale: {
           extensionVersion: '2.22.0',
           hypertables: Array.from(

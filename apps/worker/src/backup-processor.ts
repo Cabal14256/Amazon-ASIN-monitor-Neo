@@ -2,8 +2,10 @@ import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
 import {
   BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
+  backupDatabaseSettingsSchema,
   backupJobDataSchema,
   backupTimescaleManifestSchema,
+  type BackupDatabaseSettings,
   type BackupJobData,
   type BackupTimescaleManifest,
 } from '@asin-monitor/contracts';
@@ -16,6 +18,8 @@ import {
 } from '@asin-monitor/db';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -171,6 +175,65 @@ function quoteStagingDatabase(name: string): string {
   if (!/^neo_restore_(?:primary|competitor)_[a-f0-9]{16}$/.test(name))
     throw new BackupCommandError('BACKUP_RESTORE_DATABASE_INVALID');
   return `"${name}"`;
+}
+
+function quoteSqlLiteral(value: string): string {
+  return `E'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+export function createStagingDatabaseSql(
+  name: string,
+  settings: BackupDatabaseSettings,
+): string {
+  const parsed = backupDatabaseSettingsSchema.parse(settings);
+  return (
+    `CREATE DATABASE ${quoteStagingDatabase(name)} TEMPLATE template0` +
+    ` ENCODING ${quoteSqlLiteral(parsed.encoding)}` +
+    ` LC_COLLATE ${quoteSqlLiteral(parsed.lcCollate)}` +
+    ` LC_CTYPE ${quoteSqlLiteral(parsed.lcCtype)}` +
+    ` LOCALE_PROVIDER ${parsed.localeProvider}` +
+    (parsed.localeProvider === 'icu'
+      ? ` ICU_LOCALE ${quoteSqlLiteral(parsed.icuLocale)}` +
+        (parsed.icuRules
+          ? ` ICU_RULES ${quoteSqlLiteral(parsed.icuRules)}`
+          : '')
+      : '')
+  );
+}
+
+function sameDatabaseSettings(
+  left: BackupDatabaseSettings,
+  right: BackupDatabaseSettings,
+): boolean {
+  return (
+    left.encoding === right.encoding &&
+    left.lcCollate === right.lcCollate &&
+    left.lcCtype === right.lcCtype &&
+    left.localeProvider === right.localeProvider &&
+    (left.localeProvider === 'libc' ||
+      (right.localeProvider === 'icu' &&
+        left.icuLocale === right.icuLocale &&
+        left.icuRules === right.icuRules))
+  );
+}
+
+async function archiveSha256(
+  path: string,
+  checkpoint: () => Promise<void>,
+): Promise<string> {
+  const hash = createHash('sha256');
+  let bytesSinceCheckpoint = 0;
+  await checkpoint();
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+    bytesSinceCheckpoint += chunk.length;
+    if (bytesSinceCheckpoint >= 8 * 1024 * 1024) {
+      await checkpoint();
+      bytesSinceCheckpoint = 0;
+    }
+  }
+  await checkpoint();
+  return hash.digest('hex');
 }
 
 export function connectionForDatabase(url: string, database: string): string {
@@ -374,11 +437,12 @@ async function healthCheck(env: Env, target: BackupJobData['target']) {
   }
 }
 
-/** Session-level advisory lock shared by every Neo backup/restore worker. */
+/** Session-level advisory lock shared by every worker for one backup target. */
 export async function acquireBackupTargetLock(
   env: Env,
   target: BackupJobData['target'],
 ) {
+  const advisoryKey = target === 'primary' ? 161 : 162;
   const pool = createPgPool(targetUrl(env, target), {
     max: 1,
     connectionTimeoutMillis: Math.min(
@@ -391,7 +455,8 @@ export async function acquireBackupTargetLock(
     const client = await pool.connect();
     try {
       const acquired = await client.query(
-        'SELECT pg_try_advisory_lock(1313165122, 161) AS acquired',
+        'SELECT pg_try_advisory_lock(1313165122, $1) AS acquired',
+        [advisoryKey],
       );
       if (acquired.rows[0]?.acquired !== true)
         throw new BackupCommandError('BACKUP_TARGET_BUSY');
@@ -411,6 +476,34 @@ export async function acquireBackupTargetLock(
             throw new BackupCommandError('BACKUP_TIMESCALE_REQUIRED');
           return readTimescaleManifest(lockedClient);
         },
+        async readDatabaseSettings(): Promise<BackupDatabaseSettings> {
+          const result = await lockedClient.query(
+            'SELECT pg_encoding_to_char(encoding) AS encoding, datcollate AS "lcCollate", datctype AS "lcCtype", datlocprovider AS "localeProvider", daticulocale AS "icuLocale", daticurules AS "icuRules" FROM pg_database WHERE datname = current_database()',
+          );
+          const row = result.rows[0];
+          const settings = backupDatabaseSettingsSchema.safeParse(
+            row?.localeProvider === 'i'
+              ? {
+                  encoding: row.encoding,
+                  lcCollate: row.lcCollate,
+                  lcCtype: row.lcCtype,
+                  localeProvider: 'icu',
+                  icuLocale: row.icuLocale,
+                  ...(row.icuRules ? { icuRules: row.icuRules } : {}),
+                }
+              : row?.localeProvider === 'c'
+              ? {
+                  encoding: row.encoding,
+                  lcCollate: row.lcCollate,
+                  lcCtype: row.lcCtype,
+                  localeProvider: 'libc',
+                }
+              : null,
+          );
+          if (!settings.success)
+            throw new BackupCommandError('BACKUP_SOURCE_LOCALE_UNSUPPORTED');
+          return settings.data;
+        },
         async stagingDatabaseExists(name: string) {
           quoteStagingDatabase(name);
           const result = await lockedClient.query(
@@ -419,10 +512,11 @@ export async function acquireBackupTargetLock(
           );
           return result.rows.length > 0;
         },
-        async createStagingDatabase(name: string) {
-          await lockedClient.query(
-            `CREATE DATABASE ${quoteStagingDatabase(name)} TEMPLATE template0`,
-          );
+        async createStagingDatabase(
+          name: string,
+          settings: BackupDatabaseSettings,
+        ) {
+          await lockedClient.query(createStagingDatabaseSql(name, settings));
         },
         async ownsStagingDatabase(name: string) {
           quoteStagingDatabase(name);
@@ -449,7 +543,8 @@ export async function acquireBackupTargetLock(
           released = true;
           try {
             await lockedClient.query(
-              'SELECT pg_advisory_unlock(1313165122, 161)',
+              'SELECT pg_advisory_unlock(1313165122, $1)',
+              [advisoryKey],
             );
           } finally {
             lockedClient.release();
@@ -488,6 +583,7 @@ async function restorePostgresqlIsolated(input: {
   directoryFile: string;
   taskId: string;
   target: BackupJobData['target'];
+  databaseSettings: BackupDatabaseSettings;
   lock: Awaited<ReturnType<typeof acquireBackupTargetLock>>;
   env: Env;
   signal: AbortSignal;
@@ -508,7 +604,7 @@ async function restorePostgresqlIsolated(input: {
     try {
       // TEMPLATE template0 is enforced by createStagingDatabase(), so objects
       // added to the online target after the backup cannot survive restore.
-      await input.lock.createStagingDatabase(database);
+      await input.lock.createStagingDatabase(database, input.databaseSettings);
     } catch {
       throw new BackupCommandError('BACKUP_RESTORE_CREATE_UNCONFIRMED');
     }
@@ -582,6 +678,7 @@ async function restoreTimescaleIsolated(input: {
   taskId: string;
   target: BackupJobData['target'];
   manifest: BackupTimescaleManifest;
+  databaseSettings: BackupDatabaseSettings;
   lock: Awaited<ReturnType<typeof acquireBackupTargetLock>>;
   env: Env;
   signal: AbortSignal;
@@ -611,7 +708,7 @@ async function restoreTimescaleIsolated(input: {
     if (await input.lock.stagingDatabaseExists(database))
       throw new BackupCommandError('BACKUP_RESTORE_DATABASE_EXISTS');
     try {
-      await input.lock.createStagingDatabase(database);
+      await input.lock.createStagingDatabase(database, input.databaseSettings);
     } catch {
       // A lost acknowledgement can leave a newly-created database behind.
       // Never drop it without a confirmed CREATE result.
@@ -862,6 +959,7 @@ export function createBackupProcessor(
         const sourceManifest = lock.hasTimescale
           ? await lock.readTimescaleManifest()
           : undefined;
+        const databaseSettings = await lock.readDatabaseSettings();
         await progress(1, '正在创建 PostgreSQL 自定义格式备份');
         await processCommand(
           commandPath(options.env.PG_DUMP_PATH, 'pg_dump'),
@@ -870,7 +968,7 @@ export function createBackupProcessor(
             '--no-owner',
             '--no-acl',
             `--file=${partial}`,
-            ...tables.map((table) => `--table=${table}`),
+            ...tables.map((table) => `--table-and-children=${table}`),
           ],
           environment,
           {
@@ -906,6 +1004,12 @@ export function createBackupProcessor(
         // A valid dump is now discoverable. Keep it for operator reconciliation
         // if the following Redis completion acknowledgement is ambiguous.
         artifactPath = undefined;
+        const digest = sourceManifest
+          ? undefined
+          : await archiveSha256(output, async () => {
+              await check();
+              await lock.ensureHeld();
+            });
         const metadata = backupArtifactMetadataSchema.parse(
           sourceManifest
             ? {
@@ -914,6 +1018,7 @@ export function createBackupProcessor(
                 target: data.target,
                 sourceEngine: 'timescaledb',
                 timescale: sourceManifest,
+                databaseSettings,
                 ...(data.params.description
                   ? { description: data.params.description }
                   : {}),
@@ -924,6 +1029,8 @@ export function createBackupProcessor(
                 target: data.target,
                 sourceEngine: 'postgresql',
                 scope: tables.length ? 'selective' : 'full',
+                archiveSha256: digest,
+                databaseSettings,
                 ...(tables.length ? { tables } : {}),
                 ...(data.params.description
                   ? { description: data.params.description }
@@ -984,8 +1091,17 @@ export function createBackupProcessor(
         throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
       if ((metadata.sourceEngine === 'timescaledb') !== lock.hasTimescale)
         throw new BackupCommandError('BACKUP_SOURCE_TARGET_MISMATCH');
-      if (metadata.sourceEngine === 'postgresql' && metadata.version !== 3)
-        throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
+      if (metadata.sourceEngine === 'postgresql') {
+        if (metadata.version !== 3)
+          throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
+        if (
+          (await archiveSha256(input, async () => {
+            await check();
+            await lock.ensureHeld();
+          })) !== metadata.archiveSha256
+        )
+          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+      }
       if (metadata.sourceEngine === 'timescaledb') {
         if (metadata.version !== 2)
           throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
@@ -1001,6 +1117,7 @@ export function createBackupProcessor(
           taskId: data.taskId,
           target: data.target,
           manifest: metadata.timescale,
+          databaseSettings: metadata.databaseSettings,
           lock,
           env: options.env,
           signal: controller.signal,
@@ -1031,13 +1148,16 @@ export function createBackupProcessor(
         });
         return completed.result;
       }
-      if (metadata.version === 3 && metadata.scope === 'full') {
+      if (metadata.version !== 3 || metadata.sourceEngine !== 'postgresql')
+        throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
+      if (metadata.scope === 'full') {
         await progress(5, '正在创建隔离 PostgreSQL 恢复数据库');
         const restoredDatabase = await restorePostgresqlIsolated({
           databaseUrl,
           directoryFile: input,
           taskId: data.taskId,
           target: data.target,
+          databaseSettings: metadata.databaseSettings,
           lock,
           env: options.env,
           signal: controller.signal,
@@ -1068,6 +1188,13 @@ export function createBackupProcessor(
         });
         return completed.result;
       }
+      if (
+        !sameDatabaseSettings(
+          metadata.databaseSettings,
+          await lock.readDatabaseSettings(),
+        )
+      )
+        throw new BackupCommandError('BACKUP_TARGET_LOCALE_MISMATCH');
       await progress(5, '正在恢复 PostgreSQL 备份');
       await processCommand(
         commandPath(options.env.PG_RESTORE_PATH, 'pg_restore'),
@@ -1179,6 +1306,12 @@ export function createBackupProcessor(
         : error instanceof BackupCommandError &&
           error.reason === 'BACKUP_METADATA_UNVERIFIED'
         ? '备份文件来源未验证，禁止通过 Neo 自动恢复'
+        : error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_METADATA_MISMATCH'
+        ? '备份文件与元数据不匹配，禁止自动恢复'
+        : error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_TARGET_LOCALE_MISMATCH'
+        ? '恢复目标数据库的字符集或排序规则与备份不一致，禁止原位恢复'
         : '备份任务失败，请核实数据库状态和备份文件';
       let cancelled = false;
       try {
