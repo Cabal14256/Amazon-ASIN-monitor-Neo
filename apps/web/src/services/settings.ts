@@ -224,7 +224,7 @@ export class SettingsApi {
     if (feishuRevision(original) !== feishuRevision(latest))
       throw new ApiError(
         'BUSINESS',
-        '飞书配置已被其他管理员更新，请刷新后重试',
+        '飞书配置已被其他管理员更新；请放弃本地修改后重新编辑',
         409,
         409,
       );

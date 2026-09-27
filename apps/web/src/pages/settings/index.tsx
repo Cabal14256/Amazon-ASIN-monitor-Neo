@@ -28,15 +28,17 @@ import {
   type FeishuDraft,
 } from '../../services/settings';
 import {
-  DEFAULT_MONITOR_CONCURRENCY_CAP,
   deniedSettingsError,
   isEmptySensitiveReplacement,
+  isEnabledBooleanConfig,
   isSensitiveConfigKey,
   isSupportedMonitorConcurrency,
   isSupportedScheduleMinutes,
   SCHEDULE_MINUTE_OPTIONS,
   SETTINGS_CONFIG_GROUPS,
+  updateFeishuEdit,
   visibleConfigValue,
+  type FeishuEdit,
 } from './settings-model';
 
 type Tab = 'sp-api' | 'status' | 'feishu' | 'backup';
@@ -128,7 +130,7 @@ function ConfigField({
     : row.configKey === 'ENABLE_HTML_SCRAPER_FALLBACK'
     ? 'HTML 抓取可能违反 Amazon 服务条款，并触发 IP 封禁或验证码。仅在 SP-API 和旧客户端均失败时作为最后兜底。'
     : row.configKey === 'MONITOR_MAX_CONCURRENT_GROUP_CHECKS'
-    ? `填写 1–${DEFAULT_MONITOR_CONCURRENCY_CAP} 的整数；实际并发还受部署环境 MAX_ALLOWED_CONCURRENT_GROUP_CHECKS 限制。`
+    ? '填写正整数；上限由部署环境 MAX_ALLOWED_CONCURRENT_GROUP_CHECKS 决定，并由服务端校验。'
     : row.configKey;
   return (
     <Field label={row.description || row.configKey} hint={hint}>
@@ -136,7 +138,7 @@ function ConfigField({
         boolean ? (
           <select
             {...control}
-            value={value === 'true' || value === '1' ? 'true' : 'false'}
+            value={isEnabledBooleanConfig(value) ? 'true' : 'false'}
             disabled={!canWrite || saving}
             onChange={(event) => onChange(event.target.value)}
             className="w-full rounded-input border border-input bg-card px-4 py-3 text-sm text-foreground focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:opacity-60"
@@ -169,7 +171,6 @@ function ConfigField({
             type={sensitive ? 'password' : number ? 'number' : 'text'}
             inputMode={number ? 'numeric' : undefined}
             min={number ? 1 : undefined}
-            max={number ? DEFAULT_MONITOR_CONCURRENCY_CAP : undefined}
             step={number ? 1 : undefined}
             value={value}
             placeholder={
@@ -266,7 +267,7 @@ function SpApiPanel({
     ) {
       setNotice({
         tone: 'error',
-        message: `监控并发数量必须为 1–${DEFAULT_MONITOR_CONCURRENCY_CAP} 的整数；实际并发还受部署环境上限限制。`,
+        message: '监控并发数量必须为正整数；实际并发上限由服务端部署环境决定。',
       });
       return;
     }
@@ -434,7 +435,7 @@ function FeishuPanel({
   announce: (message: string) => void;
   onDenied: (error: unknown) => void;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, FeishuDraft>>({});
+  const [drafts, setDrafts] = useState<Record<string, FeishuEdit>>({});
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
@@ -460,8 +461,20 @@ function FeishuPanel({
   function update(country: string, patch: FeishuDraft) {
     setDrafts((current) => ({
       ...current,
-      [country]: { ...current[country], ...patch },
+      [country]: updateFeishuEdit(
+        current[country],
+        byCountry.get(country),
+        patch,
+      ),
     }));
+    setNotice(null);
+  }
+  function discard(country: string) {
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next[country];
+      return next;
+    });
     setNotice(null);
   }
   function save() {
@@ -475,8 +488,8 @@ function FeishuPanel({
       let denied = false;
       let completed = 0;
       try {
-        for (const [country, draft] of changes) {
-          await api.saveFeishuChange(country, byCountry.get(country), draft);
+        for (const [country, { original, draft }] of changes) {
+          await api.saveFeishuChange(country, original, draft);
           completed++;
           setDrafts((current) => {
             const next = { ...current };
@@ -561,7 +574,7 @@ function FeishuPanel({
           <div className="grid gap-5 lg:grid-cols-2">
             {['US', 'EU'].map((country) => {
               const row = byCountry.get(country);
-              const draft = drafts[country] ?? {};
+              const draft = drafts[country]?.draft ?? {};
               const enabled = draft.enabled ?? isEnabled(row?.enabled);
               return (
                 <section
@@ -631,6 +644,16 @@ function FeishuPanel({
                       )}
                       {row && <span>配置 ID {row.id}</span>}
                     </div>
+                    {drafts[country] && (
+                      <Button
+                        variant="ghost"
+                        size="small"
+                        disabled={saving}
+                        onClick={() => discard(country)}
+                      >
+                        放弃本地修改
+                      </Button>
+                    )}
                   </div>
                 </section>
               );

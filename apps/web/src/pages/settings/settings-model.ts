@@ -1,5 +1,6 @@
-import type { SpApiDisplayConfig } from '@asin-monitor/contracts';
+import type { FeishuConfig, SpApiDisplayConfig } from '@asin-monitor/contracts';
 import { ApiError } from '../../lib/http';
+import type { FeishuDraft } from '../../services/settings';
 
 export const SETTINGS_CONFIG_GROUPS = [
   {
@@ -57,9 +58,27 @@ export function isSupportedScheduleMinutes(value: string) {
   return SCHEDULE_MINUTE_OPTIONS.some((option) => option === value);
 }
 
-export const DEFAULT_MONITOR_CONCURRENCY_CAP = 10;
 export function isSupportedMonitorConcurrency(value: string) {
-  return /^(?:[1-9]|10)$/.test(value);
+  return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value));
+}
+
+export function isEnabledBooleanConfig(value: string) {
+  return ['true', '1'].includes(value.trim().toLowerCase());
+}
+
+export interface FeishuEdit {
+  original: FeishuConfig | undefined;
+  draft: FeishuDraft;
+}
+
+export function updateFeishuEdit(
+  existing: FeishuEdit | undefined,
+  original: FeishuConfig | undefined,
+  patch: FeishuDraft,
+): FeishuEdit {
+  return existing
+    ? { ...existing, draft: { ...existing.draft, ...patch } }
+    : { original, draft: patch };
 }
 
 export function isEmptySensitiveReplacement(key: string, value: string) {

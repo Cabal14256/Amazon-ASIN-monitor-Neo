@@ -1,14 +1,16 @@
-import type { SpApiDisplayConfig } from '@asin-monitor/contracts';
-import { describe, expect, it } from 'vitest';
+import type { FeishuConfig, SpApiDisplayConfig } from '@asin-monitor/contracts';
+import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
+import { SettingsApi } from '../../services/settings';
 import {
-  DEFAULT_MONITOR_CONCURRENCY_CAP,
   deniedSettingsError,
   isEmptySensitiveReplacement,
+  isEnabledBooleanConfig,
   isSupportedMonitorConcurrency,
   isSupportedScheduleMinutes,
   SCHEDULE_MINUTE_OPTIONS,
   SETTINGS_CONFIG_KEYS,
+  updateFeishuEdit,
   visibleConfigValue,
 } from './settings-model';
 
@@ -52,12 +54,59 @@ describe('settings credential presentation', () => {
       expect(isSupportedScheduleMinutes(value)).toBe(false);
   });
 
-  it('rejects concurrency values the active Legacy loader would truncate, default, or cap', () => {
-    expect(DEFAULT_MONITOR_CONCURRENCY_CAP).toBe(10);
-    for (const value of ['1', '2', '9', '10'])
+  it('accepts positive integer concurrency values above the default deployment cap', () => {
+    for (const value of ['1', '2', '9', '10', '15', '20', '500'])
       expect(isSupportedMonitorConcurrency(value)).toBe(true);
-    for (const value of ['', '0', '-1', '1.5', '11', 'Infinity', ' 2 '])
+    for (const value of [
+      '',
+      '0',
+      '-1',
+      '1.5',
+      '01',
+      'Infinity',
+      ' 2 ',
+      '9007199254740992',
+    ])
       expect(isSupportedMonitorConcurrency(value)).toBe(false);
+  });
+
+  it('normalizes Legacy boolean values shown in settings controls', () => {
+    for (const value of ['true', 'TRUE', ' true ', '1', ' 1 '])
+      expect(isEnabledBooleanConfig(value)).toBe(true);
+    for (const value of ['false', ' FALSE ', '0', '', 'invalid'])
+      expect(isEnabledBooleanConfig(value)).toBe(false);
+  });
+
+  it('keeps the first Feishu revision and rejects a stale webhook after background refetch', async () => {
+    const original: FeishuConfig = {
+      id: 7,
+      country: 'EU',
+      webhookUrl: '***REDACTED***',
+      enabled: 1,
+      createTime: null,
+      updateTime: '2026-09-26T12:00:00.000Z',
+    };
+    const first = updateFeishuEdit(undefined, original, {
+      webhookUrl: 'https://open.feishu.cn/new-hook',
+    });
+    const refreshed = { ...original, updateTime: '2026-09-26T12:00:01.000Z' };
+    const second = updateFeishuEdit(first, refreshed, { enabled: false });
+    expect(second.original).toBe(original);
+    expect(second.draft).toEqual({
+      webhookUrl: 'https://open.feishu.cn/new-hook',
+      enabled: false,
+    });
+    const client = {
+      request: vi.fn().mockResolvedValue({ success: true, data: [refreshed] }),
+    };
+    await expect(
+      new SettingsApi(client).saveFeishuChange(
+        'EU',
+        second.original,
+        second.draft,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(client.request).toHaveBeenCalledTimes(1);
   });
 
   it('blocks a blank edited credential because the environment may remain active', () => {
