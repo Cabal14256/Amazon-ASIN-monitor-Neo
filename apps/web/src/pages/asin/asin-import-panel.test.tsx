@@ -146,6 +146,7 @@ function chooseFile() {
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  window.sessionStorage.clear();
   Reflect.deleteProperty(window.navigator, 'locks');
   taskSnapshot.current = undefined;
   vi.restoreAllMocks();
@@ -203,9 +204,35 @@ describe('primary ASIN import page', () => {
       window.localStorage.getItem(asinImportGateKey('operator')),
     ).toContain('sending');
     expect(
+      window.sessionStorage.getItem(asinImportGateKey('operator')),
+    ).toContain(taskId);
+    expect(
       screen.getByRole('button', { name: '上传并创建导入任务' }),
     ).toHaveProperty('disabled', true);
     expect(f.request).toHaveBeenCalledOnce();
+    cleanup();
+    fixture();
+    await screen.findByText(`任务编号：${taskId}`);
+    window.localStorage.removeItem(asinImportGateKey('operator'));
+    cleanup();
+    fixture();
+    await screen.findByText(`任务编号：${taskId}`);
+    const originalRemoveItem = Storage.prototype.removeItem;
+    const remove = vi
+      .spyOn(Storage.prototype, 'removeItem')
+      .mockImplementation(function (this: Storage, key) {
+        if (this === window.sessionStorage)
+          throw new DOMException('Storage unavailable', 'SecurityError');
+        originalRemoveItem.call(this, key);
+      });
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '已核实原任务，允许重新导入',
+      }),
+    );
+    await screen.findByText('无法清除导入锁，请检查浏览器会话存储权限。');
+    expect(screen.getByText(`任务编号：${taskId}`)).toBeTruthy();
+    remove.mockRestore();
     fireEvent.click(
       screen.getByRole('button', {
         name: '已核实原任务，允许重新导入',
@@ -214,6 +241,9 @@ describe('primary ASIN import page', () => {
     await screen.findByText('请确认原任务不会继续写入后再重新导入。');
     expect(
       window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toBeNull();
+    expect(
+      window.sessionStorage.getItem(asinImportGateKey('operator')),
     ).toBeNull();
   });
 

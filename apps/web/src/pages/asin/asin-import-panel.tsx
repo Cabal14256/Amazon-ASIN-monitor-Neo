@@ -21,12 +21,29 @@ import {
   type AsinImportGate,
 } from './asin-import-gate';
 
-function storage(): Storage | null {
+function storage(kind: 'local' | 'session' = 'local'): Storage | null {
   try {
-    return typeof window === 'undefined' ? null : window.localStorage;
+    if (typeof window === 'undefined') return null;
+    return kind === 'local' ? window.localStorage : window.sessionStorage;
   } catch {
     return null;
   }
+}
+
+function restoredGate(stored: Storage, userId: string): AsinImportGate | null {
+  const persisted = readAsinImportGate(stored, userId);
+  if (
+    persisted &&
+    (persisted.phase !== 'uncertain' || persisted.taskId !== null)
+  )
+    return persisted;
+  const session = storage('session');
+  const fallback = session ? readAsinImportGate(session, userId) : null;
+  return fallback?.phase === 'uncertain' &&
+    fallback.taskId &&
+    (!persisted || fallback.savedAt === persisted.savedAt)
+    ? fallback
+    : persisted;
 }
 
 function publicError(error: unknown): string {
@@ -96,7 +113,7 @@ export function AsinImportPanel() {
       return;
     }
     const stored = storage();
-    const restored = stored ? readAsinImportGate(stored, userId) : null;
+    const restored = stored ? restoredGate(stored, userId) : null;
     setGate(restored);
     if (restored) setOpen(true);
   }, [canImport, userId]);
@@ -111,7 +128,7 @@ export function AsinImportPanel() {
         event.key !== asinImportGateKey(userId)
       )
         return;
-      const restored = readAsinImportGate(stored, userId);
+      const restored = restoredGate(stored, userId);
       if (request.current && !restored) return;
       if (!restored) {
         if (gateRef.current?.taskId) setLastTaskId(gateRef.current.taskId);
@@ -255,16 +272,16 @@ export function AsinImportPanel() {
             savedAt: Date.now(),
           };
           const persisted = writeAsinImportGate(stored, userId, accepted);
+          const session = storage('session');
+          const fallback: AsinImportGate = {
+            ...accepted,
+            phase: 'uncertain',
+            savedAt: claim.gate.savedAt,
+          };
+          if (session)
+            writeAsinImportGate(session, userId, persisted ? null : fallback);
           if (owner.current !== userId || !mounted.current) return;
-          setGate(
-            persisted
-              ? accepted
-              : {
-                  ...accepted,
-                  phase: 'uncertain',
-                  savedAt: claim.gate.savedAt,
-                },
-          );
+          setGate(persisted ? accepted : fallback);
           setLastTaskId(result.taskId);
           setNotice(
             persisted
@@ -323,16 +340,22 @@ export function AsinImportPanel() {
       const previousRaw = stored.getItem(key);
       result = await locks.request(key, () => {
         const current = readAsinImportGate(stored, userId);
+        const session = storage('session');
+        const sessionGate = session
+          ? readAsinImportGate(session, userId)
+          : null;
+        const matchesUnsavedGate =
+          expected.phase === 'uncertain' &&
+          expected.taskId &&
+          ((current?.phase === 'uncertain' &&
+            current.taskId === null &&
+            current.savedAt === expected.savedAt) ||
+            (!current &&
+              JSON.stringify(sessionGate) === JSON.stringify(expected)));
         if (
           stored.getItem(key) !== previousRaw ||
           (JSON.stringify(current) !== JSON.stringify(expected) &&
-            !(
-              expected.phase === 'uncertain' &&
-              expected.taskId &&
-              current?.phase === 'uncertain' &&
-              current.taskId === null &&
-              current.savedAt === expected.savedAt
-            ))
+            !matchesUnsavedGate)
         )
           return 'changed' as const;
         return writeAsinImportGate(stored, userId, null)
@@ -344,12 +367,17 @@ export function AsinImportPanel() {
     }
     if (owner.current !== userId || !mounted.current) return;
     if (result !== 'cleared') {
-      setGate(readAsinImportGate(stored, userId));
+      setGate(restoredGate(stored, userId));
       setNotice(
         result === 'changed'
           ? '原任务状态已变化，请重新核实后再解锁。'
           : '无法清除导入锁，请检查浏览器本地存储权限。',
       );
+      return;
+    }
+    const session = storage('session');
+    if (session && !writeAsinImportGate(session, userId, null)) {
+      setNotice('无法清除导入锁，请检查浏览器会话存储权限。');
       return;
     }
     setGate(null);
