@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom/client';
 import { buildApiURL, normalizeApiPath, normalizeBaseURL } from './apiUrl';
 import { formatBeijingNow } from './beijingTime';
 import { debugError } from './debug';
-import { waitForTaskResult } from './task';
+import { TaskWaitTimeoutError, waitForTaskResult } from './task';
 import { getToken } from './token';
 
 function getExportDateSuffix(): string {
@@ -463,6 +463,16 @@ export async function exportToExcelAsync(
           backgrounded ? '后台导出已完成，文件开始下载' : '导出成功',
         );
       } catch (error: any) {
+        if (error instanceof TaskWaitTimeoutError && taskId) {
+          if (!backgrounded && !disposed) {
+            updateProgress(
+              progress,
+              '导出仍在后台进行，请到任务中心查看进度并下载',
+            );
+          }
+          message.info('导出仍在后台进行，请稍后到任务中心下载');
+          return;
+        }
         const errorMessage = error?.message || '导出失败，请重试';
         if (!backgrounded && !disposed) {
           updateProgress(0, errorMessage);

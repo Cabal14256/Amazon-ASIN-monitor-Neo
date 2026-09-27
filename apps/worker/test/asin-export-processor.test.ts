@@ -96,10 +96,14 @@ async function harness(pages: AsinGroupReadResult[]) {
   directories.push(directory);
   const artifacts = new ExportArtifactStore(directory);
   let current = state();
+  let beforeMutation:
+    | ((change: Parameters<typeof transitionTask>[1]) => void)
+    | undefined;
   const store = {
     read: vi.fn(async () => current),
     mutate: vi.fn(
       async (_id: string, change: Parameters<typeof transitionTask>[1]) => {
+        beforeMutation?.(change);
         current = transitionTask(current, change, new Date());
         return current;
       },
@@ -175,6 +179,9 @@ async function harness(pages: AsinGroupReadResult[]) {
     setState(next: TaskState) {
       current = next;
     },
+    onMutation(hook: (change: Parameters<typeof transitionTask>[1]) => void) {
+      beforeMutation = hook;
+    },
   };
 }
 
@@ -185,7 +192,7 @@ describe('ASIN streaming export', () => {
         { AUTH_DATA_AUTHORITY: 'postgresql', TASK_META_TTL_SECONDS: 60 } as Env,
         vi.fn(),
       ),
-    ).rejects.toThrow('at least 72 hours');
+    ).rejects.toThrow('at least 6 days');
   });
 
   it('matches the fixed Legacy twelve-column fixture across PostgreSQL pages', async () => {
@@ -357,6 +364,22 @@ describe('ASIN streaming export', () => {
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('cancelled');
     expect(await readdir(h.directory)).toEqual([]);
+  });
+
+  it('keeps cancellation when it arrives after the final check but before completion CAS', async () => {
+    const h = await harness([]);
+    h.onMutation((change) => {
+      if (change.kind === 'completed') {
+        h.setState(
+          transitionTask(h.state, { kind: 'cancel-request' }, new Date()),
+        );
+      }
+    });
+    await h.processor(h.job, 'token');
+    expect(h.state).toMatchObject({
+      status: 'cancelled',
+      result: null,
+    });
   });
 });
 

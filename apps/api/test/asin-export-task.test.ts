@@ -1,5 +1,9 @@
 import type { Env } from '@asin-monitor/config';
-import { PgAsinQueryRepository, TaskRegistryError } from '@asin-monitor/db';
+import {
+  ASIN_EXPORT_MIN_TASK_TTL_SECONDS,
+  PgAsinQueryRepository,
+  TaskRegistryError,
+} from '@asin-monitor/db';
 import { HttpException } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { authorizeAdministration } from '../src/auth/administration-authorization';
@@ -103,6 +107,12 @@ describe('ASIN export producer', () => {
     ).rejects.toMatchObject({ status: 503 });
     await expect(
       service('postgresql', 60).create(principal, { exportType: 'asin' }),
+    ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      service('postgresql', ASIN_EXPORT_MIN_TASK_TTL_SECONDS - 1).create(
+        principal,
+        { exportType: 'asin' },
+      ),
     ).rejects.toMatchObject({ status: 503 });
     createLimitedExport.mockRejectedValueOnce(
       new TaskRegistryError('TASK_EXPORT_LIMIT'),

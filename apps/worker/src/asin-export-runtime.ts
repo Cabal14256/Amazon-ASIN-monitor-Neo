@@ -24,7 +24,7 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     throw new Error('ASIN export requires PostgreSQL authority');
   if (env.TASK_META_TTL_SECONDS < ASIN_EXPORT_MIN_TASK_TTL_SECONDS)
     throw new Error(
-      'ASIN export requires at least 72 hours of task metadata TTL',
+      'ASIN export requires at least 6 days of task metadata TTL',
     );
   const connection = parseRedisUrl(env.REDIS_URL);
   const control = new Redis({

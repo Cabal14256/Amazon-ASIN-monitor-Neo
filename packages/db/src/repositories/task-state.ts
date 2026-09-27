@@ -98,6 +98,15 @@ export function transitionTask(
       ['cancelling', 'cancelled', 'completed'].includes(task.status)
     )
       return task;
+  } else if (
+    change.kind === 'completed' &&
+    task.taskType === 'export' &&
+    task.taskSubType === 'asin' &&
+    (task.cancelRequestedAt || task.status === 'cancelling')
+  ) {
+    // Completion must not win if cancellation reached Redis after the
+    // Worker's last status check. The processor will finalize cancellation.
+    return task;
   } else if (isTerminalTaskStatus(task.status)) return task;
   const timestamp = new Date(
     Math.max(now.getTime(), Date.parse(task.updatedAt) + 1),

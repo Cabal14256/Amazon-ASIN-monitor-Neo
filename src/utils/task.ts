@@ -50,6 +50,13 @@ interface WaitForTaskOptions {
   onProgress?: (task: AsyncTaskStatus) => void;
 }
 
+export class TaskWaitTimeoutError extends Error {
+  constructor() {
+    super('任务执行超时');
+    this.name = 'TaskWaitTimeoutError';
+  }
+}
+
 const TASK_STATUS_SET = new Set<AsyncTaskStatusValue>([
   'pending',
   'processing',
@@ -365,5 +372,5 @@ export async function waitForTaskResult(
   }
 
   cleanup();
-  throw new Error('任务执行超时');
+  throw new TaskWaitTimeoutError();
 }
