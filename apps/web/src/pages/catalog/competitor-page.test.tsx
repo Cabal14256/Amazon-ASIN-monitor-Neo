@@ -262,6 +262,92 @@ describe('competitor catalog refresh and authority transitions', () => {
     expect(screen.getByRole('button', { name: '新建变体组' })).toBeTruthy();
     f.queryClient.clear();
   });
+  it('unlocks an inspection gate cleared in another tab only after rereading', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listData(original))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(listData(updated));
+    const f = fixture(list, vi.fn());
+    await screen.findAllByText('Original rival');
+    const key = catalogSafetyKey('operator', 'competitor');
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ phase: 'inspection', operationId: 'other-tab' }),
+    );
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull(),
+    );
+
+    window.localStorage.removeItem(key);
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await screen.findAllByText('Current rival');
+    expect(screen.getByRole('button', { name: '新建变体组' })).toBeTruthy();
+    f.queryClient.clear();
+  });
+
+  it('corrects the last page after a group is deleted in another tab', async () => {
+    const pageOne = { ...listData(original), total: 11 };
+    const pageTwo = { ...listData(updated), current: 2, total: 11 };
+    const removedPage = { ...pageTwo, list: [], total: 10 };
+    const correctedPage = { ...pageOne, total: 10 };
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(pageOne)
+      .mockResolvedValueOnce(pageTwo)
+      .mockResolvedValueOnce(removedPage)
+      .mockResolvedValue(correctedPage);
+    const f = fixture(list, vi.fn());
+    await screen.findAllByText('Original rival');
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+    await screen.findAllByText('Current rival');
+    const key = catalogSafetyKey('operator', 'competitor');
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        phase: 'refresh',
+        message: null,
+        detailId: null,
+        createUncertain: false,
+        operationId: 'other-tab',
+      }),
+    );
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    window.localStorage.removeItem(key);
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await screen.findByText('第 1 / 1 页 · 共 10 组');
+    expect(screen.getByRole('heading', { name: 'Original rival' })).toBeTruthy();
+    expect(list).toHaveBeenNthCalledWith(3, expect.anything(), {
+      current: 2,
+      pageSize: 10,
+    });
+    expect(list).toHaveBeenNthCalledWith(4, expect.anything(), {
+      current: 1,
+      pageSize: 10,
+    });
+    expect(screen.getByRole('button', { name: '新建变体组' })).toBeTruthy();
+    f.queryClient.clear();
+  });
+
   it('hides old catalog data after a committed write when refresh fails', async () => {
     const list = vi
       .fn()

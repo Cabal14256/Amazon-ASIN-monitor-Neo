@@ -963,26 +963,41 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       }
       const currentSafety =
         runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
-      if (currentSafety?.phase === 'inspection') return;
-      if (currentSafety?.phase !== 'refresh') {
+      if (
+        currentSafety?.phase !== 'refresh' &&
+        currentSafety?.phase !== 'inspection'
+      ) {
         runtime.queryClient.setQueryData(safetyKey, null);
         return;
       }
       void (async () => {
         try {
           await clearCatalogCache();
-          const fresh = await config.list(runtime.http, query);
+          const firstPage = await config.list(runtime.http, query);
+          const lastPage = Math.max(
+            1,
+            Math.ceil(firstPage.total / firstPage.pageSize),
+          );
+          const correctedQuery =
+            firstPage.current > lastPage
+              ? { ...query, current: lastPage }
+              : query;
+          const fresh =
+            correctedQuery === query
+              ? firstPage
+              : await config.list(runtime.http, correctedQuery);
           if (
             !active ||
             revision !== crossTabSafetyRevision.current ||
             readCatalogSafetyGate(stored, ownerId, config.id)
           )
             return;
-          runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
           runtime.queryClient.setQueryData(
-            safetyKey,
-            currentSafety.createUncertain ? { phase: 'inspection' } : null,
+            [config.id, 'groups', correctedQuery],
+            fresh,
           );
+          if (correctedQuery !== query) setQuery(correctedQuery);
+          runtime.queryClient.setQueryData(safetyKey, null);
         } catch {
           // Keep the safety gate until this tab can reread the catalog.
         }
