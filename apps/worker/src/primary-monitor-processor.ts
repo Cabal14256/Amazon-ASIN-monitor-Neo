@@ -12,6 +12,9 @@ import {
   type TaskState,
 } from '@asin-monitor/db';
 import {
+  NOTIFICATION_MAX_ITEMS,
+  NOTIFICATION_MAX_TEXT_BYTES,
+  NotificationError,
   snapshotNotification,
   type FeishuNotifications,
   type NotificationData,
@@ -58,7 +61,14 @@ interface MonitorProcessorOptions {
 type CountrySummary = NotificationData & {
   totalGroups: number;
   brokenGroups: number;
+  notificationItems: number;
+  notificationTextBytes: number;
 };
+class MonitorNotificationCapacityError extends Error {
+  constructor() {
+    super('MONITOR_NOTIFICATION_CAPACITY');
+  }
+}
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -69,15 +79,50 @@ const count = (value: unknown): number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
     ? value
     : 0;
-const emptyCountry = (): CountrySummary => ({
-  totalGroups: 0,
-  brokenGroups: 0,
-  brokenGroupNames: [],
-  brokenGroupDetails: [],
-  brokenASINs: [],
-  brokenByType: { SP_API_ERROR: 0, NOT_FOUND: 0, NO_VARIANTS: 0 },
-  checkTime: new Date().toISOString(),
-});
+const emptyCountry = (): CountrySummary => {
+  const checkTime = new Date().toISOString();
+  return {
+    totalGroups: 0,
+    brokenGroups: 0,
+    brokenGroupNames: [],
+    brokenGroupDetails: [],
+    brokenASINs: [],
+    brokenByType: { SP_API_ERROR: 0, NOT_FOUND: 0, NO_VARIANTS: 0 },
+    checkTime,
+    notificationItems: 0,
+    notificationTextBytes: Buffer.byteLength(checkTime),
+  };
+};
+
+function reserveNotification(
+  summary: CountrySummary,
+  items: number,
+  fields: (string | undefined)[],
+) {
+  const textBytes = fields.reduce(
+    (total, field) => total + (field ? Buffer.byteLength(field) : 0),
+    0,
+  );
+  if (
+    summary.notificationItems + items > NOTIFICATION_MAX_ITEMS ||
+    summary.notificationTextBytes + textBytes > NOTIFICATION_MAX_TEXT_BYTES
+  )
+    throw new MonitorNotificationCapacityError();
+  summary.notificationItems += items;
+  summary.notificationTextBytes += textBytes;
+}
+
+function validateNotificationSummary(
+  summary: CountrySummary,
+): NotificationData {
+  try {
+    return snapshotNotification(summary);
+  } catch (error) {
+    if (error instanceof NotificationError && error.reason === 'invalid-input')
+      throw new MonitorNotificationCapacityError();
+    throw error;
+  }
+}
 
 function addGroup(summary: CountrySummary, result: VariantGroupCheckData) {
   const group = record(result.groupSnapshot);
@@ -89,30 +134,54 @@ function addGroup(summary: CountrySummary, result: VariantGroupCheckData) {
     : [];
   summary.totalGroups++;
   if (result.isBroken) {
+    const statusSource = string(group.statusSource);
+    const manualBrokenReason = string(group.manualBrokenReason);
+    reserveNotification(summary, 2, [
+      groupName,
+      groupId,
+      groupName,
+      statusSource,
+      manualBrokenReason,
+    ]);
     summary.brokenGroups++;
     summary.brokenGroupNames!.push(groupName);
     summary.brokenGroupDetails!.push({
       variantGroupId: groupId,
       groupName,
-      statusSource: string(group.statusSource),
-      manualBrokenReason: string(group.manualBrokenReason),
+      statusSource,
+      manualBrokenReason,
     });
   }
   for (const code of ['SP_API_ERROR', 'NOT_FOUND', 'NO_VARIANTS'] as const)
     summary.brokenByType![code] =
       (summary.brokenByType![code] ?? 0) + count(result.brokenByType?.[code]);
   if (group.feishuNotifyEnabled === 0) return;
+  const childByAsin = new Map<string, Record<string, unknown>>();
+  for (const child of children) {
+    const asin = string(child.asin);
+    if (asin && !childByAsin.has(asin)) childByAsin.set(asin, child);
+  }
   for (const asin of result.brokenASINs ?? []) {
-    const child = children.find((row) => row.asin === asin.asin);
+    const asinCode = string(asin.asin);
+    const child = asinCode ? childByAsin.get(asinCode) : undefined;
     if (child?.feishuNotifyEnabled === 0) continue;
-    summary.brokenASINs!.push({
-      asin: string(asin.asin),
+    const item = {
+      asin: asinCode,
       brand: string(child?.brand),
       variantGroupId: groupId,
       groupName,
       statusSource: string(asin.statusSource),
       manualBrokenReason: string(asin.manualBrokenReason),
-    });
+    };
+    reserveNotification(summary, 1, [
+      item.variantGroupId,
+      item.groupName,
+      item.statusSource,
+      item.manualBrokenReason,
+      item.asin,
+      item.brand,
+    ]);
+    summary.brokenASINs!.push(item);
   }
 }
 
@@ -205,6 +274,9 @@ export function createPrimaryMonitorProcessor(
             });
             committed = true;
             addGroup(countryResults[country], result);
+            // Stop before the next history commit when a country can no
+            // longer fit the exact untruncated notification contract.
+            validateNotificationSummary(countryResults[country]);
           } catch (error) {
             if (
               !(error instanceof VariantCheckError) ||
@@ -241,7 +313,7 @@ export function createPrimaryMonitorProcessor(
       const notificationSnapshots = Object.fromEntries(
         data.countries.map((country) => [
           country,
-          snapshotNotification(countryResults[country]),
+          validateNotificationSummary(countryResults[country]),
         ]),
       ) as Record<string, NotificationData>;
       const notificationResults: Record<string, string> = {};
@@ -327,6 +399,7 @@ export function createPrimaryMonitorProcessor(
     } catch (error) {
       const cancelled =
         error instanceof Error && error.message === 'MONITOR_CANCELLED';
+      const capacity = error instanceof MonitorNotificationCapacityError;
       if (finalResult && !cancelled) {
         // BullMQ persists the returned result; the task query reconciler can
         // recover the Redis task state from that owned completed queue job.
@@ -336,11 +409,13 @@ export function createPrimaryMonitorProcessor(
         return cancellationAccepted ? { cancelled: true } : finalResult;
       }
       const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+      let cancelledAfterError = cancelled;
       try {
         await options.assertJobLock(job, token);
         const state = await options.store.read(data.taskId);
         if (state && !isTerminalTaskStatus(state.status)) {
-          if (cancelled || state.cancelRequestedAt)
+          if (cancelled || state.cancelRequestedAt) {
+            cancelledAfterError = true;
             await options.store.mutate(
               data.taskId,
               {
@@ -349,10 +424,18 @@ export function createPrimaryMonitorProcessor(
               },
               identity,
             );
-          else if (finalAttempt && !options.shutdownSignal.aborted)
+          } else if (
+            (capacity || finalAttempt) &&
+            !options.shutdownSignal.aborted
+          )
             await options.store.mutate(
               data.taskId,
-              { kind: 'failed', message: '监控任务失败，请核实已提交结果' },
+              {
+                kind: 'failed',
+                message: capacity
+                  ? '监控通知摘要超出容量，请核实已提交结果'
+                  : '监控任务失败，请核实已提交结果',
+              },
               identity,
             );
         }
@@ -361,7 +444,13 @@ export function createPrimaryMonitorProcessor(
           reason: 'monitor_status_unconfirmed',
         });
       }
-      if (cancelled) return { cancelled: true };
+      if (cancelledAfterError) return { cancelled: true };
+      if (capacity) {
+        logger.error('主营监控通知容量超限', {
+          reason: 'monitor_notification_capacity',
+        });
+        throw new UnrecoverableError('监控通知摘要超出容量，请核实已提交结果');
+      }
       logger.warn('主营监控等待重试或对账', {
         reason: committed
           ? 'monitor_partial_commit'
