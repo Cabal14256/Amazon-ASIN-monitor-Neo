@@ -247,14 +247,22 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       )('exceljs');
       const book = new ExcelJS.Workbook();
       await book.xlsx.load(download.rawPayload);
+      expect(book.worksheets[0].getRow(1).cellCount).toBe(15);
       const rows = book.worksheets[0]
         .getSheetValues()
         .slice(2)
         .map((row) => (row as unknown[]).slice(1));
       expect(rows).toHaveLength(122);
-      expect(rows.some((row) => row[0] === 'Empty' && !row[6])).toBe(true);
       expect(
-        rows.some((row) => row[0] === 'Broken' && row[6] === 'B000000001'),
+        rows.some(
+          (row) => row[0] === 'Empty' && row[6] === 'NORMAL' && !row[7],
+        ),
+      ).toBe(true);
+      expect(
+        rows.some(
+          (row) =>
+            row[0] === 'Broken' && row[6] === 'AUTO' && row[7] === 'B000000001',
+        ),
       ).toBe(true);
       expect(rows.some((row) => row[0] === 'Other')).toBe(false);
       expect(
