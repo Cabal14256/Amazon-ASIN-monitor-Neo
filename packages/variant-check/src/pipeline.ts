@@ -369,12 +369,17 @@ export class VariantCheckPipeline {
         snapshot.asins.length >= this.batchThreshold
           ? await this.observeHybrid(snapshot, context, scope)
           : await this.observeGroup(snapshot, context, scope);
-      if (operation?.taskType === 'monitor')
+      const monitorDeferred = new Set<string>();
+      if (operation?.taskType === 'monitor') {
+        for (const observation of observations)
+          if (observation.kind === 'deferred')
+            monitorDeferred.add(observation.asinId);
         observations = await this.retryMonitorDeferred(
           snapshot,
           observations,
           scope,
         );
+      }
       const output = await this.persist(
         scope,
         async (unit) => {
@@ -401,10 +406,10 @@ export class VariantCheckPipeline {
           asin: byId.get(observation.asinId)!.asin,
           country: snapshot.group.country,
           notFound:
-            operation?.taskType === 'monitor'
-              ? observation.kind !== 'deferred'
-              : observation.kind === 'checked' &&
-                observation.result.errorType === 'NOT_FOUND',
+            observation.kind === 'checked' &&
+            (observation.result.errorType === 'NOT_FOUND' ||
+              (monitorDeferred.has(observation.asinId) &&
+                observation.result.errorType !== 'SP_API_ERROR')),
         })),
       );
       this.logger.info('变体组检查完成', { count: observations.length });
@@ -476,6 +481,7 @@ export class VariantCheckPipeline {
     context: VariantCheckContext,
     scope: CheckScope,
   ): Promise<AsinCheckObservation[]> {
+    const deferredIndexes = new Set<number>();
     const results = await this.hybrid!.check(
       snapshot.asins.map((row) => row.asin),
       snapshot.group.country,
@@ -483,16 +489,25 @@ export class VariantCheckPipeline {
         signal: scope.signal,
         checkpoint: () => scope.guard(),
         onProgress: context.onProgress,
+        onDeferred:
+          context.operation?.taskType === 'monitor'
+            ? (index) => deferredIndexes.add(index)
+            : undefined,
       },
     );
     await scope.guard();
     if (results.length !== snapshot.asins.length)
       throw new VariantCheckError('invalid-result');
-    return results.map((result, index) => ({
-      asinId: snapshot.asins[index].id,
-      kind: 'checked',
-      result,
-    }));
+    return results.map(
+      (result, index): AsinCheckObservation =>
+        deferredIndexes.has(index)
+          ? {
+              asinId: snapshot.asins[index].id,
+              kind: 'deferred',
+              error: 'ASIN检查失败，已加入延后队列',
+            }
+          : { asinId: snapshot.asins[index].id, kind: 'checked', result },
+    );
   }
   private async observeGroup(
     snapshot: GroupCheckSnapshot,

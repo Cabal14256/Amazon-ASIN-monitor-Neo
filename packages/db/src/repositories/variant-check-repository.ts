@@ -340,7 +340,7 @@ export class DrizzleVariantCheckUnit
         variantGroupId: group.id,
         variantGroupName: group.name,
         checkType: 'GROUP',
-        country: group.country,
+        country: normalizeCountry(group.country),
         isBroken: result.isBroken,
         checkTime: checkedAt,
         checkResult: result,
@@ -365,7 +365,7 @@ export class DrizzleVariantCheckUnit
           siteSnapshot: asin.site,
           brandSnapshot: asin.brand,
           checkType: 'ASIN',
-          country: asin.country,
+          country: normalizeCountry(group.country),
           isBroken: effective.isBroken === 1,
           checkTime: checkedAt,
           checkResult: {

@@ -206,6 +206,33 @@ describe('primary monitor BullMQ processor', () => {
     expect(summary.brokenGroupDetails).toHaveLength(101);
     expect(summary.brokenASINs).toHaveLength(101);
   });
+  it('rejects oversized notification summaries before claiming any country', async () => {
+    for (const { items, brand } of [
+      { items: 10_001, brand: 'Fixture' },
+      { items: 7_000, brand: 'B'.repeat(160) },
+    ]) {
+      const f = fixture();
+      f.data.countries = ['US'];
+      f.groups.mockImplementationOnce(async () => [
+        { country: 'US' as const, groupId: 'g1' },
+      ]);
+      f.checkGroup.mockImplementationOnce(async () => ({
+        ...result('g1', true),
+        brokenASINs: Array.from({ length: items }, () => ({
+          asin: 'B000000001',
+          statusSource: 'AUTO',
+        })),
+        groupSnapshot: {
+          ...result('g1', true).groupSnapshot,
+          children: [{ asin: 'B000000001', feishuNotifyEnabled: 1, brand }],
+        },
+      }));
+
+      await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+      expect(f.claimNotification).not.toHaveBeenCalled();
+      expect(f.sendCountry).not.toHaveBeenCalled();
+    }
+  });
   it('timestamps the country after its group checks finish', async () => {
     const f = fixture();
     f.data.countries = ['US'];

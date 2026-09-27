@@ -11,9 +11,10 @@ import {
   type RedisTaskRepository,
   type TaskState,
 } from '@asin-monitor/db';
-import type {
-  FeishuNotifications,
-  NotificationData,
+import {
+  snapshotNotification,
+  type FeishuNotifications,
+  type NotificationData,
 } from '@asin-monitor/notify';
 import type { VariantCheckPipeline } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
@@ -235,6 +236,14 @@ export function createPrimaryMonitorProcessor(
         countryResults[country].checkTime = new Date().toISOString();
       }
       if (failedGroups) throw new Error('MONITOR_GROUPS_INCOMPLETE');
+      // Validate every bounded payload before the first notification claim.
+      // A rejected payload can then be retried without an uncertain send.
+      const notificationSnapshots = Object.fromEntries(
+        data.countries.map((country) => [
+          country,
+          snapshotNotification(countryResults[country]),
+        ]),
+      ) as Record<string, NotificationData>;
       const notificationResults: Record<string, string> = {};
       for (let index = 0; index < data.countries.length; index++) {
         await check();
@@ -247,7 +256,7 @@ export function createPrimaryMonitorProcessor(
           const outcome = await options.notifications.sendCountry(
             'primary',
             country,
-            countryResults[country],
+            notificationSnapshots[country],
             controller.signal,
           );
           await options.repository.completeNotification(
