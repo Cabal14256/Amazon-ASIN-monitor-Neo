@@ -122,13 +122,40 @@ describe('shared ASIN catalog display data', () => {
       ),
     ).toContain('勿直接重试');
     expect(
-      catalogWriteOutcomeUncertain(new ApiError('HTTP', 'upstream', 503)),
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503),
+        'competitor',
+      ),
     ).toBe(true);
-    expect(catalogWriteOutcomeUncertain(new ApiError('TIMEOUT', 'late'))).toBe(
-      true,
-    );
     expect(
-      catalogWriteOutcomeUncertain(new ApiError('HTTP', 'duplicate', 409)),
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', '鉴权权威源尚未切换，请使用现有竞品入口', 503),
+        'competitor',
+      ),
+    ).toBe(false);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', 'server error', 500),
+        'competitor',
+      ),
+    ).toBe(false);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', 'upstream', 503),
+        'asin',
+      ),
+    ).toBe(true);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('TIMEOUT', 'late'),
+        'competitor',
+      ),
+    ).toBe(true);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', 'duplicate', 409),
+        'competitor',
+      ),
     ).toBe(false);
   });
   it('rejects an edit when another operator changed the source record', () => {

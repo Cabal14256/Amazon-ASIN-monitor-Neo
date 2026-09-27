@@ -121,11 +121,18 @@ export function catalogWriteError(error: unknown): string {
   return 'ASIN 操作暂不可用，请稍后重试。';
 }
 
-export function catalogWriteOutcomeUncertain(error: unknown): boolean {
+export function catalogWriteOutcomeUncertain(
+  error: unknown,
+  source: 'asin' | 'competitor',
+): boolean {
   return (
     error instanceof ApiError &&
     (['TIMEOUT', 'NETWORK', 'INVALID_RESPONSE'].includes(error.kind) ||
-      (error.kind === 'HTTP' && (error.status ?? 0) >= 500))
+      (error.kind === 'HTTP' &&
+        (source === 'competitor'
+          ? error.status === 503 &&
+            error.message === '写入结果未确认，请刷新数据后再操作'
+          : (error.status ?? 0) >= 500)))
   );
 }
 

@@ -216,6 +216,25 @@ describe('competitor catalog refresh and authority transitions', () => {
     f.queryClient.clear();
   });
 
+  it('keeps the catalog visible when the API definitively rejects a write before commit', async () => {
+    const list = vi.fn().mockResolvedValue(listData(original));
+    const createGroup = vi.fn(async () => {
+      throw new ApiError('HTTP', '鉴权权威源尚未切换，请使用现有竞品入口', 503);
+    });
+    const f = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    await create();
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain(
+        '写入服务尚未开放',
+      ),
+    );
+    expect(screen.getAllByText('Original rival').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: '重新读取目录' })).toBeNull();
+    expect(f.announce).not.toHaveBeenCalled();
+    f.queryClient.clear();
+  });
+
   it('finishes refresh when a concurrent delete removes the selected group', async () => {
     const list = vi
       .fn()

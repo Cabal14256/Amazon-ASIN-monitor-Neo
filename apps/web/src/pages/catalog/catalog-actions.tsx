@@ -343,7 +343,10 @@ export function CatalogActionPanel({
       close();
     } catch (cause) {
       if (catalogAccessDenied(cause)) denied();
-      else if (mutationAttempted && catalogWriteOutcomeUncertain(cause))
+      else if (
+        mutationAttempted &&
+        catalogWriteOutcomeUncertain(cause, config.id)
+      )
         uncertain(action);
       else setError(catalogWriteError(cause));
     } finally {
