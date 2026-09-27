@@ -9,6 +9,7 @@ import {
   catalogActionSourceCurrent,
   catalogError,
   catalogWriteError,
+  catalogWriteOutcomeUncertain,
   checkedAt,
   childStatus,
   groupStatus,
@@ -115,6 +116,20 @@ describe('shared ASIN catalog display data', () => {
     expect(
       catalogWriteError(new ApiError('HTTP', 'raw sensitive details', 413)),
     ).not.toContain('raw sensitive');
+    expect(
+      catalogWriteError(
+        new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503),
+      ),
+    ).toContain('勿直接重试');
+    expect(
+      catalogWriteOutcomeUncertain(new ApiError('HTTP', 'upstream', 503)),
+    ).toBe(true);
+    expect(catalogWriteOutcomeUncertain(new ApiError('TIMEOUT', 'late'))).toBe(
+      true,
+    );
+    expect(
+      catalogWriteOutcomeUncertain(new ApiError('HTTP', 'duplicate', 409)),
+    ).toBe(false);
   });
   it('rejects an edit when another operator changed the source record', () => {
     const group = {
@@ -142,6 +157,12 @@ describe('shared ASIN catalog display data', () => {
       catalogActionSourceCurrent(
         { type: 'edit-group', group },
         { ...group, brand: 'New brand' },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'delete-group', group },
+        { ...group, children: [] },
       ),
     ).toBe(false);
     const manualGroup = {
@@ -186,6 +207,18 @@ describe('shared ASIN catalog display data', () => {
         group,
       ),
     ).toBe(true);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'move-asin', group, child: group.children[0] },
+        { ...group, country: 'DE' },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'delete-asin', group, child: group.children[0] },
+        { ...group, children: [{ ...group.children[0], brand: 'Changed' }] },
+      ),
+    ).toBe(false);
     expect(
       catalogActionSourceCurrent(
         { type: 'asin-notify', group, child: group.children[0] },

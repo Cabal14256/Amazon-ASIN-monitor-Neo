@@ -60,6 +60,7 @@ export class CompetitorWriteController {
       );
   }
   @Delete('variant-groups/:groupId')
+  @RequirePermissions('asin:delete')
   @Header('Cache-Control', 'no-store')
   async deleteGroup(
     @Req() request: FastifyRequest,
@@ -73,6 +74,7 @@ export class CompetitorWriteController {
     };
   }
   @Delete('asins/:asinId')
+  @RequirePermissions('asin:delete')
   @Header('Cache-Control', 'no-store')
   async deleteAsin(
     @Req() request: FastifyRequest,

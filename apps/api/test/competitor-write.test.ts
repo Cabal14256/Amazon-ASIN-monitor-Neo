@@ -121,7 +121,7 @@ function fixture() {
     lastActiveAt: new Date(),
     expiresAt: new Date('2099-01-01T00:00:00Z'),
   };
-  const permissions = ['asin:write'];
+  const permissions = ['asin:write', 'asin:delete'];
   const result = {
     groups: [competitorQueryGroup()],
     asins: [competitorQueryAsin()],
@@ -178,7 +178,7 @@ function fixture() {
         expiresAt: new Date('2099-01-01T00:00:00Z'),
       }),
     ),
-    getPermissionCodes: vi.fn(async () => ['asin:write']),
+    getPermissionCodes: vi.fn(async () => ['asin:write', 'asin:delete']),
     getRoles: vi.fn(async () => [
       { id: 'writer-121', code: 'ADMIN', name: 'Fixture' },
     ]),
@@ -265,6 +265,31 @@ describe('competitor writes HTTP / current primary authorization', () => {
     'rejects committed permission revocation for $action despite cached guard grants',
     async (value) => {
       f.permissions.splice(0);
+      expect((await request(value)).statusCode).toBe(403);
+      expect(f.unit[value.action]).not.toHaveBeenCalled();
+    },
+  );
+  it.each([cases[5], cases[6]])(
+    'allows asin:delete without asin:write for $action',
+    async (value) => {
+      f.auth.getPermissionCodes.mockResolvedValue(['asin:delete']);
+      f.permissions.splice(0, f.permissions.length, 'asin:delete');
+      expect((await request(value)).statusCode).toBe(200);
+      expect(f.unit[value.action]).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([cases[5], cases[6]])(
+    'rejects asin:write without asin:delete before $action starts',
+    async (value) => {
+      f.auth.getPermissionCodes.mockResolvedValue(['asin:write']);
+      expect((await request(value)).statusCode).toBe(403);
+      expect(f.repository.transaction).not.toHaveBeenCalled();
+    },
+  );
+  it.each([cases[5], cases[6]])(
+    'rechecks asin:delete inside the transaction for $action',
+    async (value) => {
+      f.permissions.splice(0, f.permissions.length, 'asin:write');
       expect((await request(value)).statusCode).toBe(403);
       expect(f.unit[value.action]).not.toHaveBeenCalled();
     },

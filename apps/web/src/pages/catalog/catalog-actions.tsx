@@ -8,6 +8,7 @@ import {
   catalogAccessDenied,
   catalogActionSourceCurrent,
   catalogWriteError,
+  catalogWriteOutcomeUncertain,
   singleAsinCode,
   statusSource,
 } from './catalog-data';
@@ -82,6 +83,7 @@ export function CatalogActionPanel({
   close,
   saved,
   denied,
+  uncertain,
   writingChange,
 }: {
   action: CatalogAction;
@@ -90,9 +92,11 @@ export function CatalogActionPanel({
   close: () => void;
   saved: (message: string, action: CatalogAction) => Promise<void>;
   denied: () => void;
+  uncertain: (action: CatalogAction) => void;
   writingChange: (writing: boolean) => void;
 }) {
   const writes = config.writes;
+  const mainWrites = config.id === 'asin' ? config.writes : undefined;
   const group = 'group' in action ? action.group : undefined;
   const child = 'child' in action ? action.child : undefined;
   const groupForm =
@@ -153,10 +157,17 @@ export function CatalogActionPanel({
     try {
       const result = await config.list(http, {
         keyword: targetSearch.trim() || undefined,
+        country: config.id === 'competitor' ? group?.country : undefined,
         current: 1,
         pageSize: 20,
       });
-      setTargets(result.list.filter((item) => item.id !== group?.id));
+      setTargets(
+        result.list.filter(
+          (item) =>
+            item.id !== group?.id &&
+            (config.id !== 'competitor' || item.country === group?.country),
+        ),
+      );
     } catch (cause) {
       if (catalogAccessDenied(cause)) denied();
       setError(catalogWriteError(cause));
@@ -192,52 +203,100 @@ export function CatalogActionPanel({
     }
     setPending(true);
     writingChange(true);
+    let mutationAttempted = false;
     try {
       if ('group' in action) {
         const latest = await config.detail(http, action.group.id);
         if (!catalogActionSourceCurrent(action, latest))
           throw new ApiError('HTTP', '记录已变化', 409);
       }
+      if (moving) {
+        const target = await config.detail(http, targetGroupId.trim());
+        if (
+          !targets?.some(
+            (item) =>
+              item.id === target.id &&
+              item.country === target.country &&
+              item.name === target.name &&
+              item.brand === target.brand,
+          )
+        )
+          throw new ApiError('HTTP', '记录已变化', 409);
+      }
+      mutationAttempted = true;
       switch (action.type) {
         case 'create-group':
-          await writes.createGroup(http, {
-            name: name.trim(),
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-          });
+          if (config.id === 'competitor')
+            await config.writes!.createGroup(http, {
+              name: name.trim(),
+              country: country.trim().toUpperCase(),
+              brand: brand.trim(),
+            });
+          else
+            await config.writes!.createGroup(http, {
+              name: name.trim(),
+              country: country.trim().toUpperCase(),
+              site: site.trim(),
+              brand: brand.trim(),
+            });
           break;
         case 'edit-group':
-          await writes.updateGroup(http, action.group.id, {
-            name: name.trim(),
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-          });
+          if (config.id === 'competitor')
+            await config.writes!.updateGroup(http, action.group.id, {
+              name: name.trim(),
+              country: country.trim().toUpperCase(),
+              brand: brand.trim(),
+            });
+          else
+            await config.writes!.updateGroup(http, action.group.id, {
+              name: name.trim(),
+              country: country.trim().toUpperCase(),
+              site: site.trim(),
+              brand: brand.trim(),
+            });
           break;
         case 'delete-group':
           await writes.deleteGroup(http, action.group.id);
           break;
         case 'create-asin':
-          await writes.createAsin(http, {
-            asin: singleAsinCode(asin)!,
-            name: name.trim() || null,
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-            parentId: action.group.id,
-            asinType: asinType ? (asinType as '1' | '2') : null,
-          });
+          if (config.id === 'competitor')
+            await config.writes!.createAsin(http, {
+              asin: singleAsinCode(asin)!,
+              name: name.trim() || null,
+              country: action.group.country,
+              brand: brand.trim(),
+              parentId: action.group.id,
+              asinType: asinType ? (asinType as '1' | '2') : null,
+            });
+          else
+            await config.writes!.createAsin(http, {
+              asin: singleAsinCode(asin)!,
+              name: name.trim() || null,
+              country: country.trim().toUpperCase(),
+              site: site.trim(),
+              brand: brand.trim(),
+              parentId: action.group.id,
+              asinType: asinType ? (asinType as '1' | '2') : null,
+            });
           break;
         case 'edit-asin':
-          await writes.updateAsin(http, action.child.id, {
-            asin: action.child.asin,
-            name: name.trim() || null,
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-            asinType: asinType ? (asinType as '1' | '2') : null,
-          });
+          if (config.id === 'competitor')
+            await config.writes!.updateAsin(http, action.child.id, {
+              asin: action.child.asin,
+              name: name.trim() || null,
+              country: action.group.country,
+              brand: brand.trim(),
+              asinType: asinType ? (asinType as '1' | '2') : null,
+            });
+          else
+            await config.writes!.updateAsin(http, action.child.id, {
+              asin: action.child.asin,
+              name: name.trim() || null,
+              country: country.trim().toUpperCase(),
+              site: site.trim(),
+              brand: brand.trim(),
+              asinType: asinType ? (asinType as '1' | '2') : null,
+            });
           break;
         case 'move-asin':
           await writes.moveAsin(http, action.child.id, {
@@ -248,28 +307,32 @@ export function CatalogActionPanel({
           await writes.deleteAsin(http, action.child.id);
           break;
         case 'group-notify':
-          await writes.updateGroupNotify(
+          if (!mainWrites) throw new ApiError('INVALID_INPUT', '不支持此操作');
+          await mainWrites.updateGroupNotify(
             http,
             action.group.id,
             !action.group.feishuNotifyEnabled,
           );
           break;
         case 'group-manual':
-          await writes.updateGroupManual(http, action.group.id, {
+          if (!mainWrites) throw new ApiError('INVALID_INPUT', '不支持此操作');
+          await mainWrites.updateGroupManual(http, action.group.id, {
             markedBroken: !action.group.manualBroken,
             reason: reason.trim() || undefined,
             expectedManualState: manualExpectedGroup(action.group),
           });
           break;
         case 'asin-notify':
-          await writes.updateAsinNotify(
+          if (!mainWrites) throw new ApiError('INVALID_INPUT', '不支持此操作');
+          await mainWrites.updateAsinNotify(
             http,
             action.child.id,
             !action.child.feishuNotifyEnabled,
           );
           break;
         case 'asin-manual':
-          await writes.updateAsinManual(http, action.child.id, {
+          if (!mainWrites) throw new ApiError('INVALID_INPUT', '不支持此操作');
+          await mainWrites.updateAsinManual(http, action.child.id, {
             action: action.action,
             reason: reason.trim() || undefined,
             expectedManualState: manualExpectedAsin(action.child, action.group),
@@ -280,7 +343,9 @@ export function CatalogActionPanel({
       close();
     } catch (cause) {
       if (catalogAccessDenied(cause)) denied();
-      setError(catalogWriteError(cause));
+      else if (mutationAttempted && catalogWriteOutcomeUncertain(cause))
+        uncertain(action);
+      else setError(catalogWriteError(cause));
     } finally {
       setPending(false);
       writingChange(false);
@@ -402,27 +467,38 @@ export function CatalogActionPanel({
             </>
           )}
           {(groupForm || asinForm) && (
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div
+              className={`grid gap-4 ${
+                config.showSite ? 'sm:grid-cols-3' : 'sm:grid-cols-2'
+              }`}
+            >
               <Field label="国家代码" required>
                 {(control) => (
                   <Input
                     {...control}
-                    value={country}
+                    value={
+                      config.id === 'competitor' && asinForm
+                        ? group?.country ?? ''
+                        : country
+                    }
                     maxLength={10}
+                    disabled={config.id === 'competitor' && asinForm}
                     onChange={(event) => setCountry(event.target.value)}
                   />
                 )}
               </Field>
-              <Field label="站点" hint="填写店铺代号，例如 12。" required>
-                {(control) => (
-                  <Input
-                    {...control}
-                    value={site}
-                    maxLength={100}
-                    onChange={(event) => setSite(event.target.value)}
-                  />
-                )}
-              </Field>
+              {config.showSite && (
+                <Field label="站点" hint="填写店铺代号，例如 12。" required>
+                  {(control) => (
+                    <Input
+                      {...control}
+                      value={site}
+                      maxLength={100}
+                      onChange={(event) => setSite(event.target.value)}
+                    />
+                  )}
+                </Field>
+              )}
               <Field label="品牌" required>
                 {(control) => (
                   <Input
@@ -490,8 +566,8 @@ export function CatalogActionPanel({
                       className="w-full justify-start"
                       onClick={() => setTargetGroupId(target.id)}
                     >
-                      {target.name} · {target.country} · {target.site} ·{' '}
-                      {target.id}
+                      {target.name} · {target.country}
+                      {config.showSite && ` · ${target.site}`} · {target.id}
                     </Button>
                   ))}
                 </div>

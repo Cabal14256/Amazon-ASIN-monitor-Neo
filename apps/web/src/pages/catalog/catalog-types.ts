@@ -1,4 +1,8 @@
 import type {
+  CompetitorCreateAsinRequest,
+  CompetitorGroupUpsertRequest,
+  CompetitorMoveAsinRequest,
+  CompetitorUpdateAsinRequest,
   CreateAsinRequest,
   MoveAsinRequest,
   UpdateAsinRequest,
@@ -92,8 +96,7 @@ export type CatalogAction =
       child: CatalogChild;
     };
 
-export interface CatalogConfig {
-  id: 'asin' | 'competitor';
+interface CatalogConfigBase {
   title: string;
   label: string;
   heading: string;
@@ -111,8 +114,14 @@ export interface CatalogConfig {
     id: string,
     signal?: AbortSignal,
   ) => Promise<CatalogGroup>;
-  writes?: CatalogWrites;
 }
+
+export type CatalogConfig =
+  | (CatalogConfigBase & { id: 'asin'; writes?: CatalogWrites })
+  | (CatalogConfigBase & {
+      id: 'competitor';
+      writes?: CompetitorCatalogWrites;
+    });
 
 export interface CatalogWrites {
   createGroup: (
@@ -186,5 +195,39 @@ export interface CatalogWrites {
         parentManualBroken: boolean;
       };
     },
+  ) => Promise<unknown>;
+}
+
+export interface CompetitorCatalogWrites {
+  createGroup: (
+    http: Pick<HttpClient, 'request'>,
+    input: CompetitorGroupUpsertRequest,
+  ) => Promise<unknown>;
+  updateGroup: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: CompetitorGroupUpsertRequest,
+  ) => Promise<unknown>;
+  deleteGroup: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+  ) => Promise<unknown>;
+  createAsin: (
+    http: Pick<HttpClient, 'request'>,
+    input: CompetitorCreateAsinRequest,
+  ) => Promise<unknown>;
+  updateAsin: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: CompetitorUpdateAsinRequest,
+  ) => Promise<unknown>;
+  moveAsin: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: CompetitorMoveAsinRequest,
+  ) => Promise<unknown>;
+  deleteAsin: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
   ) => Promise<unknown>;
 }

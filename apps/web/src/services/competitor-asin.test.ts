@@ -1,7 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpClient } from '../lib/http';
 import { jsonResponse, sessionFixture } from '../lib/transport-fixtures';
-import { getCompetitorGroup, getCompetitorGroups } from './competitor-asin';
+import {
+  createCompetitorAsin,
+  createCompetitorGroup,
+  deleteCompetitorAsin,
+  deleteCompetitorGroup,
+  getCompetitorGroup,
+  getCompetitorGroups,
+  moveCompetitorAsin,
+  updateCompetitorAsin,
+  updateCompetitorGroup,
+} from './competitor-asin';
 
 const group = {
   id: 'competitor-group-1',
@@ -100,5 +110,112 @@ describe('competitor catalog transport', () => {
       { signal, timeoutMs: 30_000, maxResponseBytes: 32 * 1024 * 1024 },
       expect.anything(),
     );
+  });
+
+  it.each(['/api', 'https://app.test/api/'])(
+    'uses %s for all seven writes with competitor-only request fields',
+    async (baseURL) => {
+      const fetcher = vi.fn<typeof fetch>(async (url, options) =>
+        jsonResponse({
+          success: true,
+          errorCode: 0,
+          data:
+            options?.method === 'DELETE'
+              ? '删除成功'
+              : new URL(String(url)).pathname.includes('/asins')
+              ? {
+                  id: 'competitor-child-1',
+                  asin: 'B00RIVAL00',
+                  country: 'DE',
+                  brand: 'Rival',
+                  variantGroupId: 'competitor-group-1',
+                }
+              : group,
+        }),
+      );
+      const http = client(baseURL, fetcher);
+      const groupInput = {
+        name: 'Fixture competitor',
+        country: 'DE',
+        brand: 'Rival',
+      };
+      const childInput = {
+        asin: 'B00RIVAL00',
+        name: 'Rival child',
+        country: 'DE',
+        brand: 'Rival',
+        asinType: '2' as const,
+      };
+      await createCompetitorGroup(http, groupInput);
+      await updateCompetitorGroup(http, group.id, groupInput);
+      await deleteCompetitorGroup(http, group.id);
+      await createCompetitorAsin(http, { ...childInput, parentId: group.id });
+      await updateCompetitorAsin(http, 'competitor-child-1', childInput);
+      await moveCompetitorAsin(http, 'competitor-child-1', {
+        targetGroupId: 'competitor-group-2',
+      });
+      await deleteCompetitorAsin(http, 'competitor-child-1');
+      expect(
+        fetcher.mock.calls.map(([url, options]) => [
+          options?.method,
+          new URL(String(url)).pathname,
+        ]),
+      ).toEqual([
+        ['POST', '/api/v1/competitor/variant-groups'],
+        ['PUT', '/api/v1/competitor/variant-groups/competitor-group-1'],
+        ['DELETE', '/api/v1/competitor/variant-groups/competitor-group-1'],
+        ['POST', '/api/v1/competitor/asins'],
+        ['PUT', '/api/v1/competitor/asins/competitor-child-1'],
+        ['POST', '/api/v1/competitor/asins/competitor-child-1/move'],
+        ['DELETE', '/api/v1/competitor/asins/competitor-child-1'],
+      ]);
+      expect(
+        fetcher.mock.calls.every(([url]) => !String(url).includes('/api/api/')),
+      ).toBe(true);
+      for (const [, options] of fetcher.mock.calls) {
+        if (!options?.body) continue;
+        expect(JSON.parse(String(options.body))).not.toHaveProperty('site');
+      }
+      expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body))).toMatchObject({
+        parentId: group.id,
+        country: group.country,
+        asinType: '2',
+      });
+    },
+  );
+
+  it('rejects malformed identifiers and request fields before sending a write', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const http = client('/api/', fetcher);
+    await expect(
+      deleteCompetitorAsin(http, '../outside'),
+    ).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    await expect(getCompetitorGroup(http, ' group ')).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    await expect(
+      createCompetitorGroup(http, { name: '', country: 'DE', brand: 'Rival' }),
+    ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects a success envelope without write data and budgets full group responses', async () => {
+    const request = vi.fn().mockResolvedValue({ success: true });
+    const http = { request } as unknown as Pick<HttpClient, 'request'>;
+    await expect(deleteCompetitorGroup(http, group.id)).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
+    request.mockResolvedValue({ success: true, data: group });
+    await createCompetitorGroup(http, {
+      name: group.name,
+      country: group.country,
+      brand: group.brand,
+    });
+    expect(request.mock.calls[1][1]).toMatchObject({
+      timeoutMs: 120_000,
+      maxResponseBytes: 32 * 1024 * 1024,
+    });
   });
 });

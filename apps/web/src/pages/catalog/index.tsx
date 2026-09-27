@@ -190,6 +190,9 @@ function GroupDetail({
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  useEffect(() => {
+    if (detail.isError && catalogAccessDenied(detail.error)) onDenied?.();
+  }, [detail.error, detail.isError, onDenied]);
   const group = detail.data;
   const children = group?.children ?? [];
   const childPages = Math.max(1, Math.ceil(children.length / CHILD_PAGE_SIZE));
@@ -355,24 +358,28 @@ function GroupDetail({
                     >
                       添加 ASIN
                     </Button>
-                    <Button
-                      variant="secondary"
-                      size="small"
-                      disabled={preparingAction || actionsDisabled}
-                      onClick={() => void prepareAction('group-notify')}
-                    >
-                      {group.feishuNotifyEnabled
-                        ? '关闭飞书通知'
-                        : '开启飞书通知'}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="small"
-                      disabled={preparingAction || actionsDisabled}
-                      onClick={() => void prepareAction('group-manual')}
-                    >
-                      {group.manualBroken ? '清除人工标记' : '标记人工异常'}
-                    </Button>
+                    {config.id === 'asin' && (
+                      <>
+                        <Button
+                          variant="secondary"
+                          size="small"
+                          disabled={preparingAction || actionsDisabled}
+                          onClick={() => void prepareAction('group-notify')}
+                        >
+                          {group.feishuNotifyEnabled
+                            ? '关闭飞书通知'
+                            : '开启飞书通知'}
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="small"
+                          disabled={preparingAction || actionsDisabled}
+                          onClick={() => void prepareAction('group-manual')}
+                        >
+                          {group.manualBroken ? '清除人工标记' : '标记人工异常'}
+                        </Button>
+                      </>
+                    )}
                   </>
                 )}
                 {canDelete && (
@@ -474,48 +481,64 @@ function GroupDetail({
                               >
                                 移动
                               </Button>
-                              <Button
-                                variant="secondary"
-                                size="small"
-                                disabled={preparingAction || actionsDisabled}
-                                onClick={() =>
-                                  void prepareAction('asin-notify', child.id)
-                                }
-                              >
-                                {child.feishuNotifyEnabled
-                                  ? '关闭通知'
-                                  : '开启通知'}
-                              </Button>
-                              <Button
-                                variant="secondary"
-                                size="small"
-                                disabled={preparingAction || actionsDisabled}
-                                onClick={() =>
-                                  void prepareAction('asin-manual', child.id)
-                                }
-                              >
-                                {asinManualAction(child) === 'MARK_BROKEN'
-                                  ? '标记异常'
-                                  : '清除自身标记'}
-                              </Button>
-                              {asinGroupManualAction(child) && (
-                                <Button
-                                  variant="secondary"
-                                  size="small"
-                                  disabled={preparingAction || actionsDisabled}
-                                  onClick={() =>
-                                    void prepareAction(
-                                      'asin-manual',
-                                      child.id,
-                                      'group',
-                                    )
-                                  }
-                                >
-                                  {asinGroupManualAction(child) ===
-                                  'EXCLUDE_GROUP_MANUAL'
-                                    ? '排除组标记'
-                                    : '恢复组标记'}
-                                </Button>
+                              {config.id === 'asin' && (
+                                <>
+                                  <Button
+                                    variant="secondary"
+                                    size="small"
+                                    disabled={
+                                      preparingAction || actionsDisabled
+                                    }
+                                    onClick={() =>
+                                      void prepareAction(
+                                        'asin-notify',
+                                        child.id,
+                                      )
+                                    }
+                                  >
+                                    {child.feishuNotifyEnabled
+                                      ? '关闭通知'
+                                      : '开启通知'}
+                                  </Button>
+                                  <Button
+                                    variant="secondary"
+                                    size="small"
+                                    disabled={
+                                      preparingAction || actionsDisabled
+                                    }
+                                    onClick={() =>
+                                      void prepareAction(
+                                        'asin-manual',
+                                        child.id,
+                                      )
+                                    }
+                                  >
+                                    {asinManualAction(child) === 'MARK_BROKEN'
+                                      ? '标记异常'
+                                      : '清除自身标记'}
+                                  </Button>
+                                  {asinGroupManualAction(child) && (
+                                    <Button
+                                      variant="secondary"
+                                      size="small"
+                                      disabled={
+                                        preparingAction || actionsDisabled
+                                      }
+                                      onClick={() =>
+                                        void prepareAction(
+                                          'asin-manual',
+                                          child.id,
+                                          'group',
+                                        )
+                                      }
+                                    >
+                                      {asinGroupManualAction(child) ===
+                                      'EXCLUDE_GROUP_MANUAL'
+                                        ? '排除组标记'
+                                        : '恢复组标记'}
+                                    </Button>
+                                  )}
+                                </>
                               )}
                             </>
                           )}
@@ -798,6 +821,10 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const writingRef = useRef(false);
   const actionRef = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [refreshRequired, setRefreshRequired] = useState<{
+    message: string | null;
+    detailId: string | null;
+  } | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -852,16 +879,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     setQuery((previous) => ({ ...previous, current: next }));
   }
 
-  function reportAccessDenied() {
-    setAccessDenied(true);
-    setAction(null);
-    setNotice(null);
-    if (recheckActive.current) return;
-    runtime.clearUserWork();
-    void recheckAccess();
-  }
-
-  async function recheckAccess() {
+  const recheckAccess = useCallback(async () => {
     if (recheckActive.current) return;
     recheckActive.current = true;
     setRechecking(true);
@@ -878,39 +896,96 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       const fresh = await config.list(runtime.http, query);
       runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
       setAccessDenied(false);
+      setRefreshRequired(null);
     } catch {
       setAccessRetryError('重新读取目录失败，请稍后重试。');
     } finally {
       recheckActive.current = false;
       setRechecking(false);
     }
+  }, [config, identity, query, runtime]);
+
+  const reportAccessDenied = useCallback(() => {
+    setAccessDenied(true);
+    setAction(null);
+    setNotice(null);
+    setRefreshRequired(null);
+    if (recheckActive.current) return;
+    runtime.clearUserWork();
+    void recheckAccess();
+  }, [recheckAccess, runtime]);
+
+  function reportUncertainWrite(uncertainAction: CatalogAction) {
+    if (uncertainAction.type === 'delete-group') setSelectedId(null);
+    setAction(null);
+    setNotice(null);
+    setRefreshRequired({
+      message: null,
+      detailId: uncertainAction.type === 'delete-group' ? null : selectedId,
+    });
   }
+
+  useEffect(() => {
+    if (groups.isError && catalogAccessDenied(groups.error))
+      reportAccessDenied();
+  }, [groups.error, groups.isError, reportAccessDenied]);
 
   async function afterWrite(message: string, savedAction: CatalogAction) {
     if (savedAction.type === 'delete-group') setSelectedId(null);
-    setNotice(message);
-    announce(message);
-    await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
-    await runtime.queryClient.invalidateQueries({
-      queryKey: [config.id],
-      refetchType: 'none',
-    });
+    const detailId = savedAction.type === 'delete-group' ? null : selectedId;
+    setNotice(null);
     try {
-      const fresh = await config.list(runtime.http, query);
+      await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+      await runtime.queryClient.invalidateQueries({
+        queryKey: [config.id],
+        refetchType: 'none',
+      });
+      const [fresh, detail] = await Promise.all([
+        config.list(runtime.http, query),
+        detailId ? config.detail(runtime.http, detailId) : null,
+      ]);
       runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
-      if (selectedId && savedAction.type !== 'delete-group') {
-        const detail = await config.detail(runtime.http, selectedId);
+      if (detailId && detail) {
         runtime.queryClient.setQueryData(
-          [config.id, 'group', selectedId],
+          [config.id, 'group', detailId],
           detail,
         );
+      }
+      setRefreshRequired(null);
+      if (message) {
+        setNotice(message);
+        announce(message);
       }
     } catch (cause) {
       if (catalogAccessDenied(cause)) {
         reportAccessDenied();
       } else {
-        setNotice(`${message}目录刷新失败，请手动重试。`);
+        setRefreshRequired({ message, detailId });
       }
+    }
+  }
+
+  async function retryAfterWrite() {
+    if (!refreshRequired) return;
+    const { message, detailId } = refreshRequired;
+    try {
+      const [fresh, detail] = await Promise.all([
+        config.list(runtime.http, query),
+        detailId ? config.detail(runtime.http, detailId) : null,
+      ]);
+      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+      if (detailId && detail)
+        runtime.queryClient.setQueryData(
+          [config.id, 'group', detailId],
+          detail,
+        );
+      setRefreshRequired(null);
+      if (message) {
+        setNotice(message);
+        announce(message);
+      }
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) reportAccessDenied();
     }
   }
 
@@ -929,6 +1004,22 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
               重新验证
             </Button>
           )}
+        </div>
+      </AppShell>
+    );
+
+  if (refreshRequired)
+    return (
+      <AppShell title={config.title}>
+        <div className="space-y-3 rounded-control bg-status-warning-soft p-5 text-sm text-status-warning">
+          <p role="alert">
+            {refreshRequired.message
+              ? '写入请求已完成，但目录或详情刷新失败。旧数据已隐藏，请重新读取后继续操作。'
+              : '写入结果未确认。旧数据已隐藏，请重新读取核实后再操作，勿直接重试。'}
+          </p>
+          <Button variant="secondary" onClick={() => void retryAfterWrite()}>
+            重新读取目录
+          </Button>
         </div>
       </AppShell>
     );
@@ -985,6 +1076,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                 }
                 saved={afterWrite}
                 denied={reportAccessDenied}
+                uncertain={reportUncertainWrite}
                 writingChange={writingChange}
               />
             </div>

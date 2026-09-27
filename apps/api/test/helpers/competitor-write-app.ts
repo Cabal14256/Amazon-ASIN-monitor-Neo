@@ -117,7 +117,7 @@ export async function competitorWriteApp(
     };
     await applyPolicy();
     await f.pools.primaryPool.query(
-      "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code IN ('asin:write','asin:read') ON CONFLICT DO NOTHING",
+      "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code IN ('asin:write','asin:delete','asin:read') ON CONFLICT DO NOTHING",
     );
     await f.pools.primaryPool.query(
       "CREATE TABLE competitor_variant_groups(id text PRIMARY KEY,name text); INSERT INTO competitor_variant_groups VALUES('g1','wrong-primary-data')",
