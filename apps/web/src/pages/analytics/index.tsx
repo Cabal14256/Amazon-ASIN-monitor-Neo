@@ -44,9 +44,11 @@ import {
   hours,
   initialAnalyticsFilters,
   integerMetric,
+  latestPeakIntervals,
   metric,
   percent,
   rowText,
+  selectOverviewSummary,
   type AnalyticsFilters,
 } from './analytics-data';
 
@@ -221,10 +223,13 @@ function Table({ headers, rows }: { headers: string[]; rows: ReactNode[][] }) {
 
 function Overview({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
-  const query = {
-    country: filters.country || undefined,
+  const range = {
     startTime: filters.startTime,
     endTime: filters.endTime,
+  };
+  const query = {
+    country: filters.country || undefined,
+    ...range,
   };
   const stats = useQuery({
     queryKey: ['analytics', 'statistics', query],
@@ -240,20 +245,24 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
       ),
   });
   const byCountry = useQuery({
-    queryKey: ['analytics', 'by-country', filters],
+    queryKey: ['analytics', 'by-country', range],
     queryFn: ({ signal }) =>
-      getStatisticsByCountry(runtime.http, query, signal),
+      getStatisticsByCountry(runtime.http, range, signal),
   });
   const allCountries = useQuery({
-    queryKey: ['analytics', 'all-countries-summary', filters],
+    queryKey: ['analytics', 'all-countries-summary', range],
     queryFn: ({ signal }) =>
-      getAllCountriesSummary(runtime.http, query, signal),
+      getAllCountriesSummary(runtime.http, range, signal),
   });
   const regions = useQuery({
-    queryKey: ['analytics', 'region-summary', filters],
-    queryFn: ({ signal }) => getRegionSummary(runtime.http, query, signal),
+    queryKey: ['analytics', 'region-summary', range],
+    queryFn: ({ signal }) => getRegionSummary(runtime.http, range, signal),
   });
-  const summary = allCountries.data ?? stats.data;
+  const summary = selectOverviewSummary(
+    filters.country,
+    stats.data,
+    allCountries.data,
+  );
   return (
     <div className="space-y-5">
       {summary && (
@@ -300,8 +309,8 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
           />
         </QueryPanel>
         <QueryPanel
-          title="国家分布"
-          description="按国家聚合检查与异常数量。"
+          title="全球国家分布"
+          description="按全部国家聚合检查与异常数量，不受国家筛选影响。"
           pending={byCountry.isPending}
           error={byCountry.error}
           retry={() => void byCountry.refetch()}
@@ -348,8 +357,8 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
           ) : null}
         </QueryPanel>
         <QueryPanel
-          title="区域摘要"
-          description="七个业务区域的时长与异常表现。"
+          title="全球区域摘要"
+          description="七个业务区域的时长与异常表现，不受国家筛选影响。"
           pending={regions.isPending}
           error={regions.error}
           retry={() => void regions.refetch()}
@@ -664,16 +673,36 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
               {areas.data.map((area) => (
                 <div
                   key={area.name}
-                  className="flex items-center justify-between rounded-control border border-border p-4"
+                  className="rounded-control border border-border p-4"
                 >
-                  <span className="font-semibold">{area.name}</span>
-                  <span className="text-sm text-muted-foreground">
-                    {area.areas.length} 个时间区段
-                  </span>
-                  <span
-                    className="size-3 rounded-full"
-                    style={{ backgroundColor: area.color }}
-                  />
+                  <div className="flex items-center gap-3">
+                    <span
+                      className="size-3 rounded-full"
+                      style={{ backgroundColor: area.color }}
+                    />
+                    <span className="font-semibold">{area.name}</span>
+                    <span className="ml-auto text-sm text-muted-foreground">
+                      {area.areas.length} 个时间区段
+                    </span>
+                  </div>
+                  <ol
+                    className="mt-3 grid gap-2 sm:grid-cols-2"
+                    aria-label={`${area.name} 高峰时段`}
+                  >
+                    {latestPeakIntervals(area.areas).map(([start, end]) => (
+                      <li
+                        key={`${start.xAxis}-${end.xAxis}`}
+                        className="neo-mono rounded-control bg-muted px-3 py-2 text-xs"
+                      >
+                        {start.xAxis} 至 {end.xAxis}
+                      </li>
+                    ))}
+                  </ol>
+                  {area.areas.length > 8 ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      仅显示最近 8 段；调整时间范围可查看较早区段。
+                    </p>
+                  ) : null}
                 </div>
               ))}
             </div>

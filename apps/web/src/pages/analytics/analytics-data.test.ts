@@ -6,7 +6,9 @@ import {
   applyAnalyticsFilters,
   count,
   initialAnalyticsFilters,
+  latestPeakIntervals,
   percent,
+  selectOverviewSummary,
 } from './analytics-data';
 
 describe('analytics page filters and display values', () => {
@@ -55,6 +57,21 @@ describe('analytics page filters and display values', () => {
     expect(percent(120)).toBe('100%');
     expect(count('12345')).toBe('12,345');
     expect(count('invalid')).toBe('0');
+  });
+
+  it('uses country statistics for selected-country KPIs and global metrics otherwise', () => {
+    const selected = { totalChecks: 2, brokenCount: 1 };
+    const global = { totalChecks: 20, brokenCount: 8 };
+    expect(selectOverviewSummary('US', selected, global)).toBe(selected);
+    expect(selectOverviewSummary('US', undefined, global)).toBeUndefined();
+    expect(selectOverviewSummary('', selected, global)).toBe(global);
+    expect(selectOverviewSummary('', selected, undefined)).toBe(selected);
+  });
+
+  it('shows the latest peak intervals in chronological order', () => {
+    const intervals = Array.from({ length: 10 }, (_, index) => index);
+    expect(latestPeakIntervals(intervals)).toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(latestPeakIntervals([1, 2])).toEqual([1, 2]);
   });
 
   it('gives actionable messages for authorization and result bounds', () => {

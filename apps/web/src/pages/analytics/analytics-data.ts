@@ -65,6 +65,18 @@ export function count(value: unknown): string {
   );
 }
 
+export function selectOverviewSummary<Selected, Global>(
+  country: string,
+  selected: Selected | undefined,
+  global: Global | undefined,
+): Selected | Global | undefined {
+  return country ? selected : global ?? selected;
+}
+
+export function latestPeakIntervals<T>(intervals: readonly T[]): T[] {
+  return intervals.slice(-8);
+}
+
 export function dateLabel(value: unknown): string {
   if (typeof value !== 'string' || !value) return '未标记';
   return value.replace('T', ' ').replace(' 00:00:00', '');
