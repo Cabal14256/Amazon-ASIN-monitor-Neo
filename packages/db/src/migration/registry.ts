@@ -506,7 +506,10 @@ function targetHypertableDimensions(
 
 function tableSpec(table: PgTable): TableMigrationSpec {
   const tableName = getTableName(table);
-  const columns = Object.values(getTableColumns(table));
+  // The frozen snapshot target predates the post-import Feishu CAS upgrade.
+  const columns = Object.values(getTableColumns(table)).filter(
+    (column) => tableName !== 'feishu_config' || column.name !== 'revision',
+  );
   // Snapshot import validates Legacy and the frozen 0000/0001 target BEFORE
   // runtime upgrades. 0008 widens ID# keys only after this final import gate;
   // the current application's Drizzle length must not rewrite that contract.

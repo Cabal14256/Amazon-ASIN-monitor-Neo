@@ -50,6 +50,10 @@ services:
       - ./packages/db/docker/apply-competitor-write-policy.sh:/opt/asin-monitor/apply-competitor-write-policy.sh:ro
       - ./packages/db/migrations/0011_competitor_write_policy.sql:/opt/asin-monitor/0011_competitor_write_policy.sql:ro
       - ./packages/db/migrations/0011_competitor_write_policy.rollback.sql:/opt/asin-monitor/0011_competitor_write_policy.rollback.sql:ro
+      # Feishu CAS is an explicit primary-only upgrade after the final import.
+      - ./packages/db/docker/apply-feishu-revision.sh:/opt/asin-monitor/apply-feishu-revision.sh:ro
+      - ./packages/db/migrations/0013_feishu_revision.sql:/opt/asin-monitor/0013_feishu_revision.sql:ro
+      - ./packages/db/migrations/0013_feishu_revision.rollback.sql:/opt/asin-monitor/0013_feishu_revision.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

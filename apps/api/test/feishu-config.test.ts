@@ -7,6 +7,7 @@ import {
   type FeishuConfigurationUnit,
 } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FeishuConfigModule } from '../src/feishu-config/feishu-config.module';
 import { FEISHU_CONFIGURATION_REPOSITORY } from '../src/feishu-config/feishu-config.service';
@@ -25,6 +26,7 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
     id,
     country,
     webhookUrl: `https://example.invalid/private-hook-115/${country}`,
+    revision: '11111111-1111-4111-8111-111111111111',
     enabled: true,
     createTime: new Date('2026-09-13T00:00:00Z'),
     updateTime: null,
@@ -66,6 +68,7 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
     country: 'EU',
     webhookUrl: 'https://example.invalid/private-hook-115/updated',
     enabled: false,
+    expectedRevision: '11111111-1111-4111-8111-111111111111',
   };
   const routes: [Method, string, unknown?][] = [
     ['GET', ''],
@@ -105,10 +108,17 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
       upsert: vi.fn(async (change) => {
         const key = change.country.trim().toLowerCase(),
           previous = records.get(key);
+        if (
+          previous
+            ? change.expectedRevision !== previous.revision
+            : change.expectedRevision != null
+        )
+          throw new FeishuConfigurationError('conflict');
         const row = {
           ...(previous ?? makeRow(3, change.country)),
           webhookUrl: change.webhookUrl,
           enabled: change.enabled,
+          revision: randomUUID(),
         };
         records.set(key, row);
         return row;
@@ -118,7 +128,10 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
       }),
       toggle: vi.fn(async (country, enabled) => {
         const row = records.get(country.trim().toLowerCase());
-        if (row) row.enabled = enabled;
+        if (row) {
+          row.enabled = enabled;
+          row.revision = randomUUID();
+        }
         return unit.find(country);
       }),
     };
@@ -188,7 +201,11 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
       ['POST', ''],
       ['PUT', '/US'],
     ] as const) {
-      const response = await request(method, path, body);
+      const requestBody = {
+        ...body,
+        expectedRevision: records.get('eu')!.revision,
+      };
+      const response = await request(method, path, requestBody);
       expect(response.statusCode, response.body).toBe(200);
       expect(response.json()).toEqual({
         success: true,
@@ -198,7 +215,15 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
       expect(response.json().data.enabled).toBe(0);
       expect(response.json().data.country).toBe('EU');
     }
-    expect(unit.upsert).toHaveBeenLastCalledWith(body);
+    expect(unit.upsert).toHaveBeenCalledTimes(2);
+    expect(unit.upsert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        country: 'EU',
+        webhookUrl: body.webhookUrl,
+        enabled: false,
+        expectedRevision: expect.any(String),
+      }),
+    );
     expect(records.get('us')!.enabled).toBe(true);
   });
   it('keeps write-only settings grant sufficient for a write and its full response', async () => {
@@ -206,6 +231,7 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
     const response = await request('POST', '', {
       country: 'EU',
       webhookUrl: body.webhookUrl,
+      expectedRevision: records.get('eu')!.revision,
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().data).toMatchObject({
@@ -213,6 +239,31 @@ describe('Feishu configuration / six HTTP endpoints and current settings authori
       enabled: 1,
     });
     expect((await request()).statusCode).toBe(403);
+  });
+  it('returns a fixed 409 for stale and old-client writes without leaking the webhook', async () => {
+    const initialRevision = records.get('eu')!.revision;
+    const first = await request('POST', '', {
+      ...body,
+      expectedRevision: initialRevision,
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().data.revision).not.toBe(initialRevision);
+    for (const payload of [
+      { ...body, expectedRevision: initialRevision },
+      { country: body.country, webhookUrl: body.webhookUrl },
+      { ...body, expectedRevision: null },
+    ]) {
+      const conflict = await request('POST', '', payload);
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.json()).toMatchObject({
+        errorCode: 409,
+        errorMessage: '配置已变更，请刷新后重试',
+      });
+      expect(conflict.body).not.toContain(body.webhookUrl);
+    }
+    expect(records.get('eu')!.revision).toBe(first.json().data.revision);
+    expect(records.get('eu')!.webhookUrl).toBe(body.webhookUrl);
+    expect(app.logger.error).not.toHaveBeenCalled();
   });
   it('commits disable before the enabled-only lookup produces the Legacy 404', async () => {
     let committed = false;

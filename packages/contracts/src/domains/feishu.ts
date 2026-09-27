@@ -3,12 +3,15 @@ import { z } from 'zod';
 import { resultSchema } from '../envelope';
 
 /** 飞书配置域（6 端点）。 */
+export const feishuRevisionSchema = z.string().uuid();
 export const feishuConfigSchema = z
   .object({
     id: z.number(),
     country: z.string(),
     webhookUrl: z.string().optional(),
     webhook_url: z.string().optional(),
+    // Legacy responses omit this field; Neo always returns its opaque row revision.
+    revision: feishuRevisionSchema.optional(),
     // Legacy storage permits NULL; list responses preserve it as stored.
     enabled: z.union([z.boolean(), z.literal(0), z.literal(1)]).nullable(),
     createTime: z.string().nullable().optional(),
@@ -24,6 +27,9 @@ export const upsertFeishuConfigRequestSchema = z.object({
   country: z.string().min(1),
   webhookUrl: z.string().min(1),
   enabled: z.union([z.boolean(), z.literal(0), z.literal(1)]).optional(),
+  // null is create-only; a token updates exactly the version that was read.
+  // Omission from an older Neo client remains create-only for safety.
+  expectedRevision: feishuRevisionSchema.nullable().optional(),
 });
 export type UpsertFeishuConfigRequest = z.infer<
   typeof upsertFeishuConfigRequestSchema

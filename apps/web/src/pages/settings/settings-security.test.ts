@@ -96,6 +96,7 @@ describe('settings credential presentation', () => {
       id: 7,
       country: 'EU',
       webhookUrl: '***REDACTED***',
+      revision: '11111111-1111-4111-8111-111111111111',
       enabled: 1,
       createTime: null,
       updateTime: '2026-09-26T12:00:00.000Z',
@@ -103,7 +104,10 @@ describe('settings credential presentation', () => {
     const first = updateFeishuEdit(undefined, original, {
       webhookUrl: 'https://open.feishu.cn/new-hook',
     });
-    const refreshed = { ...original, updateTime: '2026-09-26T12:00:01.000Z' };
+    const refreshed = {
+      ...original,
+      revision: '22222222-2222-4222-8222-222222222222',
+    };
     const second = updateFeishuEdit(first, refreshed, { enabled: false });
     expect(second.original).toBe(original);
     expect(second.draft).toEqual({
