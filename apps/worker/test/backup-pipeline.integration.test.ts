@@ -147,12 +147,18 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-integration-'));
       adminPool = createPgPool(sourceUrl, { max: 1 });
-      await adminPool.query(`CREATE DATABASE ${scratchName}`);
+      await adminPool.query(
+        `CREATE DATABASE ${scratchName} TEMPLATE template0`,
+      );
       scratchCreated = true;
       const target = new URL(sourceUrl);
       target.pathname = `/${scratchName}`;
       scratchUrl = target.toString();
       scratchPool = createPgPool(scratchUrl, { max: 1 });
+      const extension = await scratchPool.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS enabled",
+      );
+      expect(extension.rows[0]?.enabled).toBe(false);
       await scratchPool.query(
         `CREATE TABLE public.${tableA} (id integer PRIMARY KEY, note text NOT NULL)`,
       );

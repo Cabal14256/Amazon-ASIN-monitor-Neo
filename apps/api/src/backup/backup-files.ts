@@ -9,6 +9,7 @@ import {
 import { basename, resolve, sep } from 'node:path';
 
 import {
+  BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
   backupFileSchema,
   type BackupFile,
@@ -65,7 +66,8 @@ export async function readBackupMetadata(directory: string, filename: string) {
   try {
     const path = `${safeBackupPath(directory, filename)}.meta.json`;
     const details = await lstat(path);
-    if (!details.isFile() || details.size > 4096) return null;
+    if (!details.isFile() || details.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES)
+      return null;
     const parsed = backupArtifactMetadataSchema.safeParse(
       JSON.parse(await readFile(path, 'utf8')),
     );

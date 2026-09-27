@@ -26,22 +26,33 @@ const weekday = (value: string): number =>
     >
   )[value] ?? 0);
 
+const BACKUP_SCHEDULE_CATCHUP_MS = 5 * 60_000;
+
 export function backupScheduleKey(
   config: Pick<BackupConfig, 'scheduleType' | 'scheduleValue' | 'backupTime'>,
   now = new Date(),
 ): string | null {
   if (!config.backupTime) return null;
-  const parts = shanghaiParts(now);
-  if (`${parts.hour}:${parts.minute}` !== config.backupTime) return null;
-  if (
-    config.scheduleType === 'weekly' &&
-    weekday(parts.weekday) !== config.scheduleValue
-  )
-    return null;
-  if (
-    config.scheduleType === 'monthly' &&
-    Number(parts.day) !== config.scheduleValue
-  )
-    return null;
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  // A failed enqueue can retry on the next 30-second tick, including after
+  // midnight. Keep the original scheduled key so task IDs remain stable.
+  for (let minutesAgo = 0; minutesAgo <= 5; minutesAgo++) {
+    const parts = shanghaiParts(new Date(now.getTime() - minutesAgo * 60_000));
+    if (`${parts.hour}:${parts.minute}` !== config.backupTime) continue;
+    const scheduledAt = Date.parse(
+      `${parts.year}-${parts.month}-${parts.day}T${config.backupTime}:00+08:00`,
+    );
+    if (now.getTime() - scheduledAt >= BACKUP_SCHEDULE_CATCHUP_MS) return null;
+    if (
+      config.scheduleType === 'weekly' &&
+      weekday(parts.weekday) !== config.scheduleValue
+    )
+      return null;
+    if (
+      config.scheduleType === 'monthly' &&
+      Number(parts.day) !== config.scheduleValue
+    )
+      return null;
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  }
+  return null;
 }

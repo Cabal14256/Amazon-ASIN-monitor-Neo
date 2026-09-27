@@ -1,5 +1,6 @@
 import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
 import {
+  BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
   backupJobDataSchema,
   backupTimescaleManifestSchema,
@@ -599,6 +600,15 @@ async function restoreTimescaleIsolated(input: {
   return database;
 }
 
+export async function readBackupArtifactMetadataFile(path: string) {
+  const details = await lstat(path);
+  if (!details.isFile() || details.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES)
+    throw new Error('BACKUP_METADATA_INVALID');
+  return backupArtifactMetadataSchema.parse(
+    JSON.parse(await readFile(path, 'utf8')),
+  );
+}
+
 export function createBackupProcessor(
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
   options: BackupProcessorOptions,
@@ -797,13 +807,7 @@ export function createBackupProcessor(
       await assertCustomDump(input, maxBytes);
       let metadata;
       try {
-        const sidecar = `${input}.meta.json`;
-        const details = await lstat(sidecar);
-        if (!details.isFile() || details.size > 4096)
-          throw new Error('BACKUP_METADATA_INVALID');
-        metadata = backupArtifactMetadataSchema.parse(
-          JSON.parse(await readFile(sidecar, 'utf8')),
-        );
+        metadata = await readBackupArtifactMetadataFile(`${input}.meta.json`);
       } catch {
         throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
       }

@@ -24,6 +24,35 @@ describe('backup scheduler', () => {
     ).toBeNull();
   });
 
+  it('retries within five minutes using the original scheduled key', () => {
+    const config = {
+      scheduleType: 'daily' as const,
+      scheduleValue: null,
+      backupTime: '02:00',
+    };
+    expect(backupScheduleKey(config, at('2026-09-26T18:04:59.000Z'))).toBe(
+      '2026-09-27T02:00',
+    );
+    expect(
+      backupScheduleKey(config, at('2026-09-26T18:05:00.000Z')),
+    ).toBeNull();
+  });
+
+  it('retries across midnight against the scheduled day', () => {
+    expect(
+      backupScheduleKey(
+        { scheduleType: 'weekly', scheduleValue: 7, backupTime: '23:59' },
+        at('2026-09-27T16:02:00.000Z'),
+      ),
+    ).toBe('2026-09-27T23:59');
+    expect(
+      backupScheduleKey(
+        { scheduleType: 'monthly', scheduleValue: 27, backupTime: '23:59' },
+        at('2026-09-27T16:02:00.000Z'),
+      ),
+    ).toBe('2026-09-27T23:59');
+  });
+
   it('matches weekly and monthly values without using host timezone', () => {
     expect(
       backupScheduleKey(

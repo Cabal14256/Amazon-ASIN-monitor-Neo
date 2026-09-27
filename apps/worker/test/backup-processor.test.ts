@@ -1,11 +1,14 @@
-import { type BackupJobData } from '@asin-monitor/contracts';
+import {
+  BACKUP_ARTIFACT_METADATA_MAX_BYTES,
+  type BackupJobData,
+} from '@asin-monitor/contracts';
 import {
   transitionTask,
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
 import type { Job } from 'bullmq';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -13,6 +16,7 @@ import {
   commandEnvironment,
   createBackupProcessor,
   processCommand,
+  readBackupArtifactMetadataFile,
   restoreCommandArgs,
   stagingDatabaseName,
 } from '../src/backup-processor';
@@ -147,11 +151,47 @@ describe('backup command boundary', () => {
       await expect(
         processCommand(
           process.execPath,
-          ['-e', 'setInterval(() => undefined, 1000)', `--file=${output}`],
+          [
+            '-e',
+            'setInterval(() => undefined, 1000)',
+            '--',
+            `--file=${output}`,
+          ],
           { ...process.env },
           { ...options(new AbortController().signal), maxBytes: 1024 },
         ),
       ).rejects.toThrow('BACKUP_MAX_BYTES_EXCEEDED');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reads large valid Timescale metadata but rejects a file past the bound', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-command-'));
+    try {
+      const path = join(directory, 'artifact.meta.json');
+      const metadata = {
+        version: 2,
+        filename: 'backup_20260927-020000-abcdef01-primary.dump',
+        target: 'primary',
+        sourceEngine: 'timescaledb',
+        timescale: {
+          extensionVersion: '2.22.0',
+          hypertables: Array.from(
+            { length: 100 },
+            (_, index) => `public.table_${index}_${'x'.repeat(80)}`,
+          ),
+          continuousAggregates: [],
+        },
+      };
+      const serialized = JSON.stringify(metadata);
+      expect(Buffer.byteLength(serialized)).toBeGreaterThan(4096);
+      await writeFile(path, serialized);
+      expect(await readBackupArtifactMetadataFile(path)).toEqual(metadata);
+      await truncate(path, BACKUP_ARTIFACT_METADATA_MAX_BYTES + 1);
+      await expect(readBackupArtifactMetadataFile(path)).rejects.toThrow(
+        'BACKUP_METADATA_INVALID',
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

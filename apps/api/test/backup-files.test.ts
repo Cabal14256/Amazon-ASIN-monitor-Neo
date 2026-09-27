@@ -1,3 +1,4 @@
+import { BACKUP_ARTIFACT_METADATA_MAX_BYTES } from '@asin-monitor/contracts';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   deleteBackupFile,
   listBackupFiles,
+  readBackupMetadata,
   resolveBackupPath,
 } from '../src/backup/backup-files';
 
@@ -44,6 +46,36 @@ describe('backup file boundary', () => {
       await expect(readFile(metadataPath)).rejects.toMatchObject({
         code: 'ENOENT',
       });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a valid Timescale manifest larger than the old 4 KiB cap', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+    try {
+      const metadata = {
+        version: 2,
+        filename,
+        target: 'primary',
+        sourceEngine: 'timescaledb',
+        timescale: {
+          extensionVersion: '2.22.0',
+          hypertables: Array.from(
+            { length: 100 },
+            (_, index) => `public.table_${index}_${'x'.repeat(80)}`,
+          ),
+          continuousAggregates: [],
+        },
+      };
+      const serialized = JSON.stringify(metadata);
+      expect(Buffer.byteLength(serialized)).toBeGreaterThan(4096);
+      expect(Buffer.byteLength(serialized)).toBeLessThan(
+        BACKUP_ARTIFACT_METADATA_MAX_BYTES,
+      );
+      await writeFile(join(directory, `${filename}.meta.json`), serialized);
+      expect(await readBackupMetadata(directory, filename)).toEqual(metadata);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

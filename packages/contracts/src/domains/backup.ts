@@ -61,6 +61,8 @@ export const backupTimescaleManifestSchema = z
 export type BackupTimescaleManifest = z.infer<
   typeof backupTimescaleManifestSchema
 >;
+/** Bounds metadata reads while accommodating the largest valid Timescale manifest. */
+export const BACKUP_ARTIFACT_METADATA_MAX_BYTES = 16 * 1024 * 1024;
 export const backupArtifactMetadataSchema = z.union([
   backupArtifactMetadataV1Schema,
   z
