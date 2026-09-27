@@ -310,11 +310,15 @@ describe('competitor catalog single-item controls', () => {
     );
   });
 
-  it('requests a fresh catalog read after an uncertain write outcome', async () => {
-    const f = actionFixture({ type: 'delete-asin', group, child });
-    f.request.mockRejectedValue(
+  it.each([
+    [
+      'unconfirmed response',
       new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503),
-    );
+    ],
+    ['cancelled dispatched request', new ApiError('CANCELLED', '请求已取消')],
+  ])('keeps the safety gate after %s', async (_reason, error) => {
+    const f = actionFixture({ type: 'delete-asin', group, child });
+    f.request.mockRejectedValue(error);
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
     await waitFor(() =>
       expect(f.uncertain).toHaveBeenCalledWith(

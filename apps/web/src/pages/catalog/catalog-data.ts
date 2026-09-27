@@ -137,7 +137,9 @@ export function catalogWriteOutcomeUncertain(
   return (
     error instanceof ApiError &&
     !definitivePrimary503 &&
-    (['TIMEOUT', 'NETWORK', 'INVALID_RESPONSE'].includes(error.kind) ||
+    (['TIMEOUT', 'NETWORK', 'INVALID_RESPONSE', 'CANCELLED'].includes(
+      error.kind,
+    ) ||
       (error.kind === 'HTTP' &&
         (source === 'competitor'
           ? error.status === 503 &&
