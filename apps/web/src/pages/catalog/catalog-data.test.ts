@@ -145,6 +145,16 @@ describe('shared ASIN catalog display data', () => {
         'asin',
       ),
     ).toBe(true);
+    for (const message of [
+      '鉴权权威源尚未切换，请使用现有 ASIN 入口',
+      'ASIN 写入暂不可用，请使用现有 ASIN 入口',
+    ])
+      expect(
+        catalogWriteOutcomeUncertain(
+          new ApiError('HTTP', message, 503),
+          'asin',
+        ),
+      ).toBe(false);
     expect(
       catalogWriteOutcomeUncertain(
         new ApiError('TIMEOUT', 'late'),

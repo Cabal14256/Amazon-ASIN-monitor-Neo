@@ -125,8 +125,18 @@ export function catalogWriteOutcomeUncertain(
   error: unknown,
   source: 'asin' | 'competitor',
 ): boolean {
+  const definitivePrimary503 =
+    source === 'asin' &&
+    error instanceof ApiError &&
+    error.kind === 'HTTP' &&
+    error.status === 503 &&
+    [
+      '鉴权权威源尚未切换，请使用现有 ASIN 入口',
+      'ASIN 写入暂不可用，请使用现有 ASIN 入口',
+    ].includes(error.message);
   return (
     error instanceof ApiError &&
+    !definitivePrimary503 &&
     (['TIMEOUT', 'NETWORK', 'INVALID_RESPONSE'].includes(error.kind) ||
       (error.kind === 'HTTP' &&
         (source === 'competitor'

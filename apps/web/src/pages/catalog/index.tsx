@@ -60,6 +60,14 @@ const CHILD_PAGE_SIZE = 50;
 const TABLE_FEATURES = tableFeatures({});
 type StatusFilter = 'ALL' | 'BROKEN' | 'NORMAL';
 const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
+type CatalogSafetyGate =
+  | {
+      phase: 'refresh';
+      message: string | null;
+      detailId: string | null;
+      createUncertain: boolean;
+    }
+  | { phase: 'inspection' };
 
 function Notice({
   title,
@@ -816,21 +824,31 @@ export function GroupRows({
 export function CatalogPage({ config }: { config: CatalogConfig }) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
+  const ownerId = auth.status === 'authenticated' ? auth.identity.user.id : '';
+  const safetyKey = useMemo(
+    () => ['catalog-write-safety', ownerId, config.id] as const,
+    [config.id, ownerId],
+  );
+  const safety = useQuery<CatalogSafetyGate | null>({
+    queryKey: safetyKey,
+    queryFn: () => null,
+    enabled: false,
+    initialData: null,
+    gcTime: Infinity,
+  }).data;
+  const setSafety = (next: CatalogSafetyGate | null) =>
+    runtime.queryClient.setQueryData(safetyKey, next);
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
-  const canWrite = Boolean(config.writes && access.canWriteASIN);
-  const canDelete = Boolean(config.writes && access.canDeleteASIN);
+  const canWrite = Boolean(config.writes && access.canWriteASIN && !safety);
+  const canDelete = Boolean(config.writes && access.canDeleteASIN && !safety);
   const [action, setAction] = useState<CatalogAction | null>(null);
   const [actionSerial, setActionSerial] = useState(0);
   const [writing, setWriting] = useState(false);
   const writingRef = useRef(false);
   const actionRef = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [refreshRequired, setRefreshRequired] = useState<{
-    message: string | null;
-    detailId: string | null;
-  } | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -843,6 +861,9 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const groups = useQuery({
     queryKey: [config.id, 'groups', query],
     queryFn: ({ signal }) => config.list(runtime.http, query, signal),
+    enabled: () =>
+      runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey)
+        ?.phase !== 'refresh',
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
@@ -857,7 +878,8 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
 
   function openAction(next: CatalogAction) {
-    if (writingRef.current) return;
+    if (writingRef.current || runtime.queryClient.getQueryData(safetyKey))
+      return;
     setActionSerial((previous) => previous + 1);
     setAction(next);
   }
@@ -904,7 +926,6 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       const fresh = await config.list(runtime.http, query);
       runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
       setAccessDenied(false);
-      setRefreshRequired(null);
     } catch {
       setAccessRetryError('重新读取目录失败，请稍后重试。');
     } finally {
@@ -918,20 +939,39 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     setAction(null);
     setSelectedId(null);
     setNotice(null);
-    setRefreshRequired(null);
     if (recheckActive.current) return;
+    const outstanding =
+      runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
     runtime.clearUserWork();
+    if (outstanding) runtime.queryClient.setQueryData(safetyKey, outstanding);
     void recheckAccess();
-  }, [recheckAccess, runtime]);
+  }, [recheckAccess, runtime, safetyKey]);
 
-  function reportUncertainWrite(uncertainAction: CatalogAction) {
-    if (uncertainAction.type === 'delete-group') setSelectedId(null);
+  async function clearCatalogCache() {
+    await runtime.queryClient
+      .cancelQueries({ queryKey: [config.id] })
+      .catch(() => undefined);
+    runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
+    runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+  }
+
+  async function reportUncertainWrite(uncertainAction: CatalogAction) {
+    setSelectedId(null);
     setAction(null);
     setNotice(null);
-    setRefreshRequired({
+    setSafety({
+      phase: 'refresh',
       message: null,
-      detailId: uncertainAction.type === 'delete-group' ? null : selectedId,
+      detailId:
+        uncertainAction.type === 'delete-group' ||
+        uncertainAction.type === 'create-group'
+          ? null
+          : uncertainAction.group.id,
+      createUncertain:
+        uncertainAction.type === 'create-group' ||
+        uncertainAction.type === 'create-asin',
     });
+    await clearCatalogCache();
   }
 
   useEffect(() => {
@@ -976,14 +1016,16 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     if (savedAction.type === 'delete-group') setSelectedId(null);
     const detailId = savedAction.type === 'delete-group' ? null : selectedId;
     setNotice(null);
+    setSafety({
+      phase: 'refresh',
+      message,
+      detailId,
+      createUncertain: false,
+    });
     try {
-      await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
-      await runtime.queryClient.invalidateQueries({
-        queryKey: [config.id],
-        refetchType: 'none',
-      });
+      await clearCatalogCache();
       await readAfterWrite(detailId);
-      setRefreshRequired(null);
+      setSafety(null);
       if (message) {
         setNotice(message);
         announce(message);
@@ -991,18 +1033,16 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     } catch (cause) {
       if (catalogAccessDenied(cause)) {
         reportAccessDenied();
-      } else {
-        setRefreshRequired({ message, detailId });
       }
     }
   }
 
   async function retryAfterWrite() {
-    if (!refreshRequired) return;
-    const { message, detailId } = refreshRequired;
+    if (safety?.phase !== 'refresh') return;
+    const { message, detailId, createUncertain } = safety;
     try {
       await readAfterWrite(detailId);
-      setRefreshRequired(null);
+      setSafety(createUncertain ? { phase: 'inspection' } : null);
       if (message) {
         setNotice(message);
         announce(message);
@@ -1031,12 +1071,12 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       </AppShell>
     );
 
-  if (refreshRequired)
+  if (safety?.phase === 'refresh')
     return (
       <AppShell title={config.title}>
         <div className="space-y-3 rounded-control bg-status-warning-soft p-5 text-sm text-status-warning">
           <p role="alert">
-            {refreshRequired.message
+            {safety.message
               ? '写入请求已完成，但目录或详情刷新失败。旧数据已隐藏，请重新读取后继续操作。'
               : '写入结果未确认。旧数据已隐藏，请重新读取核实后再操作，勿直接重试。'}
           </p>
@@ -1078,6 +1118,14 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           </div>
         </section>
 
+        {safety?.phase === 'inspection' && (
+          <p
+            role="alert"
+            className="rounded-control bg-status-warning-soft p-4 text-sm text-status-warning"
+          >
+            新建操作的结果仍未确认。可继续筛选和查看目录，本次会话的目录写入已暂停，避免重复创建。请先核实新记录。
+          </p>
+        )}
         {notice && (
           <p
             role="status"

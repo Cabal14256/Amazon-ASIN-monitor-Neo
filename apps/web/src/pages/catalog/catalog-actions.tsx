@@ -92,7 +92,7 @@ export function CatalogActionPanel({
   close: () => void;
   saved: (message: string, action: CatalogAction) => Promise<void>;
   denied: () => void;
-  uncertain: (action: CatalogAction) => void;
+  uncertain: (action: CatalogAction) => Promise<void> | void;
   writingChange: (writing: boolean) => void;
 }) {
   const writes = config.writes;
@@ -347,7 +347,7 @@ export function CatalogActionPanel({
         mutationAttempted &&
         catalogWriteOutcomeUncertain(cause, config.id)
       )
-        uncertain(action);
+        await uncertain(action);
       else setError(catalogWriteError(cause));
     } finally {
       setPending(false);

@@ -44,6 +44,7 @@ function fixture(
   list: ReturnType<typeof vi.fn>,
   createGroup: ReturnType<typeof vi.fn>,
   deleteGroup?: ReturnType<typeof vi.fn>,
+  createAsin?: ReturnType<typeof vi.fn>,
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -91,17 +92,20 @@ function fixture(
       ...COMPETITOR_CATALOG.writes!,
       createGroup,
       deleteGroup: deleteGroup ?? COMPETITOR_CATALOG.writes!.deleteGroup,
+      createAsin: createAsin ?? COMPETITOR_CATALOG.writes!.createAsin,
     },
   } as CatalogConfig;
   const announce = vi.fn();
   HTMLElement.prototype.scrollIntoView = vi.fn();
-  render(
-    <AuthContext.Provider value={{ runtime, identity, announce }}>
-      <QueryClientProvider client={queryClient}>
-        <CatalogPage config={config} />
-      </QueryClientProvider>
-    </AuthContext.Provider>,
-  );
+  const renderPage = () =>
+    render(
+      <AuthContext.Provider value={{ runtime, identity, announce }}>
+        <QueryClientProvider client={queryClient}>
+          <CatalogPage config={config} />
+        </QueryClientProvider>
+      </AuthContext.Provider>,
+    );
+  let view = renderPage();
   return {
     list,
     createGroup,
@@ -110,6 +114,10 @@ function fixture(
     identity,
     clearUserWork,
     announce,
+    unmount: () => view.unmount(),
+    remount: () => {
+      view = renderPage();
+    },
   };
 }
 
@@ -134,7 +142,7 @@ describe('competitor catalog refresh and authority transitions', () => {
       .fn()
       .mockResolvedValueOnce(listData(original))
       .mockRejectedValueOnce(new Error('offline'))
-      .mockResolvedValueOnce(listData(updated));
+      .mockResolvedValue(listData(updated));
     const createGroup = vi.fn(async () => original);
     const f = fixture(list, createGroup);
     await screen.findAllByText('Original rival');
@@ -157,7 +165,7 @@ describe('competitor catalog refresh and authority transitions', () => {
     const list = vi
       .fn()
       .mockResolvedValueOnce(listData(original))
-      .mockResolvedValueOnce(listData(updated));
+      .mockResolvedValue(listData(updated));
     const createGroup = vi.fn(async () => {
       throw new ApiError('HTTP', 'private payload', 403);
     });
@@ -198,7 +206,7 @@ describe('competitor catalog refresh and authority transitions', () => {
     const list = vi
       .fn()
       .mockResolvedValueOnce(listData(original))
-      .mockResolvedValueOnce(listData(updated));
+      .mockResolvedValue(listData(updated));
     const createGroup = vi.fn(async () => {
       throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
     });
@@ -212,7 +220,135 @@ describe('competitor catalog refresh and authority transitions', () => {
     expect(screen.queryByText('新建变体组已完成。')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
     await screen.findAllByText('Current rival');
+    expect(screen.getByRole('alert').textContent).toContain('结果仍未确认');
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    expect(createGroup).toHaveBeenCalledOnce();
     expect(f.announce).not.toHaveBeenCalled();
+    f.queryClient.clear();
+  });
+
+  it('keeps the uncertain write gate and clears list/detail caches across a route remount', async () => {
+    const list = vi.fn().mockResolvedValueOnce(listData(original));
+    const createGroup = vi.fn(async () => {
+      throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
+    });
+    const f = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    f.queryClient.setQueryData(['competitor', 'group', original.id], original);
+    await create();
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    expect(
+      f.queryClient.getQueryData([
+        'competitor',
+        'groups',
+        { current: 1, pageSize: 10 },
+      ]),
+    ).toBeUndefined();
+    expect(
+      f.queryClient.getQueryData(['competitor', 'group', original.id]),
+    ).toBeUndefined();
+    f.unmount();
+    f.remount();
+    expect(screen.getByRole('alert').textContent).toContain('写入结果未确认');
+    expect(screen.queryByText('Original rival')).toBeNull();
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    expect(createGroup).toHaveBeenCalledOnce();
+    f.queryClient.clear();
+  });
+
+  it('does not unlock an uncertain create from an unrelated filtered reread', async () => {
+    const empty = { ...listData(original), list: [], total: 0 };
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listData(original))
+      .mockResolvedValue(empty);
+    const createGroup = vi.fn(async () => {
+      throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
+    });
+    const f = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    fireEvent.change(screen.getByLabelText('国家代码'), {
+      target: { value: 'US' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '查询' }));
+    await screen.findByText('未找到变体组');
+    await create();
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await screen.findByText('未找到变体组');
+    expect(screen.getByRole('alert').textContent).toContain('结果仍未确认');
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    f.unmount();
+    f.remount();
+    expect(screen.getByRole('alert').textContent).toContain('结果仍未确认');
+    expect(screen.getByRole('button', { name: '查询' })).toBeTruthy();
+    expect(createGroup).toHaveBeenCalledOnce();
+    f.queryClient.clear();
+  });
+
+  it('keeps an uncertain child creation read-only after rereading its parent detail', async () => {
+    const list = vi.fn().mockResolvedValue(listData(original));
+    const createAsin = vi.fn(async () => {
+      throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
+    });
+    const f = fixture(list, vi.fn(), undefined, createAsin);
+    await screen.findAllByText('Original rival');
+    fireEvent.click(screen.getAllByRole('button', { name: '查看' })[0]);
+    fireEvent.click(
+      (await screen.findAllByRole('button', { name: '添加 ASIN' }))[0],
+    );
+    const panel = within(
+      await screen.findByRole('region', { name: '添加组内 ASIN' }),
+    );
+    fireEvent.change(panel.getByRole('textbox', { name: /^ASIN/ }), {
+      target: { value: 'B000000001' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '保存' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('结果仍未确认'),
+    );
+    expect(screen.getAllByText('Original rival').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: '添加 ASIN' })).toBeNull();
+    expect(createAsin).toHaveBeenCalledOnce();
+    f.queryClient.clear();
+  });
+
+  it("retains the same user's uncertainty gate through 403 read recovery", async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listData(original))
+      .mockRejectedValueOnce(new ApiError('HTTP', 'private', 403))
+      .mockResolvedValue(listData(original));
+    const createGroup = vi.fn(async () => {
+      throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
+    });
+    const f = fixture(list, createGroup);
+    await screen.findAllByText('Original rival');
+    await create();
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() => expect(f.clearUserWork).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('写入结果未确认'),
+    );
+    f.unmount();
+    f.remount();
+    expect(screen.getByRole('alert').textContent).toContain('写入结果未确认');
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain('结果仍未确认'),
+    );
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
     f.queryClient.clear();
   });
 
@@ -239,7 +375,7 @@ describe('competitor catalog refresh and authority transitions', () => {
     const list = vi
       .fn()
       .mockResolvedValueOnce(listData(original))
-      .mockResolvedValueOnce({ ...listData(original), list: [], total: 0 });
+      .mockResolvedValue({ ...listData(original), list: [], total: 0 });
     const f = fixture(
       list,
       vi.fn(async () => updated),
@@ -271,7 +407,7 @@ describe('competitor catalog refresh and authority transitions', () => {
     const list = vi
       .fn()
       .mockResolvedValueOnce(listData(original))
-      .mockResolvedValueOnce(listData(updated));
+      .mockResolvedValue(listData(updated));
     const f = fixture(list, createGroup);
     await screen.findAllByText('Original rival');
     await create();
@@ -302,7 +438,7 @@ describe('competitor catalog refresh and authority transitions', () => {
     const list = vi
       .fn()
       .mockResolvedValueOnce(listData(original))
-      .mockResolvedValueOnce({ ...listData(original), list: [], total: 0 });
+      .mockResolvedValue({ ...listData(original), list: [], total: 0 });
     const deleteGroup = vi.fn(async () => {
       throw new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503);
     });
@@ -318,9 +454,8 @@ describe('competitor catalog refresh and authority transitions', () => {
     );
     const detailCalls = f.detail.mock.calls.length;
     fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     expect(f.detail).toHaveBeenCalledTimes(detailCalls);
-    expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText('Original rival')).toBeNull();
     expect(f.announce).not.toHaveBeenCalled();
     f.queryClient.clear();
