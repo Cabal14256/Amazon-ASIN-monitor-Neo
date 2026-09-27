@@ -154,7 +154,7 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
       throw new Error('No admitted export fixture');
     await first.mutate(
       released.value.taskId,
-      { kind: 'failed' },
+      { kind: 'failed', message: '并发准入测试释放任务容量' },
       released.value,
     );
     expect(await redis.zcard(indexKey)).toBe(2);
