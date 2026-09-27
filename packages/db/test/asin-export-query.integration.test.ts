@@ -90,6 +90,21 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
            FROM generate_series(1, 5001) AS n`,
           [denseId, asinSeed],
         );
+        await pool.query('UPDATE asins SET manual_broken=true WHERE id=$1', [
+          `${denseId}-005001`,
+        ]);
+        const denseGroup = await repository.read((unit) =>
+          unit.listExportGroups(
+            { keyword: denseId, current: 1, pageSize: 1 },
+            undefined,
+            true,
+          ),
+        );
+        expect(denseGroup.groups[0]).toMatchObject({
+          exportIsBroken: true,
+          exportHasAutoBroken: false,
+          exportHasManualBroken: true,
+        });
         const children = await repository.read((unit) =>
           unit.listExportChildren(denseId),
         );

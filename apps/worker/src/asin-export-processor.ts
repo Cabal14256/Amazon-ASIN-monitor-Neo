@@ -4,6 +4,7 @@ import {
 } from '@asin-monitor/contracts';
 import {
   MAX_ASIN_QUERY_CHILDREN,
+  effectiveVariantStatus,
   isTerminalTaskStatus,
   type AsinExportCursor,
   type AsinExportQueryRepositoryPort,
@@ -11,7 +12,7 @@ import {
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
-import { ExportArtifactStore } from '@asin-monitor/export';
+import { ExportArtifactError, ExportArtifactStore } from '@asin-monitor/export';
 import { mapAsinQueryGroups } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import ExcelJS from 'exceljs';
@@ -42,6 +43,7 @@ export interface AsinExportProcessorOptions {
   isClosing(): boolean;
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
+  now?(): Date;
 }
 class TaskStopped extends Error {
   constructor(readonly state: TaskState) {
@@ -91,6 +93,25 @@ export function createAsinExportProcessor(
     };
     const mutate = async (change: TaskMutation) =>
       verify(await store.mutate(data.taskId, change, identity(data)));
+    const discardCancelledFinal = async () => {
+      if (!published) return;
+      await artifacts.discardFinal(data.taskId).catch(() =>
+        log.warn('已取消 ASIN 导出文件清理失败', {
+          reason: 'export_cancelled_artifact_cleanup_failed',
+        }),
+      );
+    };
+    const finishCancellation = async () => {
+      const next = await mutate({
+        kind: 'cancelled',
+        message: cancelledResult.message,
+      });
+      if (next.status === 'completed') return next.result;
+      if (next.status !== 'cancelled')
+        throw new UnrecoverableError('导出任务已停止');
+      await discardCancelledFinal();
+      return cancelledResult;
+    };
     const check = async () => {
       controller.signal.throwIfAborted();
       if (options.isClosing()) throw new Error('EXPORT_WORKER_STOPPING');
@@ -114,7 +135,7 @@ export function createAsinExportProcessor(
       await check();
       const result = {
         exportType: 'asin' as const,
-        filename: asinExportFilename(new Date(data.createdAt)),
+        filename: asinExportFilename(options.now?.() ?? new Date()),
         mimeType:
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         fileSizeBytes: artifact.bytes,
@@ -143,7 +164,10 @@ export function createAsinExportProcessor(
       }, 1000);
       heartbeat.unref();
       const previous = await artifacts.read(data.taskId, controller.signal);
-      if (previous) return await complete(previous);
+      if (previous) {
+        published = true;
+        return await complete(previous);
+      }
       await mutate({ kind: 'processing', message: 'ASIN 导出任务开始处理' });
       await progress(2, '正在查询 ASIN');
       const output = await artifacts.temporary(data.taskId);
@@ -192,6 +216,15 @@ export function createAsinExportProcessor(
             throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
         }
         for (const group of result.groups) {
+          if (
+            group.exportHasAutoBroken === undefined ||
+            group.exportHasManualBroken === undefined
+          )
+            throw new Error('EXPORT_GROUP_STATUS_INVALID');
+          const groupStatusSource = effectiveVariantStatus(
+            group.exportHasAutoBroken,
+            group.exportHasManualBroken,
+          ).statusSource;
           const effectiveGroup = {
             ...group,
             isBroken: group.exportIsBroken ?? group.isBroken,
@@ -204,24 +237,26 @@ export function createAsinExportProcessor(
             );
             if (children.length === 0) {
               if (!childCursor)
-                await appendRows(
-                  mapAsinQueryGroups({
+                await appendRows({
+                  ...mapAsinQueryGroups({
                     groups: [effectiveGroup],
                     asins: [],
                     total: 0,
                     totalASINs: 0,
                   })[0]!,
-                );
+                  statusSource: groupStatusSource,
+                });
               break;
             }
-            await appendRows(
-              mapAsinQueryGroups({
+            await appendRows({
+              ...mapAsinQueryGroups({
                 groups: [effectiveGroup],
                 asins: children,
                 total: 0,
                 totalASINs: 0,
               })[0]!,
-            );
+              statusSource: groupStatusSource,
+            });
             const lastChild = children[children.length - 1]!;
             childCursor = {
               id: lastChild.id,
@@ -267,14 +302,15 @@ export function createAsinExportProcessor(
         : caught;
       if (error instanceof TaskStopped) {
         if (error.state.status === 'completed') return error.state.result;
-        if (error.state.status === 'cancelled') return cancelledResult;
+        if (error.state.status === 'cancelled') {
+          await discardCancelledFinal();
+          return cancelledResult;
+        }
         if (
           error.state.cancelRequestedAt ||
           error.state.status === 'cancelling'
-        ) {
-          await mutate({ kind: 'cancelled', message: cancelledResult.message });
-          return cancelledResult;
-        }
+        )
+          return finishCancellation();
         throw new UnrecoverableError('导出任务已停止');
       }
       if (published) {
@@ -287,18 +323,20 @@ export function createAsinExportProcessor(
         await options.assertJobLock(job, token);
         const state = verify(await store.read(data.taskId));
         if (state.cancelRequestedAt || state.status === 'cancelling') {
-          await mutate({ kind: 'cancelled', message: cancelledResult.message });
-          return cancelledResult;
+          return finishCancellation();
         }
-        if (
+        const capacity =
           error instanceof ExportCapacityError ||
-          job.attemptsMade + 1 >= (job.opts.attempts ?? 1)
-        ) {
+          (error instanceof ExportArtifactError &&
+            error.reason === 'too-large');
+        if (capacity || job.attemptsMade + 1 >= (job.opts.attempts ?? 1)) {
           const next = await mutate({
             kind: 'failed',
             message: 'ASIN 导出失败，请重试',
           });
           if (next.status === 'cancelled') return cancelledResult;
+          if (capacity && error instanceof ExportArtifactError)
+            await artifacts.discardFinal(data.taskId);
         }
       } catch {
         log.warn('ASIN 导出失败状态写入未确认', {
@@ -307,11 +345,13 @@ export function createAsinExportProcessor(
       }
       log.warn('ASIN 导出尝试失败', {
         reason:
-          error instanceof ExportCapacityError
+          error instanceof ExportCapacityError ||
+          (error instanceof ExportArtifactError && error.reason === 'too-large')
             ? 'export_limit_exceeded'
             : 'export_failed',
       });
-      throw error instanceof ExportCapacityError
+      throw error instanceof ExportCapacityError ||
+        (error instanceof ExportArtifactError && error.reason === 'too-large')
         ? new UnrecoverableError('ASIN 导出超过上限，请缩小筛选范围')
         : new Error('ASIN_EXPORT_ATTEMPT_FAILED');
     } finally {

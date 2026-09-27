@@ -138,7 +138,20 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
             return !(await queue.getJob(taskId));
           },
         );
-        if (removed) logger.info('过期 ASIN 导出文件已清理', { removed });
+        const abandoned = await artifacts.cleanup(
+          Date.now() - 60_000,
+          100,
+          async (taskId, kind) => {
+            if (closing || performance.now() >= deadline || kind !== 'final')
+              return false;
+            const task = await store.read(taskId);
+            return task?.status === 'cancelled' || task?.status === 'failed';
+          },
+        );
+        if (removed || abandoned)
+          logger.info('过期 ASIN 导出文件已清理', {
+            removed: removed + abandoned,
+          });
       } catch {
         if (!closing)
           logger.warn('ASIN 导出文件清理暂不可用', {

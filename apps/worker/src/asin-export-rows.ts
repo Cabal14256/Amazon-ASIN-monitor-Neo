@@ -8,15 +8,18 @@ export const ASIN_EXPORT_HEADER = [
   '站点',
   '品牌',
   '变体状态',
+  '变体状态来源',
   'ASIN',
   'ASIN名称',
   'ASIN类型',
   'ASIN状态',
+  'ASIN状态来源',
+  '人工异常原因',
   '创建时间',
   '最后检查时间',
 ] as const;
 export const ASIN_EXPORT_WIDTHS = [
-  20, 40, 10, 10, 15, 10, 15, 50, 15, 10, 20, 20,
+  20, 40, 10, 10, 15, 10, 12, 15, 50, 15, 10, 12, 30, 20, 20,
 ];
 
 function shanghai(value: string | null | undefined): string {
@@ -29,7 +32,7 @@ function shanghai(value: string | null | undefined): string {
 const status = (broken: number | boolean | null | undefined) =>
   broken === 1 || broken === true ? '异常' : '正常';
 
-/** Legacy ASIN export's twelve columns, with D8 Shanghai wall-clock dates. */
+/** Legacy ASIN export's fifteen columns, with D8 Shanghai wall-clock dates. */
 export function* asinExportRows(
   groups: readonly VariantGroup[],
 ): Generator<string[]> {
@@ -41,6 +44,7 @@ export function* asinExportRows(
       group.site || '',
       group.brand || '',
       status(group.isBroken),
+      group.statusSource || '',
     ];
     if (group.children?.length) {
       for (const asin of group.children)
@@ -50,11 +54,23 @@ export function* asinExportRows(
           asin.name || '',
           asin.asinType == null ? '' : String(asin.asinType),
           status(asin.isBroken),
+          asin.statusSource || '',
+          asin.manualBrokenReason || group.manualBrokenReason || '',
           shanghai(asin.createTime),
           shanghai(asin.lastCheckTime),
         ];
     } else {
-      yield [...prefix, '', '', '', '', shanghai(group.createTime), ''];
+      yield [
+        ...prefix,
+        '',
+        '',
+        '',
+        '',
+        '',
+        group.manualBrokenReason || '',
+        shanghai(group.createTime),
+        '',
+      ];
     }
   }
 }

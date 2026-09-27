@@ -58,6 +58,11 @@ export class ExportArtifactStore {
       if (!missing(error)) throw error;
     });
   }
+  async discardFinal(taskId: string): Promise<void> {
+    await unlink(this.path(taskId)).catch((error: unknown) => {
+      if (!missing(error)) throw error;
+    });
+  }
   private async inspectFile(
     path: string,
     taskId: string,

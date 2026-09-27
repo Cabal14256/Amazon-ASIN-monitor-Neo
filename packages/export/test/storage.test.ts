@@ -68,6 +68,23 @@ describe('export artifacts', () => {
     ).rejects.toThrow();
   });
 
+  it('removes only the final artifact belonging to the specified task', async () => {
+    const { directory, store } = await fixture();
+    const { path, stream } = await store.temporary(taskId);
+    await new Promise<void>((resolve) => stream.end(content, resolve));
+    await store.publish(taskId, path, new AbortController().signal);
+    await expect(store.discardFinal('../outside')).rejects.toThrow();
+    await store.discardFinal(taskId);
+    expect(await store.read(taskId)).toBeNull();
+    expect(await readFile(path)).toEqual(content);
+    await store.discard(path);
+    expect(
+      await readFile(join(directory, `export-${taskId}.xlsx`)).catch(
+        () => null,
+      ),
+    ).toBeNull();
+  });
+
   it('never publishes a truncated or non-zip partial under the final name', async () => {
     const { directory, store } = await fixture();
     const partial = await store.temporary(taskId);

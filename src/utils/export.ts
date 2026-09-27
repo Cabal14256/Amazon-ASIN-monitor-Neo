@@ -416,6 +416,7 @@ export async function exportToExcelAsync(
       try {
         const completedTask = await waitForTaskResult(taskId!, {
           timeoutMs: 30 * 60 * 1000,
+          initialLookupGraceMs: taskData.data.status === 'unknown' ? 30_000 : 0,
           onProgress: (task) => {
             if (disposed) {
               return;

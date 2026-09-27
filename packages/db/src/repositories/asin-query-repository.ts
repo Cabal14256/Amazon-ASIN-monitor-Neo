@@ -38,6 +38,8 @@ export interface AsinGroupReadResult {
   groups: (VariantGroup & {
     asinCount?: number;
     exportIsBroken?: boolean;
+    exportHasAutoBroken?: boolean;
+    exportHasManualBroken?: boolean;
     exportCursorTime?: string | null;
   })[];
   asins: Asin[];
@@ -91,6 +93,12 @@ const groupBroken = sql`(COALESCE(${g.isBroken}, false) OR COALESCE(${
   OR EXISTS (SELECT 1 FROM ${asins} AS state_child WHERE ${
   child.variantGroupId
 }=${g.id} AND ${childBroken(child)}))`;
+const exportHasAutoBroken = sql`(COALESCE(${g.isBroken}, false)
+  OR EXISTS (SELECT 1 FROM ${asins} AS state_child WHERE ${child.variantGroupId}=${g.id}
+    AND COALESCE(${child.isBroken}, false)))`;
+const exportHasManualBroken = sql`(COALESCE(${g.manualBroken}, false)
+  OR EXISTS (SELECT 1 FROM ${asins} AS state_child WHERE ${child.variantGroupId}=${g.id}
+    AND COALESCE(${child.manualBroken}, false)))`;
 const countryFilter = (
   column: typeof g.country | typeof a.country,
   value?: string,
@@ -331,6 +339,12 @@ export class DrizzleAsinQueryUnit
     const exportGroupBroken = includeChildren
       ? sql`NULL::boolean`
       : groupBroken;
+    const exportAutoBroken = includeChildren
+      ? sql`NULL::boolean`
+      : exportHasAutoBroken;
+    const exportManualBroken = includeChildren
+      ? sql`NULL::boolean`
+      : exportHasManualBroken;
     const exportCursorTime = includeChildren
       ? sql`NULL::text`
       : sql`${g.createTime}::text`;
@@ -339,6 +353,8 @@ export class DrizzleAsinQueryUnit
       WITH selected AS MATERIALIZED (
         SELECT g.*, ${asinCount} AS asin_count,
           ${exportGroupBroken} AS export_group_broken,
+          ${exportAutoBroken} AS export_has_auto_broken,
+          ${exportManualBroken} AS export_has_manual_broken,
           ${exportCursorTime} AS export_cursor_time
         FROM ${variantGroups} AS g WHERE ${groupWhere}
         ORDER BY ${g.createTime} DESC NULLS LAST, ${g.id} DESC
@@ -367,6 +383,12 @@ export class DrizzleAsinQueryUnit
           throw new AsinQueryRepositoryError('result');
         if (
           !includeChildren &&
+          (typeof row.export_has_auto_broken !== 'boolean' ||
+            typeof row.export_has_manual_broken !== 'boolean')
+        )
+          throw new AsinQueryRepositoryError('result');
+        if (
+          !includeChildren &&
           row.export_cursor_time !== null &&
           typeof row.export_cursor_time !== 'string'
         )
@@ -379,6 +401,8 @@ export class DrizzleAsinQueryUnit
           ...(!includeChildren
             ? {
                 exportIsBroken: row.export_group_broken as boolean,
+                exportHasAutoBroken: row.export_has_auto_broken as boolean,
+                exportHasManualBroken: row.export_has_manual_broken as boolean,
                 exportCursorTime: row.export_cursor_time as string | null,
               }
             : {}),

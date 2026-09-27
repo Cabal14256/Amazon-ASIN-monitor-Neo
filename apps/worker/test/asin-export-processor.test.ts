@@ -7,7 +7,7 @@ import {
   type AsinGroupReadResult,
   type TaskState,
 } from '@asin-monitor/db';
-import { ExportArtifactStore } from '@asin-monitor/export';
+import { ExportArtifactError, ExportArtifactStore } from '@asin-monitor/export';
 import type { Job } from 'bullmq';
 import ExcelJS from 'exceljs';
 import { randomUUID } from 'node:crypto';
@@ -68,6 +68,9 @@ const group = (id: string, name: string, broken = false) => ({
   site: 'amazon.com',
   brand: 'Fixture',
   isBroken: broken,
+  exportIsBroken: broken,
+  exportHasAutoBroken: broken,
+  exportHasManualBroken: false,
   createTime: new Date('2026-09-26T16:00:00.000Z'),
   exportCursorTime: '2026-09-27 00:00:00.123456',
   updateTime: null,
@@ -149,6 +152,7 @@ async function harness(pages: AsinGroupReadResult[]) {
     isClosing: () => false,
     assertJobLock: vi.fn(async () => undefined),
     updateProgress: vi.fn(async () => undefined),
+    now: vi.fn(() => new Date('2026-09-27T16:01:00.000Z')),
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const processor = createAsinExportProcessor(
@@ -195,11 +199,24 @@ describe('ASIN streaming export', () => {
     ).rejects.toThrow('at least 6 days');
   });
 
-  it('matches the fixed Legacy twelve-column fixture across PostgreSQL pages', async () => {
+  it('matches the fixed Legacy fifteen-column fixture across PostgreSQL pages', async () => {
     const pages = [
       {
-        groups: [group('g1', 'Broken', true)],
-        asins: [asin('B000000001', 'g1', true)],
+        groups: [
+          {
+            ...group('g1', 'Broken', true),
+            manualBroken: true,
+            manualBrokenReason: '组人工原因',
+            exportHasManualBroken: true,
+          },
+        ],
+        asins: [
+          {
+            ...asin('B000000001', 'g1', true),
+            manualBroken: true,
+            manualBrokenReason: 'ASIN 人工原因',
+          },
+        ],
         total: 2,
         totalASINs: 1,
       },
@@ -230,7 +247,7 @@ describe('ASIN streaming export', () => {
       .slice(1)
       .map((row) =>
         Array.from(
-          { length: 12 },
+          { length: 15 },
           (_, index) => (row as unknown[])[index + 1] ?? '',
         ),
       );
@@ -243,10 +260,13 @@ describe('ASIN streaming export', () => {
         'amazon.com',
         'Fixture',
         '异常',
+        'AUTO+MANUAL',
         'B000000001',
         'Name B000000001',
         '1',
         '异常',
+        'AUTO+MANUAL',
+        'ASIN 人工原因',
         '2026-09-27 00:00:00',
         '2026-09-27 09:02:03',
       ],
@@ -257,6 +277,9 @@ describe('ASIN streaming export', () => {
         'amazon.com',
         'Fixture',
         '正常',
+        'NORMAL',
+        '',
+        '',
         '',
         '',
         '',
@@ -265,6 +288,9 @@ describe('ASIN streaming export', () => {
         '',
       ],
     ]);
+    expect(h.state.result).toMatchObject({
+      filename: 'ASIN数据_2026-09-28.xlsx',
+    });
     expect(
       (await readdir(h.directory)).filter((name) => name.endsWith('.part')),
     ).toEqual([]);
@@ -329,6 +355,42 @@ describe('ASIN streaming export', () => {
     });
   });
 
+  it('keeps group status source stable across child pages', async () => {
+    const asins = Array.from({ length: 5001 }, (_, index) => ({
+      ...asin(`B${String(index).padStart(9, '0')}`, 'g-dense'),
+      manualBroken: index === 0,
+      manualBrokenReason: index === 0 ? '人工原因' : null,
+    }));
+    const h = await harness([
+      {
+        groups: [{ ...group('g-dense', 'Dense'), exportHasManualBroken: true }],
+        asins,
+        total: 1,
+        totalASINs: 5001,
+      },
+    ] as unknown as AsinGroupReadResult[]);
+    await h.processor(h.job, 'token');
+    const ref = (
+      h.state.result as {
+        artifact: {
+          taskId: string;
+          key: string;
+          bytes: number;
+          sha256: string;
+        };
+      }
+    ).artifact;
+    const path = await h.artifacts.verifiedPath(
+      ref,
+      new AbortController().signal,
+    );
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.readFile(path);
+    const sheet = book.worksheets[0]!;
+    expect(sheet.getRow(2).getCell(7).value).toBe('MANUAL');
+    expect(sheet.getRow(5002).getCell(7).value).toBe('MANUAL');
+  });
+
   it('uses the last group as a cursor and keeps reading past an earlier count', async () => {
     const first = group('g-1', 'First');
     const next = group('g-2', 'Next');
@@ -380,6 +442,20 @@ describe('ASIN streaming export', () => {
       status: 'cancelled',
       result: null,
     });
+    expect(await readdir(h.directory)).toEqual([]);
+  });
+
+  it('fails an oversized published artifact without a retry', async () => {
+    const h = await harness([]);
+    vi.spyOn(h.artifacts, 'publish').mockRejectedValueOnce(
+      new ExportArtifactError('too-large'),
+    );
+    await expect(h.processor(h.job, 'token')).rejects.toThrow(
+      'ASIN 导出超过上限',
+    );
+    expect(h.state.status).toBe('failed');
+    expect(h.list).toHaveBeenCalledTimes(1);
+    expect(await readdir(h.directory)).toEqual([]);
   });
 
   it('keeps cancellation when it arrives between a capacity failure read and CAS', async () => {
@@ -424,6 +500,9 @@ it('renders fixed Legacy records with Shanghai wall time before the streaming wr
       'amazon.com',
       'B',
       '正常',
+      '',
+      '',
+      '',
       '',
       '',
       '',
