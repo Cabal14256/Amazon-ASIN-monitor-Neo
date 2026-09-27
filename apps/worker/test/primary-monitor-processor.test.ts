@@ -8,6 +8,7 @@ import {
   type NotificationClaim,
   type TaskState,
 } from '@asin-monitor/db';
+import type { NotificationData } from '@asin-monitor/notify';
 import type { VariantCheckContext } from '@asin-monitor/variant-check';
 import type { Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
@@ -83,10 +84,12 @@ function fixture() {
       order.push(`notification-committed:${country}`);
     },
   );
-  const sendCountry = vi.fn(async (_domain: string, country: string) => {
-    order.push(`send:${country}`);
-    return { success: true as const, skipped: false as const };
-  });
+  const sendCountry = vi.fn(
+    async (_domain: string, country: string, _data: NotificationData) => {
+      order.push(`send:${country}`);
+      return { success: true as const, skipped: false as const };
+    },
+  );
   const checkGroup = vi.fn(
     async (id: string, _context: VariantCheckContext) => {
       order.push(`check:${id}`);
@@ -164,6 +167,12 @@ describe('primary monitor BullMQ processor', () => {
         groupSnapshot: { ...result('g1', false).groupSnapshot, country: 'DE' },
       }),
     ).toThrow(VariantCheckError);
+    expect(() =>
+      context.validateResult?.({
+        ...result('g1', false),
+        groupSnapshot: { ...result('g1', false).groupSnapshot, country: 'us ' },
+      }),
+    ).not.toThrow();
     expect(monitorGroupOperation(f.data, 'g1').operationKey).not.toBe(
       monitorGroupOperation(f.data, 'g2').operationKey,
     );
@@ -176,6 +185,47 @@ describe('primary monitor BullMQ processor', () => {
     expect(output).toMatchObject({
       notificationResults: { US: 'unconfirmed', DE: 'sent' },
     });
+  });
+  it('includes every broken group and ASIN when the country has more than 100 groups', async () => {
+    const f = fixture();
+    f.data.countries = ['US'];
+    f.groups.mockImplementationOnce(async () =>
+      Array.from({ length: 101 }, (_, index) => ({
+        country: 'US' as const,
+        groupId: `g${index}`,
+      })),
+    );
+    f.checkGroup.mockImplementation(async (id) => ({
+      ...result(id, true),
+      groupSnapshot: { ...result(id, true).groupSnapshot, country: 'US' },
+    }));
+    await f.processor(f.job, 'fixture-lock');
+    const summary = f.sendCountry.mock.calls[0][2];
+    expect(summary.brokenGroupNames).toHaveLength(101);
+    expect(summary.brokenGroupDetails).toHaveLength(101);
+    expect(summary.brokenASINs).toHaveLength(101);
+  });
+  it('timestamps the country after its group checks finish', async () => {
+    const f = fixture();
+    f.data.countries = ['US'];
+    f.groups.mockImplementationOnce(async () => [
+      { country: 'US' as const, groupId: 'g1' },
+    ]);
+    const finishedAt = new Date('2026-09-27T01:00:00.000Z');
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-27T00:30:00.000Z'));
+      f.checkGroup.mockImplementationOnce(async () => {
+        vi.setSystemTime(finishedAt);
+        return result('g1', false);
+      });
+      await f.processor(f.job, 'fixture-lock');
+      expect(f.sendCountry.mock.calls[0][2].checkTime).toBe(
+        finishedAt.toISOString(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('rejects a substituted job before database or upstream work', async () => {
     const f = fixture();

@@ -25,7 +25,7 @@ export class PgPrimaryMonitorRepository {
       `DELETE FROM primary_monitor_runs WHERE task_id IN (
          SELECT task_id FROM primary_monitor_runs
          WHERE expires_at < now()
-         ORDER BY expires_at, task_id LIMIT 100 FOR UPDATE SKIP LOCKED
+         ORDER BY expires_at, task_id LIMIT 1000 FOR UPDATE SKIP LOCKED
        )`,
     );
     return removed.rowCount ?? 0;

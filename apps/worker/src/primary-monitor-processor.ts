@@ -89,22 +89,19 @@ function addGroup(summary: CountrySummary, result: VariantGroupCheckData) {
   summary.totalGroups++;
   if (result.isBroken) {
     summary.brokenGroups++;
-    if (summary.brokenGroupNames!.length < 100)
-      summary.brokenGroupNames!.push(groupName);
-    if (summary.brokenGroupDetails!.length < 100)
-      summary.brokenGroupDetails!.push({
-        variantGroupId: groupId,
-        groupName,
-        statusSource: string(group.statusSource),
-        manualBrokenReason: string(group.manualBrokenReason),
-      });
+    summary.brokenGroupNames!.push(groupName);
+    summary.brokenGroupDetails!.push({
+      variantGroupId: groupId,
+      groupName,
+      statusSource: string(group.statusSource),
+      manualBrokenReason: string(group.manualBrokenReason),
+    });
   }
   for (const code of ['SP_API_ERROR', 'NOT_FOUND', 'NO_VARIANTS'] as const)
     summary.brokenByType![code] =
       (summary.brokenByType![code] ?? 0) + count(result.brokenByType?.[code]);
   if (group.feishuNotifyEnabled === 0) return;
   for (const asin of result.brokenASINs ?? []) {
-    if (summary.brokenASINs!.length >= 100) break;
     const child = children.find((row) => row.asin === asin.asin);
     if (child?.feishuNotifyEnabled === 0) continue;
     summary.brokenASINs!.push({
@@ -190,7 +187,10 @@ export function createPrimaryMonitorProcessor(
               operation: monitorGroupOperation(data, group.groupId),
               validateResult: (value) => {
                 const snapshot = (value as VariantGroupCheckData).groupSnapshot;
-                if (snapshot?.country !== country)
+                if (
+                  typeof snapshot?.country !== 'string' ||
+                  snapshot.country.replace(/ +$/, '').toUpperCase() !== country
+                )
                   throw new VariantCheckError('snapshot-changed');
               },
               authorize: async () => {
@@ -230,6 +230,7 @@ export function createPrimaryMonitorProcessor(
           );
           await options.updateProgress(job, progress);
         }
+        countryResults[country].checkTime = new Date().toISOString();
       }
       if (failedGroups) throw new Error('MONITOR_GROUPS_INCOMPLETE');
       const notificationResults: Record<string, string> = {};
