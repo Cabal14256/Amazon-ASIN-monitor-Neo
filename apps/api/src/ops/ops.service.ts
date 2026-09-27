@@ -50,6 +50,39 @@ const fail = (status: number, errorMessage: string): never => {
     status,
   );
 };
+export class OpsRedisDeadlineError extends Error {}
+
+/** Bound the caller even when Redis's configured command timeout is longer. */
+export function withOpsRedisDeadline<T>(
+  deadline: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return Promise.reject(new OpsRedisDeadlineError());
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new OpsRedisDeadlineError()),
+      remaining,
+    );
+    Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
+}
+
+function escapeRedisGlob(value: string) {
+  return value.replace(/[\\*?\[\]]/g, '\\$&');
+}
+
 function parseRefreshTimestamp(value: string): number | undefined {
   const match =
     /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?)?$/.exec(
@@ -155,14 +188,21 @@ export class OpsService {
   private async scanAnalyticsKeys(deadline: number) {
     const keys = new Set<string>();
     const prefix = this.analyticsPrefix;
+    const pattern = `${escapeRedisGlob(prefix)}*`;
     let cursor = '0';
     for (let page = 0; page < MAX_CACHE_SCAN_PAGES; page++) {
       if (Date.now() >= deadline) return { keys: [...keys], complete: false };
-      const [nextCursor, pageKeys] = await this.redis.scan(
-        cursor,
-        `${prefix}*`,
-        CACHE_SCAN_COUNT,
-      );
+      let nextCursor: string;
+      let pageKeys: string[];
+      try {
+        [nextCursor, pageKeys] = await withOpsRedisDeadline(deadline, () =>
+          this.redis.scan(cursor, pattern, CACHE_SCAN_COUNT),
+        );
+      } catch (error) {
+        if (error instanceof OpsRedisDeadlineError)
+          return { keys: [...keys], complete: false };
+        throw error;
+      }
       // BULL_PREFIX is configuration, not a Redis glob. Filter literal prefixes
       // before deletion even if the configured prefix contains glob characters.
       for (const key of pageKeys) {
@@ -260,15 +300,19 @@ export class OpsService {
         offset += CACHE_SCAN_COUNT
       ) {
         if (Date.now() >= deadline) fail(503, '分析缓存清理超时，请重试');
-        removed += await this.redis.unlink(
-          ...scan.keys.slice(offset, offset + CACHE_SCAN_COUNT),
+        removed += await withOpsRedisDeadline(deadline, () =>
+          this.redis.unlink(
+            ...scan.keys.slice(offset, offset + CACHE_SCAN_COUNT),
+          ),
         );
       }
       const clearedAt = new Date().toISOString();
-      await this.redis.setex(
-        this.lastClearedAtKey,
-        LAST_CLEARED_AT_TTL_SECONDS,
-        clearedAt,
+      await withOpsRedisDeadline(deadline, () =>
+        this.redis.setex(
+          this.lastClearedAtKey,
+          LAST_CLEARED_AT_TTL_SECONDS,
+          clearedAt,
+        ),
       );
       this.logger.info('分析缓存已清理', 'OpsService', {
         removed,

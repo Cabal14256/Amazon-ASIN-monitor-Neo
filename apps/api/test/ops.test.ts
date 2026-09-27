@@ -8,7 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PermissionCacheService } from '../src/auth/permission-cache.service';
 import { ApplicationDatabasePools } from '../src/database/database.service';
 import { OpsModule } from '../src/ops/ops.module';
-import { OPS_QUEUE_FACTORY, OPS_ROLE_REPOSITORY } from '../src/ops/ops.service';
+import {
+  OPS_QUEUE_FACTORY,
+  OPS_ROLE_REPOSITORY,
+  OpsRedisDeadlineError,
+  withOpsRedisDeadline,
+} from '../src/ops/ops.service';
 import { ApplicationRedisClient } from '../src/redis/redis.service';
 import { monitorAnalyticsFixture } from './helpers/monitor-analytics-fixture';
 import { sessionApp } from './helpers/session-app';
@@ -380,6 +385,24 @@ describe('Neo operations HTTP', () => {
     );
   });
 
+  it('escapes Redis glob characters in the configured namespace', async () => {
+    app.env.BULL_PREFIX = 'ops[test]*?\\';
+    const key = `${app.env.BULL_PREFIX}:neo:analytics:v1:fixture`;
+    await redis.set(key, 'cached');
+    scan.mockImplementation(async (_cursor: string, pattern: string) => {
+      expect(pattern).toBe('ops\\[test\\]\\*\\?\\\\:neo:analytics:v1:*');
+      return ['0', [key]];
+    });
+    const response = await app.http.inject({
+      method: 'POST',
+      url: '/api/v1/ops/analytics/cache/clear',
+      headers,
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(unlink).toHaveBeenCalledWith(key);
+    expect(await redis.get(key)).toBeNull();
+  });
+
   it('reports Redis and database failures without leaking their messages', async () => {
     scan.mockRejectedValueOnce(new Error('redis-password-private'));
     const failedScan = await app.http.inject({
@@ -456,5 +479,31 @@ describe('Neo operations HTTP', () => {
     } finally {
       dateNow.mockRestore();
     }
+  });
+});
+
+describe('Ops Redis command deadline', () => {
+  it('returns at the deadline even if an issued command remains pending', async () => {
+    vi.useFakeTimers();
+    try {
+      const operation = vi.fn(() => new Promise<string>(() => undefined));
+      const result = withOpsRedisDeadline(Date.now() + 5_000, operation);
+      const rejection = expect(result).rejects.toBeInstanceOf(
+        OpsRedisDeadlineError,
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      await rejection;
+      expect(operation).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not dispatch a command after its deadline', async () => {
+    const operation = vi.fn(async () => 'late');
+    await expect(
+      withOpsRedisDeadline(Date.now() - 1, operation),
+    ).rejects.toBeInstanceOf(OpsRedisDeadlineError);
+    expect(operation).not.toHaveBeenCalled();
   });
 });
