@@ -106,8 +106,12 @@ export async function listBackupFiles(
         target,
         format: 'custom',
         sourceEngine: metadata?.sourceEngine,
-        description: metadata?.version === 2 ? metadata.description : undefined,
+        description:
+          metadata?.version === 2 || metadata?.version === 3
+            ? metadata.description
+            : undefined,
         metadataVersion: metadata?.version,
+        scope: metadata?.version === 3 ? metadata.scope : undefined,
         sourceExtensionVersion:
           metadata?.version === 2 && metadata.sourceEngine === 'timescaledb'
             ? metadata.timescale.extensionVersion

@@ -214,23 +214,24 @@ export class BackupService implements OnModuleDestroy {
       if (backupFilenameTarget(input.filename) !== target)
         return fail(400, '备份文件目标数据库与恢复目标不一致');
       const path = resolveBackupPath(this.directory(), input.filename);
+      let fileSize: number;
       try {
-        await inspectBackupFile(path);
+        fileSize = (await inspectBackupFile(path)).size;
       } catch {
         return fail(404, '备份文件不存在或格式无效');
       }
+      if (fileSize > this.env.BACKUP_MAX_BYTES)
+        return fail(413, '备份文件超过当前恢复大小限制');
       const metadata = await readBackupMetadata(
         this.directory(),
         input.filename,
       );
       if (
         !metadata ||
-        (metadata.sourceEngine === 'timescaledb' && metadata.version !== 2)
+        (metadata.sourceEngine === 'timescaledb' && metadata.version !== 2) ||
+        (metadata.sourceEngine === 'postgresql' && metadata.version !== 3)
       )
-        return fail(
-          409,
-          '备份文件来源或 TimescaleDB 目录元数据未验证，禁止自动恢复',
-        );
+        return fail(409, '备份文件来源或恢复范围元数据未验证，禁止自动恢复');
       const capability = await this.capability(target);
       const timescaleTarget = capability.hasTimescale;
       if ((metadata.sourceEngine === 'timescaledb') !== timescaleTarget)
@@ -253,9 +254,11 @@ export class BackupService implements OnModuleDestroy {
       });
       return {
         ...task,
-        restoreMode: timescaleTarget
-          ? ('isolated' as const)
-          : ('in-place' as const),
+        restoreMode:
+          timescaleTarget ||
+          (metadata.version === 3 && metadata.scope === 'full')
+            ? ('isolated' as const)
+            : ('in-place' as const),
       };
     });
   }
@@ -279,10 +282,13 @@ export class BackupService implements OnModuleDestroy {
         const capability =
           file.target === 'primary' ? primaryTimescale : competitorTimescale;
         const validSource =
-          file.sourceEngine === 'postgresql' ||
+          (file.sourceEngine === 'postgresql' &&
+            file.metadataVersion === 3 &&
+            (file.scope === 'full' || file.scope === 'selective')) ||
           (file.sourceEngine === 'timescaledb' && file.metadataVersion === 2);
         const restoreSupported =
           validSource &&
+          file.size <= this.env.BACKUP_MAX_BYTES &&
           capability.status === 'fulfilled' &&
           (file.sourceEngine === 'timescaledb') ===
             capability.value.hasTimescale &&
@@ -292,7 +298,7 @@ export class BackupService implements OnModuleDestroy {
           ...file,
           restoreSupported,
           restoreMode: restoreSupported
-            ? capability.value.hasTimescale
+            ? capability.value.hasTimescale || file.scope === 'full'
               ? ('isolated' as const)
               : ('in-place' as const)
             : undefined,

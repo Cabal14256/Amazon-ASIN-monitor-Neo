@@ -12,7 +12,8 @@ const directories: string[] = [];
 async function writeMetadata(
   directory: string,
   sourceEngine: 'postgresql' | 'timescaledb',
-  version: 1 | 2 = 1,
+  version: 1 | 2 | 3 = sourceEngine === 'postgresql' ? 3 : 1,
+  scope: 'full' | 'selective' = 'full',
 ) {
   await writeFile(
     join(directory, `${filename}.meta.json`),
@@ -21,6 +22,12 @@ async function writeMetadata(
       filename,
       target: 'primary',
       sourceEngine,
+      ...(version === 3 && sourceEngine === 'postgresql'
+        ? {
+            scope,
+            ...(scope === 'selective' ? { tables: ['public.asins'] } : {}),
+          }
+        : {}),
       ...(version === 2 && sourceEngine === 'timescaledb'
         ? {
             timescale: {
@@ -42,7 +49,7 @@ afterEach(async () => {
   );
 });
 
-async function fixture() {
+async function fixture(maxBytes = 1024 * 1024) {
   const directory = await mkdtemp(join(tmpdir(), 'neo-backup-service-'));
   directories.push(directory);
   const unit = {
@@ -88,6 +95,7 @@ async function fixture() {
     {
       AUTH_DATA_AUTHORITY: 'postgresql',
       BACKUP_STORAGE_DIRECTORY: directory,
+      BACKUP_MAX_BYTES: maxBytes,
     } as never,
     repository as never,
     tasks as never,
@@ -151,11 +159,49 @@ describe('backup API service', () => {
       service.restore(principal, { filename }),
     ).resolves.toMatchObject({
       status: 'pending',
-      restoreMode: 'in-place',
+      restoreMode: 'isolated',
     });
     expect(port.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ operation: 'restore', target: 'primary' }),
     );
+  });
+
+  it('does not offer or enqueue restoration above the current size limit', async () => {
+    const { service, port, directory } = await fixture(8);
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'postgresql');
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({ status: 413 });
+    expect(port.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('keeps selective plain restores in place and rejects older unscoped plain archives', async () => {
+    const { service, port, directory } = await fixture();
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'postgresql', 2);
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({ status: 409 });
+    await writeMetadata(directory, 'postgresql', 3, 'selective');
+    await expect(service.list(principal)).resolves.toMatchObject([
+      {
+        filename,
+        scope: 'selective',
+        restoreSupported: true,
+        restoreMode: 'in-place',
+      },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).resolves.toMatchObject({ restoreMode: 'in-place' });
+    expect(port.enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('downloads only an artifact accompanied by verified restore metadata', async () => {

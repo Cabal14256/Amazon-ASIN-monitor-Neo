@@ -26,6 +26,7 @@ export const backupArtifactFormatSchema = z.literal(BACKUP_ARTIFACT_FORMAT);
 export type BackupArtifactFormat = z.infer<typeof backupArtifactFormatSchema>;
 export const backupSourceEngineSchema = z.enum(['postgresql', 'timescaledb']);
 export const backupRestoreModeSchema = z.enum(['in-place', 'isolated']);
+export const backupScopeSchema = z.enum(['full', 'selective']);
 export const BACKUP_SCHEDULER_USER_ID = 'system:backup-scheduler';
 
 /**
@@ -65,6 +66,10 @@ export type BackupTimescaleManifest = z.infer<
 >;
 /** Bounds metadata reads while accommodating the largest valid Timescale manifest. */
 export const BACKUP_ARTIFACT_METADATA_MAX_BYTES = 16 * 1024 * 1024;
+const backupTableNameSchema = z
+  .string()
+  .max(128)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/);
 export const backupArtifactMetadataSchema = z.union([
   backupArtifactMetadataV1Schema,
   z
@@ -83,6 +88,27 @@ export const backupArtifactMetadataSchema = z.union([
       target: backupTargetSchema,
       sourceEngine: z.literal('timescaledb'),
       timescale: backupTimescaleManifestSchema,
+      description: z.string().max(500).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(3),
+      filename: backupFilenameSchema,
+      target: backupTargetSchema,
+      sourceEngine: z.literal('postgresql'),
+      scope: z.literal('full'),
+      description: z.string().max(500).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(3),
+      filename: backupFilenameSchema,
+      target: backupTargetSchema,
+      sourceEngine: z.literal('postgresql'),
+      scope: z.literal('selective'),
+      tables: z.array(backupTableNameSchema).min(1).max(512),
       description: z.string().max(500).optional(),
     })
     .strict(),
@@ -108,7 +134,10 @@ export const backupFileSchema = z
     restoreSupported: z.boolean().default(false),
     restoreMode: backupRestoreModeSchema.optional(),
     sourceEngine: backupSourceEngineSchema.optional(),
-    metadataVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+    metadataVersion: z
+      .union([z.literal(1), z.literal(2), z.literal(3)])
+      .optional(),
+    scope: backupScopeSchema.optional(),
     sourceExtensionVersion: z.string().optional(),
     description: z.string().max(500).optional(),
   })
@@ -130,15 +159,7 @@ export type BackupConfig = z.infer<typeof backupConfigSchema>;
 // ── 请求 ──
 
 export const createBackupRequestSchema = z.object({
-  tables: z
-    .array(
-      z
-        .string()
-        .max(128)
-        .regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/),
-    )
-    .max(512)
-    .optional(),
+  tables: z.array(backupTableNameSchema).max(512).optional(),
   description: z.string().max(500).optional(),
   useAsync: z.union([z.boolean(), z.string()]).optional(),
   target: backupTargetSchema.default('primary'),

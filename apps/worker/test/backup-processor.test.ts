@@ -14,11 +14,13 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   commandEnvironment,
+  connectionForDatabase,
   createBackupProcessor,
   processCommand,
   readBackupArtifactMetadataFile,
   restoreCommandArgs,
   stagingDatabaseName,
+  timescaleExtensionCreateSql,
 } from '../src/backup-processor';
 
 const data: BackupJobData = {
@@ -283,5 +285,24 @@ describe('backup command boundary', () => {
     expect(() =>
       stagingDatabaseName('bad; DROP DATABASE postgres', 'primary'),
     ).toThrow('BACKUP_TASK_IDENTITY_INVALID');
+  });
+  it('removes query-level database overrides from staging connections', () => {
+    const staging = connectionForDatabase(
+      'postgresql://backup@localhost/online?database=production&sslmode=require',
+      'neo_restore_primary_1000000000004000',
+    );
+    expect(new URL(staging).searchParams.has('database')).toBe(false);
+    expect(commandEnvironment(staging).PGDATABASE).toBe(
+      'neo_restore_primary_1000000000004000',
+    );
+    expect(new URL(staging).searchParams.get('sslmode')).toBe('require');
+  });
+  it('installs the archived TimescaleDB version without SQL injection', () => {
+    expect(timescaleExtensionCreateSql('2.22.0')).toBe(
+      "CREATE EXTENSION timescaledb VERSION '2.22.0'",
+    );
+    expect(() =>
+      timescaleExtensionCreateSql("2.22.0'; DROP DATABASE online; --"),
+    ).toThrow('BACKUP_TIMESCALE_VERSION_INVALID');
   });
 });

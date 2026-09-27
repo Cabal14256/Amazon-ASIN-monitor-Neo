@@ -73,6 +73,32 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('distinguishes full and selective PostgreSQL artifacts in v3 metadata', () => {
+    const base = {
+      version: 3,
+      filename: 'backup_20260824-020000-1234abcd-primary.dump',
+      target: 'primary',
+      sourceEngine: 'postgresql',
+    };
+    expect(
+      backupArtifactMetadataSchema.parse({ ...base, scope: 'full' }),
+    ).toMatchObject({ scope: 'full' });
+    expect(
+      backupArtifactMetadataSchema.parse({
+        ...base,
+        scope: 'selective',
+        tables: ['public.asins'],
+      }),
+    ).toMatchObject({ scope: 'selective', tables: ['public.asins'] });
+    expect(() => backupArtifactMetadataSchema.parse(base)).toThrow();
+    for (const invalid of [
+      { ...base, scope: 'full', tables: ['public.asins'] },
+      { ...base, scope: 'selective' },
+      { ...base, scope: 'selective', tables: [] },
+      { ...base, scope: 'selective', tables: ['public.asins; DROP TABLE x'] },
+    ])
+      expect(() => backupArtifactMetadataSchema.parse(invalid)).toThrow();
+  });
   it('Timescale 隔离恢复契约需要目录清单并明确在线目标未切换', () => {
     const metadata = {
       version: 2,

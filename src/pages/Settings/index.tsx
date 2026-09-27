@@ -290,7 +290,8 @@ const SettingsPage: React.FC<unknown> = () => {
             backupConfigForm.setFieldsValue({
               enabled: config?.enabled || false,
               scheduleType: config?.scheduleType || 'daily',
-              scheduleValue: config?.scheduleValue,
+              scheduleValue:
+                config?.scheduleType === 'daily' ? null : config?.scheduleValue,
               backupTime: config?.backupTime
                 ? dayjs(config.backupTime, 'HH:mm')
                 : dayjs('02:00', 'HH:mm'),
@@ -315,7 +316,8 @@ const SettingsPage: React.FC<unknown> = () => {
       await backupServices.saveBackupConfig({
         enabled: values.enabled || false,
         scheduleType: values.scheduleType || 'daily',
-        scheduleValue: values.scheduleValue,
+        scheduleValue:
+          values.scheduleType === 'daily' ? null : values.scheduleValue,
         backupTime,
       });
       message.success('自动备份配置已保存');
