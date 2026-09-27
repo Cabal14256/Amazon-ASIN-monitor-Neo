@@ -57,6 +57,15 @@ export function isSupportedScheduleMinutes(value: string) {
   return SCHEDULE_MINUTE_OPTIONS.some((option) => option === value);
 }
 
+export const DEFAULT_MONITOR_CONCURRENCY_CAP = 10;
+export function isSupportedMonitorConcurrency(value: string) {
+  return /^(?:[1-9]|10)$/.test(value);
+}
+
+export function isEmptySensitiveReplacement(key: string, value: string) {
+  return isSensitiveConfigKey(key) && value.trim() === '';
+}
+
 export function deniedSettingsError(...errors: unknown[]) {
   return errors.find(
     (error): error is ApiError =>

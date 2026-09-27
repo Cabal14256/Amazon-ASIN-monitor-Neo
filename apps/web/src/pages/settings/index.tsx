@@ -28,8 +28,11 @@ import {
   type FeishuDraft,
 } from '../../services/settings';
 import {
+  DEFAULT_MONITOR_CONCURRENCY_CAP,
   deniedSettingsError,
+  isEmptySensitiveReplacement,
   isSensitiveConfigKey,
+  isSupportedMonitorConcurrency,
   isSupportedScheduleMinutes,
   SCHEDULE_MINUTE_OPTIONS,
   SETTINGS_CONFIG_GROUPS,
@@ -118,17 +121,17 @@ function ConfigField({
   const boolean = BOOLEAN_KEYS.has(row.configKey);
   const number = NUMBER_KEYS.has(row.configKey);
   const schedule = SCHEDULE_KEYS.has(row.configKey);
+  const hint = sensitive
+    ? canWrite
+      ? '原值不加载到表单；未编辑时保持现值。输入新值可替换；本页不允许清空凭据，撤销时还须检查部署环境变量。'
+      : '当前账号只有读取权限；服务端仅返回是否已配置。'
+    : row.configKey === 'ENABLE_HTML_SCRAPER_FALLBACK'
+    ? 'HTML 抓取可能违反 Amazon 服务条款，并触发 IP 封禁或验证码。仅在 SP-API 和旧客户端均失败时作为最后兜底。'
+    : row.configKey === 'MONITOR_MAX_CONCURRENT_GROUP_CHECKS'
+    ? `填写 1–${DEFAULT_MONITOR_CONCURRENCY_CAP} 的整数；实际并发还受部署环境 MAX_ALLOWED_CONCURRENT_GROUP_CHECKS 限制。`
+    : row.configKey;
   return (
-    <Field
-      label={row.description || row.configKey}
-      hint={
-        sensitive
-          ? canWrite
-            ? '原值不加载到表单；未编辑时保持现值，输入新值后保存会替换，编辑后清空会移除。'
-            : '当前账号只有读取权限；服务端仅返回是否已配置。'
-          : row.configKey
-      }
-    >
+    <Field label={row.description || row.configKey} hint={hint}>
       {(control) =>
         boolean ? (
           <select
@@ -165,6 +168,9 @@ function ConfigField({
             {...control}
             type={sensitive ? 'password' : number ? 'number' : 'text'}
             inputMode={number ? 'numeric' : undefined}
+            min={number ? 1 : undefined}
+            max={number ? DEFAULT_MONITOR_CONCURRENCY_CAP : undefined}
+            step={number ? 1 : undefined}
             value={value}
             placeholder={
               sensitive
@@ -239,6 +245,31 @@ function SpApiPanel({
         description: row.description,
       }));
     if (!configs.length) return;
+    if (
+      configs.some((row) =>
+        isEmptySensitiveReplacement(row.configKey, row.configValue),
+      )
+    ) {
+      setNotice({
+        tone: 'error',
+        message:
+          '不能在此页清空凭据：环境变量可能继续提供旧值。请填写替换值；撤销凭据还需检查部署环境变量。',
+      });
+      return;
+    }
+    if (
+      configs.some(
+        (row) =>
+          NUMBER_KEYS.has(row.configKey) &&
+          !isSupportedMonitorConcurrency(row.configValue),
+      )
+    ) {
+      setNotice({
+        tone: 'error',
+        message: `监控并发数量必须为 1–${DEFAULT_MONITOR_CONCURRENCY_CAP} 的整数；实际并发还受部署环境上限限制。`,
+      });
+      return;
+    }
     if (
       configs.some(
         (row) =>

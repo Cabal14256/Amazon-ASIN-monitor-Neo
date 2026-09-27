@@ -2,7 +2,10 @@ import type { SpApiDisplayConfig } from '@asin-monitor/contracts';
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
+  DEFAULT_MONITOR_CONCURRENCY_CAP,
   deniedSettingsError,
+  isEmptySensitiveReplacement,
+  isSupportedMonitorConcurrency,
   isSupportedScheduleMinutes,
   SCHEDULE_MINUTE_OPTIONS,
   SETTINGS_CONFIG_KEYS,
@@ -47,6 +50,29 @@ describe('settings credential presentation', () => {
       expect(isSupportedScheduleMinutes(value)).toBe(true);
     for (const value of ['', '0', '25', '90', '15.5'])
       expect(isSupportedScheduleMinutes(value)).toBe(false);
+  });
+
+  it('rejects concurrency values the active Legacy loader would truncate, default, or cap', () => {
+    expect(DEFAULT_MONITOR_CONCURRENCY_CAP).toBe(10);
+    for (const value of ['1', '2', '9', '10'])
+      expect(isSupportedMonitorConcurrency(value)).toBe(true);
+    for (const value of ['', '0', '-1', '1.5', '11', 'Infinity', ' 2 '])
+      expect(isSupportedMonitorConcurrency(value)).toBe(false);
+  });
+
+  it('blocks a blank edited credential because the environment may remain active', () => {
+    expect(isEmptySensitiveReplacement('SP_API_US_LWA_CLIENT_SECRET', '')).toBe(
+      true,
+    );
+    expect(isEmptySensitiveReplacement('SP_API_REFRESH_TOKEN', '   ')).toBe(
+      true,
+    );
+    expect(
+      isEmptySensitiveReplacement('SP_API_US_LWA_CLIENT_SECRET', 'new-value'),
+    ).toBe(false);
+    expect(isEmptySensitiveReplacement('MONITOR_US_SCHEDULE_MINUTES', '')).toBe(
+      false,
+    );
   });
 
   it('detects a 403 from either status query without treating other failures as permission loss', () => {
