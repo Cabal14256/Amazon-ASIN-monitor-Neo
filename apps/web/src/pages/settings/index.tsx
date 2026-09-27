@@ -1,5 +1,5 @@
 import type { FeishuConfig, SpApiDisplayConfig } from '@asin-monitor/contracts';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
   RefreshCw,
@@ -8,7 +8,7 @@ import {
   ShieldCheck,
   Webhook,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
@@ -22,7 +22,12 @@ import { Field, Input } from '../../components/ui/field';
 import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
-import { SettingsApi } from '../../services/settings';
+import { SettingsApi, type FeishuDraft } from '../../services/settings';
+import {
+  isSensitiveConfigKey,
+  SETTINGS_CONFIG_GROUPS,
+  visibleConfigValue,
+} from './settings-model';
 
 type Tab = 'sp-api' | 'status' | 'feishu' | 'backup';
 type Notice = { tone: 'success' | 'error'; message: string };
@@ -38,55 +43,20 @@ const NUMBER_KEYS = new Set([
   'MONITOR_US_SCHEDULE_MINUTES',
   'MONITOR_EU_SCHEDULE_MINUTES',
 ]);
-const GROUPS = [
-  {
-    title: 'US 区域 LWA',
-    keys: [
-      'SP_API_US_LWA_CLIENT_ID',
-      'SP_API_US_LWA_CLIENT_SECRET',
-      'SP_API_US_REFRESH_TOKEN',
-    ],
-  },
-  {
-    title: 'EU 区域 LWA',
-    keys: [
-      'SP_API_EU_LWA_CLIENT_ID',
-      'SP_API_EU_LWA_CLIENT_SECRET',
-      'SP_API_EU_REFRESH_TOKEN',
-    ],
-  },
-  {
-    title: 'AWS 与签名',
-    keys: [
-      'SP_API_ACCESS_KEY_ID',
-      'SP_API_SECRET_ACCESS_KEY',
-      'SP_API_ROLE_ARN',
-      'SP_API_USE_AWS_SIGNATURE',
-    ],
-  },
-  {
-    title: '监控与备用来源',
-    keys: [
-      'MONITOR_MAX_CONCURRENT_GROUP_CHECKS',
-      'MONITOR_US_SCHEDULE_MINUTES',
-      'MONITOR_EU_SCHEDULE_MINUTES',
-      'COMPETITOR_MONITOR_ENABLED',
-      'ENABLE_HTML_SCRAPER_FALLBACK',
-      'ENABLE_LEGACY_CLIENT_FALLBACK',
-    ],
-  },
-] as const;
 
 function failureMessage(error: unknown) {
   return error instanceof ApiError ? error.message : '操作失败，请稍后重试。';
 }
 
-function isEnabled(value: FeishuConfig['enabled'] | undefined) {
-  return value === true || value === 1;
+function permissionDenied(error: unknown) {
+  return (
+    error instanceof ApiError &&
+    (error.status === 403 || error.errorCode === 403)
+  );
 }
 
-function webhookValue(row: FeishuConfig) {
-  return row.webhookUrl ?? row.webhook_url ?? '';
+function isEnabled(value: FeishuConfig['enabled'] | undefined) {
+  return value === true || value === 1;
 }
 
 function displayDate(value: string | null | undefined) {
@@ -131,14 +101,16 @@ function ConfigField({
   row,
   value,
   canWrite,
+  saving,
   onChange,
 }: {
   row: SpApiDisplayConfig;
   value: string;
   canWrite: boolean;
+  saving: boolean;
   onChange: (value: string) => void;
 }) {
-  const sensitive = /SECRET|TOKEN|KEY/i.test(row.configKey);
+  const sensitive = isSensitiveConfigKey(row.configKey);
   const boolean = BOOLEAN_KEYS.has(row.configKey);
   const number = NUMBER_KEYS.has(row.configKey);
   return (
@@ -147,8 +119,8 @@ function ConfigField({
       hint={
         sensitive
           ? canWrite
-            ? '敏感值以密码控件显示；只有修改过的字段会提交。'
-            : '当前账号只有读取权限，值已按服务端策略掩码。'
+            ? '原值不加载到表单；未编辑时保持现值，输入新值后保存会替换，编辑后清空会移除。'
+            : '当前账号只有读取权限；服务端仅返回是否已配置。'
           : row.configKey
       }
     >
@@ -157,7 +129,7 @@ function ConfigField({
           <select
             {...control}
             value={value === 'true' || value === '1' ? 'true' : 'false'}
-            disabled={!canWrite}
+            disabled={!canWrite || saving}
             onChange={(event) => onChange(event.target.value)}
             className="w-full rounded-input border border-input bg-card px-4 py-3 text-sm text-foreground focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:bg-muted disabled:opacity-60"
           >
@@ -170,7 +142,15 @@ function ConfigField({
             type={sensitive ? 'password' : number ? 'number' : 'text'}
             inputMode={number ? 'numeric' : undefined}
             value={value}
-            disabled={!canWrite}
+            placeholder={
+              sensitive
+                ? row.hasValue
+                  ? '已配置；输入新值以替换'
+                  : '尚未配置'
+                : undefined
+            }
+            autoComplete={sensitive ? 'new-password' : undefined}
+            disabled={!canWrite || saving}
             onChange={(event) => onChange(event.target.value)}
           />
         )
@@ -183,37 +163,22 @@ function SpApiPanel({
   api,
   canWrite,
   announce,
+  onDenied,
 }: {
   api: SettingsApi;
   canWrite: boolean;
   announce: (message: string) => void;
+  onDenied: (error: unknown) => void;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [changed, setChanged] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const query = useQuery({
     queryKey: ['settings', 'sp-api'],
     queryFn: ({ signal }) => api.spApiConfigs(signal),
-    enabled: true,
     staleTime: 30_000,
-  });
-  const mutation = useMutation({
-    mutationFn: (
-      configs: {
-        configKey: string;
-        configValue: string;
-        description?: string;
-      }[],
-    ) => api.updateSpApiConfigs({ configs }),
-    onSuccess: async () => {
-      setChanged(new Set());
-      setDrafts({});
-      setNotice({ tone: 'success', message: 'SP-API 配置已保存。' });
-      announce('SP-API 配置已保存');
-      await query.refetch();
-    },
-    onError: (error) =>
-      setNotice({ tone: 'error', message: failureMessage(error) }),
   });
   const rows = useMemo(() => query.data ?? [], [query.data]);
   const byKey = useMemo(
@@ -221,19 +186,26 @@ function SpApiPanel({
     [rows],
   );
   useEffect(() => {
-    setDrafts((current) => {
-      const next = { ...current };
-      for (const row of rows)
-        if (!(row.configKey in next)) next[row.configKey] = row.configValue;
-      return next;
-    });
-  }, [rows]);
+    if (!canWrite) {
+      setDrafts({});
+      setChanged(new Set());
+    }
+  }, [canWrite]);
+  useEffect(() => {
+    if (query.isError && permissionDenied(query.error)) {
+      setDrafts({});
+      setChanged(new Set());
+      onDenied(query.error);
+    }
+  }, [onDenied, query.error, query.isError]);
   function setValue(key: string, value: string) {
     setDrafts((current) => ({ ...current, [key]: value }));
     setChanged((current) => new Set(current).add(key));
     setNotice(null);
   }
   function save() {
+    if (!canWrite || savingRef.current || query.isError || query.isPending)
+      return;
     const configs = [...changed]
       .map((key) => byKey.get(key))
       .filter((row): row is SpApiDisplayConfig => Boolean(row))
@@ -243,19 +215,45 @@ function SpApiPanel({
         description: row.description,
       }));
     if (!configs.length) return;
-    mutation.mutate(configs);
+    savingRef.current = true;
+    setSaving(true);
+    void (async () => {
+      try {
+        await api.updateSpApiConfigs({ configs });
+        setChanged(new Set());
+        setDrafts({});
+        setNotice({ tone: 'success', message: 'SP-API 配置已保存。' });
+        announce('SP-API 配置已保存');
+        await query.refetch();
+      } catch (error) {
+        if (permissionDenied(error)) {
+          setDrafts({});
+          setChanged(new Set());
+          onDenied(error);
+        }
+        setNotice({ tone: 'error', message: failureMessage(error) });
+      } finally {
+        savingRef.current = false;
+        setSaving(false);
+      }
+    })();
   }
   return (
     <div className="space-y-5">
       <Card>
         <CardHeader
           title="SP-API 与监控参数"
-          description="凭据与运行参数由 Neo PostgreSQL 配置来源读取。敏感值不会进入浏览器缓存。"
+          description="凭据与运行参数由 Neo PostgreSQL 配置来源读取。敏感原值不进入页面查询缓存。"
           action={
             <Button
               size="small"
-              pending={mutation.isPending}
-              disabled={!canWrite || changed.size === 0}
+              pending={saving}
+              disabled={
+                !canWrite ||
+                changed.size === 0 ||
+                query.isError ||
+                query.isPending
+              }
               onClick={save}
             >
               <Save aria-hidden="true" />
@@ -301,7 +299,7 @@ function SpApiPanel({
             />
           ) : (
             <div className="grid gap-5 lg:grid-cols-2">
-              {GROUPS.map((group) => (
+              {SETTINGS_CONFIG_GROUPS.map((group) => (
                 <section
                   key={group.title}
                   className="rounded-control border border-border p-5"
@@ -315,8 +313,13 @@ function SpApiPanel({
                         <ConfigField
                           key={row.configKey}
                           row={row}
-                          value={drafts[row.configKey] ?? row.configValue}
+                          value={visibleConfigValue(
+                            row,
+                            drafts[row.configKey],
+                            canWrite,
+                          )}
                           canWrite={canWrite}
+                          saving={saving}
                           onChange={(value) => setValue(row.configKey, value)}
                         />
                       );
@@ -356,36 +359,21 @@ function FeishuPanel({
   api,
   canWrite,
   announce,
+  onDenied,
 }: {
   api: SettingsApi;
   canWrite: boolean;
   announce: (message: string) => void;
+  onDenied: (error: unknown) => void;
 }) {
-  const [drafts, setDrafts] = useState<
-    Record<string, { webhookUrl: string; enabled: boolean }>
-  >({});
-  const [changed, setChanged] = useState<Set<string>>(new Set());
+  const [drafts, setDrafts] = useState<Record<string, FeishuDraft>>({});
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const query = useQuery({
     queryKey: ['settings', 'feishu'],
     queryFn: ({ signal }) => api.feishuConfigs(signal),
     staleTime: 30_000,
-  });
-  const mutation = useMutation({
-    mutationFn: async (
-      items: { country: string; webhookUrl: string; enabled: boolean }[],
-    ) => {
-      for (const item of items) await api.upsertFeishu(item);
-    },
-    onSuccess: async () => {
-      setChanged(new Set());
-      setDrafts({});
-      setNotice({ tone: 'success', message: '飞书配置已保存。' });
-      announce('飞书配置已保存');
-      await query.refetch();
-    },
-    onError: (error) =>
-      setNotice({ tone: 'error', message: failureMessage(error) }),
   });
   const rows = useMemo(() => query.data ?? [], [query.data]);
   const byCountry = useMemo(
@@ -393,53 +381,67 @@ function FeishuPanel({
     [rows],
   );
   useEffect(() => {
-    setDrafts((current) => {
-      const next = { ...current };
-      for (const country of ['US', 'EU']) {
-        const row = byCountry.get(country);
-        if (row && !next[country])
-          next[country] = {
-            webhookUrl: webhookValue(row),
-            enabled: isEnabled(row.enabled),
-          };
-      }
-      return next;
-    });
-  }, [byCountry]);
-  function update(
-    country: string,
-    patch: Partial<{ webhookUrl: string; enabled: boolean }>,
-  ) {
+    if (!canWrite) setDrafts({});
+  }, [canWrite]);
+  useEffect(() => {
+    if (query.isError && permissionDenied(query.error)) {
+      setDrafts({});
+      onDenied(query.error);
+    }
+  }, [onDenied, query.error, query.isError]);
+  function update(country: string, patch: FeishuDraft) {
     setDrafts((current) => ({
       ...current,
-      [country]: {
-        ...(current[country] ?? { webhookUrl: '', enabled: false }),
-        ...patch,
-      },
+      [country]: { ...current[country], ...patch },
     }));
-    setChanged((current) => new Set(current).add(country));
     setNotice(null);
   }
   function save() {
-    const items = [...changed]
-      .map((country) => {
-        const row = drafts[country];
-        return row ? { country, ...row } : undefined;
-      })
-      .filter(
-        (
-          item,
-        ): item is { country: string; webhookUrl: string; enabled: boolean } =>
-          Boolean(item),
-      );
-    if (items.some((item) => !item.webhookUrl.trim())) {
-      setNotice({
-        tone: 'error',
-        message: '启用或保存飞书配置前必须填写 Webhook 地址。',
-      });
+    if (!canWrite || savingRef.current || query.isError || query.isPending)
       return;
-    }
-    if (items.length) mutation.mutate(items);
+    const changes = Object.entries(drafts);
+    if (!changes.length) return;
+    savingRef.current = true;
+    setSaving(true);
+    void (async () => {
+      let denied = false;
+      let completed = 0;
+      try {
+        for (const [country, draft] of changes) {
+          await api.saveFeishuChange(country, byCountry.get(country), draft);
+          completed++;
+          setDrafts((current) => {
+            const next = { ...current };
+            delete next[country];
+            return next;
+          });
+        }
+        setNotice({ tone: 'success', message: '飞书配置已保存。' });
+        announce('飞书配置已保存');
+      } catch (error) {
+        if (permissionDenied(error)) {
+          denied = true;
+          setDrafts({});
+          onDenied(error);
+        }
+        setNotice({
+          tone: 'error',
+          message:
+            completed > 0
+              ? `已有 ${completed} 项保存成功；其余配置未保存：${failureMessage(
+                  error,
+                )}`
+              : failureMessage(error),
+        });
+      } finally {
+        try {
+          if (!denied) await query.refetch();
+        } finally {
+          savingRef.current = false;
+          setSaving(false);
+        }
+      }
+    })();
   }
   return (
     <Card>
@@ -449,8 +451,13 @@ function FeishuPanel({
         action={
           <Button
             size="small"
-            pending={mutation.isPending}
-            disabled={!canWrite || changed.size === 0}
+            pending={saving}
+            disabled={
+              !canWrite ||
+              Object.keys(drafts).length === 0 ||
+              query.isError ||
+              query.isPending
+            }
             onClick={save}
           >
             <Save aria-hidden="true" />
@@ -486,10 +493,8 @@ function FeishuPanel({
           <div className="grid gap-5 lg:grid-cols-2">
             {['US', 'EU'].map((country) => {
               const row = byCountry.get(country);
-              const draft = drafts[country] ?? {
-                webhookUrl: '',
-                enabled: false,
-              };
+              const draft = drafts[country] ?? {};
+              const enabled = draft.enabled ?? isEnabled(row?.enabled);
               return (
                 <section
                   key={country}
@@ -516,7 +521,7 @@ function FeishuPanel({
                       label="Webhook 地址"
                       hint={
                         canWrite
-                          ? '保存时只提交当前国家的修改。'
+                          ? '未修改地址时可以单独切换状态；新地址不能为空。'
                           : '服务端已隐藏完整地址。'
                       }
                     >
@@ -524,14 +529,14 @@ function FeishuPanel({
                         <Input
                           {...control}
                           type="password"
-                          value={
-                            canWrite
-                              ? draft.webhookUrl
-                              : row
-                              ? '***REDACTED***'
-                              : ''
+                          value={canWrite ? draft.webhookUrl ?? '' : ''}
+                          placeholder={
+                            row?.webhookUrl || row?.webhook_url
+                              ? '已配置；输入新地址以替换'
+                              : '尚未配置'
                           }
-                          disabled={!canWrite}
+                          autoComplete="new-password"
+                          disabled={!canWrite || saving}
                           onChange={(event) =>
                             update(country, { webhookUrl: event.target.value })
                           }
@@ -542,8 +547,8 @@ function FeishuPanel({
                       <input
                         type="checkbox"
                         className="size-4 accent-ink"
-                        checked={draft.enabled}
-                        disabled={!canWrite}
+                        checked={enabled}
+                        disabled={!canWrite || saving}
                         onChange={(event) =>
                           update(country, { enabled: event.target.checked })
                         }
@@ -551,7 +556,7 @@ function FeishuPanel({
                       启用通知
                     </label>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      {draft.enabled ? (
+                      {enabled ? (
                         <StatusBadge status="success">已启用</StatusBadge>
                       ) : (
                         <StatusBadge status="warning">已停用</StatusBadge>
@@ -803,12 +808,20 @@ function BackupPanel() {
 }
 
 export default function SettingsPage() {
-  const { runtime, announce } = useAuth();
+  const { runtime, announce, identity: identityStore } = useAuth();
   const identity = useIdentity();
   const current =
     identity.status === 'authenticated' ? identity.identity : undefined;
   const access = createAccess(current);
   const api = useMemo(() => new SettingsApi(runtime.http), [runtime.http]);
+  const onDenied = useCallback(
+    (error: unknown) => {
+      if (!permissionDenied(error)) return;
+      runtime.queryClient.removeQueries({ queryKey: ['settings'] });
+      void identityStore.refresh();
+    },
+    [identityStore, runtime.queryClient],
+  );
   const [tab, setTab] = useState<Tab>('sp-api');
   const tabs = [
     { key: 'sp-api' as const, label: 'SP-API 与监控' },
@@ -864,6 +877,7 @@ export default function SettingsPage() {
             api={api}
             canWrite={access.canWriteSettings}
             announce={announce}
+            onDenied={onDenied}
           />
         )}
         {tab === 'status' && <StatusPanel api={api} />}
@@ -872,6 +886,7 @@ export default function SettingsPage() {
             api={api}
             canWrite={access.canWriteSettings}
             announce={announce}
+            onDenied={onDenied}
           />
         )}
         {tab === 'backup' && <BackupPanel />}
