@@ -56,8 +56,8 @@ interface WaitForTaskOptions {
 }
 
 export class TaskWaitTimeoutError extends Error {
-  constructor() {
-    super('任务执行超时');
+  constructor(readonly kind: 'elapsed' | 'initial-unconfirmed' = 'elapsed') {
+    super(kind === 'initial-unconfirmed' ? '任务状态尚未确认' : '任务执行超时');
     this.name = 'TaskWaitTimeoutError';
   }
 }
@@ -311,7 +311,7 @@ export async function waitForTaskResult(
   } catch (error) {
     cleanup();
     if (error instanceof UnknownTaskLookupTimeoutError)
-      throw new TaskWaitTimeoutError();
+      throw new TaskWaitTimeoutError('initial-unconfirmed');
     throw error;
   }
 

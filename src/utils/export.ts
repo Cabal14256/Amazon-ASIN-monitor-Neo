@@ -465,6 +465,15 @@ export async function exportToExcelAsync(
         );
       } catch (error: any) {
         if (error instanceof TaskWaitTimeoutError && taskId) {
+          if (error.kind === 'initial-unconfirmed') {
+            if (!backgrounded && !disposed) {
+              updateProgress(progress, `提交状态尚未确认，任务 ID：${taskId}`);
+            }
+            message.info(
+              `提交状态尚未确认，任务 ID：${taskId}。请稍后到任务中心查看，避免重复提交`,
+            );
+            return;
+          }
           if (!backgrounded && !disposed) {
             updateProgress(
               progress,
