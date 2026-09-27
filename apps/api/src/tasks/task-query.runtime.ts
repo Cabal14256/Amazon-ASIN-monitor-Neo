@@ -7,6 +7,10 @@ import {
 } from '@asin-monitor/config';
 import type { VariantCheckJobData } from '@asin-monitor/contracts';
 import {
+  asinExportJobDataSchema,
+  type AsinExportJobData,
+} from '@asin-monitor/contracts';
+import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
   type BatchDeleteTaskData,
@@ -57,6 +61,15 @@ export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
 }
+export interface ExportProducerPort {
+  store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
+  enqueue(data: AsinExportJobData): Promise<void>;
+}
+export class ExportEnqueueRejected extends Error {
+  constructor(readonly reason: 'queue-full' | 'unavailable' | 'invalid') {
+    super(`EXPORT_ENQUEUE_${reason.toUpperCase().replace('-', '_')}`);
+  }
+}
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
 function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
@@ -83,6 +96,11 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);
+  }
+  if (type === 'export' && job.name === 'asin') {
+    const data = asinExportJobDataSchema.parse(job.data);
+    if (data.taskId !== job.id || data.taskType !== type)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
   }
   return {
     ...(checkOperation ? { checkOperation } : {}),
@@ -123,6 +141,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private exportQueue?: Queue;
   private readonly checkQueues = new Map<
     'variant-check' | 'batch-check',
     Queue
@@ -374,6 +393,61 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openExport(ensureOpen: () => void): ExportProducerPort {
+    return {
+      store: this.createStore(ensureOpen),
+      enqueue: async (input) => {
+        const parsed = asinExportJobDataSchema.safeParse(input);
+        if (!parsed.success) throw new ExportEnqueueRejected('invalid');
+        let queue: Queue;
+        try {
+          ensureOpen();
+          await this.ready();
+          ensureOpen();
+          queue = this.exportQueue ??= new Queue(
+            getPhysicalQueueName('export'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('export', this.env)
+                .defaultJobOptions,
+            },
+          );
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('导出队列连接异常', 'TaskQueryRuntime', {
+                reason: 'export_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.exportQueue === queue) this.exportQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          const counts = await queue.getJobCounts(
+            'waiting',
+            'active',
+            'delayed',
+          );
+          if (
+            Object.values(counts).reduce((sum, value) => sum + value, 0) >= 100
+          )
+            throw new ExportEnqueueRejected('queue-full');
+          ensureOpen();
+        } catch (error) {
+          if (error instanceof ExportEnqueueRejected) throw error;
+          throw new ExportEnqueueRejected('unavailable');
+        }
+        // An error from add may follow a committed Redis write. Keep its task
+        // ID for reconciliation instead of claiming the request was rejected.
+        await queue.add('asin', parsed.data, { jobId: parsed.data.taskId });
+        ensureOpen();
+      },
+    };
+  }
   async onModuleDestroy() {
     this.closed = true;
     await Promise.allSettled(
@@ -381,6 +455,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.exportQueue ? [this.exportQueue] : []),
         ...this.checkQueues.values(),
       ].map((queue) => queue.close()),
     );

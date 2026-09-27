@@ -163,6 +163,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
       {
         userId: before.userId,
         taskType: before.taskType,
+        taskSubType: before.taskSubType,
         createdAt: before.createdAt,
       },
     );
@@ -172,6 +173,22 @@ describe('own task query HTTP and bounded reconciliation', () => {
     const response = await get();
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
+  });
+  it('ends an older ASIN export submission when BullMQ confirms that no job exists', async () => {
+    task = taskFixture({
+      taskId: '10000000-0000-4000-8000-000000000166',
+      taskType: 'export',
+      taskSubType: 'asin',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const response = await get(`/tasks/${task.taskId}`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.status).toBe('failed');
+    expect(port.store.mutate).toHaveBeenCalledWith(
+      task.taskId,
+      { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+      expect.objectContaining({ taskSubType: 'asin', userId: taskUserId }),
+    );
   });
   it.each(['pending', 'processing', 'cancelling'])(
     'does not replace nonterminal %s metadata with queue progress',

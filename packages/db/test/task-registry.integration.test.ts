@@ -72,6 +72,50 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
     expect(await other.listUser('foreign')).toEqual([]);
     expect(await redis.get(legacy)).toBe('unchanged');
   });
+  it('atomically admits only two ASIN exports per owner across repository instances', async () => {
+    const owner = `export-owner-${randomUUID()}`;
+    keys.add(userKey(owner));
+    keys.add(`${prefix}:neo:task:export:${encodeURIComponent(owner)}`);
+    const inputs = Array.from({ length: 3 }, () => ({
+      taskId: randomUUID(),
+      userId: owner,
+      taskType: 'export',
+      taskSubType: 'asin',
+    }));
+    inputs.forEach((input) => keys.add(metaKey(input.taskId)));
+    const results = await Promise.allSettled(
+      inputs.map((input, index) =>
+        (index % 2 ? other : repository).createLimitedExport(input, 2),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(2);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    expect(
+      results.find((result) => result.status === 'rejected'),
+    ).toMatchObject({ reason: { code: 'TASK_EXPORT_LIMIT' } });
+    const admitted = results.find((result) => result.status === 'fulfilled');
+    if (!admitted || admitted.status !== 'fulfilled')
+      throw new Error('No admitted export fixture');
+    await repository.mutate(
+      admitted.value.taskId,
+      { kind: 'completed' },
+      admitted.value,
+    );
+    const fourth = {
+      taskId: randomUUID(),
+      userId: owner,
+      taskType: 'export',
+      taskSubType: 'asin',
+    };
+    keys.add(metaKey(fourth.taskId));
+    await expect(other.createLimitedExport(fourth, 2)).resolves.toMatchObject({
+      taskId: fourth.taskId,
+    });
+  });
   it('does not lose cancellation across two concurrent writers and never regresses terminal results', async () => {
     for (let round = 0; round < 20; round++) {
       const id = `race-${round}`;

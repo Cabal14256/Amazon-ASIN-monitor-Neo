@@ -235,6 +235,11 @@ const envObjectSchema = z.object({
       value === undefined || (isAbsolute(value) && !value.includes('\0')),
     'IMPORT_STORAGE_DIRECTORY 必须是共享存储的绝对路径',
   ),
+  EXPORT_STORAGE_DIRECTORY: optionalNonEmptyStringSchema.refine(
+    (value) =>
+      value === undefined || (isAbsolute(value) && !value.includes('\0')),
+    'EXPORT_STORAGE_DIRECTORY 必须是共享存储的绝对路径',
+  ),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
   PASSWORD_EXPIRE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
@@ -494,6 +499,17 @@ export function getImportStorageDirectory(
   const workspaceRoot = findWorkspaceRoot(cwd);
   if (!workspaceRoot) throw new Error('IMPORT_STORAGE_DIRECTORY_REQUIRED');
   return join(workspaceRoot, 'var', 'neo', 'imports');
+}
+
+/** Export API and Worker must see one private persistent directory. */
+export function getExportStorageDirectory(
+  env: Pick<Env, 'EXPORT_STORAGE_DIRECTORY'>,
+  cwd = process.cwd(),
+): string {
+  if (env.EXPORT_STORAGE_DIRECTORY) return env.EXPORT_STORAGE_DIRECTORY;
+  const workspaceRoot = findWorkspaceRoot(cwd);
+  if (!workspaceRoot) throw new Error('EXPORT_STORAGE_DIRECTORY_REQUIRED');
+  return join(workspaceRoot, 'var', 'neo', 'exports');
 }
 
 /** Neo 专用配置优先，根前端配置作为补充；已有进程环境变量始终优先。 */

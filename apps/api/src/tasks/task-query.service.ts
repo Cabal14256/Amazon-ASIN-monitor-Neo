@@ -26,6 +26,9 @@ function fail(status: number, message: string): never {
 }
 const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
+const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
+  checkTask(task) ||
+  (task.taskType === 'export' && task.taskSubType === 'asin');
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed');
@@ -83,11 +86,36 @@ export class TaskQueryService {
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
-    if (!queued) return task;
+    if (!queued) {
+      // A request may time out after registry creation but before/while BullMQ
+      // accepts the job. Once the queue confirms absence after a grace period,
+      // an orphan ASIN task is terminal instead of pending for its whole TTL.
+      if (
+        task.taskType === 'export' &&
+        task.taskSubType === 'asin' &&
+        task.status === 'pending' &&
+        Date.now() - Date.parse(task.createdAt) >= 30_000
+      ) {
+        const failed = await port.store.mutate(
+          task.taskId,
+          { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+          {
+            userId: task.userId,
+            taskType: task.taskType,
+            taskSubType: task.taskSubType,
+            createdAt: task.createdAt,
+          },
+        );
+        if (!failed) fail(404, '任务不存在');
+        this.owner(failed, userId);
+        return failed;
+      }
+      return task;
+    }
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (checkTask(task)) {
+    if (boundTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -99,7 +127,7 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(checkTask(task) ? { taskSubType: task.taskSubType } : {}),
+      ...(boundTask(task) ? { taskSubType: task.taskSubType } : {}),
     };
     if (
       checkTask(task) &&

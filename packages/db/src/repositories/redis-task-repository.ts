@@ -25,11 +25,43 @@ if (metaType ~= 'none' and metaType ~= 'string') or
    (indexType ~= 'none' and indexType ~= 'zset') then
   return redis.error_reply('TASK_REGISTRY_WRONGTYPE')
 end
+if KEYS[3] then
+  local exportType = redis.call('TYPE', KEYS[3]).ok
+  if exportType ~= 'none' and exportType ~= 'zset' then
+    return redis.error_reply('TASK_EXPORT_INDEX_WRONGTYPE')
+  end
+end
 local current = redis.call('GET', KEYS[1])
 if (current or '') ~= ARGV[1] then return 0 end
+local limit = tonumber(ARGV[9] or '0')
+if limit > 0 then
+  local active = 0
+  for _, id in ipairs(redis.call('ZRANGE', KEYS[3], 0, -1)) do
+    local raw = redis.call('GET', ARGV[10] .. id)
+    local live = false
+    if raw then
+      local ok, task = pcall(cjson.decode, raw)
+      if not ok then return redis.error_reply('TASK_EXPORT_INDEX_INVALID') end
+      live = task.userId == ARGV[11] and task.taskType == 'export' and
+        task.taskSubType == 'asin' and
+        (task.status == 'pending' or task.status == 'processing' or task.status == 'cancelling')
+    end
+    if live then active = active + 1
+    else redis.call('ZREM', KEYS[3], id) end
+  end
+  if active >= limit then return 3 end
+end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
 redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
 redis.call('EXPIRE', KEYS[2], ARGV[3])
+if KEYS[3] then
+  if limit > 0 then
+    redis.call('ZADD', KEYS[3], ARGV[4], ARGV[5])
+  elseif ARGV[12] == 'completed' or ARGV[12] == 'failed' or ARGV[12] == 'cancelled' then
+    redis.call('ZREM', KEYS[3], ARGV[5])
+  end
+  redis.call('EXPIRE', KEYS[3], ARGV[3])
+end
 local count = redis.call('ZCARD', KEYS[2])
 if count > tonumber(ARGV[6]) then
   redis.call('ZREMRANGEBYRANK', KEYS[2], 0, count - tonumber(ARGV[6]) - 1)
@@ -47,7 +79,8 @@ export class TaskRegistryError extends Error {
       | 'TASK_CONTENTION'
       | 'TASK_IDENTITY_CHANGED'
       | 'TASK_RECORD_INVALID'
-      | 'TASK_RECORD_TOO_LARGE',
+      | 'TASK_RECORD_TOO_LARGE'
+      | 'TASK_EXPORT_LIMIT',
   ) {
     super(code);
     this.name = 'TaskRegistryError';
@@ -83,7 +116,7 @@ export class RedisTaskRepository {
     this.config = { ...config };
   }
 
-  private key(kind: 'meta' | 'user', id: string): string {
+  private key(kind: 'meta' | 'user' | 'export', id: string): string {
     if (!id || id.length > 200) throw new Error('TASK_IDENTIFIER_INVALID');
     return `${this.prefix}:${kind}:${encodeURIComponent(id)}`;
   }
@@ -102,6 +135,7 @@ export class RedisTaskRepository {
   private async save(
     expected: string | null,
     task: TaskState,
+    maxActiveExports?: number,
   ): Promise<boolean> {
     let raw: string;
     try {
@@ -123,11 +157,18 @@ export class RedisTaskRepository {
       throw new TaskRegistryError('TASK_RECORD_TOO_LARGE');
     // Round-trip validation catches unsupported JSON values before issuing Redis writes.
     this.parse(raw, task.taskId);
+    const limited = expected === null && maxActiveExports !== undefined;
+    const trackExport =
+      limited ||
+      (expected !== null &&
+        task.taskType === 'export' &&
+        task.taskSubType === 'asin');
     const saved = await this.redis.eval(
       COMPARE_AND_SET,
-      2,
+      trackExport ? 3 : 2,
       this.key('meta', task.taskId),
       this.key('user', task.userId),
+      ...(trackExport ? [this.key('export', task.userId)] : []),
       expected ?? '',
       raw,
       this.config.TASK_META_TTL_SECONDS,
@@ -136,7 +177,16 @@ export class RedisTaskRepository {
       this.config.TASK_USER_MAX_ITEMS,
       taskNotificationChannel(this.config.BULL_PREFIX),
       encodeTaskNotification(task),
+      ...(trackExport
+        ? [
+            maxActiveExports ?? 0,
+            `${this.prefix}:meta:`,
+            task.userId,
+            task.status,
+          ]
+        : []),
     );
+    if (saved === 3) throw new TaskRegistryError('TASK_EXPORT_LIMIT');
     if (saved === 2) {
       try {
         this.onNotificationFailure?.();
@@ -147,7 +197,10 @@ export class RedisTaskRepository {
     return saved === 1 || saved === 2;
   }
 
-  async create(input: CreateTaskInput): Promise<TaskState> {
+  private async createInternal(
+    input: CreateTaskInput,
+    maxActiveExports?: number,
+  ): Promise<TaskState> {
     const data = createTaskInputSchema.parse(input);
     const timestamp = this.now().toISOString();
     const task: TaskState = {
@@ -167,9 +220,32 @@ export class RedisTaskRepository {
       cancelledAt: null,
       revision: 0,
     };
-    if (!(await this.save(null, task)))
+    if (!(await this.save(null, task, maxActiveExports)))
       throw new TaskRegistryError('TASK_EXISTS');
     return task;
+  }
+
+  create(input: CreateTaskInput): Promise<TaskState> {
+    return this.createInternal(input);
+  }
+
+  /** The admission slot and task metadata are committed by one Redis script. */
+  createLimitedExport(
+    input: CreateTaskInput,
+    maxActiveExports: number,
+  ): Promise<TaskState> {
+    if (
+      input.taskType !== 'export' ||
+      input.taskSubType !== 'asin' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        input.taskId,
+      ) ||
+      !Number.isInteger(maxActiveExports) ||
+      maxActiveExports < 1 ||
+      maxActiveExports > 10
+    )
+      throw new TaskRegistryError('TASK_RECORD_INVALID');
+    return this.createInternal(input, maxActiveExports);
   }
 
   async read(taskId: string): Promise<TaskState | null> {
