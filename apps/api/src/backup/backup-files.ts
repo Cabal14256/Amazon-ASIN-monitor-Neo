@@ -104,6 +104,11 @@ export async function listBackupFiles(
         target,
         format: 'custom',
         sourceEngine: metadata?.sourceEngine,
+        metadataVersion: metadata?.version,
+        sourceExtensionVersion:
+          metadata?.version === 2 && metadata.sourceEngine === 'timescaledb'
+            ? metadata.timescale.extensionVersion
+            : undefined,
       }),
     );
   }

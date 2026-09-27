@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  backupArtifactMetadataSchema,
   backupConfigResultSchema,
   backupJobDataSchema,
   backupListResultSchema,
   backupTaskResultSchema,
   createBackupRequestSchema,
   createBackupResultSchema,
+  restoreBackupResultSchema,
   saveBackupConfigRequestSchema,
 } from '../src/domains/backup';
 import {
@@ -71,6 +73,56 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('Timescale 隔离恢复契约需要目录清单并明确在线目标未切换', () => {
+    const metadata = {
+      version: 2,
+      filename: 'backup_20260824-020000-1234abcd-primary.dump',
+      target: 'primary',
+      sourceEngine: 'timescaledb',
+      timescale: {
+        extensionVersion: '2.29.2',
+        hypertables: ['public.monitor_history'],
+        continuousAggregates: ['public.monitor_hourly'],
+      },
+    };
+    expect(backupArtifactMetadataSchema.parse(metadata)).toMatchObject(
+      metadata,
+    );
+    expect(() =>
+      backupArtifactMetadataSchema.parse({ ...metadata, timescale: undefined }),
+    ).toThrow();
+    expect(
+      restoreBackupResultSchema.parse({
+        success: true,
+        data: { taskId: 'task', status: 'pending', restoreMode: 'isolated' },
+      }).data,
+    ).toMatchObject({ restoreMode: 'isolated' });
+    expect(
+      backupTaskResultSchema.parse({
+        success: true,
+        data: {
+          operation: 'restore',
+          format: 'custom',
+          target: 'primary',
+          restoreMode: 'isolated',
+          restoredDatabase: 'neo_restore_primary_1234567890abcdef',
+          targetDatabaseChanged: false,
+        },
+      }).data,
+    ).toMatchObject({ targetDatabaseChanged: false });
+    expect(() =>
+      backupTaskResultSchema.parse({
+        success: true,
+        data: {
+          operation: 'restore',
+          format: 'custom',
+          target: 'primary',
+          restoreMode: 'isolated',
+          targetDatabaseChanged: true,
+        },
+      }),
+    ).toThrow();
+  });
   it('备份列表项含 filename/size/createdAt', () => {
     const parsed = backupListResultSchema.parse({
       success: true,

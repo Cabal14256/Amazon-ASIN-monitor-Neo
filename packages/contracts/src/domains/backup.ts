@@ -24,6 +24,7 @@ export const BACKUP_ARTIFACT_FORMAT = 'custom' as const;
 export const backupArtifactFormatSchema = z.literal(BACKUP_ARTIFACT_FORMAT);
 export type BackupArtifactFormat = z.infer<typeof backupArtifactFormatSchema>;
 export const backupSourceEngineSchema = z.enum(['postgresql', 'timescaledb']);
+export const backupRestoreModeSchema = z.enum(['in-place', 'isolated']);
 
 /**
  * Only final artifacts emitted by the Neo worker are addressable. This also
@@ -42,7 +43,7 @@ export type BackupFilename = z.infer<typeof backupFilenameSchema>;
 
 /** Sidecar written atomically with each new dump. Missing metadata is unsafe
  * for automated restore, including artifacts from an older Neo deployment. */
-export const backupArtifactMetadataSchema = z
+const backupArtifactMetadataV1Schema = z
   .object({
     version: z.literal(1),
     filename: backupFilenameSchema,
@@ -50,6 +51,36 @@ export const backupArtifactMetadataSchema = z
     sourceEngine: backupSourceEngineSchema,
   })
   .strict();
+export const backupTimescaleManifestSchema = z
+  .object({
+    extensionVersion: z.string().min(1).max(128),
+    hypertables: z.array(z.string().min(1).max(130)).max(10_000),
+    continuousAggregates: z.array(z.string().min(1).max(130)).max(10_000),
+  })
+  .strict();
+export type BackupTimescaleManifest = z.infer<
+  typeof backupTimescaleManifestSchema
+>;
+export const backupArtifactMetadataSchema = z.union([
+  backupArtifactMetadataV1Schema,
+  z
+    .object({
+      version: z.literal(2),
+      filename: backupFilenameSchema,
+      target: backupTargetSchema,
+      sourceEngine: z.literal('postgresql'),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(2),
+      filename: backupFilenameSchema,
+      target: backupTargetSchema,
+      sourceEngine: z.literal('timescaledb'),
+      timescale: backupTimescaleManifestSchema,
+    })
+    .strict(),
+]);
 
 const backupTimeSchema = z
   .string()
@@ -66,7 +97,10 @@ export const backupFileSchema = z
     createdAt: z.string(),
     // False until the API verifies that the target is plain PostgreSQL.
     restoreSupported: z.boolean().default(false),
+    restoreMode: backupRestoreModeSchema.optional(),
     sourceEngine: backupSourceEngineSchema.optional(),
+    metadataVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+    sourceExtensionVersion: z.string().optional(),
   })
   .passthrough();
 export type BackupFile = z.infer<typeof backupFileSchema>;
@@ -233,6 +267,7 @@ export type BackupJobData = z.infer<typeof backupJobDataSchema>;
 export const backupTaskDataSchema = z.object({
   taskId: z.string(),
   status: z.string(),
+  restoreMode: backupRestoreModeSchema.optional(),
 });
 export const createBackupResultSchema = resultSchema(
   z.union([createBackupSyncDataSchema, backupTaskDataSchema]),
@@ -264,9 +299,27 @@ export const backupTaskResultDataSchema = z
     result: z.unknown().optional(),
     message: z.string().optional(),
     restoreSupported: z.boolean().optional(),
+    restoreMode: backupRestoreModeSchema.optional(),
+    restoredDatabase: z
+      .string()
+      .regex(/^neo_restore_(?:primary|competitor)_[a-f0-9]{16}$/)
+      .optional(),
+    targetDatabaseChanged: z.boolean().optional(),
     sourceEngine: backupSourceEngineSchema.optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((value, ctx) => {
+    if (value.restoreMode !== 'isolated') return;
+    if (
+      value.operation !== 'restore' ||
+      !value.restoredDatabase ||
+      value.targetDatabaseChanged !== false
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '隔离恢复必须给出恢复数据库并明确在线目标未变更',
+      });
+  });
 export const backupTaskResultSchema = resultSchema(backupTaskResultDataSchema);
 
 /**

@@ -12,14 +12,24 @@ const directories: string[] = [];
 async function writeMetadata(
   directory: string,
   sourceEngine: 'postgresql' | 'timescaledb',
+  version: 1 | 2 = 1,
 ) {
   await writeFile(
     join(directory, `${filename}.meta.json`),
     JSON.stringify({
-      version: 1,
+      version,
       filename,
       target: 'primary',
       sourceEngine,
+      ...(version === 2 && sourceEngine === 'timescaledb'
+        ? {
+            timescale: {
+              extensionVersion: '2.29.2',
+              hypertables: ['public.monitor_history'],
+              continuousAggregates: ['public.monitor_hourly'],
+            },
+          }
+        : {}),
     }),
   );
 }
@@ -62,10 +72,10 @@ async function fixture() {
   const tasks = { openBackup: vi.fn(() => port) };
   const pools = {
     primaryPool: {
-      query: vi.fn(async () => ({ rows: [{ enabled: false }] })),
+      query: vi.fn(async () => ({ rows: [] as { extversion: string }[] })),
     },
     competitorPool: {
-      query: vi.fn(async () => ({ rows: [{ enabled: false }] })),
+      query: vi.fn(async () => ({ rows: [] as { extversion: string }[] })),
     },
   };
   const service = new BackupService(
@@ -135,6 +145,7 @@ describe('backup API service', () => {
       service.restore(principal, { filename }),
     ).resolves.toMatchObject({
       status: 'pending',
+      restoreMode: 'in-place',
     });
     expect(port.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ operation: 'restore', target: 'primary' }),
@@ -150,9 +161,11 @@ describe('backup API service', () => {
     expect(port.enqueue).not.toHaveBeenCalled();
   });
 
-  it('marks Timescale artifacts unrestorable and rejects restore and selective dumps', async () => {
+  it('keeps legacy Timescale artifacts unrestorable and rejects selective dumps', async () => {
     const { service, port, directory, pools } = await fixture();
-    pools.primaryPool.query.mockResolvedValue({ rows: [{ enabled: true }] });
+    pools.primaryPool.query.mockResolvedValue({
+      rows: [{ extversion: '2.29.2' }],
+    });
     await writeFile(join(directory, filename), 'PGDMPfixture');
     await writeMetadata(directory, 'timescaledb');
     await expect(service.list(principal)).resolves.toMatchObject([
@@ -166,6 +179,45 @@ describe('backup API service', () => {
     await expect(
       service.create(principal, { tables: ['public.monitor_history'] }),
     ).rejects.toMatchObject({ status: 409 });
+    expect(port.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('accepts a verified Timescale dump for isolated recovery without promising a live cutover', async () => {
+    const { service, port, directory, pools } = await fixture();
+    pools.primaryPool.query.mockResolvedValue({
+      rows: [{ extversion: '2.29.2' }],
+    });
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'timescaledb', 2);
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: true, restoreMode: 'isolated' },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).resolves.toMatchObject({
+      status: 'pending',
+      restoreMode: 'isolated',
+    });
+    expect(port.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'restore', target: 'primary' }),
+    );
+  });
+
+  it('fails closed when the Timescale extension version differs from the archive', async () => {
+    const { service, port, directory, pools } = await fixture();
+    pools.primaryPool.query.mockResolvedValue({
+      rows: [{ extversion: '2.28.0' }],
+    });
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'timescaledb', 2);
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({
+      status: 409,
+    });
     expect(port.enqueue).not.toHaveBeenCalled();
   });
 

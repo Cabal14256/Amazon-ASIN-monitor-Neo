@@ -14,6 +14,7 @@ import {
   createBackupProcessor,
   processCommand,
   restoreCommandArgs,
+  stagingDatabaseName,
 } from '../src/backup-processor';
 
 const data: BackupJobData = {
@@ -181,5 +182,17 @@ describe('backup command boundary', () => {
     expect(args).toContain('--dbname=backup_ci');
     expect(args).toContain('--single-transaction');
     expect(args.join(' ')).not.toContain('private_password');
+  });
+
+  it('derives a bounded isolated database name from a validated task ID and target', () => {
+    expect(stagingDatabaseName(data.taskId, 'primary')).toBe(
+      'neo_restore_primary_1000000000004000',
+    );
+    expect(stagingDatabaseName(data.taskId, 'competitor')).toBe(
+      'neo_restore_competitor_1000000000004000',
+    );
+    expect(() =>
+      stagingDatabaseName('bad; DROP DATABASE postgres', 'primary'),
+    ).toThrow('BACKUP_TASK_IDENTITY_INVALID');
   });
 });

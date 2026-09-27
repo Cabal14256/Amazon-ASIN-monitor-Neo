@@ -11,13 +11,14 @@ import {
 } from '@asin-monitor/db';
 import type { Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   acquireBackupTargetLock,
   createBackupProcessor,
+  stagingDatabaseName,
 } from '../src/backup-processor';
 
 /** Runs only against the disposable Timescale CI cluster. The scratch database
@@ -42,7 +43,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     function env(databaseUrl: string) {
       return {
         DATABASE_URL: databaseUrl,
-        COMPETITOR_DATABASE_URL: process.env.COMPETITOR_DATABASE_URL,
+        COMPETITOR_DATABASE_URL: databaseUrl,
         BACKUP_STORAGE_DIRECTORY: directory,
         DATABASE_POOL_CONNECTION_TIMEOUT_MS: 2000,
         BACKUP_COMMAND_TIMEOUT_MS: 30000,
@@ -56,15 +57,22 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       databaseUrl: string,
       operation: 'create' | 'restore',
       params: { tables?: string[]; filename?: string },
+      options: {
+        taskId?: string;
+        target?: 'primary' | 'competitor';
+        cancelAtProgress?: number;
+        onProgress?: (value: number, taskId: string) => Promise<void>;
+      } = {},
     ) {
-      const taskId = randomUUID();
+      const taskId = options.taskId ?? randomUUID();
       const createdAt = new Date().toISOString();
+      const shutdown = new AbortController();
       const data = backupJobDataSchema.parse({
         taskId,
         taskType: 'backup',
         taskSubType: operation,
         operation,
-        target: 'primary',
+        target: options.target ?? 'primary',
         userId: 'backup-integration',
         createdAt,
         params,
@@ -102,10 +110,22 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         store,
         {
           env: env(databaseUrl),
-          shutdownSignal: new AbortController().signal,
+          shutdownSignal: shutdown.signal,
           isClosing: () => false,
           assertJobLock: vi.fn(async () => undefined),
-          updateProgress: vi.fn(async () => undefined),
+          updateProgress: vi.fn(async (_job: Job, value: number) => {
+            await options.onProgress?.(value, taskId);
+            if (value !== options.cancelAtProgress) return;
+            states.set(
+              taskId,
+              transitionTask(
+                states.get(taskId)!,
+                { kind: 'cancel-request' },
+                new Date(),
+              ),
+            );
+            shutdown.abort();
+          }),
         },
         { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       );
@@ -231,10 +251,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       await expect(
         runJob(scratchUrl, 'restore', { filename: artifact.filename }),
-      ).rejects.toThrow('TimescaleDB 不支持');
+      ).rejects.toThrow('备份文件来源数据库类型与恢复目标不一致');
     }, 120000);
 
-    it('refuses in-place Timescale restore and selective table dumps', async () => {
+    it('rejects selective Timescale table dumps', async () => {
       const sourcePool = adminPool;
       const extension = await sourcePool.query(
         "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS enabled",
@@ -243,16 +263,240 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await expect(
         runJob(sourceUrl, 'create', { tables: ['public.monitor_history'] }),
       ).rejects.toThrow();
-      await expect(
-        runJob(sourceUrl, 'restore', {
-          filename: 'backup_20260927-020000-abcdef01-primary.dump',
-        }),
-      ).rejects.toThrow();
       const failures = [...states.values()].filter(
         (state) =>
           state.status === 'failed' && state.message.startsWith('TimescaleDB'),
       );
-      expect(failures).toHaveLength(2);
+      expect(failures).toHaveLength(1);
     }, 30000);
+
+    it('restores Timescale hypertables and aggregates to isolated databases, cleaning failed and cancelled attempts', async () => {
+      const sourceName = `neo_backup_ts_ci_${randomUUID()
+        .replaceAll('-', '')
+        .slice(0, 12)}`;
+      const suffix = sourceName.slice(-12);
+      const hypertable = `backup_metric_${suffix}`;
+      const cagg = `backup_hourly_${suffix}`;
+      const source = new URL(sourceUrl);
+      source.pathname = `/${sourceName}`;
+      const timescaleUrl = source.toString();
+      const retained: string[] = [];
+      let timescalePool: ReturnType<typeof createPgPool> | undefined;
+      let sourceCreated = false;
+      try {
+        await adminPool.query(
+          `CREATE DATABASE ${sourceName} TEMPLATE template0`,
+        );
+        sourceCreated = true;
+        timescalePool = createPgPool(timescaleUrl, { max: 1 });
+        await timescalePool.query('CREATE EXTENSION timescaledb');
+        await timescalePool.query(
+          `CREATE TABLE public.${hypertable} (ts timestamptz NOT NULL, value integer NOT NULL)`,
+        );
+        await timescalePool.query(
+          `SELECT create_hypertable('public.${hypertable}', 'ts')`,
+        );
+        await timescalePool.query(
+          `CREATE MATERIALIZED VIEW public.${cagg} WITH (timescaledb.continuous) AS
+           SELECT time_bucket('1 hour', ts) AS bucket, count(*)::bigint AS samples
+           FROM public.${hypertable} GROUP BY 1 WITH NO DATA`,
+        );
+        await timescalePool.query(
+          `INSERT INTO public.${hypertable} VALUES ('2026-01-01T00:15:00Z', 7)`,
+        );
+        await timescalePool.query(
+          `CALL refresh_continuous_aggregate('public.${cagg}', '2026-01-01T00:00:00Z'::timestamptz, '2026-01-01T01:00:00Z'::timestamptz)`,
+        );
+        const created = await runJob(timescaleUrl, 'create', {});
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        expect(artifact).toMatchObject({
+          sourceEngine: 'timescaledb',
+          restoreSupported: true,
+        });
+        if (!artifact.filename) throw new Error('Missing Timescale archive');
+        const metadata = JSON.parse(
+          await readFile(
+            join(directory, `${artifact.filename}.meta.json`),
+            'utf8',
+          ),
+        );
+        expect(metadata).toMatchObject({
+          version: 2,
+          timescale: {
+            hypertables: expect.arrayContaining([`public.${hypertable}`]),
+            continuousAggregates: expect.arrayContaining([`public.${cagg}`]),
+          },
+        });
+        await timescalePool.query(`UPDATE public.${hypertable} SET value = 99`);
+        const restored = await runJob(timescaleUrl, 'restore', {
+          filename: artifact.filename,
+        });
+        const result = backupTaskResultDataSchema.parse(restored.result);
+        expect(result).toMatchObject({
+          restoreMode: 'isolated',
+          targetDatabaseChanged: false,
+        });
+        if (!result.restoredDatabase)
+          throw new Error('Missing isolated database');
+        retained.push(result.restoredDatabase);
+        const restoredUrl = new URL(timescaleUrl);
+        restoredUrl.pathname = `/${result.restoredDatabase}`;
+        const restoredPool = createPgPool(restoredUrl.toString(), { max: 1 });
+        try {
+          expect(
+            (await restoredPool.query(`SELECT value FROM public.${hypertable}`))
+              .rows[0]?.value,
+          ).toBe(7);
+          expect(
+            (await restoredPool.query(`SELECT samples FROM public.${cagg}`))
+              .rows[0]?.samples,
+          ).toBe('1');
+          expect(
+            (
+              await restoredPool.query(
+                "SELECT current_setting('timescaledb.restoring', true) AS enabled",
+              )
+            ).rows[0]?.enabled,
+          ).not.toBe('on');
+        } finally {
+          await restoredPool.end();
+        }
+        expect(
+          (await timescalePool.query(`SELECT value FROM public.${hypertable}`))
+            .rows[0]?.value,
+        ).toBe(99);
+
+        const failedTaskId = randomUUID();
+        await expect(
+          runJob(
+            timescaleUrl,
+            'restore',
+            { filename: artifact.filename },
+            {
+              taskId: failedTaskId,
+              onProgress: async (value) => {
+                if (value !== 50) return;
+                const blockedUrl = new URL(timescaleUrl);
+                blockedUrl.pathname = `/${stagingDatabaseName(
+                  failedTaskId,
+                  'primary',
+                )}`;
+                const blockedPool = createPgPool(blockedUrl.toString(), {
+                  max: 1,
+                });
+                try {
+                  await blockedPool.query(
+                    `CREATE TABLE public.${hypertable} (id integer)`,
+                  );
+                } finally {
+                  await blockedPool.end();
+                }
+              },
+            },
+          ),
+        ).rejects.toThrow();
+        expect(
+          (
+            await adminPool.query(
+              'SELECT 1 FROM pg_database WHERE datname = $1',
+              [stagingDatabaseName(failedTaskId, 'primary')],
+            )
+          ).rows,
+        ).toHaveLength(0);
+
+        const cancelledTaskId = randomUUID();
+        const cancelled = await runJob(
+          timescaleUrl,
+          'restore',
+          { filename: artifact.filename },
+          { taskId: cancelledTaskId, cancelAtProgress: 50 },
+        );
+        expect(cancelled.state.status).toBe('cancelled');
+        expect(
+          (
+            await adminPool.query(
+              'SELECT 1 FROM pg_database WHERE datname = $1',
+              [stagingDatabaseName(cancelledTaskId, 'primary')],
+            )
+          ).rows,
+        ).toHaveLength(0);
+
+        const held = await acquireBackupTargetLock(
+          env(timescaleUrl),
+          'primary',
+        );
+        const contendedTaskId = randomUUID();
+        try {
+          await expect(
+            runJob(
+              timescaleUrl,
+              'restore',
+              { filename: artifact.filename },
+              { taskId: contendedTaskId },
+            ),
+          ).rejects.toThrow('目标数据库正在执行备份或恢复');
+        } finally {
+          await held.release();
+        }
+        expect(
+          (
+            await adminPool.query(
+              'SELECT 1 FROM pg_database WHERE datname = $1',
+              [stagingDatabaseName(contendedTaskId, 'primary')],
+            )
+          ).rows,
+        ).toHaveLength(0);
+
+        const competitor = await runJob(
+          timescaleUrl,
+          'create',
+          {},
+          { target: 'competitor' },
+        );
+        const competitorArtifact = backupTaskResultDataSchema.parse(
+          competitor.result,
+        );
+        if (!competitorArtifact.filename)
+          throw new Error('Missing competitor archive');
+        const competitorRestore = await runJob(
+          timescaleUrl,
+          'restore',
+          { filename: competitorArtifact.filename },
+          { target: 'competitor' },
+        );
+        const competitorResult = backupTaskResultDataSchema.parse(
+          competitorRestore.result,
+        );
+        expect(competitorResult).toMatchObject({
+          target: 'competitor',
+          restoreMode: 'isolated',
+        });
+        if (!competitorResult.restoredDatabase)
+          throw new Error('Missing competitor isolated database');
+        retained.push(competitorResult.restoredDatabase);
+        const competitorUrl = new URL(timescaleUrl);
+        competitorUrl.pathname = `/${competitorResult.restoredDatabase}`;
+        const competitorPool = createPgPool(competitorUrl.toString(), {
+          max: 1,
+        });
+        try {
+          expect(
+            (
+              await competitorPool.query(
+                `SELECT value FROM public.${hypertable}`,
+              )
+            ).rows[0]?.value,
+          ).toBe(99);
+        } finally {
+          await competitorPool.end();
+        }
+      } finally {
+        await timescalePool?.end();
+        for (const database of retained)
+          await adminPool.query(`DROP DATABASE ${database} WITH (FORCE)`);
+        if (sourceCreated)
+          await adminPool.query(`DROP DATABASE ${sourceName} WITH (FORCE)`);
+      }
+    }, 180000);
   },
 );

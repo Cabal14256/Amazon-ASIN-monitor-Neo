@@ -68,15 +68,22 @@ export class BackupService implements OnModuleDestroy {
     });
   }
 
-  private async hasTimescale(target: BackupTarget): Promise<boolean> {
+  private async capability(target: BackupTarget) {
     const pool =
       target === 'primary' ? this.pools.primaryPool : this.pools.competitorPool;
     const result = await pool.query(
-      "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS enabled",
+      "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'",
     );
-    if (typeof result.rows[0]?.enabled !== 'boolean')
+    if (
+      result.rows.length > 1 ||
+      (result.rows.length === 1 &&
+        typeof result.rows[0]?.extversion !== 'string')
+    )
       throw new Error('BACKUP_CAPABILITY_UNCONFIRMED');
-    return result.rows[0].enabled;
+    return {
+      hasTimescale: result.rows.length === 1,
+      extensionVersion: result.rows[0]?.extversion as string | undefined,
+    };
   }
 
   private async run<T>(
@@ -160,7 +167,7 @@ export class BackupService implements OnModuleDestroy {
       if (input.useAsync === false || input.useAsync === 'false')
         return fail(400, 'Neo 备份必须使用异步任务');
       await this.authorize(principal);
-      if (input.tables?.length && (await this.hasTimescale(target)))
+      if (input.tables?.length && (await this.capability(target)).hasTimescale)
         return fail(
           409,
           'TimescaleDB 不支持通过 Neo 接口按表备份，请创建完整数据库备份',
@@ -208,16 +215,24 @@ export class BackupService implements OnModuleDestroy {
         this.directory(),
         input.filename,
       );
-      if (metadata?.sourceEngine !== 'postgresql')
+      if (
+        !metadata ||
+        (metadata.sourceEngine === 'timescaledb' && metadata.version !== 2)
+      )
         return fail(
           409,
-          '备份文件来源未验证或包含 TimescaleDB 数据，禁止通过 Neo 自动恢复',
+          '备份文件来源或 TimescaleDB 目录元数据未验证，禁止自动恢复',
         );
-      if (await this.hasTimescale(target))
-        return fail(
-          409,
-          'TimescaleDB 不支持通过 Neo 接口原位恢复，请在隔离库按运行手册恢复',
-        );
+      const capability = await this.capability(target);
+      const timescaleTarget = capability.hasTimescale;
+      if ((metadata.sourceEngine === 'timescaledb') !== timescaleTarget)
+        return fail(409, '备份文件来源数据库类型与恢复目标不一致');
+      if (
+        metadata.version === 2 &&
+        metadata.sourceEngine === 'timescaledb' &&
+        metadata.timescale.extensionVersion !== capability.extensionVersion
+      )
+        return fail(409, 'TimescaleDB 扩展版本与备份不一致');
       const task = await this.enqueue(principal, {
         taskType: 'backup',
         taskSubType: 'restore',
@@ -228,7 +243,12 @@ export class BackupService implements OnModuleDestroy {
       this.logger.info('PostgreSQL 恢复任务已创建', 'BackupService', {
         target,
       });
-      return task;
+      return {
+        ...task,
+        restoreMode: timescaleTarget
+          ? ('isolated' as const)
+          : ('in-place' as const),
+      };
     });
   }
 
@@ -237,8 +257,8 @@ export class BackupService implements OnModuleDestroy {
       await this.authorize(principal);
       const files = await listBackupFiles(this.directory());
       const [primaryTimescale, competitorTimescale] = await Promise.allSettled([
-        this.hasTimescale('primary'),
-        this.hasTimescale('competitor'),
+        this.capability('primary'),
+        this.capability('competitor'),
       ]);
       if (
         primaryTimescale.status === 'rejected' ||
@@ -247,15 +267,29 @@ export class BackupService implements OnModuleDestroy {
         this.logger.warn('备份恢复能力未确认', 'BackupService', {
           reason: 'backup_restore_capability_unconfirmed',
         });
-      return files.map((file) => ({
-        ...file,
-        restoreSupported:
-          file.sourceEngine === 'postgresql' &&
-          (file.target === 'primary'
-            ? primaryTimescale.status === 'fulfilled' && !primaryTimescale.value
-            : competitorTimescale.status === 'fulfilled' &&
-              !competitorTimescale.value),
-      }));
+      return files.map((file) => {
+        const capability =
+          file.target === 'primary' ? primaryTimescale : competitorTimescale;
+        const validSource =
+          file.sourceEngine === 'postgresql' ||
+          (file.sourceEngine === 'timescaledb' && file.metadataVersion === 2);
+        const restoreSupported =
+          validSource &&
+          capability.status === 'fulfilled' &&
+          (file.sourceEngine === 'timescaledb') ===
+            capability.value.hasTimescale &&
+          (file.sourceEngine !== 'timescaledb' ||
+            file.sourceExtensionVersion === capability.value.extensionVersion);
+        return {
+          ...file,
+          restoreSupported,
+          restoreMode: restoreSupported
+            ? capability.value.hasTimescale
+              ? ('isolated' as const)
+              : ('in-place' as const)
+            : undefined,
+        };
+      });
     });
   }
 

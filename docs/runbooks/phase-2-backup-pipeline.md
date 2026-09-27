@@ -1,4 +1,4 @@
-# Neo PostgreSQL 备份与普通 PostgreSQL 恢复
+# Neo PostgreSQL / TimescaleDB 备份与恢复
 
 ## 格式与边界
 
@@ -6,7 +6,7 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 创建和恢复始终提交到 `backup-task-queue` 异步执行。任务元数据先写入 Redis task registry， Worker 再执行 `pg_dump`/`pg_restore`，每次检查 BullMQ lease、任务身份和取消状态。
 
-**当前支持边界：**Neo 可对完整 TimescaleDB 数据库创建 custom dump，但不能通过 Neo 恢复接口恢复 TimescaleDB 来源文件，也不能对安装了 TimescaleDB 扩展的目标库原位恢复。TimescaleDB 目标也不允许通过 Neo 接口按表备份；官方指出按表 `pg_dump` 缺少重建 hypertable 所需的元数据。`GET /api/v1/backup` 只对元数据证实来自普通 PostgreSQL 且当前目标库也为普通 PostgreSQL 的文件返回 `restoreSupported: true`；来源元数据缺失或能力检查失败时返回 `false`。`POST /api/v1/backup/restore` 在入队前返回 409，Worker 再次检查以防止绕过 API。
+**当前支持边界：**完整 TimescaleDB custom dump 可恢复到同一 PostgreSQL 实例上的**新建隔离数据库**。Neo 不自动替换在线主库或竞品库，不修改 `DATABASE_URL`/`COMPETITOR_DATABASE_URL`，不执行生产切换。异步任务受理与完成结果分别标记 `restoreMode: isolated`；完成结果提供 `restoredDatabase` 和 `targetDatabaseChanged: false`，运维须独立验证并决定切换。普通 PostgreSQL 文件沿用原位恢复，标记 `restoreMode: in-place`。TimescaleDB 不支持按表 `pg_dump`；该模式缺少重建 hypertable 所需的目录元数据。`GET /api/v1/backup` 仅在备份来源、当前目标库扩展类型与版本相符时返回 `restoreSupported: true`；未验证文件与早期缺少 Timescale 目录清单的文件返回 `false`。API 和 Worker 均会拒绝来源/目标类型不一致的任务。
 
 ## 持久化存储
 
@@ -17,7 +17,7 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 ## 普通 PostgreSQL 恢复演练
 
 1. 在不含 TimescaleDB 扩展的隔离 PostgreSQL database 上挂载同一备份目录，确认备份文件的 target 与恢复目标一致。
-2. 确认目录里有匹配目标库的正式 `.dump` 文件和同名 `.meta.json`，元数据的 `sourceEngine` 为 `postgresql`，且 `PGDMP` 文件头有效；记录文件哈希与 `pg_dump`/`pg_restore` 版本。旧版本 Neo 生成但缺少元数据的文件不能通过自动恢复接口处理，应先在隔离环境人工核实。使用 `POST /api/v1/backup/restore` 创建任务，等待任务中心状态为 `completed`。
+2. 确认目录里有匹配目标库的正式 `.dump` 文件和同名 `.meta.json`，元数据的 `sourceEngine` 为 `postgresql`，且 `PGDMP` 文件头有效；记录文件哈希与 `pg_dump`/`pg_restore` 版本。旧版本 Neo 生成但缺少元数据的文件不能通过自动恢复接口处理，应先在隔离环境人工核实。使用 `POST /api/v1/backup/restore` 创建任务，确认受理结果 `restoreMode: in-place`，等待任务中心状态为 `completed`。
 3. 检查恢复后的 schema、角色/权限和业务记录，并运行 API/Worker 集成检查。
 4. 保留演练日志和 `pg_restore` 版本；生产恢复前必须有变更审批和回滚窗口。
 
@@ -25,9 +25,12 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 同一目标库的备份和恢复共用 PostgreSQL advisory lock，跨 Worker 实例互斥；占用时任务明确失败。若 Worker 被强制终止，锁连接会断开，须先确认目标库中没有遗留的 `pg_dump`/`pg_restore` 会话再提交新任务。备份队列 `attempts=1`，不会自动重放可能已部分执行的恢复；操作员应检查任务、文件和数据库状态，再决定是否创建新任务。
 
-## TimescaleDB 恢复边界
+## TimescaleDB 隔离恢复
 
-TimescaleDB 全库 dump 的恢复必须由运维在**新建的隔离目标库**执行，先安装相容版本的扩展并调用 `timescaledb_pre_restore()`，然后以 `pg_restore -d <新库>` 恢复，最后调用 `timescaledb_post_restore()`。不得使用 `pg_restore -j`。完成后核对 hypertable、chunk、continuous aggregate、压缩策略和记录；当前 Neo API 不负责该流程，也不提供生产数据库切换。步骤与版本要求以 [Timescale 官方逻辑备份指南](https://docs.timescale.com/self-hosted/latest/backup-and-restore/logical-backup/) 为准。
+1. 确认 `.dump` 与 `.meta.json` 同在备份卷，元数据为 `version: 2`、`sourceEngine: timescaledb`，并含扩展版本、hypertable 和 continuous aggregate 清单。目标连接角色须有 `CREATEDB`、`CREATE EXTENSION timescaledb` 和清理隔离库所需的权限；目标实例须安装与备份相同的扩展版本。先确认数据库容量足以同时容纳在线库与隔离库。
+2. 调用 `POST /api/v1/backup/restore`，确认 `restoreMode: isolated`。Worker 在目标实例创建 `neo_restore_<primary|competitor>_<任务 ID 前 16 位十六进制>`，撤销该库对 `PUBLIC` 的连接权限，安装 TimescaleDB 扩展，调用 `timescaledb_pre_restore()`，验证恢复状态在新会话可见，再运行 `pg_restore -Fc --exit-on-error -d <隔离库>`，最后调用 `timescaledb_post_restore()`。
+3. Worker 在新会话核对恢复状态已关闭，扩展版本、hypertable 与 continuous aggregate 清单与备份元数据完全一致，才将任务标为完成。失败或取消时先尝试 `timescaledb_post_restore()`，再删除**本任务确认创建**的隔离库；数据库创建确认丢失或清理未确认时任务失败并提示人工核对，禁止把残留库当作成功恢复。数据库名可由任务 ID 确定，排查时不得删除不属于该任务的数据库。
+4. 任务完成后从结果读取 `restoredDatabase`，核对业务记录、chunk、压缩与保留策略、CAGG 数据和权限。完成状态只证明隔离恢复与目录检查成功；生产切换、连接串变更、回滚窗口及停写安排由运维另行执行。Neo 不运行 `pg_restore -j`。步骤与版本要求以 [Timescale 官方逻辑备份指南](https://docs.timescale.com/self-hosted/latest/backup-and-restore/logical-backup/) 为准。
 
 ## 自动计划
 
