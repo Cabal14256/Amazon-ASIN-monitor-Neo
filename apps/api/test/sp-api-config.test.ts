@@ -330,6 +330,26 @@ describe('SP-API configuration HTTP and host source', () => {
     expect(f.unit.upsertConfiguration).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(fixture.logger)).not.toContain(secret);
   });
+  it('rejects values above the deployment monitor cap without writing any batch item', async () => {
+    await fixture.app.close();
+    await start({ MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: '3' });
+    const payload = (value: string) => ({
+      configs: [
+        { configKey: key, configValue: 'replacement-fixture-secret' },
+        {
+          configKey: 'MONITOR_MAX_CONCURRENT_GROUP_CHECKS',
+          configValue: value,
+        },
+      ],
+    });
+    for (const value of ['8', '0', '2.5', '-1']) {
+      const response = await request('PUT', '', payload(value));
+      expect(response.statusCode).toBe(400);
+      expect(f.unit.upsertConfiguration).not.toHaveBeenCalled();
+      expect(f.rows.get(key)?.configValue).toBe(secret);
+    }
+    expect((await request('PUT', '', payload('3'))).statusCode).toBe(200);
+  });
   it.each([
     { configs: [{ configKey: key }] },
     { configs: [{ configKey: key, configValue: 'x'.repeat(4097) }] },
