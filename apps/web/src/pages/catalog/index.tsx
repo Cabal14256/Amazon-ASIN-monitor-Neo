@@ -869,6 +869,14 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const [status, setStatus] = useState<StatusFilter>('ALL');
   const [query, setQuery] = useState<CatalogQuery>(INITIAL_QUERY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const crossTabSafetyRevision = useRef(0);
+  const clearCatalogCache = useCallback(async () => {
+    await runtime.queryClient
+      .cancelQueries({ queryKey: [config.id] })
+      .catch(() => undefined);
+    runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
+    runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+  }, [config.id, runtime.queryClient]);
   const groups = useQuery({
     queryKey: [config.id, 'groups', query],
     queryFn: ({ signal }) => config.list(runtime.http, query, signal),
@@ -888,14 +896,47 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
         event.key !== catalogSafetyKey(ownerId, config.id)
       )
         return;
-      runtime.queryClient.setQueryData(
-        safetyKey,
-        readCatalogSafetyGate(stored, ownerId, config.id),
-      );
+      const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
+      const revision = ++crossTabSafetyRevision.current;
+      if (incoming) {
+        runtime.queryClient.setQueryData(safetyKey, incoming);
+        if (incoming.phase === 'refresh') {
+          setAction(null);
+          setSelectedId(null);
+          setNotice(null);
+          void clearCatalogCache();
+        }
+        return;
+      }
+      const currentSafety =
+        runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+      if (currentSafety?.phase === 'inspection') return;
+      if (currentSafety?.phase !== 'refresh') {
+        runtime.queryClient.setQueryData(safetyKey, null);
+        return;
+      }
+      void (async () => {
+        try {
+          await clearCatalogCache();
+          const fresh = await config.list(runtime.http, query);
+          if (
+            revision !== crossTabSafetyRevision.current ||
+            readCatalogSafetyGate(stored, ownerId, config.id)
+          )
+            return;
+          runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+          runtime.queryClient.setQueryData(
+            safetyKey,
+            currentSafety.createUncertain ? { phase: 'inspection' } : null,
+          );
+        } catch {
+          // Keep the safety gate until this tab can reread the catalog.
+        }
+      })();
     };
     window.addEventListener('storage', syncSafety);
     return () => window.removeEventListener('storage', syncSafety);
-  }, [config.id, config.writes, ownerId, runtime.queryClient, safetyKey]);
+  }, [clearCatalogCache, config, ownerId, query, runtime, safetyKey]);
   useEffect(() => {
     if (!action) return;
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -976,14 +1017,6 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     void recheckAccess();
   }, [recheckAccess, runtime, safetyKey]);
 
-  async function clearCatalogCache() {
-    await runtime.queryClient
-      .cancelQueries({ queryKey: [config.id] })
-      .catch(() => undefined);
-    runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
-    runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
-  }
-
   async function reportUncertainWrite(uncertainAction: CatalogAction) {
     setSelectedId(null);
     setAction(null);
@@ -1015,10 +1048,20 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           (error: unknown) => ({ ok: false as const, error }),
         )
       : Promise.resolve(null);
-    const [fresh, detailResult] = await Promise.all([
+    const [firstPage, detailResult] = await Promise.all([
       config.list(runtime.http, query),
       detailRequest,
     ]);
+    const lastPage = Math.max(
+      1,
+      Math.ceil(firstPage.total / firstPage.pageSize),
+    );
+    const correctedQuery =
+      firstPage.current > lastPage ? { ...query, current: lastPage } : query;
+    const fresh =
+      correctedQuery === query
+        ? firstPage
+        : await config.list(runtime.http, correctedQuery);
     const stillListed = Boolean(
       detailId && fresh.list.some((item) => item.id === detailId),
     );
@@ -1032,7 +1075,11 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       )
     )
       throw detailResult.error;
-    runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+    runtime.queryClient.setQueryData(
+      [config.id, 'groups', correctedQuery],
+      fresh,
+    );
+    if (correctedQuery !== query) setQuery(correctedQuery);
     if (detailId && stillListed && detailResult?.ok)
       runtime.queryClient.setQueryData(
         [config.id, 'group', detailId],

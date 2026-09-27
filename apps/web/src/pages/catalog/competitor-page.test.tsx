@@ -15,6 +15,7 @@ import type { IdentityStore } from '../../auth/identity';
 import { ApiError } from '../../lib/http';
 import type { createTransportRuntime } from '../../services/runtime';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
+import { catalogSafetyKey } from './catalog-safety-gate';
 import type { CatalogConfig } from './catalog-types';
 import { CatalogPage } from './index';
 
@@ -140,6 +141,50 @@ async function create() {
 }
 
 describe('competitor catalog refresh and authority transitions', () => {
+  it('clears stale state on a cross-tab gate and only unlocks after a successful reread', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listData(original))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(listData(updated));
+    const f = fixture(list, vi.fn());
+    await screen.findAllByText('Original rival');
+    fireEvent.click(screen.getByRole('button', { name: '新建变体组' }));
+    f.queryClient.setQueryData(['competitor', 'group', original.id], original);
+    const key = catalogSafetyKey('operator', 'competitor');
+    const refresh = {
+      phase: 'refresh',
+      message: null,
+      detailId: null,
+      createUncertain: false,
+    };
+    window.localStorage.setItem(key, JSON.stringify(refresh));
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByText('Original rival')).toBeNull();
+      expect(screen.queryByRole('region', { name: '新建变体组' })).toBeNull();
+      expect(
+        f.queryClient.getQueryData(['competitor', 'group', original.id]),
+      ).toBeUndefined();
+    });
+    window.localStorage.removeItem(key);
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await screen.findAllByText('Current rival');
+    expect(screen.getByRole('button', { name: '新建变体组' })).toBeTruthy();
+    f.queryClient.clear();
+  });
   it('hides old catalog data after a committed write when refresh fails', async () => {
     const list = vi
       .fn()
@@ -497,6 +542,39 @@ describe('competitor catalog refresh and authority transitions', () => {
     expect(f.detail).toHaveBeenCalledTimes(detailCalls);
     expect(screen.queryByText('Original rival')).toBeNull();
     expect(f.announce).not.toHaveBeenCalled();
+    f.queryClient.clear();
+  });
+  it('returns to the last valid page after deleting the sole group on page two', async () => {
+    const lastGroup = { ...original, id: 'group-2', name: 'Last rival' };
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ ...listData(original), total: 11 })
+      .mockResolvedValueOnce({
+        ...listData(lastGroup),
+        total: 11,
+        current: 2,
+      })
+      .mockResolvedValueOnce({
+        ...listData(lastGroup),
+        list: [],
+        total: 10,
+        current: 2,
+      })
+      .mockResolvedValue({ ...listData(original), total: 10 });
+    const deleteGroup = vi.fn(async () => undefined);
+    const f = fixture(list, vi.fn(), deleteGroup);
+    f.detail.mockResolvedValue(lastGroup);
+    await screen.findAllByText('Original rival');
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+    await screen.findAllByText('Last rival');
+    fireEvent.click(screen.getAllByRole('button', { name: '查看' })[0]);
+    fireEvent.click(
+      (await screen.findAllByRole('button', { name: '删除变体组' }))[0],
+    );
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    await screen.findAllByText('Original rival');
+    expect(screen.getByText(/第 1 \/ 1 页/)).toBeTruthy();
+    expect(deleteGroup).toHaveBeenCalledOnce();
     f.queryClient.clear();
   });
 });
