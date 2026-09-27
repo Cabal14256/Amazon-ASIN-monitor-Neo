@@ -11,6 +11,8 @@ import {
   durationSummaryQuery,
   initialAnalyticsFilters,
   latestPeakIntervals,
+  loadMonthlyRows,
+  monthlyIntersectionQuery,
   monthlyRowsInRange,
   monthsInRange,
   overviewAsinMetric,
@@ -93,18 +95,19 @@ describe('analytics page filters and display values', () => {
   });
 
   it('encodes variant group IDs for the monitor-history drill-down', () => {
-    const href = variantGroupHistoryHref('Group A/& 中文');
+    const href = variantGroupHistoryHref('Group A/& 中文', true);
     expect(href).toBe(
       '/monitor-history?type=group&id=Group%20A%2F%26%20%E4%B8%AD%E6%96%87',
     );
     expect(new URLSearchParams(href!.split('?')[1]).get('id')).toBe(
       'Group A/& 中文',
     );
-    expect(variantGroupHistoryHref(42)).toBe(
+    expect(variantGroupHistoryHref(42, true)).toBe(
       '/monitor-history?type=group&id=42',
     );
-    expect(variantGroupHistoryHref('')).toBeNull();
-    expect(variantGroupHistoryHref('bad\nvalue')).toBeNull();
+    expect(variantGroupHistoryHref('', true)).toBeNull();
+    expect(variantGroupHistoryHref('bad\nvalue', true)).toBeNull();
+    expect(variantGroupHistoryHref('g1', false)).toBeNull();
   });
 
   const timezone = process.env.TZ;
@@ -198,18 +201,18 @@ describe('analytics page filters and display values', () => {
       groupBy: 'week' as const,
     };
     expect(
-      periodDetailsQuery(filters, {
-        country: 'UK',
-        site: 'amazon.co.uk',
-        brand: 'Brand A',
-      }),
+      periodDetailsQuery(
+        filters,
+        { country: 'UK', site: 'amazon.co.uk', brand: 'Brand A' },
+        'hour',
+      ),
     ).toEqual({
       country: 'UK',
       site: 'amazon.co.uk',
       brand: 'Brand A',
       startTime: filters.startTime,
       endTime: filters.endTime,
-      timeSlotGranularity: 'week',
+      timeSlotGranularity: 'hour',
     });
   });
 
@@ -221,14 +224,19 @@ describe('analytics page filters and display values', () => {
       groupBy: 'day' as const,
     };
     expect(
-      periodSummaryQuery(filters, { site: ' Shop A ', brand: ' Brand A ' }, 2),
+      periodSummaryQuery(
+        filters,
+        { site: ' Shop A ', brand: ' Brand A ' },
+        2,
+        'hour',
+      ),
     ).toEqual({
       country: 'UK',
       startTime: filters.startTime,
       endTime: filters.endTime,
       site: 'Shop A',
       brand: 'Brand A',
-      timeSlotGranularity: 'day',
+      timeSlotGranularity: 'hour',
       current: 2,
       pageSize: 20,
     });
@@ -246,6 +254,55 @@ describe('analytics page filters and display values', () => {
         groupBy: 'day',
       }),
     ).toMatchObject({ ok: false, error: '分析范围最多可跨 12 个自然月。' });
+  });
+
+  it('clips each monthly query to the selected Shanghai timestamps', () => {
+    const filters = {
+      country: 'UK',
+      startTime: '2026-12-31 23:00:00',
+      endTime: '2027-02-01 01:00:00',
+      groupBy: 'day' as const,
+    };
+    expect(monthlyIntersectionQuery(filters, '2026-12')).toEqual({
+      country: 'UK',
+      month: '2026-12',
+      startTime: '2026-12-31 23:00:00',
+      endTime: '2026-12-31 23:59:59',
+    });
+    expect(monthlyIntersectionQuery(filters, '2027-01')).toEqual({
+      country: 'UK',
+      month: '2027-01',
+      startTime: '2027-01-01 00:00:00',
+      endTime: '2027-01-31 23:59:59',
+    });
+    expect(monthlyIntersectionQuery(filters, '2027-02')).toEqual({
+      country: 'UK',
+      month: '2027-02',
+      startTime: '2027-02-01 00:00:00',
+      endTime: '2027-02-01 01:00:00',
+    });
+  });
+
+  it('aborts sibling monthly requests when one month fails', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const aborted: string[] = [];
+    const promise = loadMonthlyRows(
+      ['2026-12', '2027-01', '2027-02'],
+      (month, signal) =>
+        month === '2026-12'
+          ? new Promise<number[]>((_resolve, reject) => {
+              rejectFirst = reject;
+            })
+          : new Promise<number[]>((_resolve, reject) => {
+              signal.addEventListener('abort', () => {
+                aborted.push(month);
+                reject(new Error('cancelled'));
+              });
+            }),
+    );
+    rejectFirst(new Error('month failed'));
+    await expect(promise).rejects.toThrow('month failed');
+    expect(aborted).toEqual(['2027-01', '2027-02']);
   });
 
   it('combines ASIN rows into one abnormal-duration point per time period', () => {

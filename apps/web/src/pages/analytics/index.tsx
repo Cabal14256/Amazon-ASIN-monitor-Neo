@@ -8,7 +8,8 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
-import { useAuth } from '../../auth/context';
+import { createAccess } from '../../auth/access';
+import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
 import { EmptyState, FilterChip, Skeleton } from '../../components/ui/feedback';
@@ -48,7 +49,9 @@ import {
   initialAnalyticsFilters,
   integerMetric,
   latestPeakIntervals,
+  loadMonthlyRows,
   metric,
+  monthlyIntersectionQuery,
   monthlyRowsInRange,
   monthsInRange,
   overviewAsinMetric,
@@ -243,9 +246,15 @@ function Table({ headers, rows }: { headers: string[]; rows: ReactNode[][] }) {
   );
 }
 
-function VariantGroupCell({ row }: { row: Record<string, unknown> }) {
+function VariantGroupCell({
+  row,
+  canReadMonitor,
+}: {
+  row: Record<string, unknown>;
+  canReadMonitor: boolean;
+}) {
   const label = rowText(row, 'variant_group_name', 'variant_group_id');
-  const href = variantGroupHistoryHref(row.variant_group_id);
+  const href = variantGroupHistoryHref(row.variant_group_id, canReadMonitor);
   return href ? (
     <a
       href={href}
@@ -488,7 +497,13 @@ function Overview({ filters }: { filters: AnalyticsFilters }) {
 
 function Rankings({ filters }: { filters: AnalyticsFilters }) {
   const { runtime } = useAuth();
+  const identity = useIdentity();
+  const canReadMonitor =
+    identity.status === 'authenticated' &&
+    createAccess(identity.identity).canReadMonitor;
   const query = analyticsCountryQuery(filters);
+  const [periodGranularity, setPeriodGranularity] =
+    useState<DurationSummaryGranularity>('hour');
   const [periodFilterDraft, setPeriodFilterDraft] = useState<PeriodFilters>({
     site: '',
     brand: '',
@@ -516,7 +531,7 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
       ? selection.period
       : null;
   const detailParams = selectedPeriod
-    ? periodDetailsQuery(filters, selectedPeriod)
+    ? periodDetailsQuery(filters, selectedPeriod, periodGranularity)
     : null;
   const asinCountry = useQuery({
     queryKey: ['analytics', 'asin-by-country', filters],
@@ -542,11 +557,18 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
       ),
   });
   const periods = useQuery({
-    queryKey: ['analytics', 'period-summary', filters, periodFilters, page],
+    queryKey: [
+      'analytics',
+      'period-summary',
+      filters,
+      periodFilters,
+      page,
+      periodGranularity,
+    ],
     queryFn: ({ signal }) =>
       getPeriodSummary(
         runtime.http,
-        periodSummaryQuery(filters, periodFilters, page),
+        periodSummaryQuery(filters, periodFilters, page, periodGranularity),
         signal,
       ),
   });
@@ -599,7 +621,7 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
           <Table
             headers={['变体组', '国家', '异常 ASIN', '异常时长', '异常率']}
             rows={(asinGroup.data ?? []).map((row) => [
-              <VariantGroupCell row={row} />,
+              <VariantGroupCell row={row} canReadMonitor={canReadMonitor} />,
               rowText(row, 'country'),
               count(row.brokenAsinsDedup),
               hours(row.abnormalDurationHours),
@@ -618,23 +640,41 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
         >
           <Table
             headers={['变体组', '检查', '异常']}
-            rows={(groups.data ?? [])
-              .slice(0, 30)
-              .map((row) => [
-                <VariantGroupCell row={row} />,
-                count(row.total_checks),
-                count(row.broken_count),
-              ])}
+            rows={(groups.data ?? []).map((row) => [
+              <VariantGroupCell row={row} canReadMonitor={canReadMonitor} />,
+              count(row.total_checks),
+              count(row.broken_count),
+            ])}
           />
         </QueryPanel>
         <QueryPanel
           title="周期摘要"
-          description="每个周期保留详情标记，可继续按时间槽追踪。"
+          description="每个周期保留详情标记，可继续按独立时间槽粒度追踪。"
           pending={periods.isPending}
           error={periods.error}
           retry={() => void periods.refetch()}
         >
           <div className="mb-4 flex flex-wrap items-end gap-3">
+            <Field label="周期粒度">
+              {(control) => (
+                <select
+                  {...control}
+                  className="w-full rounded-input border border-input bg-card px-4 py-3 text-sm"
+                  value={periodGranularity}
+                  onChange={(event) => {
+                    setPeriodGranularity(
+                      event.target.value as DurationSummaryGranularity,
+                    );
+                    setPageSelection(null);
+                    setSelection(null);
+                    setDetailPageSelection(null);
+                  }}
+                >
+                  <option value="hour">小时</option>
+                  <option value="day">天</option>
+                </select>
+              )}
+            </Field>
             <Field label="站点">
               {(control) => (
                 <Input
@@ -721,7 +761,7 @@ function Rankings({ filters }: { filters: AnalyticsFilters }) {
           title="周期时间槽明细"
           description={`${selectedPeriod.country} / ${
             selectedPeriod.site || '无站点'
-          } / ${selectedPeriod.brand || '无品牌'} · ${filters.groupBy} 粒度`}
+          } / ${selectedPeriod.brand || '无品牌'} · ${periodGranularity} 粒度`}
           pending={details.isPending}
           error={details.error}
           retry={() => void details.refetch()}
@@ -802,16 +842,18 @@ function PeakAndDuration({ filters }: { filters: AnalyticsFilters }) {
     queryKey: ['analytics', 'monthly', filters],
     queryFn: async ({ signal }) => {
       const months = monthsInRange(filters.startTime, filters.endTime);
-      const results = await Promise.all(
-        months.map((month) =>
-          getMonthlyBreakdown(
-            runtime.http,
-            { country: query.country, month },
-            signal,
-          ),
-        ),
+      return loadMonthlyRows(
+        months,
+        async (token, siblingSignal) =>
+          (
+            await getMonthlyBreakdown(
+              runtime.http,
+              monthlyIntersectionQuery(filters, token),
+              siblingSignal,
+            )
+          ).rows,
+        signal,
       );
-      return results.flatMap((result) => result.rows);
     },
   });
   const areas = useQuery({

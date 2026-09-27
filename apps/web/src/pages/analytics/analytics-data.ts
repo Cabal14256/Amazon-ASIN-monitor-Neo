@@ -64,6 +64,7 @@ export function peakHoursQuery(filters: AnalyticsFilters) {
 export function periodDetailsQuery(
   filters: AnalyticsFilters,
   period: PeriodIdentity,
+  granularity: DurationSummaryGranularity,
 ) {
   return {
     country: period.country,
@@ -71,7 +72,7 @@ export function periodDetailsQuery(
     brand: period.brand,
     startTime: filters.startTime,
     endTime: filters.endTime,
-    timeSlotGranularity: filters.groupBy,
+    timeSlotGranularity: granularity,
   };
 }
 
@@ -79,12 +80,13 @@ export function periodSummaryQuery(
   filters: AnalyticsFilters,
   periodFilters: PeriodFilters,
   page: number,
+  granularity: DurationSummaryGranularity,
 ) {
   return {
     ...analyticsCountryQuery(filters),
     site: periodFilters.site.trim() || undefined,
     brand: periodFilters.brand.trim() || undefined,
-    timeSlotGranularity: filters.groupBy,
+    timeSlotGranularity: granularity,
     current: page,
     pageSize: 20,
   };
@@ -140,6 +142,45 @@ export function monthsInRange(startTime: string, endTime: string) {
     );
   }
   return months;
+}
+
+export function monthlyIntersectionQuery(
+  filters: AnalyticsFilters,
+  month: string,
+) {
+  const [year, number] = month.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(year, number, 0)).getUTCDate();
+  const monthStart = `${month}-01 00:00:00`;
+  const monthEnd = `${month}-${String(lastDay).padStart(2, '0')} 23:59:59`;
+  return {
+    country: filters.country || undefined,
+    month,
+    startTime: filters.startTime > monthStart ? filters.startTime : monthStart,
+    endTime: filters.endTime < monthEnd ? filters.endTime : monthEnd,
+  };
+}
+
+/** Cancel queued and active sibling requests as soon as one month fails. */
+export async function loadMonthlyRows<T>(
+  months: readonly string[],
+  load: (month: string, signal: AbortSignal) => Promise<readonly T[]>,
+  signal?: AbortSignal,
+): Promise<T[]> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  try {
+    const rows = await Promise.all(
+      months.map((month) => load(month, controller.signal)),
+    );
+    return rows.flatMap((monthRows) => [...monthRows]);
+  } catch (error) {
+    abort();
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
 }
 
 export function initialAnalyticsFilters(): AnalyticsFilters {
@@ -220,7 +261,11 @@ export function abnormalSummaryPageRows<T>(rows: readonly T[], page: number) {
   return rows.slice((page - 1) * 50, page * 50);
 }
 
-export function variantGroupHistoryHref(value: unknown): string | null {
+export function variantGroupHistoryHref(
+  value: unknown,
+  canReadMonitor: boolean,
+): string | null {
+  if (!canReadMonitor) return null;
   const id =
     typeof value === 'string'
       ? value
