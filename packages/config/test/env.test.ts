@@ -153,6 +153,16 @@ describe('loadEnv', () => {
       loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: '5001' }),
     ).toThrow(EnvValidationError);
   });
+  it('shares the Legacy deployment cap for monitor concurrency writes', () => {
+    expect(loadEnv(validEnv).MAX_ALLOWED_CONCURRENT_GROUP_CHECKS).toBe(10);
+    expect(
+      loadEnv({ ...validEnv, MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: '3' })
+        .MAX_ALLOWED_CONCURRENT_GROUP_CHECKS,
+    ).toBe(3);
+    expect(() =>
+      loadEnv({ ...validEnv, MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: '2.5' }),
+    ).toThrow(EnvValidationError);
+  });
   it('uses one persistent import directory for API/Worker and rejects relative configuration', () => {
     const env = loadEnv(validEnv);
     const root = resolve(__dirname, '../../..');
