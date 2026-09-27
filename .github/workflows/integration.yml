@@ -20,7 +20,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     services:
       redis:
@@ -413,5 +413,7 @@ jobs:
             echo "## Integration CI"
             echo "- Result: ${{ job.status }}"
             echo "- Test-step duration after services became ready: ${duration_seconds}s"
-            echo "- Promotion threshold: 10 consecutive successful runs whose total startedAt-to-updatedAt duration is under 600s"
+            echo "- Infrastructure timeout: 15m; this only bounds the job and does not change test assertions or the promotion target"
+            echo "- Promotion threshold: 10 consecutive successful runs whose total Actions startedAt-to-updatedAt duration is under 600s"
+            echo "- The test-step duration above excludes service setup and teardown; use the Actions run timestamps for total duration"
           } >> "$GITHUB_STEP_SUMMARY"
