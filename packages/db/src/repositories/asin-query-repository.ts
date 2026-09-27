@@ -3,7 +3,9 @@ import {
   asc,
   eq,
   getTableColumns,
+  gt,
   ilike,
+  lt,
   or,
   sql,
   type SQL,
@@ -38,6 +40,10 @@ export interface AsinGroupReadResult {
   total: number;
   totalASINs: number;
 }
+export interface AsinExportCursor {
+  id: string;
+  createTime: Date | null;
+}
 export interface AsinQueryUnit extends RoleWriteUnit {
   list(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
   detail(groupId: string): Promise<AsinGroupReadResult>;
@@ -46,8 +52,15 @@ export interface AsinQueryRepositoryPort {
   read<T>(operation: (unit: AsinQueryUnit) => Promise<T>): Promise<T>;
 }
 export interface AsinExportQueryUnit extends AsinQueryUnit {
-  listExportGroups(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
-  listExportChildren(groupId: string, offset: number): Promise<Asin[]>;
+  listExportGroups(
+    query: AsinGroupQuery,
+    cursor?: AsinExportCursor,
+    includeTotal?: boolean,
+  ): Promise<AsinGroupReadResult>;
+  listExportChildren(
+    groupId: string,
+    cursor?: AsinExportCursor,
+  ): Promise<Asin[]>;
 }
 export interface AsinExportQueryRepositoryPort {
   read<T>(operation: (unit: AsinExportQueryUnit) => Promise<T>): Promise<T>;
@@ -120,6 +133,16 @@ function validateGroupId(groupId: string) {
   )
     throw new AsinQueryRepositoryError('input');
 }
+function validateExportCursor(cursor?: AsinExportCursor) {
+  if (!cursor) return;
+  validateGroupId(cursor.id);
+  if (
+    cursor.createTime !== null &&
+    (!(cursor.createTime instanceof Date) ||
+      !Number.isFinite(cursor.createTime.getTime()))
+  )
+    throw new AsinQueryRepositoryError('input');
+}
 function count(value: unknown): number {
   if (typeof value !== 'string' && typeof value !== 'number')
     throw new AsinQueryRepositoryError('result');
@@ -181,21 +204,42 @@ export class DrizzleAsinQueryUnit
   list(query: AsinGroupQuery) {
     return this.query(query);
   }
-  listExportGroups(query: AsinGroupQuery) {
-    return this.query(query, undefined, false);
+  listExportGroups(
+    query: AsinGroupQuery,
+    cursor?: AsinExportCursor,
+    includeTotal = true,
+  ) {
+    if (query.current !== 1) throw new AsinQueryRepositoryError('input');
+    validateExportCursor(cursor);
+    return this.query(query, undefined, false, cursor, includeTotal);
   }
-  async listExportChildren(groupId: string, offset: number): Promise<Asin[]> {
+  async listExportChildren(
+    groupId: string,
+    cursor?: AsinExportCursor,
+  ): Promise<Asin[]> {
     validateGroupId(groupId);
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
-      throw new AsinQueryRepositoryError('input');
+    validateExportCursor(cursor);
+    const after = cursor
+      ? cursor.createTime === null
+        ? or(
+            and(sql`${asins.createTime} IS NULL`, gt(asins.id, cursor.id)),
+            sql`${asins.createTime} IS NOT NULL`,
+          )
+        : or(
+            gt(asins.createTime, cursor.createTime),
+            and(
+              eq(asins.createTime, cursor.createTime),
+              gt(asins.id, cursor.id),
+            ),
+          )
+      : undefined;
     this.ensureOpen();
     const children = await this.db
       .select()
       .from(asins)
-      .where(eq(asins.variantGroupId, groupId))
+      .where(and(eq(asins.variantGroupId, groupId), after))
       .orderBy(sql`${asins.createTime} ASC NULLS FIRST`, asc(asins.id))
-      .limit(MAX_ASIN_QUERY_CHILDREN)
-      .offset(offset);
+      .limit(MAX_ASIN_QUERY_CHILDREN);
     this.ensureOpen();
     return children;
   }
@@ -207,12 +251,26 @@ export class DrizzleAsinQueryUnit
     query: AsinGroupQuery,
     groupId?: string,
     includeChildren = true,
+    exportCursor?: AsinExportCursor,
+    includeTotal = true,
   ): Promise<AsinGroupReadResult> {
     validateQuery(query);
     const keyword = textFilter(query.keyword);
     const groupWhere =
       and(
         groupId === undefined ? undefined : eq(g.id, groupId),
+        exportCursor
+          ? exportCursor.createTime === null
+            ? and(sql`${g.createTime} IS NULL`, lt(g.id, exportCursor.id))
+            : or(
+                lt(g.createTime, exportCursor.createTime),
+                sql`${g.createTime} IS NULL`,
+                and(
+                  eq(g.createTime, exportCursor.createTime),
+                  lt(g.id, exportCursor.id),
+                ),
+              )
+          : undefined,
         query.keyword
           ? or(
               ilike(g.name, `%${query.keyword}%`),
@@ -231,19 +289,21 @@ export class DrizzleAsinQueryUnit
         countryFilter(a.country, query.country),
         stateFilter(childBroken(a), query.variantStatus),
       ) ?? sql`true`;
-    // All counts, selected groups and children are one MVCC statement snapshot.
-    // Limiting before aggregation bounds materialization; overflow fails in full.
+    // API list/detail counts, selected groups and children share one statement
+    // snapshot. Export uses keyset pages and counts groups only on the first page.
     const total =
-      groupId === undefined
+      groupId === undefined && includeTotal
         ? sql`(SELECT count(*)::text FROM ${variantGroups} AS g WHERE ${groupWhere})`
         : sql`'0'`;
     const totalASINs =
-      groupId === undefined
+      groupId === undefined && includeChildren
         ? sql`(SELECT count(*)::text FROM ${asins} AS a LEFT JOIN ${variantGroups} AS g ON ${g.id}=${a.variantGroupId} WHERE ${asinWhere})`
         : sql`'0'`;
-    const asinCount = sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${
-      a.variantGroupId
-    }=${g.id} AND ${keyword ?? sql`true`})`;
+    const asinCount = includeChildren
+      ? sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${
+          a.variantGroupId
+        }=${g.id} AND ${keyword ?? sql`true`})`
+      : sql`NULL::text`;
     const childPage = includeChildren
       ? sql`, child_page AS MATERIALIZED (
         SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON p.id=${
@@ -266,7 +326,9 @@ export class DrizzleAsinQueryUnit
           ${exportGroupBroken} AS export_group_broken
         FROM ${variantGroups} AS g WHERE ${groupWhere}
         ORDER BY ${g.createTime} DESC NULLS LAST, ${g.id} DESC
-        LIMIT ${query.pageSize} OFFSET ${(query.current - 1) * query.pageSize}
+        LIMIT ${query.pageSize} OFFSET ${
+      includeChildren ? (query.current - 1) * query.pageSize : 0
+    }
       ) ${childPage}
       SELECT ${total} AS total, ${totalASINs} AS total_asins,
         COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.create_time DESC NULLS LAST, p.id DESC) FROM selected p), '[]'::jsonb) AS groups,
@@ -289,7 +351,7 @@ export class DrizzleAsinQueryUnit
           throw new AsinQueryRepositoryError('result');
         return {
           ...hydrate(variantGroups, row),
-          ...(groupId === undefined
+          ...(groupId === undefined && includeChildren
             ? { asinCount: count(row.asin_count) }
             : {}),
           ...(!includeChildren

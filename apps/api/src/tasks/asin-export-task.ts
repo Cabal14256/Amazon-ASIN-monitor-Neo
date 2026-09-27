@@ -3,7 +3,11 @@ import {
   asinExportTaskRequestSchema,
   createExportTaskRequestSchema,
 } from '@asin-monitor/contracts';
-import { PgAsinQueryRepository, TaskRegistryError } from '@asin-monitor/db';
+import {
+  ASIN_EXPORT_MIN_TASK_TTL_SECONDS,
+  PgAsinQueryRepository,
+  TaskRegistryError,
+} from '@asin-monitor/db';
 import {
   Body,
   Controller,
@@ -56,6 +60,8 @@ export class AsinExportTaskService implements OnModuleDestroy {
   async create(principal: AuthPrincipal, raw: unknown) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有导出入口');
+    if (this.env.TASK_META_TTL_SECONDS < ASIN_EXPORT_MIN_TASK_TTL_SECONDS)
+      fail(503, '导出任务元数据保留时间不足');
     if (this.closed) fail(503, '导出服务正在停止');
     if (this.active >= 4) fail(429, '导出提交繁忙，请稍后再试');
     const request = createExportTaskRequestSchema.safeParse(raw);
@@ -146,15 +152,11 @@ export class AsinExportTaskService implements OnModuleDestroy {
         this.logger.warn('ASIN 导出任务提交未确认', 'AsinExportTaskService', {
           reason: 'export_enqueue_outcome_unknown',
         });
-        throw new HttpException(
-          {
-            success: false,
-            errorCode: 500,
-            errorMessage: '任务提交结果未确认，请查询此任务状态后再操作',
-            data: { taskId, status: 'unknown' },
-          },
-          500,
-        );
+        return {
+          taskId,
+          exportType: 'asin' as const,
+          status: 'unknown' as const,
+        };
       }
       this.logger.error('ASIN 导出提交失败', 'AsinExportTaskService', {
         reason: 'export_create_failed',

@@ -5,6 +5,7 @@ import {
 import {
   MAX_ASIN_QUERY_CHILDREN,
   isTerminalTaskStatus,
+  type AsinExportCursor,
   type AsinExportQueryRepositoryPort,
   type RedisTaskRepository,
   type TaskMutation,
@@ -159,6 +160,7 @@ export function createAsinExportProcessor(
       let total = 0;
       let processed = 0;
       let rowCount = 0;
+      let groupCursor: AsinExportCursor | undefined;
       const appendRows = async (
         group: ReturnType<typeof mapAsinQueryGroups>[number],
       ) => {
@@ -172,17 +174,21 @@ export function createAsinExportProcessor(
       for (let page = 1; ; page++) {
         await check();
         const result = await repository.read((unit) =>
-          unit.listExportGroups({
-            keyword: data.params.keyword || undefined,
-            country: data.params.country || undefined,
-            variantStatus: data.params.variantStatus || undefined,
-            current: page,
-            pageSize: GROUP_PAGE_SIZE,
-          }),
+          unit.listExportGroups(
+            {
+              keyword: data.params.keyword || undefined,
+              country: data.params.country || undefined,
+              variantStatus: data.params.variantStatus || undefined,
+              current: 1,
+              pageSize: GROUP_PAGE_SIZE,
+            },
+            groupCursor,
+            page === 1,
+          ),
         );
         if (page === 1) {
           total = result.total;
-          if (total > MAX_GROUPS || result.totalASINs > MAX_ROWS)
+          if (total > MAX_GROUPS)
             throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
         }
         for (const group of result.groups) {
@@ -190,14 +196,14 @@ export function createAsinExportProcessor(
             ...group,
             isBroken: group.exportIsBroken ?? group.isBroken,
           };
-          let childOffset = 0;
+          let childCursor: AsinExportCursor | undefined;
           for (;;) {
             await check();
             const children = await repository.read((unit) =>
-              unit.listExportChildren(group.id, childOffset),
+              unit.listExportChildren(group.id, childCursor),
             );
             if (children.length === 0) {
-              if (childOffset === 0)
+              if (!childCursor)
                 await appendRows(
                   mapAsinQueryGroups({
                     groups: [effectiveGroup],
@@ -216,16 +222,28 @@ export function createAsinExportProcessor(
                 totalASINs: 0,
               })[0]!,
             );
-            childOffset += children.length;
+            const lastChild = children[children.length - 1]!;
+            childCursor = {
+              id: lastChild.id,
+              createTime: lastChild.createTime,
+            };
             if (children.length < MAX_ASIN_QUERY_CHILDREN) break;
           }
         }
         processed += result.groups.length;
+        if (processed > MAX_GROUPS)
+          throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
+        const lastGroup = result.groups[result.groups.length - 1];
+        if (lastGroup)
+          groupCursor = {
+            id: lastGroup.id,
+            createTime: lastGroup.createTime,
+          };
         await progress(
           Math.min(90, 5 + Math.floor((processed / Math.max(total, 1)) * 85)),
           `正在生成 ASIN 导出（${processed}/${total} 组）`,
         );
-        if (result.groups.length === 0 || processed >= total) break;
+        if (result.groups.length === 0) break;
       }
       await check();
       await workbook.commit();

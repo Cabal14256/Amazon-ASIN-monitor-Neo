@@ -1,6 +1,8 @@
+import type { Env } from '@asin-monitor/config';
 import type { AsinExportJobData } from '@asin-monitor/contracts';
 import {
   transitionTask,
+  type AsinExportCursor,
   type AsinExportQueryRepositoryPort,
   type AsinGroupReadResult,
   type TaskState,
@@ -15,6 +17,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAsinExportProcessor } from '../src/asin-export-processor';
 import { ASIN_EXPORT_HEADER, asinExportRows } from '../src/asin-export-rows';
+import { startAsinExportRuntime } from '../src/asin-export-runtime';
 
 const taskId = '10000000-0000-4000-8000-000000000166';
 const createdAt = '2026-09-27T00:00:00.000Z';
@@ -100,23 +103,33 @@ async function harness(pages: AsinGroupReadResult[]) {
       },
     ),
   };
-  const list = vi.fn(async (query: { current: number }) => {
-    const selected = pages[query.current - 1];
-    return selected
-      ? { ...selected, asins: [] }
-      : {
-          groups: [],
-          asins: [],
-          total: pages[0]?.total ?? 0,
-          totalASINs: pages[0]?.totalASINs ?? 0,
-        };
-  });
-  const children = vi.fn(async (groupId: string, offset: number) =>
-    pages
-      .flatMap((page) => page.asins)
-      .filter((asin) => asin.variantGroupId === groupId)
-      .slice(offset, offset + 5000),
+  let nextPage = 0;
+  const list = vi.fn(
+    async (
+      _query: { current: number },
+      _cursor?: AsinExportCursor,
+      _includeTotal?: boolean,
+    ) => {
+      const selected = pages[nextPage++];
+      return selected
+        ? { ...selected, asins: [] }
+        : {
+            groups: [],
+            asins: [],
+            total: pages[0]?.total ?? 0,
+            totalASINs: pages[0]?.totalASINs ?? 0,
+          };
+    },
   );
+  const children = vi.fn(async (groupId: string, cursor?: AsinExportCursor) => {
+    const selected = pages
+      .flatMap((page) => page.asins)
+      .filter((asin) => asin.variantGroupId === groupId);
+    const start = cursor
+      ? selected.findIndex((asin) => asin.id === cursor.id) + 1
+      : 0;
+    return selected.slice(start, start + 5000);
+  });
   const repository = {
     read: async (
       operation: (unit: {
@@ -164,6 +177,15 @@ async function harness(pages: AsinGroupReadResult[]) {
 }
 
 describe('ASIN streaming export', () => {
+  it('rejects metadata TTL below the bounded queue and worker lifetime', async () => {
+    await expect(
+      startAsinExportRuntime(
+        { AUTH_DATA_AUTHORITY: 'postgresql', TASK_META_TTL_SECONDS: 60 } as Env,
+        vi.fn(),
+      ),
+    ).rejects.toThrow('at least 72 hours');
+  });
+
   it('matches the fixed Legacy twelve-column fixture across PostgreSQL pages', async () => {
     const pages = [
       {
@@ -177,7 +199,7 @@ describe('ASIN streaming export', () => {
     const h = await harness(pages);
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('completed');
-    expect(h.list).toHaveBeenCalledTimes(2);
+    expect(h.list).toHaveBeenCalledTimes(3);
     const ref = (
       h.state.result as {
         artifact: {
@@ -238,7 +260,7 @@ describe('ASIN streaming export', () => {
       (await readdir(h.directory)).filter((name) => name.endsWith('.part')),
     ).toEqual([]);
     await h.processor(h.job, 'token');
-    expect(h.list).toHaveBeenCalledTimes(2);
+    expect(h.list).toHaveBeenCalledTimes(3);
   });
 
   it('rejects a stolen task identity and never publishes an artifact', async () => {
@@ -270,7 +292,7 @@ describe('ASIN streaming export', () => {
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('completed');
     expect(h.state.result).toMatchObject({ rowCount: 6000 });
-    expect(h.list).toHaveBeenCalledTimes(3);
+    expect(h.list).toHaveBeenCalledTimes(4);
     expect(
       (await readdir(h.directory)).filter((name) => name.endsWith('.part')),
     ).toEqual([]);
@@ -291,8 +313,28 @@ describe('ASIN streaming export', () => {
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('completed');
     expect(h.state.result).toMatchObject({ rowCount: 5001 });
-    expect(h.children).toHaveBeenCalledWith('g-dense', 0);
-    expect(h.children).toHaveBeenCalledWith('g-dense', 5000);
+    expect(h.children).toHaveBeenCalledWith('g-dense', undefined);
+    expect(h.children).toHaveBeenCalledWith('g-dense', {
+      id: asins[4999]!.id,
+      createTime: asins[4999]!.createTime,
+    });
+  });
+
+  it('uses the last group as a cursor and keeps reading past an earlier count', async () => {
+    const first = group('g-1', 'First');
+    const next = group('g-2', 'Next');
+    const h = await harness([
+      { groups: [first], asins: [], total: 1, totalASINs: 100_001 },
+      { groups: [next], asins: [], total: 0, totalASINs: 0 },
+    ] as unknown as AsinGroupReadResult[]);
+    await h.processor(h.job, 'token');
+    expect(h.state.result).toMatchObject({ rowCount: 2 });
+    expect(h.list).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ current: 1 }),
+      { id: first.id, createTime: first.createTime },
+      false,
+    );
   });
 
   it('cleans an interrupted partial and records cancellation', async () => {

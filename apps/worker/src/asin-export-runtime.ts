@@ -4,6 +4,7 @@ import {
   type Env,
 } from '@asin-monitor/config';
 import {
+  ASIN_EXPORT_MIN_TASK_TTL_SECONDS,
   ASIN_EXPORT_QUERY_TIMEOUT_MS,
   createPgPool,
   PgAsinExportQueryRepository,
@@ -21,6 +22,10 @@ import { taskNotificationWarning } from './task-notification-warning';
 export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
   if (env.AUTH_DATA_AUTHORITY !== 'postgresql')
     throw new Error('ASIN export requires PostgreSQL authority');
+  if (env.TASK_META_TTL_SECONDS < ASIN_EXPORT_MIN_TASK_TTL_SECONDS)
+    throw new Error(
+      'ASIN export requires at least 72 hours of task metadata TTL',
+    );
   const connection = parseRedisUrl(env.REDIS_URL);
   const control = new Redis({
     ...connection,

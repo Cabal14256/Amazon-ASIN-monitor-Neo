@@ -173,11 +173,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         return current?.status === 'completed' ? current : null;
       }, 30_000);
       expect(task.result).toMatchObject({ exportType: 'asin', rowCount: 5001 });
-      const download = await f.app.inject({
-        method: 'GET',
-        url: `/api/v1/tasks/${taskId}/download`,
-        headers: ownerHeaders,
-      });
+      const download = await (async () => {
+        const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+        try {
+          const response = await f.app.inject({
+            method: 'GET',
+            url: `/api/v1/tasks/${taskId}/download`,
+            headers: ownerHeaders,
+          });
+          expect(timeoutSpy).toHaveBeenCalledWith(
+            expect.any(Function),
+            30 * 60_000,
+          );
+          return response;
+        } finally {
+          timeoutSpy.mockRestore();
+        }
+      })();
       expect(download.statusCode).toBe(200);
       const ExcelJS = createRequire(
         resolve(__dirname, '../../worker/package.json'),

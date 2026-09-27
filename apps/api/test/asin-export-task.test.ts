@@ -27,9 +27,12 @@ const openExport = vi.fn(() => ({
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const pools = { primaryPool: {} };
 
-function service(authority: Env['AUTH_DATA_AUTHORITY'] = 'postgresql') {
+function service(
+  authority: Env['AUTH_DATA_AUTHORITY'] = 'postgresql',
+  ttl = 604_800,
+) {
   return new AsinExportTaskService(
-    { AUTH_DATA_AUTHORITY: authority } as Env,
+    { AUTH_DATA_AUTHORITY: authority, TASK_META_TTL_SECONDS: ttl } as Env,
     pools as never,
     { openExport } as unknown as TaskQueryRuntime,
     logger as never,
@@ -98,6 +101,9 @@ describe('ASIN export producer', () => {
     await expect(
       service('legacy-mysql').create(principal, { exportType: 'asin' }),
     ).rejects.toMatchObject({ status: 503 });
+    await expect(
+      service('postgresql', 60).create(principal, { exportType: 'asin' }),
+    ).rejects.toMatchObject({ status: 503 });
     createLimitedExport.mockRejectedValueOnce(
       new TaskRegistryError('TASK_EXPORT_LIMIT'),
     );
@@ -124,9 +130,14 @@ describe('ASIN export producer', () => {
       expect.objectContaining({ userId: principal.userId, createdAt }),
     );
     enqueue.mockRejectedValueOnce(new Error('Redis acknowledgement lost'));
-    await expect(
-      service().create(principal, { exportType: 'asin' }),
-    ).rejects.toMatchObject({ status: 500 });
+    const uncertain = await service().create(principal, {
+      exportType: 'asin',
+    });
+    expect(uncertain).toMatchObject({
+      taskId: expect.any(String),
+      exportType: 'asin',
+      status: 'unknown',
+    });
     expect(mutate).toHaveBeenCalledTimes(1);
   });
 });

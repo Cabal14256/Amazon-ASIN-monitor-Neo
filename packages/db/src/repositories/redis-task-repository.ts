@@ -15,6 +15,8 @@ import {
 
 export type TaskRedisPort = Pick<Redis, 'get' | 'eval' | 'zrevrange' | 'mget'>;
 export const TASK_RECORD_MAX_BYTES = 262_144;
+// A full 100-job queue at one 30-minute consumer can wait 50 hours.
+export const ASIN_EXPORT_MIN_TASK_TTL_SECONDS = 72 * 60 * 60;
 const MAX_WRITE_ATTEMPTS = 8;
 // All keys are explicit. A single Redis instance is the deployment contract.
 // Validate types before mutation; Lua prevents interleaving, not general rollback.

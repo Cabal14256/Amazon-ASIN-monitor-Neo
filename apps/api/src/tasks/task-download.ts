@@ -30,6 +30,7 @@ function fail(status: number, message: string): never {
     status,
   );
 }
+const ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 
 @Injectable()
 export class TaskDownloadService implements OnModuleDestroy {
@@ -53,7 +54,7 @@ export class TaskDownloadService implements OnModuleDestroy {
     const controller = new AbortController();
     this.active.add(controller);
     const abort = () => controller.abort();
-    const timer = setTimeout(abort, 120_000);
+    let timer = setTimeout(abort, 120_000);
     timer.unref();
     request.raw.once('aborted', abort);
     reply.raw.once('close', abort);
@@ -101,6 +102,10 @@ export class TaskDownloadService implements OnModuleDestroy {
           await authorizeAdministration(unit, request.auth!, 'asin:read');
         });
         controller.signal.throwIfAborted();
+        // The supported 256 MiB XLSX needs time for hashing and slower clients.
+        clearTimeout(timer);
+        timer = setTimeout(abort, ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS);
+        timer.unref();
         const path = await this.artifacts.verifiedPath(
           artifact.data,
           controller.signal,
