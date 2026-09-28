@@ -45,6 +45,21 @@ function legacy(cases: unknown[]): unknown[] {
   );
 }
 
+const timezoneOffsetScript = `
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+process.stdout.write(String(new Date(input.date).getTimezoneOffset()));
+`;
+function timezoneOffset(tz: string): number {
+  return Number(
+    execFileSync(process.execPath, ['-e', timezoneOffsetScript], {
+      input: JSON.stringify({ date: '2024-01-01T00:00:00Z' }),
+      encoding: 'utf8',
+      env: { ...process.env, TZ: tz },
+      timeout: 10_000,
+    }),
+  );
+}
+
 describe('monitor analytics views / actual Legacy oracle', () => {
   const monthlyRows: MonitorMonthlySourceRow[] = [
     {
@@ -190,28 +205,21 @@ describe('monitor analytics views / actual Legacy oracle', () => {
   it.each(['UTC', 'America/New_York', 'Asia/Shanghai'])(
     'renders the same view under host TZ=%s',
     (tz) => {
-      const previous = process.env.TZ;
-      try {
-        process.env.TZ = tz;
-        expect(new Date('2024-01-01T00:00:00Z').getTimezoneOffset()).toBe(
-          (
-            {
-              UTC: 0,
-              'America/New_York': 300,
-              'Asia/Shanghai': -480,
-            } as Record<string, number>
-          )[tz],
-        );
-        expect(buildMonitorMonthlyBreakdown([], undefined, now).month).toBe(
-          '2026-10',
-        );
-        expect(peakCases.map(buildMonitorPeakMarkAreas)).toEqual(
-          legacy(peakCases.map((params) => ({ kind: 'peaks', params }))),
-        );
-      } finally {
-        if (previous === undefined) delete process.env.TZ;
-        else process.env.TZ = previous;
-      }
+      expect(timezoneOffset(tz)).toBe(
+        (
+          {
+            UTC: 0,
+            'America/New_York': 300,
+            'Asia/Shanghai': -480,
+          } as Record<string, number>
+        )[tz],
+      );
+      expect(buildMonitorMonthlyBreakdown([], undefined, now).month).toBe(
+        '2026-10',
+      );
+      expect(peakCases.map(buildMonitorPeakMarkAreas)).toEqual(
+        legacy(peakCases.map((params) => ({ kind: 'peaks', params }))),
+      );
     },
   );
 

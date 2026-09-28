@@ -364,34 +364,41 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         }
       },
     );
-    it('requests running cancellation without overwriting payload, keeps progress sticky and accepts Worker acknowledgement', async () => {
-      const { task, queue } = await enqueued();
-      const job = await activate(queue, task.taskId),
-        data = await redis.hget(queue.toKey(task.taskId), 'data');
-      await store.mutate(task.taskId, { kind: 'processing' });
-      const first = await cancel(task.taskId),
-        second = await cancel(task.taskId);
-      expect(first.statusCode).toBe(200);
-      expect(first.json().data.status).toBe('cancelling');
-      expect(second.json().data.cancelRequestedAt).toBe(
-        first.json().data.cancelRequestedAt,
-      );
-      expect(await job.getState()).toBe('active');
-      expect(await redis.hget(queue.toKey(task.taskId), 'data')).toBe(data);
-      expect(
-        (await store.mutate(task.taskId, { kind: 'progress', progress: 20 }))
-          ?.status,
-      ).toBe('cancelling');
-      expect(events).toEqual([]);
-      await store.mutate(task.taskId, { kind: 'cancelled' });
-      await job.moveToCompleted({ cancelled: true }, 'fixture-lock-97', false);
-      const detail = await f.http.inject({
-        method: 'GET',
-        url: `/api/v1/tasks/${task.taskId}`,
-        headers: owner.headers,
-      });
-      expect(detail.json().data.status).toBe('cancelled');
-    });
+    it.each(['export', 'variant-check'] as const)(
+      'requests running %s cancellation without overwriting payload, keeps progress sticky and accepts Worker acknowledgement',
+      async (type) => {
+        const { task, queue } = await enqueued(type);
+        const job = await activate(queue, task.taskId),
+          data = await redis.hget(queue.toKey(task.taskId), 'data');
+        await store.mutate(task.taskId, { kind: 'processing' });
+        const first = await cancel(task.taskId),
+          second = await cancel(task.taskId);
+        expect(first.statusCode).toBe(200);
+        expect(first.json().data.status).toBe('cancelling');
+        expect(second.json().data.cancelRequestedAt).toBe(
+          first.json().data.cancelRequestedAt,
+        );
+        expect(await job.getState()).toBe('active');
+        expect(await redis.hget(queue.toKey(task.taskId), 'data')).toBe(data);
+        expect(
+          (await store.mutate(task.taskId, { kind: 'progress', progress: 20 }))
+            ?.status,
+        ).toBe('cancelling');
+        expect(events).toEqual([]);
+        await store.mutate(task.taskId, { kind: 'cancelled' });
+        await job.moveToCompleted(
+          { cancelled: true },
+          'fixture-lock-97',
+          false,
+        );
+        const detail = await f.http.inject({
+          method: 'GET',
+          url: `/api/v1/tasks/${task.taskId}`,
+          headers: owner.headers,
+        });
+        expect(detail.json().data.status).toBe('cancelled');
+      },
+    );
     it.each(['completed', 'failed'] as const)(
       'preserves a %s result when execution wins after the HTTP metadata read',
       async (state) => {

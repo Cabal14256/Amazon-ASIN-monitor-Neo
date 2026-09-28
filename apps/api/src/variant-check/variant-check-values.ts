@@ -5,11 +5,19 @@ import {
 import { VariantCheckError } from '@asin-monitor/db';
 import { normalizeCountry } from '@asin-monitor/sp-api';
 
-export type CheckSubType = VariantCheckJobData['taskSubType'];
+export type CheckSubType = Exclude<
+  VariantCheckJobData['taskSubType'],
+  'competitor-asin-check' | 'competitor-variant-group-check'
+>;
 type RequestOf<T> = T extends VariantCheckJobData
   ? Pick<T, 'taskType' | 'taskSubType' | 'params'>
   : never;
-export type CheckRequest = RequestOf<VariantCheckJobData>;
+export type CheckRequest = RequestOf<
+  Exclude<
+    VariantCheckJobData,
+    { taskSubType: 'competitor-asin-check' | 'competitor-variant-group-check' }
+  >
+>;
 export function checkRequestObject(value: unknown): Record<string, unknown> {
   if (value === undefined || value === null) return {};
   if (typeof value !== 'object' || Array.isArray(value))
@@ -61,7 +69,7 @@ export function parseCheckRequest(
         }),
       };
     if (type === 'parent-asin-query') {
-      const params = variantCheckJobSchema.options[2].shape.params.parse({
+      const params = variantCheckJobSchema.options[4].shape.params.parse({
         asins: body.asins,
         country: body.country,
       });
@@ -72,7 +80,7 @@ export function parseCheckRequest(
       return {
         taskType: 'batch-check',
         taskSubType: type,
-        params: variantCheckJobSchema.options[3].shape.params.parse({
+        params: variantCheckJobSchema.options[5].shape.params.parse({
           groupIds: body.groupIds,
           forceRefresh: body.forceRefresh !== false,
           ...(body.country === undefined ? {} : { country: body.country }),
