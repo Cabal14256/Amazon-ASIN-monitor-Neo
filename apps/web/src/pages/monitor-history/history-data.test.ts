@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
   historyError,
+  historyIntervalPosition,
   historyLinkFilter,
   historyNotification,
   historyPageInfo,
@@ -88,6 +89,33 @@ describe('monitor history display boundaries', () => {
     expect(historyWallTime('2026-09-23T09:45:30')).toBe('2026-09-23 09:45:30');
     expect(historyWallTime('2026-02-30T09:45')).toBeUndefined();
     expect(historyWallTime('0000-01-01T00:00')).toBeUndefined();
+  });
+
+  it('clips interval bars to the selected Shanghai wall-clock window', () => {
+    expect(
+      historyIntervalPosition(
+        '2026-09-01 06:00:00',
+        '2026-09-01 18:00:00',
+        '2026-09-01 00:00:00',
+        '2026-09-02 00:00:00',
+      ),
+    ).toEqual({ left: '25%', width: '50%' });
+    expect(
+      historyIntervalPosition(
+        '2026-08-31 23:00:00',
+        null,
+        '2026-09-01 00:00:00',
+        '2026-09-02 00:00:00',
+      ),
+    ).toEqual({ left: '0%', width: '100%' });
+    expect(
+      historyIntervalPosition(
+        '2026-09-03 00:00:00',
+        '2026-09-04 00:00:00',
+        '2026-09-01 00:00:00',
+        '2026-09-02 00:00:00',
+      ),
+    ).toBeUndefined();
   });
 
   it.each([

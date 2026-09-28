@@ -2,6 +2,7 @@ import type { Env } from '@asin-monitor/config';
 import {
   monitorHistoryDetailResultSchema,
   monitorHistoryListResultSchema,
+  monitorStatusIntervalResultSchema,
   type MonitorHistoryRecord,
 } from '@asin-monitor/contracts';
 import {
@@ -69,6 +70,13 @@ function fixture() {
     historyById: vi.fn(
       async (): Promise<MonitorHistoryRecord | null> => record,
     ),
+    listStatusIntervals: vi.fn(async () => ({
+      list: [],
+      total: 0,
+      current: 1,
+      pageSize: 50,
+      coverage: 'complete' as const,
+    })),
   } as unknown as MonitorHistoryQueryUnit;
   const repository: MonitorHistoryQueryRepositoryPort = {
     read: vi.fn(async (action) => action(unit)),
@@ -101,7 +109,11 @@ describe('monitor history HTTP / current transaction authorization', () => {
   let f: ReturnType<typeof fixture>,
     app: Awaited<ReturnType<typeof sessionApp>>,
     headers: { authorization: string };
-  const paths = ['/monitor-history', '/monitor-history/107'];
+  const paths = [
+    '/monitor-history',
+    '/monitor-history/status-intervals?startTime=2026-09-01&endTime=2026-09-02',
+    '/monitor-history/107',
+  ];
   async function start(env: NodeJS.ProcessEnv = {}) {
     app = await sessionApp(
       f.auth,
@@ -144,6 +156,8 @@ describe('monitor history HTTP / current transaction authorization', () => {
       expect(response.headers['cache-control']).toBe('no-store');
       (path === paths[0]
         ? monitorHistoryListResultSchema
+        : path.startsWith('/monitor-history/status-intervals')
+        ? monitorStatusIntervalResultSchema
         : monitorHistoryDetailResultSchema
       ).parse(response.json());
       expect(response.body).toContain('complete');
@@ -204,7 +218,7 @@ describe('monitor history HTTP / current transaction authorization', () => {
   });
   it('returns the existing missing history 404', async () => {
     vi.mocked(f.unit.historyById).mockResolvedValueOnce(null);
-    const response = await get(paths[1]);
+    const response = await get('/monitor-history/107');
     expect(response.statusCode).toBe(404);
     expect(response.json().errorMessage).toBe('监控历史不存在');
   });

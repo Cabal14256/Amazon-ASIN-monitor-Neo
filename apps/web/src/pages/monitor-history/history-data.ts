@@ -119,3 +119,45 @@ export function historyWallTime(value: string): string | undefined {
     return undefined;
   return full.replace('T', ' ');
 }
+
+function historyWallClockMs(value: string): number | undefined {
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(normalized))
+    return undefined;
+  const date = new Date(`${normalized}Z`);
+  if (
+    !Number.isFinite(date.getTime()) ||
+    date.toISOString().slice(0, 19) !== normalized
+  )
+    return undefined;
+  return date.getTime();
+}
+
+/** Position an interval inside the selected Shanghai wall-clock window. */
+export function historyIntervalPosition(
+  intervalStart: string,
+  intervalEnd: string | null,
+  windowStart: string,
+  windowEnd: string,
+): { left: string; width: string } | undefined {
+  const start = historyWallClockMs(intervalStart);
+  const end = intervalEnd ? historyWallClockMs(intervalEnd) : undefined;
+  const rangeStart = historyWallClockMs(windowStart);
+  const rangeEnd = historyWallClockMs(windowEnd);
+  if (
+    start === undefined ||
+    rangeStart === undefined ||
+    rangeEnd === undefined ||
+    rangeEnd <= rangeStart ||
+    (end !== undefined && end <= start)
+  )
+    return undefined;
+  const clippedStart = Math.max(start, rangeStart);
+  const clippedEnd = Math.min(end ?? rangeEnd, rangeEnd);
+  if (clippedEnd <= clippedStart) return undefined;
+  const span = rangeEnd - rangeStart;
+  return {
+    left: `${((clippedStart - rangeStart) / span) * 100}%`,
+    width: `${((clippedEnd - clippedStart) / span) * 100}%`,
+  };
+}

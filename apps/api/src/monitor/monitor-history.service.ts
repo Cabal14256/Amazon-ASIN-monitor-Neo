@@ -1,8 +1,11 @@
 import type { Env } from '@asin-monitor/config';
+import type { MonitorStatusIntervalData } from '@asin-monitor/contracts';
 import {
   MonitorHistoryQueryError,
+  MonitorStatusIntervalQueryError,
   parseMonitorHistoryId,
   parseMonitorHistoryQuery,
+  parseMonitorStatusIntervalQuery,
   type MonitorHistoryQueryRepositoryPort,
   type MonitorHistoryQueryUnit,
 } from '@asin-monitor/db';
@@ -32,7 +35,7 @@ export class MonitorHistoryService {
   private async read<T>(
     principal: AuthPrincipal,
     reply: FastifyReply,
-    operation: 'list' | 'detail',
+    operation: 'list' | 'detail' | 'status-intervals',
     action: (unit: MonitorHistoryQueryUnit) => Promise<T>,
   ): Promise<T> {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -78,6 +81,13 @@ export class MonitorHistoryService {
         if (error.code === 'too-large')
           fail(413, '监控历史结果过大，请缩小查询范围或使用导出');
       }
+      if (error instanceof MonitorStatusIntervalQueryError) {
+        if (error.code === 'input') fail(400, '状态区间查询参数无效');
+        if (error.code === 'capacity')
+          fail(429, '状态区间查询繁忙，请稍后再试');
+        if (error.code === 'too-large')
+          fail(413, '状态区间结果过大，请缩小查询范围');
+      }
       this.logger.error('监控历史查询失败', 'MonitorHistoryService', {
         operation,
         reason: 'monitor_history_query_failed',
@@ -100,6 +110,16 @@ export class MonitorHistoryService {
       const result = await unit.historyById(parseMonitorHistoryId(raw));
       if (!result) fail(404, '监控历史不存在');
       return result;
+    });
+  }
+  statusIntervals(
+    principal: AuthPrincipal,
+    reply: FastifyReply,
+    raw: unknown,
+  ): Promise<MonitorStatusIntervalData> {
+    return this.read(principal, reply, 'status-intervals', async (unit) => {
+      const query = parseMonitorStatusIntervalQuery(raw);
+      return unit.listStatusIntervals(query);
     });
   }
 }

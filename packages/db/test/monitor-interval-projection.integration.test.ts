@@ -7,6 +7,7 @@ import { readMonitorAbnormalQuery } from '../src/repositories/monitor-abnormal-q
 import { monitorIntervalCoverageSelect } from '../src/repositories/monitor-interval-coverage';
 import { PgMonitorIntervalMaintenanceRepository } from '../src/repositories/monitor-interval-maintenance-repository';
 import { reconcileMonitorInterval } from '../src/repositories/monitor-interval-projection';
+import { readMonitorStatusIntervals } from '../src/repositories/monitor-status-interval-query-repository';
 import { legacyAnalyticsFixture } from './helpers/monitor-analytics-legacy';
 
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
@@ -279,6 +280,41 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       expect(fallback.source).toBe('raw');
       expect(fallback.data).toEqual(await legacy.abnormal(query, false));
+    });
+
+    it('returns stale until the projection is reconciled, then reads complete paged intervals', async () => {
+      await seed();
+      const query = {
+        country,
+        asinId: 'interval-109-a',
+        startTime: '1998-01-01 00:00:00',
+        endTime: '1998-01-01 02:00:00',
+        current: 1,
+        pageSize: 10,
+      } as const;
+      const read = () =>
+        createDb(pool).transaction((tx) =>
+          readMonitorStatusIntervals(tx, query, () => {}),
+        );
+      expect(await read()).toMatchObject({
+        coverage: 'stale',
+        list: [],
+        total: 0,
+      });
+      await drain();
+      const result = await read();
+      expect(result.coverage).toBe('complete');
+      expect(result.total).toBe(1);
+      expect(result.list).toEqual([
+        expect.objectContaining({
+          asinKey: 'I109-A',
+          asinId: 'interval-109-a',
+          country,
+          intervalStart: '1998-01-01 00:00:00',
+          intervalEnd: null,
+          isBroken: false,
+        }),
+      ]);
     });
 
     it('preserves first metadata, null flags, fallback keys and same-second transitions across Legacy batches', async () => {

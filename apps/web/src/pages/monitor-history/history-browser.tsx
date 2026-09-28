@@ -1,6 +1,7 @@
 import type {
   MonitorHistoryListQuery,
   MonitorHistoryRecord,
+  MonitorStatusIntervalData,
 } from '@asin-monitor/contracts';
 import { useQuery } from '@tanstack/react-query';
 import { useRouterState } from '@tanstack/react-router';
@@ -24,6 +25,7 @@ import {
 import { ApiError } from '../../lib/http';
 import {
   historyError,
+  historyIntervalPosition,
   historyLinkFilter,
   historyNotification,
   historyPageInfo,
@@ -89,6 +91,79 @@ function ErrorNotice({
       <Button variant="secondary" size="small" className="mt-4" onClick={retry}>
         重试加载
       </Button>
+    </div>
+  );
+}
+
+function StatusIntervalTimeline({
+  data,
+  windowStart,
+  windowEnd,
+}: {
+  data: MonitorStatusIntervalData;
+  windowStart: string;
+  windowEnd: string;
+}) {
+  if (data.coverage === 'stale')
+    return (
+      <p
+        role="status"
+        className="rounded-control bg-status-warning-soft p-3 text-sm text-status-warning"
+      >
+        状态区间尚未覆盖当前时间范围，暂不展示可能不完整的时间轴；检查记录列表仍可用。
+      </p>
+    );
+  if (!data.list.length)
+    return (
+      <EmptyState
+        title="暂无状态区间"
+        description="当前时间范围没有可展示的区间。"
+      />
+    );
+  return (
+    <div className="space-y-3" aria-label="状态区间时间轴">
+      {data.list.map((interval) => (
+        <div
+          key={`${interval.country}:${interval.asinKey}:${interval.intervalStart}`}
+          className="grid gap-2 rounded-control border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,2fr)] sm:items-center"
+        >
+          <div className="min-w-0 text-xs">
+            <p className="truncate font-semibold">
+              {interval.asinName ||
+                interval.asinCode ||
+                interval.asinId ||
+                interval.asinKey}
+            </p>
+            <p className="text-muted-foreground">
+              {interval.country} · {historyTime(interval.intervalStart)} 至{' '}
+              {interval.intervalEnd
+                ? historyTime(interval.intervalEnd)
+                : '仍在持续'}
+            </p>
+          </div>
+          <div
+            className="h-3 overflow-hidden rounded-full bg-muted"
+            aria-hidden="true"
+          >
+            {(() => {
+              const position = historyIntervalPosition(
+                interval.intervalStart,
+                interval.intervalEnd,
+                windowStart,
+                windowEnd,
+              );
+              return position ? (
+                <div
+                  className={`h-full ${
+                    interval.isBroken ? 'bg-status-danger' : 'bg-status-success'
+                  }`}
+                  style={position}
+                />
+              ) : null;
+            })()}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -417,6 +492,26 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
     gcTime: 0,
     refetchOnWindowFocus: true,
   });
+  const intervalQuery =
+    source.getIntervals && query.startTime && query.endTime
+      ? {
+          country: query.country,
+          variantGroupId: query.variantGroupId,
+          asinId: query.asinId,
+          startTime: query.startTime,
+          endTime: query.endTime,
+          current: 1,
+          pageSize: 50,
+        }
+      : null;
+  const intervals = useQuery({
+    queryKey: [source.key, 'status-intervals', intervalQuery],
+    queryFn: ({ signal }) =>
+      source.getIntervals!(runtime.http, intervalQuery!, signal),
+    enabled: intervalQuery !== null,
+    staleTime: 0,
+    gcTime: 0,
+  });
   const accessDenied =
     history.isError &&
     history.error instanceof ApiError &&
@@ -731,6 +826,52 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
             )}
           </CardContent>
         </Card>
+        {source.getIntervals && (
+          <Card>
+            <CardHeader
+              title="状态区间时间轴"
+              description="仅在完整 coverage 下显示维护后的状态区间；coverage 不足时保留历史列表回退。"
+              action={
+                <Button
+                  variant="secondary"
+                  size="small"
+                  disabled={intervalQuery === null || intervals.isFetching}
+                  pending={intervals.isFetching}
+                  onClick={() => {
+                    void intervals.refetch();
+                  }}
+                >
+                  <RefreshCw aria-hidden="true" />
+                  刷新时间轴
+                </Button>
+              }
+            />
+            <CardContent>
+              {intervalQuery === null ? (
+                <p className="text-sm text-muted-foreground">
+                  选择开始和结束时间后读取状态区间。
+                </p>
+              ) : intervals.isPending ? (
+                <Skeleton className="h-20" />
+              ) : intervals.isError ? (
+                <ErrorNotice
+                  title="状态区间暂不可用"
+                  error={intervals.error}
+                  subject="状态区间"
+                  retry={() => {
+                    void intervals.refetch();
+                  }}
+                />
+              ) : intervals.data ? (
+                <StatusIntervalTimeline
+                  data={intervals.data}
+                  windowStart={intervalQuery!.startTime}
+                  windowEnd={intervalQuery!.endTime}
+                />
+              ) : null}
+            </CardContent>
+          </Card>
+        )}
         {visibleSelectedId !== null && (
           <HistoryDetail
             id={visibleSelectedId}
