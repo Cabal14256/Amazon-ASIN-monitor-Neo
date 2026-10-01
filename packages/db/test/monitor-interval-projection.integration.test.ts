@@ -317,6 +317,78 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ]);
     });
 
+    it('paginates a covered window without dropping later intervals and respects global coverage', async () => {
+      await seed();
+      await seed({ hour: 1, broken: true });
+      await drain();
+      const read = (current: number) =>
+        createDb(pool).transaction((tx) =>
+          readMonitorStatusIntervals(
+            tx,
+            {
+              country,
+              asinId: 'interval-109-a',
+              startTime: range.startTime,
+              endTime: '1998-01-01 03:00:00',
+              current,
+              pageSize: 1,
+            },
+            () => {},
+          ),
+        );
+      const first = await read(1);
+      const second = await read(2);
+      expect(first).toMatchObject({
+        coverage: 'complete',
+        total: 2,
+        current: 1,
+      });
+      expect(second).toMatchObject({
+        coverage: 'complete',
+        total: 2,
+        current: 2,
+      });
+      expect(first.list).toHaveLength(1);
+      expect(second.list).toHaveLength(1);
+      expect(first.list[0].isBroken).toBe(false);
+      expect(second.list[0].isBroken).toBe(true);
+      expect(first.list[0].intervalEnd).toBe(second.list[0].intervalStart);
+      // Other suites deliberately retain pending country receipts. An omitted
+      // country must use their real global proof rather than assume completion.
+      await createDb(pool).transaction(
+        async (tx) => {
+          const window = {
+            startTime: range.startTime,
+            endTime: '1998-01-01 03:00:00',
+          };
+          const proof = await tx.execute(
+            monitorIntervalCoverageSelect(
+              parseMonitorAnalyticsQuery(
+                'abnormal-duration-statistics',
+                window,
+              ),
+            ),
+          );
+          const global = await readMonitorStatusIntervals(
+            tx,
+            {
+              ...window,
+              asinId: 'interval-109-a',
+              current: 1,
+              pageSize: 1,
+            },
+            () => {},
+          );
+          expect(global.coverage).toBe(
+            proof.rows[0].covered ? 'complete' : 'stale',
+          );
+          expect(global.total).toBe(proof.rows[0].covered ? 2 : 0);
+          expect(global.list).toHaveLength(proof.rows[0].covered ? 1 : 0);
+        },
+        { isolationLevel: 'repeatable read' },
+      );
+    });
+
     it('preserves first metadata, null flags, fallback keys and same-second transitions across Legacy batches', async () => {
       await seed();
       await seed({

@@ -6,7 +6,13 @@ import type {
 import { useQuery } from '@tanstack/react-query';
 import { useRouterState } from '@tanstack/react-router';
 import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from 'react';
 import { useAuth } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
@@ -23,6 +29,10 @@ import {
   ModuleLabel,
 } from '../../components/ui/surfaces';
 import { ApiError } from '../../lib/http';
+import {
+  createHistoryReadAccess,
+  type HistoryReadAccess,
+} from './history-access';
 import {
   historyError,
   historyIntervalPosition,
@@ -95,14 +105,18 @@ function ErrorNotice({
   );
 }
 
-function StatusIntervalTimeline({
+export function StatusIntervalTimeline({
   data,
   windowStart,
   windowEnd,
+  pending,
+  changePage,
 }: {
   data: MonitorStatusIntervalData;
   windowStart: string;
   windowEnd: string;
+  pending: boolean;
+  changePage: (current: number) => void;
 }) {
   if (data.coverage === 'stale')
     return (
@@ -113,15 +127,14 @@ function StatusIntervalTimeline({
         状态区间尚未覆盖当前时间范围，暂不展示可能不完整的时间轴；检查记录列表仍可用。
       </p>
     );
-  if (!data.list.length)
-    return (
-      <EmptyState
-        title="暂无状态区间"
-        description="当前时间范围没有可展示的区间。"
-      />
-    );
   return (
     <div className="space-y-3" aria-label="状态区间时间轴">
+      {!data.list.length && (
+        <EmptyState
+          title="暂无状态区间"
+          description="当前时间范围没有可展示的区间。"
+        />
+      )}
       {data.list.map((interval) => (
         <div
           key={`${interval.country}:${interval.asinKey}:${interval.intervalStart}`}
@@ -140,9 +153,10 @@ function StatusIntervalTimeline({
                 ? historyTime(interval.intervalEnd)
                 : '仍在持续'}
             </p>
+            <span>{interval.isBroken ? '异常' : '正常'}</span>
           </div>
           <div
-            className="h-3 overflow-hidden rounded-full bg-muted"
+            className="relative h-3 overflow-hidden rounded-full bg-muted"
             aria-hidden="true"
           >
             {(() => {
@@ -154,7 +168,7 @@ function StatusIntervalTimeline({
               );
               return position ? (
                 <div
-                  className={`h-full ${
+                  className={`absolute h-full ${
                     interval.isBroken ? 'bg-status-danger' : 'bg-status-success'
                   }`}
                   style={position}
@@ -164,6 +178,30 @@ function StatusIntervalTimeline({
           </div>
         </div>
       ))}
+      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+        <p role="status">
+          第 {data.current} 页 · 共 {data.total} 个区间 · 每页 {data.pageSize}{' '}
+          条
+        </p>
+        <div className="flex gap-2">
+          <Button
+            variant="secondary"
+            size="small"
+            disabled={pending || data.current <= 1}
+            onClick={() => changePage(data.current - 1)}
+          >
+            上一页区间
+          </Button>
+          <Button
+            variant="secondary"
+            size="small"
+            disabled={pending || data.current * data.pageSize >= data.total}
+            onClick={() => changePage(data.current + 1)}
+          >
+            下一页区间
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -326,15 +364,18 @@ function HistoryDetail({
   id,
   close,
   source,
+  readAccess,
 }: {
   id: number;
   close: () => void;
   source: HistorySource;
+  readAccess: HistoryReadAccess;
 }) {
   const { runtime } = useAuth();
   const detail = useQuery({
     queryKey: [source.key, 'detail', id],
-    queryFn: ({ signal }) => source.getDetail(runtime.http, id, signal),
+    queryFn: ({ signal }) =>
+      readAccess.read(() => source.getDetail(runtime.http, id, signal), signal),
     staleTime: 0,
     gcTime: 0,
     refetchOnWindowFocus: true,
@@ -465,6 +506,12 @@ function HistoryDetail({
 
 export function HistoryBrowser({ source }: { source: HistorySource }) {
   const { runtime } = useAuth();
+  const [readAccess] = useState(createHistoryReadAccess);
+  const access = useSyncExternalStore(
+    readAccess.subscribe,
+    readAccess.getSnapshot,
+    readAccess.getSnapshot,
+  );
   const search = useRouterState({
     select: (state) => state.location.searchStr,
   });
@@ -474,6 +521,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
     initialState.query,
   );
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [intervalPage, setIntervalPage] = useState(1);
   const [filterError, setFilterError] = useState<string | null>(null);
   const previousSearch = useRef(search);
   useEffect(() => {
@@ -482,12 +530,18 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
     const next = historyLinkState(search);
     setFilters(next.filters);
     setQuery(next.query);
+    setIntervalPage(1);
     setSelectedId(null);
     setFilterError(null);
   }, [search]);
   const history = useQuery({
     queryKey: [source.key, 'list', query],
-    queryFn: ({ signal }) => source.getList(runtime.http, query, signal),
+    queryFn: ({ signal }) =>
+      readAccess.read(
+        () => source.getList(runtime.http, query, signal),
+        signal,
+      ),
+    enabled: !access.denial,
     staleTime: 0,
     gcTime: 0,
     refetchOnWindowFocus: true,
@@ -500,23 +554,28 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
           asinId: query.asinId,
           startTime: query.startTime,
           endTime: query.endTime,
-          current: 1,
+          current: intervalPage,
           pageSize: 50,
         }
       : null;
   const intervals = useQuery({
     queryKey: [source.key, 'status-intervals', intervalQuery],
     queryFn: ({ signal }) =>
-      source.getIntervals!(runtime.http, intervalQuery!, signal),
-    enabled: intervalQuery !== null,
+      readAccess.read(
+        () => source.getIntervals!(runtime.http, intervalQuery!, signal),
+        signal,
+      ),
+    enabled: intervalQuery !== null && !access.denial,
     staleTime: 0,
     gcTime: 0,
   });
-  const accessDenied =
-    history.isError &&
-    history.error instanceof ApiError &&
-    [401, 403].includes(history.error.status ?? 0);
-  const data = accessDenied ? undefined : history.data;
+  useEffect(() => {
+    if (!access.denial) return;
+    setSelectedId(null);
+    void runtime.queryClient.cancelQueries({ queryKey: [source.key] });
+    runtime.queryClient.removeQueries({ queryKey: [source.key] });
+  }, [access.denial, runtime.queryClient, source.key]);
+  const data = access.denial ? undefined : history.data;
   const page = data ? historyPageInfo(data) : null;
   const current = data?.current ?? query.current ?? 1;
   const visibleSelectedId =
@@ -565,11 +624,56 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
     setFilterError(null);
     setSelectedId(null);
     setQuery(nextQuery);
+    setIntervalPage(1);
   }
   function changePage(next: number) {
     setSelectedId(null);
     setQuery((previous) => ({ ...previous, current: next }));
   }
+  if (access.denial)
+    return (
+      <AppShell title={source.title}>
+        <div
+          role="alert"
+          className="space-y-3 rounded-control border border-status-danger/25 bg-status-danger-soft p-5 text-status-danger"
+        >
+          <h1 className="font-semibold">读取权限需要重新确认</h1>
+          <p className="text-sm">
+            历史记录、状态区间和详情已隐藏。请确认当前账号权限后重新读取。
+          </p>
+          {access.recoveryFailed && (
+            <p role="status" className="text-sm">
+              重新验证或读取未完成，旧数据继续隐藏，请稍后重试。
+            </p>
+          )}
+          <Button
+            variant="secondary"
+            pending={access.recovering}
+            onClick={() => {
+              const readers: (() => Promise<unknown>)[] = [
+                async () => {
+                  const result = await history.refetch({ throwOnError: true });
+                  if (!result.isSuccess) throw result.error;
+                  return result.data;
+                },
+              ];
+              if (intervalQuery) {
+                readers.push(async () => {
+                  const result = await intervals.refetch({
+                    throwOnError: true,
+                  });
+                  if (!result.isSuccess) throw result.error;
+                  return result.data;
+                });
+              }
+              void readAccess.recover(readers);
+            }}
+          >
+            重新验证并读取
+          </Button>
+        </div>
+      </AppShell>
+    );
   return (
     <AppShell title={source.title}>
       <div className="space-y-6">
@@ -711,6 +815,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
                   onClick={() => {
                     setFilters(EMPTY_FILTERS);
                     setQuery(INITIAL_QUERY);
+                    setIntervalPage(1);
                     setSelectedId(null);
                     setFilterError(null);
                   }}
@@ -830,7 +935,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
           <Card>
             <CardHeader
               title="状态区间时间轴"
-              description="仅在完整 coverage 下显示维护后的状态区间；coverage 不足时保留历史列表回退。"
+              description="选择时间范围后，按国家、变体组 ID 和 ASIN ID 显示已完整核对的区间；其他检查记录筛选不应用于时间轴。"
               action={
                 <Button
                   variant="secondary"
@@ -867,6 +972,8 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
                   data={intervals.data}
                   windowStart={intervalQuery!.startTime}
                   windowEnd={intervalQuery!.endTime}
+                  pending={intervals.isFetching}
+                  changePage={setIntervalPage}
                 />
               ) : null}
             </CardContent>
@@ -876,6 +983,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
           <HistoryDetail
             id={visibleSelectedId}
             source={source}
+            readAccess={readAccess}
             close={() => setSelectedId(null)}
           />
         )}

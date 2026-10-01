@@ -89,6 +89,42 @@ function fixture() {
 }
 
 describe('monitor status interval repository result boundary', () => {
+  it.each(['eu', 'Eu', 'eU'])(
+    'uses the same five-country coverage proof and records for %s and EU',
+    async (country) => {
+      const upper = fixture();
+      const lower = fixture();
+      await readMonitorStatusIntervals(
+        upper.db,
+        { ...upper.query, country: 'EU' },
+        () => {},
+      );
+      await readMonitorStatusIntervals(
+        lower.db,
+        { ...lower.query, country },
+        () => {},
+      );
+      const lowerCall = lower.execute.mock.calls.at(-1) as unknown as [
+        { text: string },
+        unknown[],
+      ];
+      const upperCall = upper.execute.mock.calls.at(-1) as unknown as [
+        { text: string },
+        unknown[],
+      ];
+      expect(lowerCall[0].text).toBe(upperCall[0].text);
+      expect(lowerCall[1]).toEqual(upperCall[1]);
+    },
+  );
+  it('reads the default all-country window without requiring a country filter', async () => {
+    const f = fixture();
+    const { country: _country, ...query } = f.query;
+    const result = await readMonitorStatusIntervals(f.db, query, () => {});
+    expect(result.coverage).toBe('complete');
+    expect(result.list[0].country).toBe('US');
+    expect(f.execute).toHaveBeenCalledTimes(3);
+  });
+
   it('returns complete rows after the coverage proof and checks connection lifetime', async () => {
     const f = fixture();
     const ensureOpen = vi.fn();

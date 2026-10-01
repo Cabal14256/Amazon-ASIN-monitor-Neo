@@ -102,7 +102,12 @@ export async function readMonitorStatusIntervals(
   const coverageQuery = parseMonitorAnalyticsQuery(
     'abnormal-duration-statistics',
     {
-      country: query.country,
+      ...(query.country
+        ? {
+            country:
+              query.country.toUpperCase() === 'EU' ? 'EU' : query.country,
+          }
+        : {}),
       startTime: query.startTime,
       endTime: query.endTime,
     },
