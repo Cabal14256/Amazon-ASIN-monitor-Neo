@@ -354,6 +354,9 @@ export class DrizzleVariantCheckUnit
             ? 'SP_API_ERROR'
             : observation.kind === 'checked' && !observation.result.hasVariants
             ? observation.result.errorType || 'NO_VARIANTS'
+            : effective.statusSource === 'MANUAL' ||
+              effective.statusSource === 'AUTO+MANUAL'
+            ? 'MANUAL_MARKED'
             : undefined;
         return {
           monitorTaskId: taskId,

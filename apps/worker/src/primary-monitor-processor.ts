@@ -16,6 +16,7 @@ import {
   NOTIFICATION_MAX_TEXT_BYTES,
   NotificationError,
   snapshotNotification,
+  validateCountryNotification,
   type FeishuNotifications,
   type NotificationData,
 } from '@asin-monitor/notify';
@@ -114,9 +115,12 @@ function reserveNotification(
 
 function validateNotificationSummary(
   summary: CountrySummary,
+  country: string,
 ): NotificationData {
   try {
-    return snapshotNotification(summary);
+    const snapshot = snapshotNotification(summary);
+    validateCountryNotification('primary', country, snapshot);
+    return snapshot;
   } catch (error) {
     if (error instanceof NotificationError && error.reason === 'invalid-input')
       throw new MonitorNotificationCapacityError();
@@ -277,7 +281,7 @@ export function createPrimaryMonitorProcessor(
             addGroup(countryResults[country], result);
             // Stop before the next history commit when a country can no
             // longer fit the exact untruncated notification contract.
-            validateNotificationSummary(countryResults[country]);
+            validateNotificationSummary(countryResults[country], country);
           } catch (error) {
             if (
               !(error instanceof VariantCheckError) ||
@@ -314,7 +318,7 @@ export function createPrimaryMonitorProcessor(
       const notificationSnapshots = Object.fromEntries(
         data.countries.map((country) => [
           country,
-          validateNotificationSummary(countryResults[country]),
+          validateNotificationSummary(countryResults[country], country),
         ]),
       ) as Record<string, NotificationData>;
       const notificationResults: Record<string, string> = {};

@@ -278,6 +278,40 @@ describe('primary monitor BullMQ processor', () => {
       expect(f.sendCountry).not.toHaveBeenCalled();
     },
   );
+  it('rejects a rendered country card before claiming any country delivery', async () => {
+    const f = fixture();
+    const asins = Array.from(
+      { length: 5000 },
+      (_, index) => `B${String(index).padStart(9, '0')}`,
+    );
+    // US is small; the later DE card exceeds the sender limit after Markdown
+    // expansion, while its raw notification text remains within the input cap.
+    f.checkGroup.mockImplementation(async (id) =>
+      id === 'g1'
+        ? result(id, false)
+        : {
+            ...result(id, true),
+            brokenASINs: asins.map((asin) => ({ asin, statusSource: 'AUTO' })),
+            groupSnapshot: {
+              ...result(id, true).groupSnapshot,
+              children: asins.map((asin) => ({
+                asin,
+                brand: 'B'.repeat(140),
+                feishuNotifyEnabled: 1,
+              })),
+            },
+          },
+    );
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.checkGroup).toHaveBeenCalledTimes(2);
+    expect(f.state.status).toBe('failed');
+    expect(f.state.message).toContain('通知摘要超出容量');
+    expect(f.claimNotification).not.toHaveBeenCalled();
+    expect(f.completeNotification).not.toHaveBeenCalled();
+    expect(f.sendCountry).not.toHaveBeenCalled();
+  });
   it('timestamps the country after its group checks finish', async () => {
     const f = fixture();
     f.data.countries = ['US'];

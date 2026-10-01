@@ -68,7 +68,7 @@ export function getQueuePolicy(name: QueueName, env: Env) {
     ...(policy.attempts > 1
       ? { backoff: { type: 'exponential' as const, delay: 5000 } }
       : {}),
-    // Completed monitor jobs are the recovery receipt when the final task
+    // Terminal monitor jobs are the recovery receipt when the final task
     // registry write fails. Keep them for the full bounded metadata lifetime.
     removeOnComplete: {
       age:
@@ -76,7 +76,12 @@ export function getQueuePolicy(name: QueueName, env: Env) {
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
           : policy.completeAge,
     },
-    removeOnFail: { age: policy.failureAge },
+    removeOnFail: {
+      age:
+        name === 'monitor'
+          ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
+          : policy.failureAge,
+    },
   };
   const limiter =
     name === 'monitor'

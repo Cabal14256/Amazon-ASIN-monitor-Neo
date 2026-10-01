@@ -1,5 +1,11 @@
 import { loadEnv } from '@asin-monitor/config';
-import { Queue, QueueEvents, Worker } from 'bullmq';
+import {
+  Queue,
+  QueueEvents,
+  UnrecoverableError,
+  Worker,
+  type Job,
+} from 'bullmq';
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
@@ -93,11 +99,14 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
   20_000,
 );
 
-it
-  .skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')
-  .each(['604800', '1209600'])(
-  'real monitor cleanup preserves the completion receipt through metadata TTL %s and then expires it',
-  async (ttl) => {
+it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
+  { ttl: '604800', status: 'completed' },
+  { ttl: '1209600', status: 'completed' },
+  { ttl: '604800', status: 'failed' },
+  { ttl: '1209600', status: 'failed' },
+] as const)(
+  'real monitor cleanup retains the $status receipt through metadata TTL $ttl and then expires it',
+  async ({ ttl, status }) => {
     const env = loadEnv({
       ...process.env,
       BULL_PREFIX: `fixture-${randomUUID()}`,
@@ -106,7 +115,13 @@ it
     const connection = parseRedisUrl(env.REDIS_URL);
     const [plan] = buildWorkerPlans(
       ['monitor'],
-      { monitor: async () => ({ totalChecked: 1, success: true }) },
+      {
+        monitor: async () => {
+          if (status === 'failed')
+            throw new UnrecoverableError('fixture terminal failure');
+          return { totalChecked: 1, success: true };
+        },
+      },
       env,
       connection,
     );
@@ -123,31 +138,45 @@ it
     const errors: string[] = [];
     for (const resource of [queue, events, worker, redis])
       resource.on('error', () => errors.push('fixture connection error'));
+    const finish = async (job: Job) => {
+      if (status === 'failed')
+        await expect(job.waitUntilFinished(events, 5000)).rejects.toThrow(
+          'fixture terminal failure',
+        );
+      else
+        await expect(job.waitUntilFinished(events, 5000)).resolves.toEqual({
+          totalChecked: 1,
+          success: true,
+        });
+    };
     try {
       await events.waitUntilReady();
       const receipt = await queue.add('primary-monitor', {});
-      await receipt.waitUntilFinished(events, 5000);
-      const age = getQueuePolicy('monitor', env).defaultJobOptions
-        .removeOnComplete.age;
-      // Age only this isolated fixture's completed index; no wall-clock wait.
+      await finish(receipt);
+      const policy = getQueuePolicy('monitor', env).defaultJobOptions;
+      const age = (
+        status === 'completed' ? policy.removeOnComplete : policy.removeOnFail
+      ).age;
+      // Age only this isolated fixture's terminal index; no wall-clock wait.
       await redis.zadd(
-        queue.toKey('completed'),
+        queue.toKey(status),
         Date.now() - (age - 60) * 1000,
         receipt.id!,
       );
       const cleanup = await queue.add('primary-monitor', {});
-      await cleanup.waitUntilFinished(events, 5000);
-      expect((await queue.getJob(receipt.id!))?.returnvalue).toEqual({
-        totalChecked: 1,
-        success: true,
-      });
+      await finish(cleanup);
+      const saved = await queue.getJob(receipt.id!);
+      expect(await saved?.getState()).toBe(status);
+      if (status === 'completed')
+        expect(saved?.returnvalue).toEqual({ totalChecked: 1, success: true });
+      else expect(saved?.failedReason).toBe('fixture terminal failure');
       await redis.zadd(
-        queue.toKey('completed'),
+        queue.toKey(status),
         Date.now() - (age + 60) * 1000,
         receipt.id!,
       );
       const expiredCleanup = await queue.add('primary-monitor', {});
-      await expiredCleanup.waitUntilFinished(events, 5000);
+      await finish(expiredCleanup);
       expect(await queue.getJob(receipt.id!)).toBeUndefined();
       expect(errors).toEqual([]);
     } finally {

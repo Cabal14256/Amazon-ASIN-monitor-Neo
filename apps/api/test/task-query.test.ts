@@ -206,6 +206,33 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(task).toEqual(before);
     expect(port.store.mutate).not.toHaveBeenCalled();
   });
+  it('reconciles a six-day-old failed monitor receipt after its final registry write failed', async () => {
+    const sixDaysAgo = new Date(Date.now() - 6 * 86_400_000).toISOString();
+    task = taskFixture({
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      status: 'processing',
+      createdAt: sixDaysAgo,
+      updatedAt: sixDaysAgo,
+    });
+    queue = { ...task, status: 'failed', error: 'private-driver-error' };
+    const response = await get();
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      status: 'failed',
+      error: '任务执行失败',
+    });
+    expect(response.body).not.toContain('private-driver-error');
+    expect(port.store.mutate).toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ kind: 'failed' }),
+      expect.objectContaining({
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        createdAt: task.createdAt,
+      }),
+    );
+  });
   it('finishes a monitor cancellation when it races with queue completion', async () => {
     task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });
     queue = { ...task, status: 'completed', result: { totalChecked: 2 } };
