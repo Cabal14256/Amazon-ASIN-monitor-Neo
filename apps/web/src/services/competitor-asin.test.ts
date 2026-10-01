@@ -200,13 +200,148 @@ describe('competitor catalog transport', () => {
     ).rejects.toMatchObject({
       kind: 'INVALID_INPUT',
     });
-    await expect(getCompetitorGroup(http, ' group ')).rejects.toMatchObject({
-      kind: 'INVALID_INPUT',
-    });
+    for (const id of [
+      '',
+      ' ',
+      '.',
+      '..',
+      'a/b',
+      'a\\b',
+      'a?b',
+      'a#b',
+      'a\tb',
+      'a\nb',
+      'a\u0000b',
+      'a\u007fb',
+      '🔎'.repeat(51),
+    ]) {
+      await expect(getCompetitorGroup(http, id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+      await expect(deleteCompetitorAsin(http, id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+    }
     await expect(
       createCompetitorGroup(http, { name: '', country: 'DE', brand: 'Rival' }),
     ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(['/api', 'https://app.test/api/'])(
+    'preserves migrated PADSPACE group and child IDs through reads and writes with %s',
+    async (baseURL) => {
+      const groupId = 'Gróup ';
+      const childId = 'Ásin ';
+      const targetId = ' Gróup cible ';
+      const child = {
+        ...group.children[0],
+        id: childId,
+        variantGroupId: groupId,
+      };
+      const migrated = { ...group, id: groupId, children: [child] };
+      const fetcher = vi.fn<typeof fetch>(async (url, options) =>
+        jsonResponse({
+          success: true,
+          errorCode: 0,
+          data:
+            options?.method === 'DELETE'
+              ? '删除成功'
+              : new URL(String(url)).pathname.includes('/asins')
+              ? child
+              : new URL(String(url)).pathname.endsWith('/variant-groups')
+              ? {
+                  list: [migrated],
+                  total: 1,
+                  totalASINs: 1,
+                  current: 1,
+                  pageSize: 20,
+                }
+              : migrated,
+        }),
+      );
+      const http = client(baseURL, fetcher);
+      const list = await getCompetitorGroups(http, {});
+      const detail = await getCompetitorGroup(http, list.list[0].id);
+      expect(detail.id).toBe(groupId);
+      expect(detail.children?.[0].id).toBe(childId);
+      const groupInput = {
+        name: group.name,
+        country: group.country,
+        brand: group.brand,
+      };
+      const childInput = {
+        asin: child.asin,
+        country: child.country,
+        brand: group.brand,
+      };
+      const expectedSource = {
+        ...childInput,
+        variantGroupId: groupId,
+        name: null,
+        asinType: null,
+      };
+      await updateCompetitorGroup(http, detail.id, groupInput);
+      await deleteCompetitorGroup(http, detail.id, [childId]);
+      await createCompetitorAsin(http, { ...childInput, parentId: detail.id });
+      await updateCompetitorAsin(http, childId, {
+        ...childInput,
+        expectedSource,
+      });
+      await moveCompetitorAsin(http, childId, {
+        targetGroupId: targetId,
+        expectedSourceGroup: detail.id,
+      });
+      await deleteCompetitorAsin(http, childId, expectedSource);
+      const groupPath = '/api/v1/competitor/variant-groups/Gr%C3%B3up%20';
+      const childPath = '/api/v1/competitor/asins/%C3%81sin%20';
+      expect(
+        fetcher.mock.calls.map(([url, options]) => [
+          options?.method,
+          new URL(String(url)).pathname,
+        ]),
+      ).toEqual([
+        ['GET', '/api/v1/competitor/variant-groups'],
+        ['GET', groupPath],
+        ['PUT', groupPath],
+        ['DELETE', groupPath],
+        ['POST', '/api/v1/competitor/asins'],
+        ['PUT', childPath],
+        ['POST', `${childPath}/move`],
+        ['DELETE', childPath],
+      ]);
+      expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body))).toEqual({
+        expectedChildIds: [childId],
+      });
+      expect(JSON.parse(String(fetcher.mock.calls[4][1]?.body))).toMatchObject({
+        parentId: groupId,
+      });
+      expect(JSON.parse(String(fetcher.mock.calls[5][1]?.body))).toMatchObject({
+        expectedSource,
+      });
+      expect(JSON.parse(String(fetcher.mock.calls[6][1]?.body))).toEqual({
+        targetGroupId: targetId,
+        expectedSourceGroup: groupId,
+      });
+      expect(JSON.parse(String(fetcher.mock.calls[7][1]?.body))).toEqual({
+        expectedSource,
+      });
+      expect(
+        fetcher.mock.calls.every(([url]) => !String(url).includes('/api/api/')),
+      ).toBe(true);
+    },
+  );
+
+  it('counts Unicode code points without shortening a valid 50-character ID', async () => {
+    const id = '🔎'.repeat(49) + ' ';
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ success: true, errorCode: 0, data: { ...group, id } }),
+    );
+    const http = client('/api', fetcher);
+    await expect(getCompetitorGroup(http, id)).resolves.toMatchObject({ id });
+    expect(new URL(String(fetcher.mock.calls[0][0])).pathname).toBe(
+      `/api/v1/competitor/variant-groups/${encodeURIComponent(id)}`,
+    );
   });
 
   it('rejects a success envelope without write data and budgets full group responses', async () => {

@@ -30,17 +30,17 @@ const GROUP_OPTIONS = { timeoutMs: 120_000, maxResponseBytes: RESPONSE_LIMIT };
 
 function segment(id: string): string {
   if (
-    !id ||
+    !id.trim() ||
     id === '.' ||
     id === '..' ||
-    id.trim() !== id ||
     [...id].length > 50 ||
     /[\\/?#]/.test(id) ||
     [...id].some(
-      (char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127,
+      (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
     )
   )
     throw new ApiError('INVALID_INPUT', '竞品 ASIN 或变体组 ID 无效');
+  // Migrated IDs retain their original case, accents and PADSPACE suffix.
   return encodeURIComponent(id);
 }
 
