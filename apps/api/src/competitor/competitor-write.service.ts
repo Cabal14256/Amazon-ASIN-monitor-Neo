@@ -217,14 +217,17 @@ export class CompetitorWriteService implements OnModuleDestroy {
     });
   }
   moveAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
-    return this.write(principal, 'move-asin', async (unit) =>
-      mapCompetitorAsinWrite(
+    return this.write(principal, 'move-asin', async (unit) => {
+      const { targetGroupId, expectedSourceGroup } =
+        parseCompetitorAsinMove(body);
+      return mapCompetitorAsinWrite(
         await unit.moveAsin(
           parseCompetitorWriteId(id),
-          parseCompetitorAsinMove(body).targetGroupId,
+          targetGroupId,
+          expectedSourceGroup,
         ),
-      ),
-    );
+      );
+    });
   }
   deleteGroup(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'delete-group', async (unit) => {

@@ -337,7 +337,34 @@ describe('competitor writes HTTP / current primary authorization', () => {
       name: null,
       parentId: 'group-119',
     });
-    expect(f.unit.moveAsin).toHaveBeenCalledWith('asin-119', 'group-target');
+    expect(f.unit.moveAsin).toHaveBeenCalledWith(
+      'asin-119',
+      'group-target',
+      undefined,
+    );
+  });
+  it('forwards the original move parent and reports a locked source conflict', async () => {
+    const body = {
+      targetGroupId: 'group-target',
+      expectedSourceGroup: 'group-119',
+    };
+    expect((await request(cases[4], headers, body)).statusCode).toBe(200);
+    expect(f.unit.moveAsin).toHaveBeenCalledWith(
+      'asin-119',
+      'group-target',
+      'group-119',
+    );
+    vi.mocked(f.unit.moveAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    expect((await request(cases[4], headers, body)).statusCode).toBe(409);
+    for (const expectedSourceGroup of ['', null, [], 'g'.repeat(51)]) {
+      expect(
+        (await request(cases[4], headers, { ...body, expectedSourceGroup }))
+          .statusCode,
+      ).toBe(400);
+    }
+    expect(f.unit.moveAsin).toHaveBeenCalledTimes(2);
   });
   it('passes source snapshots into locked writes and returns a conflict when they change', async () => {
     const expectedGroup = {
@@ -395,7 +422,7 @@ describe('competitor writes HTTP / current primary authorization', () => {
     expect(conflict.statusCode).toBe(409);
     expect(conflict.json().errorMessage).toContain('已变化');
   });
-  it('requires a distinct confirmed child set before deleting a group', async () => {
+  it('preserves bodyless Legacy deletes and validates optional Neo child snapshots', async () => {
     expect(
       (
         await app.http.inject({
@@ -404,9 +431,12 @@ describe('competitor writes HTTP / current primary authorization', () => {
           headers,
         })
       ).statusCode,
-    ).toBe(400);
+    ).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', undefined);
+    expect((await request(cases[5], headers, {})).statusCode).toBe(200);
+    vi.mocked(f.unit.deleteGroup).mockClear();
     for (const body of [
-      {},
+      { expectedChildIds: null },
       { expectedChildIds: 'asin-119' },
       { expectedChildIds: ['asin-119', 'asin-119'] },
       { expectedChildIds: [''] },
@@ -416,6 +446,10 @@ describe('competitor writes HTTP / current primary authorization', () => {
     expect(f.unit.deleteGroup).not.toHaveBeenCalled();
     expect((await request(cases[5])).statusCode).toBe(200);
     expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', ['asin-119']);
+    expect(
+      (await request(cases[5], headers, { expectedChildIds: [] })).statusCode,
+    ).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', []);
   });
   it('reports changed group membership as a conflict without exposing child IDs', async () => {
     vi.mocked(f.unit.deleteGroup).mockRejectedValue(

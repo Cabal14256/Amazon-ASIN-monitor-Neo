@@ -827,6 +827,13 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     () => ['catalog-write-safety', ownerId, config.id] as const,
     [config.id, ownerId],
   );
+  const [storageUnavailable, setStorageUnavailable] = useState(() =>
+    Boolean(ownerId && config.writes && !catalogSafetyStorage()),
+  );
+  const [storageRecoveryError, setStorageRecoveryError] = useState<
+    string | null
+  >(null);
+  const [recoveringStorage, setRecoveringStorage] = useState(false);
   const safety = useQuery<CatalogSafetyGate | null>({
     queryKey: safetyKey,
     queryFn: () => null,
@@ -834,9 +841,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     initialData: () => {
       if (!ownerId || !config.writes) return null;
       const stored = catalogSafetyStorage();
-      return stored
-        ? readCatalogSafetyGate(stored, ownerId, config.id)
-        : { phase: 'inspection' };
+      return stored ? readCatalogSafetyGate(stored, ownerId, config.id) : null;
     },
     gcTime: Infinity,
   }).data;
@@ -845,6 +850,14 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     expected?: CatalogSafetyGate,
   ): boolean => {
     const stored = catalogSafetyStorage();
+    if (!stored) {
+      setStorageUnavailable(true);
+      runtime.queryClient.setQueryData(
+        safetyKey,
+        expected ?? next ?? safety ?? null,
+      );
+      return false;
+    }
     const current = stored
       ? readCatalogSafetyGate(stored, ownerId, config.id)
       : null;
@@ -857,9 +870,10 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     }
     const saved =
       stored && writeCatalogSafetyGate(stored, ownerId, config.id, next);
+    if (!saved) setStorageUnavailable(true);
     runtime.queryClient.setQueryData(
       safetyKey,
-      saved ? next : { phase: 'inspection' },
+      saved ? next : current ?? expected ?? next,
     );
     return Boolean(saved);
   };
@@ -873,11 +887,13 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   };
   const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {
     const stored = catalogSafetyStorage();
-    if (!stored)
+    if (!stored) {
+      setStorageUnavailable(true);
       throw new ApiError(
         'INVALID_INPUT',
         '浏览器本地存储不可用，无法安全提交。',
       );
+    }
     const existing = readCatalogSafetyGate(stored, ownerId, config.id);
     if (existing) {
       runtime.queryClient.setQueryData(safetyKey, existing);
@@ -894,18 +910,24 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
         candidate.type === 'create-group' || candidate.type === 'create-asin',
       operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     };
-    if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate))
+    if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {
+      setStorageUnavailable(true);
       throw new ApiError(
         'INVALID_INPUT',
         '无法保存写入状态，请检查浏览器本地存储权限。',
       );
+    }
     return gate;
   };
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
-  const canWrite = Boolean(config.writes && access.canWriteASIN && !safety);
-  const canDelete = Boolean(config.writes && access.canDeleteASIN && !safety);
+  const canWrite = Boolean(
+    config.writes && access.canWriteASIN && !safety && !storageUnavailable,
+  );
+  const canDelete = Boolean(
+    config.writes && access.canDeleteASIN && !safety && !storageUnavailable,
+  );
   const [action, setAction] = useState<CatalogAction | null>(null);
   const [actionSerial, setActionSerial] = useState(0);
   const [writing, setWriting] = useState(false);
@@ -1209,7 +1231,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           ? readCatalogSafetyGate(stored, ownerId, config.id)
           : null;
         if (!stored) {
-          runtime.queryClient.setQueryData(safetyKey, { phase: 'inspection' });
+          setStorageUnavailable(true);
           return;
         }
         if (!current) {
@@ -1251,7 +1273,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           ? readCatalogSafetyGate(stored, ownerId, config.id)
           : null;
         if (!stored) {
-          runtime.queryClient.setQueryData(safetyKey, { phase: 'inspection' });
+          setStorageUnavailable(true);
           return;
         }
         if (!current) {
@@ -1276,6 +1298,62 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     }
   }
 
+  async function recoverStorage() {
+    if (recoveringStorage) return;
+    setRecoveringStorage(true);
+    setStorageRecoveryError(null);
+    try {
+      await runWithCatalogLock(async () => {
+        const stored = catalogSafetyStorage();
+        if (!stored) {
+          setStorageRecoveryError(
+            '本地存储仍不可用，请允许此站点保存数据后重试。',
+          );
+          return;
+        }
+        const outstanding =
+          readCatalogSafetyGate(stored, ownerId, config.id) ??
+          runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+        if (outstanding) {
+          // Storage recovery must never acknowledge an unconfirmed mutation.
+          runtime.queryClient.setQueryData(safetyKey, outstanding);
+        } else {
+          await readAfterWrite(null);
+          runtime.queryClient.setQueryData(
+            safetyKey,
+            readCatalogSafetyGate(stored, ownerId, config.id),
+          );
+        }
+        setStorageUnavailable(false);
+      });
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) reportAccessDenied();
+      else
+        setStorageRecoveryError(
+          '恢复检查未完成，请确认本地存储及跨标签锁可用，并重试读取目录。',
+        );
+    } finally {
+      setRecoveringStorage(false);
+    }
+  }
+
+  const storageWarning = storageUnavailable && (
+    <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
+      <p role="alert">
+        浏览器本地存储不可用，写入已暂停。可继续查看目录；请允许此站点保存数据后检查恢复。已有待核实操作会继续保留。
+      </p>
+      {storageRecoveryError && <p role="status">{storageRecoveryError}</p>}
+      <Button
+        variant="secondary"
+        size="small"
+        pending={recoveringStorage}
+        onClick={() => void recoverStorage()}
+      >
+        检查存储并恢复
+      </Button>
+    </div>
+  );
+
   if (accessDenied)
     return (
       <AppShell title={config.title}>
@@ -1298,13 +1376,18 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   if (safety?.phase === 'refresh')
     return (
       <AppShell title={config.title}>
+        {storageWarning}
         <div className="space-y-3 rounded-control bg-status-warning-soft p-5 text-sm text-status-warning">
           <p role="alert">
             {safety.message
               ? '写入请求已完成，但目录或详情刷新失败。旧数据已隐藏，请重新读取后继续操作。'
               : '写入结果未确认。旧数据已隐藏，请重新读取核实后再操作，勿直接重试。'}
           </p>
-          <Button variant="secondary" onClick={() => void retryAfterWrite()}>
+          <Button
+            variant="secondary"
+            disabled={storageUnavailable}
+            onClick={() => void retryAfterWrite()}
+          >
             重新读取目录
           </Button>
         </div>
@@ -1342,6 +1425,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           </div>
         </section>
 
+        {storageWarning}
         {safety?.phase === 'inspection' && (
           <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
             <p role="alert">
@@ -1350,6 +1434,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
             <Button
               variant="secondary"
               size="small"
+              disabled={storageUnavailable}
               onClick={() => void reconcileCreate()}
             >
               已核实原操作，重读目录并恢复写入

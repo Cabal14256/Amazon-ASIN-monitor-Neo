@@ -297,9 +297,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await history();
       const before = await snapshot(),
         savedHistory = await histories();
-      const response = await request('DELETE', 'variant-groups/g1', {
-          expectedChildIds: ['a1'],
-        }),
+      const response = await request('DELETE', 'variant-groups/g1'),
         source = await legacy.deleteGroup('g1');
       expect(response.statusCode).toBe(200);
       expect(response.headers['cache-control']).toBe('no-store');
@@ -894,6 +892,65 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ).json(),
           (await legacy.detail(id)).body,
         );
+    });
+    it('rejects a move already stale before the transaction starts, including a stale same-target move', async () => {
+      await group('g1');
+      await group('g2');
+      await group('g3');
+      await asin('a1');
+      expect(
+        (await request('POST', 'asins/a1/move', { targetGroupId: 'g2' }))
+          .statusCode,
+      ).toBe(200);
+      const before = await snapshot();
+      for (const targetGroupId of ['g2', 'g3']) {
+        const response = await request('POST', 'asins/a1/move', {
+          targetGroupId,
+          expectedSourceGroup: 'g1',
+        });
+        expect(response.statusCode).toBe(409);
+        expect(await snapshot()).toEqual(before);
+      }
+      expect(
+        (
+          await request('POST', 'asins/a1/move', {
+            targetGroupId: 'g3',
+            expectedSourceGroup: 'g2',
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect((await snapshot()).asins[0].variant_group_id).toBe('g3');
+    });
+    it('rechecks the confirmed move parent after waiting for its row lock', async () => {
+      await group('g1');
+      await group('g2');
+      await group('g3');
+      await asin('a1');
+      const client = await f.pools.competitorPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+        );
+        pending = Promise.resolve(
+          request('POST', 'asins/a1/move', {
+            targetGroupId: 'g3',
+            expectedSourceGroup: 'g1',
+          }),
+        );
+        await blocked(client);
+        await client.query(
+          "UPDATE competitor_asins SET variant_group_id='g2' WHERE id='a1'",
+        );
+        await client.query('COMMIT');
+        expect((await pending).statusCode).toBe(409);
+        expect((await snapshot()).asins[0].variant_group_id).toBe('g2');
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+        await pending?.catch(() => {});
+      }
     });
     it('keeps same-group moves as true no-ops', async () => {
       await group('g1');

@@ -284,7 +284,10 @@ describe('competitor catalog single-item controls', () => {
           },
         });
       if (action.type === 'move-asin') {
-        expect(options.json).toEqual({ targetGroupId: target.id });
+        expect(options.json).toEqual({
+          targetGroupId: target.id,
+          expectedSourceGroup: group.id,
+        });
         expect(f.detail).toHaveBeenCalledWith(expect.anything(), target.id);
       }
       expect(f.close).toHaveBeenCalledOnce();

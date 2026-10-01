@@ -10,6 +10,7 @@ import {
   competitorGroupUpsertRequestSchema,
   competitorMonitorHistoryListResultSchema,
   competitorMonitorTriggerResultSchema,
+  competitorMoveAsinRequestSchema,
 } from '../src/domains/competitor';
 
 /**
@@ -17,6 +18,23 @@ import {
  */
 
 describe('competitor 域', () => {
+  it('keeps the Legacy move shape and preserves an optional confirmed source group', () => {
+    expect(
+      competitorMoveAsinRequestSchema.parse({ targetGroupId: 'g2' }),
+    ).toEqual({ targetGroupId: 'g2' });
+    expect(
+      competitorMoveAsinRequestSchema.parse({
+        targetGroupId: 'g2',
+        expectedSourceGroup: 'g1',
+      }),
+    ).toEqual({ targetGroupId: 'g2', expectedSourceGroup: 'g1' });
+    expect(
+      competitorMoveAsinRequestSchema.safeParse({
+        targetGroupId: 'g2',
+        expectedSourceGroup: '',
+      }).success,
+    ).toBe(false);
+  });
   it('竞对变体组列表：无 site，children 无人工异常装饰', () => {
     const parsed = competitorGroupListResultSchema.parse({
       success: true,
@@ -155,9 +173,7 @@ describe('competitor 域', () => {
         expectedChildIds: ['ca1', 'ca2'],
       }),
     ).toEqual({ expectedChildIds: ['ca1', 'ca2'] });
-    expect(competitorDeleteGroupRequestSchema.safeParse({}).success).toBe(
-      false,
-    );
+    expect(competitorDeleteGroupRequestSchema.safeParse({}).success).toBe(true);
     expect(
       competitorDeleteGroupRequestSchema.safeParse({
         expectedChildIds: [],

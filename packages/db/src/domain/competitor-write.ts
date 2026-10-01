@@ -42,9 +42,13 @@ export interface CompetitorWriteUnit
     fields: CompetitorAsinWriteFields,
     expectedSource?: CompetitorAsinSource,
   ): Promise<CompetitorAsin>;
-  moveAsin(id: string, targetGroupId: string): Promise<CompetitorAsin>;
+  moveAsin(
+    id: string,
+    targetGroupId: string,
+    expectedSourceGroup?: string,
+  ): Promise<CompetitorAsin>;
   batchCreateAsins(items: unknown[]): Promise<BatchCreateAsinsData>;
-  deleteGroup(id: string, expectedChildIds: string[]): Promise<void>;
+  deleteGroup(id: string, expectedChildIds?: string[]): Promise<void>;
   deleteAsin(id: string, expectedSource?: CompetitorAsinSource): Promise<void>;
   updateGroupNotify(
     id: string,

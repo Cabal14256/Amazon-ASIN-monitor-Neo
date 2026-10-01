@@ -14,19 +14,16 @@ export function catalogSafetyKey(owner: string, source: string): string {
   )}:${encodeURIComponent(source)}`;
 }
 
-let writableStorage: Storage | null | undefined;
 export function catalogSafetyStorage(): Storage | null {
-  if (writableStorage !== undefined) return writableStorage;
   try {
     if (typeof window === 'undefined') return null;
     const stored = window.localStorage;
     stored.setItem('neo:catalog-write-safety-probe', '1');
     stored.removeItem('neo:catalog-write-safety-probe');
-    writableStorage = stored;
+    return stored;
   } catch {
-    writableStorage = null;
+    return null;
   }
-  return writableStorage;
 }
 
 export function readCatalogSafetyGate(

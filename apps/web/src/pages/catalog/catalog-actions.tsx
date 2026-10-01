@@ -358,6 +358,9 @@ export function CatalogActionPanel({
             case 'move-asin':
               await writes.moveAsin(http, action.child.id, {
                 targetGroupId: targetGroupId.trim(),
+                ...(config.id === 'competitor'
+                  ? { expectedSourceGroup: action.group.id }
+                  : {}),
               });
               break;
             case 'delete-asin':

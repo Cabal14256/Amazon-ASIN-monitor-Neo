@@ -126,9 +126,9 @@ export type CompetitorUpdateGroupRequest = z.infer<
   typeof competitorUpdateGroupRequestSchema
 >;
 
-/** The confirmed child set must be checked again under the group's delete lock. */
+/** Legacy callers may omit a snapshot; Neo confirms children under the delete lock. */
 export const competitorDeleteGroupRequestSchema = z
-  .object({ expectedChildIds: z.array(z.string()).max(5000) })
+  .object({ expectedChildIds: z.array(z.string()).max(5000).optional() })
   .strict();
 export type CompetitorDeleteGroupRequest = z.infer<
   typeof competitorDeleteGroupRequestSchema
@@ -196,6 +196,7 @@ export const competitorDeleteAsinRequestSchema = z
 
 export const competitorMoveAsinRequestSchema = z.object({
   targetGroupId: z.string().min(1, '目标变体组ID为必填项'),
+  expectedSourceGroup: z.string().min(1).optional(),
 });
 export type CompetitorMoveAsinRequest = z.infer<
   typeof competitorMoveAsinRequestSchema

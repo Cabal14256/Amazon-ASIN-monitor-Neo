@@ -191,31 +191,35 @@ export class DrizzleCompetitorWriteUnit {
         .where(inArray(g.id, [...new Set(ids)])),
     );
   }
-  async deleteGroup(id: string, expectedChildIds: string[]) {
-    if (!Array.isArray(expectedChildIds) || expectedChildIds.length > 5000)
-      throw new CompetitorWriteError('input');
-    for (const childId of expectedChildIds) text(childId, 50);
-    if (new Set(expectedChildIds).size !== expectedChildIds.length)
-      throw new CompetitorWriteError('input');
+  async deleteGroup(id: string, expectedChildIds?: string[]) {
+    if (expectedChildIds !== undefined) {
+      if (!Array.isArray(expectedChildIds) || expectedChildIds.length > 5000)
+        throw new CompetitorWriteError('input');
+      for (const childId of expectedChildIds) text(childId, 50);
+      if (new Set(expectedChildIds).size !== expectedChildIds.length)
+        throw new CompetitorWriteError('input');
+    }
     const group = await this.group(id);
     if (!group) throw new CompetitorWriteError('group-not-found');
-    const children = await this.query(() =>
-      this.db
-        .select({ id: a.id })
-        .from(a)
-        .where(eq(a.variantGroupId, group.id))
-        .orderBy(sql`${a.id} COLLATE "C"`)
-        .limit(5001)
-        .for('update'),
-    );
-    if (children.length > 5000)
-      throw new CompetitorQueryError('too-many-children');
-    const expected = new Set(expectedChildIds);
-    if (
-      children.length !== expected.size ||
-      children.some((child) => !expected.has(child.id))
-    )
-      throw new CompetitorWriteError('members-changed');
+    if (expectedChildIds !== undefined) {
+      const children = await this.query(() =>
+        this.db
+          .select({ id: a.id })
+          .from(a)
+          .where(eq(a.variantGroupId, group.id))
+          .orderBy(sql`${a.id} COLLATE "C"`)
+          .limit(5001)
+          .for('update'),
+      );
+      if (children.length > 5000)
+        throw new CompetitorQueryError('too-many-children');
+      const expected = new Set(expectedChildIds);
+      if (
+        children.length !== expected.size ||
+        children.some((child) => !expected.has(child.id))
+      )
+        throw new CompetitorWriteError('members-changed');
+    }
     // The real FK cascades children; monitor history has no FK and is retained.
     await this.query(() => this.db.delete(g).where(eq(g.id, group.id)));
   }
@@ -370,8 +374,18 @@ export class DrizzleCompetitorWriteUnit {
     await this.touchGroups([parent.id]);
     return this.asin(asin.id);
   }
-  async moveAsin(id: string, targetGroupId: string): Promise<CompetitorAsin> {
+  async moveAsin(
+    id: string,
+    targetGroupId: string,
+    expectedSourceGroup?: string,
+  ): Promise<CompetitorAsin> {
+    if (expectedSourceGroup !== undefined) text(expectedSourceGroup, 50);
     const { asin, target } = await this.lockAsin(id, targetGroupId);
+    if (
+      expectedSourceGroup !== undefined &&
+      asin.variantGroupId !== expectedSourceGroup
+    )
+      throw new CompetitorWriteError('source-changed');
     if (!target) invalid('目标竞品变体组不存在');
     if (target!.id === asin.variantGroupId) return asin;
     if (target!.country !== asin.country)

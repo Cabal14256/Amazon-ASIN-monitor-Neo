@@ -153,6 +153,7 @@ describe('competitor catalog transport', () => {
       await updateCompetitorAsin(http, 'competitor-child-1', childInput);
       await moveCompetitorAsin(http, 'competitor-child-1', {
         targetGroupId: 'competitor-group-2',
+        expectedSourceGroup: group.id,
       });
       await deleteCompetitorAsin(http, 'competitor-child-1');
       expect(
@@ -174,6 +175,10 @@ describe('competitor catalog transport', () => {
       ).toBe(true);
       expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body))).toEqual({
         expectedChildIds: ['competitor-child-1'],
+      });
+      expect(JSON.parse(String(fetcher.mock.calls[5][1]?.body))).toEqual({
+        targetGroupId: 'competitor-group-2',
+        expectedSourceGroup: group.id,
       });
       for (const [, options] of fetcher.mock.calls) {
         if (!options?.body) continue;
