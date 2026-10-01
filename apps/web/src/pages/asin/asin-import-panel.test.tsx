@@ -16,9 +16,15 @@ import type { createTransportRuntime } from '../../services/runtime';
 import { asinImportGateKey, writeAsinImportGate } from './asin-import-gate';
 import { AsinImportPanel } from './asin-import-panel';
 
-const taskSnapshot = vi.hoisted(() => ({ current: undefined as unknown }));
+const taskSnapshot = vi.hoisted(() => ({
+  current: undefined as unknown,
+  error: false,
+}));
 vi.mock('../../hooks/tasks', () => ({
-  useTaskQuery: () => ({ data: taskSnapshot.current, isError: false }),
+  useTaskQuery: () => ({
+    data: taskSnapshot.current,
+    isError: taskSnapshot.error,
+  }),
 }));
 
 const taskId = 'b2b5894c-5802-4c9f-a1bd-9a20263d270a';
@@ -149,6 +155,7 @@ afterEach(() => {
   window.sessionStorage.clear();
   Reflect.deleteProperty(window.navigator, 'locks');
   taskSnapshot.current = undefined;
+  taskSnapshot.error = false;
   vi.restoreAllMocks();
 });
 
@@ -180,6 +187,286 @@ describe('primary ASIN import page', () => {
       window.localStorage.getItem(asinImportGateKey('operator')),
     ).toBeNull();
     expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
+  });
+
+  it.each(['completed', 'failed', 'cancelled'])(
+    'retries a failed %s gate write in place after storage recovers',
+    async (status) => {
+      installLocks();
+      const f = fixture();
+      chooseFile();
+      await screen.findByText(
+        '文件已受理为异步任务，等待任务中心确认处理结果。',
+      );
+      const setItem = Storage.prototype.setItem;
+      const removeItem = Storage.prototype.removeItem;
+      let unavailable = true;
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+        this: Storage,
+        key,
+        value,
+      ) {
+        if (unavailable && this === window.localStorage)
+          throw new Error('temporary');
+        setItem.call(this, key, value);
+      });
+      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
+        this: Storage,
+        key,
+      ) {
+        if (unavailable && this === window.localStorage)
+          throw new Error('temporary');
+        removeItem.call(this, key);
+      });
+      taskSnapshot.current = task(status);
+      f.rerender();
+      const retry = await screen.findByRole('button', {
+        name: '重试保存任务状态',
+      });
+      expect(
+        window.localStorage.getItem(asinImportGateKey('operator')),
+      ).toContain('accepted');
+      expect(
+        screen.queryByRole('button', { name: '已核实原任务，允许重新导入' }),
+      ).toBeNull();
+      unavailable = false;
+      fireEvent.click(retry);
+      await waitFor(() => expect(f.invalidate).toHaveBeenCalledOnce());
+      expect(f.request).toHaveBeenCalledOnce();
+      expect(
+        screen.queryByRole('button', { name: '重试保存任务状态' }),
+      ).toBeNull();
+      if (status === 'completed') {
+        expect(
+          window.localStorage.getItem(asinImportGateKey('operator')),
+        ).toBeNull();
+        expect(screen.getByLabelText('选择文件')).toHaveProperty(
+          'disabled',
+          false,
+        );
+      } else {
+        expect(
+          window.localStorage.getItem(asinImportGateKey('operator')),
+        ).toContain('settled');
+        expect(
+          screen.getByRole('button', { name: '已核实原任务，允许重新导入' }),
+        ).toBeTruthy();
+        cleanup();
+        const reloaded = fixture();
+        await screen.findByText(
+          '任务已结束，可能已有部分行提交；请核对结果后再解锁。',
+        );
+        expect(reloaded.invalidate).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    ['unknown', 'completed'],
+    ['unknown', 'failed'],
+    ['unknown', 'cancelled'],
+    ['session', 'completed'],
+    ['session', 'failed'],
+    ['session', 'cancelled'],
+  ])(
+    'settles a %s task after reload when it becomes %s',
+    async (source, status) => {
+      installLocks();
+      const setItem = Storage.prototype.setItem;
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+        this: Storage,
+        key,
+        value,
+      ) {
+        if (
+          source === 'session' &&
+          this === window.localStorage &&
+          value.includes('"phase":"accepted"')
+        )
+          throw new Error('quota');
+        setItem.call(this, key, value);
+      });
+      const request = vi.fn(async () => {
+        if (source === 'unknown')
+          throw new ApiError('HTTP', 'unknown', 500, 500, {
+            taskId,
+            status: 'unknown',
+          });
+        return accepted;
+      });
+      fixture(request);
+      chooseFile();
+      await screen.findByText(`任务编号：${taskId}`);
+      cleanup();
+      const reloaded = fixture();
+      await screen.findByText(`任务编号：${taskId}`);
+      taskSnapshot.current = task(status);
+      reloaded.rerender();
+      await waitFor(() => expect(reloaded.invalidate).toHaveBeenCalledOnce());
+      expect(
+        window.sessionStorage.getItem(asinImportGateKey('operator')),
+      ).toBeNull();
+      expect(request).toHaveBeenCalledOnce();
+      expect(reloaded.request).not.toHaveBeenCalled();
+      if (status === 'completed') {
+        expect(
+          window.localStorage.getItem(asinImportGateKey('operator')),
+        ).toBeNull();
+        await screen.findByText(
+          '导入任务已完成，请核对任务中心的成功、失败行与报告。',
+        );
+      } else {
+        expect(
+          window.localStorage.getItem(asinImportGateKey('operator')),
+        ).toContain('settled');
+        expect(
+          screen.getByRole('button', { name: '已核实原任务，允许重新导入' }),
+        ).toBeTruthy();
+      }
+    },
+  );
+
+  it('settles the known in-memory task after both task ID stores fail', async () => {
+    installLocks();
+    const setItem = Storage.prototype.setItem;
+    let unavailable = true;
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key,
+      value,
+    ) {
+      if (
+        unavailable &&
+        (value.includes('"phase":"accepted"') ||
+          value.includes('"phase":"uncertain"'))
+      )
+        throw new Error('quota');
+      setItem.call(this, key, value);
+    });
+    const f = fixture();
+    chooseFile();
+    await screen.findByText(`任务编号：${taskId}`);
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toContain('sending');
+    expect(
+      window.sessionStorage.getItem(asinImportGateKey('operator')),
+    ).toBeNull();
+    unavailable = false;
+    taskSnapshot.current = task('failed');
+    f.rerender();
+    await waitFor(() => expect(f.invalidate).toHaveBeenCalledOnce());
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toContain('settled');
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+
+  it('retries clearing a session fallback after the completed local gate was removed', async () => {
+    installLocks();
+    writeAsinImportGate(window.localStorage, 'operator', {
+      phase: 'sending',
+      taskId: null,
+      savedAt: 10,
+    });
+    writeAsinImportGate(window.sessionStorage, 'operator', {
+      phase: 'uncertain',
+      taskId,
+      savedAt: 10,
+    });
+    const removeItem = Storage.prototype.removeItem;
+    let unavailable = true;
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(function (
+      this: Storage,
+      key,
+    ) {
+      if (unavailable && this === window.sessionStorage)
+        throw new Error('temporary');
+      removeItem.call(this, key);
+    });
+    taskSnapshot.current = task('completed');
+    const f = fixture();
+    const retry = await screen.findByRole('button', {
+      name: '重试保存任务状态',
+    });
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toBeNull();
+    expect(
+      window.sessionStorage.getItem(asinImportGateKey('operator')),
+    ).toContain(taskId);
+    unavailable = false;
+    fireEvent.click(retry);
+    await waitFor(() => expect(f.invalidate).toHaveBeenCalledOnce());
+    expect(
+      window.sessionStorage.getItem(asinImportGateKey('operator')),
+    ).toBeNull();
+    expect(screen.getByLabelText('选择文件')).toHaveProperty('disabled', false);
+  });
+
+  it.each(['pending', 'processing', 'cancelling'])(
+    'keeps known uncertain %s tasks locked even if the latest read fails',
+    async (status) => {
+      installLocks();
+      writeAsinImportGate(window.localStorage, 'operator', {
+        phase: 'uncertain',
+        taskId,
+        savedAt: 10,
+      });
+      const f = fixture();
+      await screen.findByText(`任务编号：${taskId}`);
+      expect(
+        screen.queryByRole('button', { name: '已核实原任务，允许重新导入' }),
+      ).toBeNull();
+      taskSnapshot.current = task(status);
+      taskSnapshot.error = true;
+      f.rerender();
+      expect(
+        screen.queryByRole('button', { name: '已核实原任务，允许重新导入' }),
+      ).toBeNull();
+      expect(screen.getByLabelText('选择文件')).toHaveProperty(
+        'disabled',
+        true,
+      );
+      expect(
+        window.localStorage.getItem(asinImportGateKey('operator')),
+      ).toContain(taskId);
+      expect(f.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rechecks an active task after waiting for the reconciliation lock', async () => {
+    let release!: () => void;
+    Object.defineProperty(window.navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: async <T,>(_name: string, callback: () => T) => {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return callback();
+        },
+      },
+    });
+    writeAsinImportGate(window.localStorage, 'operator', {
+      phase: 'uncertain',
+      taskId,
+      savedAt: 10,
+    });
+    taskSnapshot.error = true;
+    const f = fixture();
+    fireEvent.click(
+      await screen.findByRole('button', { name: '已核实原任务，允许重新导入' }),
+    );
+    taskSnapshot.current = task('processing');
+    f.rerender();
+    release();
+    await screen.findByText('原导入任务仍在运行，结束前不能解锁或重新导入。');
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toContain(taskId);
+    expect(screen.getByLabelText('选择文件')).toHaveProperty('disabled', true);
+    expect(f.request).not.toHaveBeenCalled();
   });
 
   it('shows the confirmed task ID and warns when saving the accepted gate fails', async () => {
@@ -215,6 +502,7 @@ describe('primary ASIN import page', () => {
     await screen.findByText(`任务编号：${taskId}`);
     window.localStorage.removeItem(asinImportGateKey('operator'));
     cleanup();
+    taskSnapshot.error = true;
     fixture();
     await screen.findByText(`任务编号：${taskId}`);
     const originalRemoveItem = Storage.prototype.removeItem;
@@ -353,7 +641,7 @@ describe('primary ASIN import page', () => {
     );
     expect(
       window.localStorage.getItem(asinImportGateKey('operator')),
-    ).toContain('uncertain');
+    ).toContain('settled');
     expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
   });
 
@@ -378,6 +666,36 @@ describe('primary ASIN import page', () => {
     await screen.findByText(/上次任务编号/);
     expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
     expect(screen.queryByText(`任务编号：${taskId}`)).toBeNull();
+  });
+
+  it('refreshes partial results when another tab settles a failed import', async () => {
+    installLocks();
+    writeAsinImportGate(window.localStorage, 'operator', {
+      phase: 'accepted',
+      taskId,
+      savedAt: 10,
+    });
+    const f = fixture();
+    await screen.findByText(`任务编号：${taskId}`);
+    writeAsinImportGate(window.localStorage, 'operator', {
+      phase: 'settled',
+      taskId,
+      savedAt: 10,
+    });
+    window.dispatchEvent(
+      new StorageEvent('storage', {
+        key: asinImportGateKey('operator'),
+        storageArea: window.localStorage,
+      }),
+    );
+    await screen.findByText(
+      '任务已结束，可能已有部分行提交；请核对结果后再解锁。',
+    );
+    expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
+    expect(
+      screen.getByRole('button', { name: '已核实原任务，允许重新导入' }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText('选择文件')).toHaveProperty('disabled', true);
   });
 
   it.each(['completed', 'failed'])(
@@ -423,6 +741,7 @@ describe('primary ASIN import page', () => {
       expect(
         window.localStorage.getItem(asinImportGateKey('operator')),
       ).toContain(nextTaskId);
+      expect(f.invalidate).toHaveBeenCalledWith({ queryKey: ['asin'] });
     },
   );
 });

@@ -1,5 +1,5 @@
 export interface AsinImportGate {
-  phase: 'sending' | 'accepted' | 'uncertain';
+  phase: 'sending' | 'accepted' | 'uncertain' | 'settled';
   taskId: string | null;
   savedAt: number;
 }
@@ -25,10 +25,13 @@ export function readAsinImportGate(
       throw new Error('invalid');
     const gate = value as Record<string, unknown>;
     if (
-      !['sending', 'accepted', 'uncertain'].includes(String(gate.phase)) ||
+      !['sending', 'accepted', 'uncertain', 'settled'].includes(
+        String(gate.phase),
+      ) ||
       (gate.taskId !== null &&
         (typeof gate.taskId !== 'string' || !TASK_ID.test(gate.taskId))) ||
-      (gate.phase === 'accepted' && gate.taskId === null) ||
+      (['accepted', 'settled'].includes(String(gate.phase)) &&
+        gate.taskId === null) ||
       typeof gate.savedAt !== 'number' ||
       !Number.isFinite(gate.savedAt)
     )

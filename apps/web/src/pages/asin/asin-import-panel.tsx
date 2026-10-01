@@ -12,7 +12,7 @@ import {
   uncertainAsinImportTaskId,
   validateAsinImportFile,
 } from '../../services/asin-import';
-import { isTerminalTask } from '../../services/tasks';
+import { isActiveTask, isTerminalTask } from '../../services/tasks';
 import {
   asinImportGateKey,
   claimAsinImportGate,
@@ -76,6 +76,8 @@ export function AsinImportPanel() {
   const [lastTaskId, setLastTaskId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [settlementUnavailable, setSettlementUnavailable] = useState(false);
+  const [settlementRetry, setSettlementRetry] = useState(0);
   const request = useRef<AbortController | null>(null);
   const claiming = useRef(false);
   const gateRef = useRef(gate);
@@ -92,6 +94,26 @@ export function AsinImportPanel() {
     taskId,
     Boolean(userId && taskId && access.canReadASIN),
   );
+  const latestTask = useRef(task.data);
+  latestTask.current = task.data;
+  const matchingTask =
+    task.data?.taskId === gate?.taskId ? task.data : undefined;
+  const activeTask = Boolean(matchingTask && isActiveTask(matchingTask.status));
+  const terminalTask = Boolean(
+    matchingTask && isTerminalTask(matchingTask.status),
+  );
+  const canReconcile = Boolean(
+    gate &&
+      !activeTask &&
+      !(terminalTask && gate.phase !== 'settled') &&
+      (gate.phase === 'settled' ||
+        (gate.phase === 'uncertain' &&
+          (!gate.taskId ||
+            matchingTask ||
+            task.isError ||
+            !access.canReadASIN)) ||
+        (gate.phase === 'accepted' && (task.isError || !access.canReadASIN))),
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -107,6 +129,7 @@ export function AsinImportPanel() {
     if (fileInput.current) fileInput.current.value = '';
     setLastTaskId(null);
     setNotice(null);
+    setSettlementUnavailable(false);
     if (!canImport || !userId) {
       setGate(null);
       setOpen(false);
@@ -132,6 +155,8 @@ export function AsinImportPanel() {
       if (request.current && !restored) return;
       if (!restored) {
         if (gateRef.current?.taskId) setLastTaskId(gateRef.current.taskId);
+      }
+      if (!restored || restored.phase === 'settled') {
         void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
       }
       gateRef.current = restored;
@@ -150,12 +175,14 @@ export function AsinImportPanel() {
       result.taskId !== taskId ||
       !isTerminalTask(result.status) ||
       gate?.taskId !== taskId ||
-      gate.phase === 'uncertain'
+      gate.phase === 'settled'
     )
       return;
+    setSettlementUnavailable(false);
     const stored = storage();
     const locks = navigator.locks;
     if (!stored || !locks) {
+      setSettlementUnavailable(true);
       setNotice('无法保存导入任务状态，请检查浏览器本地存储和跨标签锁。');
       return;
     }
@@ -168,25 +195,46 @@ export function AsinImportPanel() {
         : '导入任务失败，可能已有部分行提交；请核对后再决定是否重试。';
     void locks
       .request(asinImportGateKey(userId), () => {
-        const persisted = readAsinImportGate(stored, userId);
-        if (persisted?.phase !== 'accepted' || persisted.taskId !== taskId)
+        // Do not interpret temporarily inaccessible storage as an absent gate.
+        stored.getItem(asinImportGateKey(userId));
+        const persisted = restoredGate(stored, userId);
+        // A failed write may leave only the original sending claim, while the
+        // current tab still knows the authoritative task ID.
+        const matchesSendingClaim =
+          gate.phase === 'uncertain' &&
+          persisted?.phase === 'uncertain' &&
+          persisted.taskId === null &&
+          persisted.savedAt === gate.savedAt;
+        if (persisted?.taskId !== taskId && !matchesSendingClaim)
           return { kind: 'changed' as const, gate: persisted };
         const nextGate: AsinImportGate | null =
           result.status === 'completed'
             ? null
-            : { phase: 'uncertain', taskId, savedAt: Date.now() };
-        return writeAsinImportGate(stored, userId, nextGate)
-          ? { kind: 'settled' as const, gate: nextGate }
-          : { kind: 'unavailable' as const };
+            : { phase: 'settled', taskId, savedAt: gate.savedAt };
+        const session = storage('session');
+        const sessionRaw = session?.getItem(asinImportGateKey(userId));
+        if (!writeAsinImportGate(stored, userId, nextGate))
+          return { kind: 'unavailable' as const };
+        if (
+          session &&
+          sessionRaw &&
+          !writeAsinImportGate(session, userId, null)
+        )
+          return { kind: 'unavailable' as const };
+        return { kind: 'settled' as const, gate: nextGate };
       })
       .then((transition) => {
         if (!active || owner.current !== userId || !mounted.current) return;
         if (transition.kind === 'changed') {
           setGate(transition.gate);
           if (transition.gate) setOpen(true);
+          // Another tab may already have settled this authoritative terminal
+          // result while this effect was waiting for the same Web Lock.
+          void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
           return;
         }
         if (transition.kind === 'unavailable') {
+          setSettlementUnavailable(true);
           setNotice('无法保存导入任务状态，请检查浏览器本地存储权限。');
           return;
         }
@@ -197,8 +245,10 @@ export function AsinImportPanel() {
         void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
       })
       .catch(() => {
-        if (active && owner.current === userId && mounted.current)
+        if (active && owner.current === userId && mounted.current) {
+          setSettlementUnavailable(true);
           setNotice('无法取得浏览器导入锁，请稍后重试。');
+        }
       });
     return () => {
       active = false;
@@ -207,10 +257,12 @@ export function AsinImportPanel() {
     announce,
     gate?.phase,
     gate?.taskId,
+    gate?.savedAt,
     runtime.queryClient,
     task.data,
     taskId,
     userId,
+    settlementRetry,
   ]);
 
   if (!canImport) return null;
@@ -357,6 +409,7 @@ export function AsinImportPanel() {
   }
 
   async function unlockAfterReconciliation() {
+    if (!canReconcile) return;
     const stored = storage();
     const locks = navigator.locks;
     if (!stored || !locks || !gate) {
@@ -364,11 +417,22 @@ export function AsinImportPanel() {
       return;
     }
     const expected = gate;
-    let result: 'changed' | 'cleared' | 'unavailable';
+    let result: 'changed' | 'cleared' | 'unavailable' | 'active';
     try {
       const key = asinImportGateKey(userId);
       const previousRaw = stored.getItem(key);
       result = await locks.request(key, () => {
+        if (
+          latestTask.current?.taskId === expected.taskId &&
+          isActiveTask(latestTask.current.status)
+        )
+          return 'active' as const;
+        if (
+          latestTask.current?.taskId === expected.taskId &&
+          isTerminalTask(latestTask.current.status) &&
+          expected.phase !== 'settled'
+        )
+          return 'changed' as const;
         const current = readAsinImportGate(stored, userId);
         const session = storage('session');
         const sessionGate = session
@@ -396,6 +460,10 @@ export function AsinImportPanel() {
       result = 'unavailable';
     }
     if (owner.current !== userId || !mounted.current) return;
+    if (result === 'active') {
+      setNotice('原导入任务仍在运行，结束前不能解锁或重新导入。');
+      return;
+    }
     if (result !== 'cleared') {
       setGate(restoredGate(stored, userId));
       setNotice(
@@ -505,6 +573,8 @@ export function AsinImportPanel() {
                     ? '任务已受理，处理完成前请勿重复上传同一文件。'
                     : gate.phase === 'sending'
                     ? '正在提交文件，请等待受理结果。'
+                    : gate.phase === 'settled'
+                    ? '任务已结束，可能已有部分行提交；请核对结果后再解锁。'
                     : '提交结果不确定，请先核实任务状态。'}
                 </p>
                 {gate.taskId && (
@@ -521,9 +591,18 @@ export function AsinImportPanel() {
                 <a className="font-semibold underline" href="/tasks">
                   打开任务中心
                 </a>
-                {(gate.phase === 'uncertain' ||
-                  (gate.phase === 'accepted' &&
-                    (task.isError || !access.canReadASIN))) && (
+                {settlementUnavailable &&
+                  terminalTask &&
+                  gate.phase !== 'settled' && (
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      onClick={() => setSettlementRetry((value) => value + 1)}
+                    >
+                      重试保存任务状态
+                    </Button>
+                  )}
+                {canReconcile && (
                   <Button
                     variant="secondary"
                     size="small"
