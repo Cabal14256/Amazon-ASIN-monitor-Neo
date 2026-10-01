@@ -1,5 +1,5 @@
 import {
-  backupInPlaceRestoreResultSchema,
+  backupRestoreReceiptSchema,
   variantCheckResultReferenceSchema,
 } from '@asin-monitor/contracts';
 import { z } from 'zod';
@@ -65,15 +65,15 @@ const mutationSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
   z.object({
     kind: z.literal('restore-committed'),
-    result: backupInPlaceRestoreResultSchema.extend({
-      verification: z.literal('unconfirmed'),
-    }),
+    result: backupRestoreReceiptSchema.refine(
+      (value) => value.verification === 'unconfirmed',
+    ),
   }),
   z.object({
     kind: z.literal('restore-confirmed'),
-    result: backupInPlaceRestoreResultSchema.extend({
-      verification: z.literal('confirmed'),
-    }),
+    result: backupRestoreReceiptSchema.refine(
+      (value) => value.verification === 'confirmed',
+    ),
   }),
   // Only callers that confirmed the immutable PostgreSQL receipt may use this.
   z.object({
@@ -101,14 +101,18 @@ export function transitionTask(
   ) {
     if (task.taskType !== 'backup' || task.taskSubType !== 'restore')
       throw new Error('BACKUP_RESTORE_TASK_INVALID');
-    const previous = backupInPlaceRestoreResultSchema.safeParse(task.result);
+    const previous = backupRestoreReceiptSchema.safeParse(task.result);
     if (change.kind === 'restore-confirmed') {
       if (
         task.status !== 'completed' ||
         !previous.success ||
         previous.data.verification !== 'unconfirmed' ||
         previous.data.filename !== change.result.filename ||
-        previous.data.target !== change.result.target
+        previous.data.target !== change.result.target ||
+        previous.data.restoreMode !== change.result.restoreMode ||
+        (previous.data.restoreMode === 'isolated' &&
+          change.result.restoreMode === 'isolated' &&
+          previous.data.restoredDatabase !== change.result.restoredDatabase)
       )
         return task;
     } else if (previous.success && task.status === 'completed') return task;

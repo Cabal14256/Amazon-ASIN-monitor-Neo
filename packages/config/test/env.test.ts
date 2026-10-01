@@ -210,6 +210,13 @@ describe('loadEnv', () => {
         loadEnv({ ...validEnv, BACKUP_STORAGE_DIRECTORY: value }),
       ).toThrow(EnvValidationError);
     for (const key of ['PG_DUMP_PATH', 'PG_RESTORE_PATH'] as const) {
+      expect(
+        loadEnv({ ...validEnv, [key]: 'x'.repeat(512) })[key],
+      ).toHaveLength(512);
+      for (const length of [513, 4096])
+        expect(() =>
+          loadEnv({ ...validEnv, [key]: 'x'.repeat(length) }),
+        ).toThrow(EnvValidationError);
       expect(() =>
         loadEnv({ ...validEnv, [key]: 'pg_dump --format=custom' }),
       ).toThrow(EnvValidationError);

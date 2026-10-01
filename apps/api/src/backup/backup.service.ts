@@ -1,10 +1,13 @@
 import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
 import {
   BACKUP_SCHEDULER_USER_ID,
+  backupDatabaseSettingsSchema,
   backupJobDataSchema,
   createBackupRequestSchema,
   restoreBackupRequestSchema,
+  sameBackupDatabaseLocale,
   saveBackupConfigRequestSchema,
+  type BackupDatabaseSettings,
   type BackupJobData,
   type BackupTarget,
 } from '@asin-monitor/contracts';
@@ -80,7 +83,7 @@ export class BackupService implements OnModuleDestroy {
     });
   }
 
-  private async capability(target: BackupTarget) {
+  private async capability(target: BackupTarget, includeLocale = false) {
     const pool =
       target === 'primary' ? this.pools.primaryPool : this.pools.competitorPool;
     // The shared pool has a bounded acquisition timeout. Give the catalog
@@ -97,9 +100,39 @@ export class BackupService implements OnModuleDestroy {
         typeof result.rows[0]?.extversion !== 'string')
     )
       throw new Error('BACKUP_CAPABILITY_UNCONFIRMED');
+    let databaseSettings: BackupDatabaseSettings | undefined;
+    if (includeLocale && result.rows.length === 0) {
+      const locale = await pool.query({
+        text: 'SELECT pg_encoding_to_char(encoding) AS encoding, datcollate AS "lcCollate", datctype AS "lcCtype", datlocprovider AS "localeProvider", daticulocale AS "icuLocale", daticurules AS "icuRules" FROM pg_database WHERE datname = current_database()',
+        query_timeout: 1500,
+      } as QueryConfig & { query_timeout: number });
+      const row = locale.rows[0];
+      if (locale.rows.length !== 1)
+        throw new Error('BACKUP_CAPABILITY_UNCONFIRMED');
+      databaseSettings = backupDatabaseSettingsSchema.parse(
+        row?.localeProvider === 'i'
+          ? {
+              encoding: row.encoding,
+              lcCollate: row.lcCollate,
+              lcCtype: row.lcCtype,
+              localeProvider: 'icu',
+              icuLocale: row.icuLocale,
+              ...(row.icuRules ? { icuRules: row.icuRules } : {}),
+            }
+          : row?.localeProvider === 'c'
+          ? {
+              encoding: row.encoding,
+              lcCollate: row.lcCollate,
+              lcCtype: row.lcCtype,
+              localeProvider: 'libc',
+            }
+          : null,
+      );
+    }
     return {
       hasTimescale: result.rows.length === 1,
       extensionVersion: result.rows[0]?.extversion as string | undefined,
+      databaseSettings,
     };
   }
 
@@ -242,7 +275,9 @@ export class BackupService implements OnModuleDestroy {
         (metadata.sourceEngine === 'postgresql' && metadata.version !== 3)
       )
         return fail(409, '备份文件来源或恢复范围元数据未验证，禁止自动恢复');
-      const capability = await this.capability(target);
+      const selective =
+        metadata.version === 3 && metadata.scope === 'selective';
+      const capability = await this.capability(target, selective);
       const timescaleTarget = capability.hasTimescale;
       if ((metadata.sourceEngine === 'timescaledb') !== timescaleTarget)
         return fail(409, '备份文件来源数据库类型与恢复目标不一致');
@@ -252,6 +287,18 @@ export class BackupService implements OnModuleDestroy {
         metadata.timescale.extensionVersion !== capability.extensionVersion
       )
         return fail(409, 'TimescaleDB 扩展版本与备份不一致');
+      if (
+        selective &&
+        (!capability.databaseSettings ||
+          !sameBackupDatabaseLocale(
+            metadata.databaseSettings,
+            capability.databaseSettings,
+          ))
+      )
+        return fail(
+          409,
+          '恢复目标数据库的字符集或排序规则与备份不一致，禁止原位恢复',
+        );
       const task = await this.enqueue(principal, {
         taskType: 'backup',
         taskSubType: 'restore',
@@ -278,8 +325,19 @@ export class BackupService implements OnModuleDestroy {
       await this.authorize(principal);
       const files = await listBackupFiles(this.directory());
       const [primaryTimescale, competitorTimescale] = await Promise.allSettled([
-        this.capability('primary'),
-        this.capability('competitor'),
+        this.capability(
+          'primary',
+          files.some(
+            (file) => file.target === 'primary' && file.scope === 'selective',
+          ),
+        ),
+        this.capability(
+          'competitor',
+          files.some(
+            (file) =>
+              file.target === 'competitor' && file.scope === 'selective',
+          ),
+        ),
       ]);
       if (
         primaryTimescale.status === 'rejected' ||
@@ -288,7 +346,7 @@ export class BackupService implements OnModuleDestroy {
         this.logger.warn('备份恢复能力未确认', 'BackupService', {
           reason: 'backup_restore_capability_unconfirmed',
         });
-      return files.map((file) => {
+      return files.map(({ databaseSettings, ...file }) => {
         const capability =
           file.target === 'primary' ? primaryTimescale : competitorTimescale;
         const validSource =
@@ -303,7 +361,15 @@ export class BackupService implements OnModuleDestroy {
           (file.sourceEngine === 'timescaledb') ===
             capability.value.hasTimescale &&
           (file.sourceEngine !== 'timescaledb' ||
-            file.sourceExtensionVersion === capability.value.extensionVersion);
+            file.sourceExtensionVersion ===
+              capability.value.extensionVersion) &&
+          (file.scope !== 'selective' ||
+            (databaseSettings !== undefined &&
+              capability.value.databaseSettings !== undefined &&
+              sameBackupDatabaseLocale(
+                databaseSettings,
+                capability.value.databaseSettings,
+              )));
         return {
           ...file,
           restoreSupported,

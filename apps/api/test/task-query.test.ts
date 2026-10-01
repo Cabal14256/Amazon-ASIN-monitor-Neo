@@ -173,9 +173,17 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
-  it.each(['processing', 'cancelling', 'cancelled', 'failed'] as const)(
-    'recovers a committed restore receipt despite stale %s registry state',
-    async (status) => {
+  it.each(
+    (['processing', 'cancelling', 'cancelled', 'failed'] as const).flatMap(
+      (status) =>
+        (['in-place', 'isolated'] as const).map((restoreMode) => ({
+          status,
+          restoreMode,
+        })),
+    ),
+  )(
+    'recovers a retained restore receipt despite stale registry state: %j',
+    async ({ status, restoreMode }) => {
       task = {
         ...task!,
         taskType: 'backup',
@@ -190,8 +198,11 @@ describe('own task query HTTP and bounded reconciliation', () => {
         format: 'custom',
         filename: 'backup_20260927-230000-1234abcd-primary.dump',
         target: 'primary',
-        restoreMode: 'in-place',
-        targetDatabaseChanged: true,
+        restoreMode,
+        targetDatabaseChanged: restoreMode === 'in-place',
+        ...(restoreMode === 'isolated'
+          ? { restoredDatabase: 'neo_restore_primary_0123456789abcdef' }
+          : {}),
         verification: 'unconfirmed',
         message: '数据库已恢复，请核对',
       };

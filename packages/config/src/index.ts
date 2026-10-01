@@ -39,6 +39,7 @@ const absolutePathSchema = optionalNonEmptyStringSchema.refine(
  * to one executable path/name so environment files cannot inject arguments or
  * shell syntax into the backup worker.
  */
+export const BACKUP_COMMAND_PATH_MAX_LENGTH = 512;
 const backupCommandPathSchema = (defaultValue: string) =>
   z.preprocess(
     (value) =>
@@ -47,7 +48,7 @@ const backupCommandPathSchema = (defaultValue: string) =>
       .string()
       .trim()
       .min(1)
-      .max(4096)
+      .max(BACKUP_COMMAND_PATH_MAX_LENGTH)
       .regex(/^[^\0\r\n;&|<>`$]+$/, '备份命令路径包含非法字符')
       .refine(
         (value) => isAbsolute(value) || !/\s/.test(value),

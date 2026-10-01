@@ -352,6 +352,8 @@ jobs:
 
       - name: Verify Neo backup commands against isolated PostgreSQL and TimescaleDB
         run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-pipeline.integration.test.ts
+      - name: Verify migrated Legacy backup configuration row selection
+        run: pnpm --filter @asin-monitor/db exec vitest run test/backup-configuration.integration.test.ts
 
       - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
         run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts

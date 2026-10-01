@@ -5,6 +5,7 @@ import {
   backupConfigResultSchema,
   backupJobDataSchema,
   backupListResultSchema,
+  backupRestoreReceiptSchema,
   backupTaskResultSchema,
   createBackupRequestSchema,
   createBackupResultSchema,
@@ -77,6 +78,30 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('accepts only a bounded isolated restore receipt with an unchanged online target', () => {
+    const receipt = {
+      operation: 'restore',
+      format: 'custom',
+      filename: 'backup_20260927-020000-abcdef01-primary.dump',
+      target: 'primary',
+      restoreMode: 'isolated',
+      restoredDatabase: 'neo_restore_primary_0123456789abcdef',
+      targetDatabaseChanged: false,
+      verification: 'unconfirmed',
+      message: '隔离数据库已恢复，任务状态待核实',
+    };
+    expect(backupRestoreReceiptSchema.parse(receipt)).toEqual(receipt);
+    for (const change of [
+      { targetDatabaseChanged: true },
+      { restoredDatabase: 'postgres' },
+      { restoredDatabase: undefined },
+      { databaseUrl: 'postgresql://private' },
+      { message: 'x'.repeat(2001) },
+    ])
+      expect(
+        backupRestoreReceiptSchema.safeParse({ ...receipt, ...change }).success,
+      ).toBe(false);
+  });
   it('distinguishes full and selective PostgreSQL artifacts in v3 metadata', () => {
     const databaseSettings = {
       encoding: 'UTF8',

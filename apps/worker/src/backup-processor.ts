@@ -1,12 +1,18 @@
-import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
+import {
+  BACKUP_COMMAND_PATH_MAX_LENGTH,
+  getBackupStorageDirectory,
+  type Env,
+} from '@asin-monitor/config';
 import {
   BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
   backupDatabaseSettingsSchema,
   backupJobDataSchema,
   backupTimescaleManifestSchema,
+  sameBackupDatabaseLocale,
   type BackupDatabaseSettings,
   type BackupJobData,
+  type BackupRestoreReceipt,
   type BackupTimescaleManifest,
 } from '@asin-monitor/contracts';
 import {
@@ -150,7 +156,7 @@ export function commandEnvironment(
 
 function commandPath(value: string | undefined, fallback: string): string {
   const path = value?.trim() || fallback;
-  if (path.includes('\0') || path.length > 512)
+  if (path.includes('\0') || path.length > BACKUP_COMMAND_PATH_MAX_LENGTH)
     throw new BackupCommandError('BACKUP_COMMAND_INVALID');
   return path;
 }
@@ -228,22 +234,6 @@ async function verifyStagingTimeZone(
   const result = await pool.query(databaseTimeZoneSql);
   if (result.rows[0]?.timezone !== (settings.timeZone ?? 'Asia/Shanghai'))
     throw new BackupCommandError('BACKUP_RESTORE_TIMEZONE_MISMATCH');
-}
-
-function sameDatabaseSettings(
-  left: BackupDatabaseSettings,
-  right: BackupDatabaseSettings,
-): boolean {
-  return (
-    left.encoding === right.encoding &&
-    left.lcCollate === right.lcCollate &&
-    left.lcCtype === right.lcCtype &&
-    left.localeProvider === right.localeProvider &&
-    (left.localeProvider === 'libc' ||
-      (right.localeProvider === 'icu' &&
-        left.icuLocale === right.icuLocale &&
-        left.icuRules === right.icuRules))
-  );
 }
 
 async function archiveSha256(
@@ -938,18 +928,36 @@ export function createBackupProcessor(
     let metadataPartialPath: string | undefined;
     let metadataPublishedPath: string | undefined;
     let publishedStagingDatabase: string | undefined;
-    let committedInPlaceRestore:
-      | {
-          operation: 'restore';
-          format: 'custom';
-          filename: string;
-          target: BackupJobData['target'];
-          restoreMode: 'in-place';
-          targetDatabaseChanged: true;
-          verification: 'unconfirmed';
-          message: string;
-        }
-      | undefined;
+    let committedRestore: BackupRestoreReceipt | undefined;
+    const finishIsolatedRestore = async (
+      restoredDatabase: string,
+      filename: string,
+    ) => {
+      publishedStagingDatabase = restoredDatabase;
+      committedRestore = {
+        operation: 'restore',
+        format: 'custom',
+        filename,
+        target: data.target,
+        restoreMode: 'isolated',
+        restoredDatabase,
+        targetDatabaseChanged: false,
+        verification: 'unconfirmed',
+        message:
+          '隔离数据库已恢复，任务状态尚未确认；请核对恢复数据库，在线目标库未切换',
+      };
+      await mutate({ kind: 'restore-committed', result: committedRestore });
+      const completed = await mutate({
+        kind: 'restore-confirmed',
+        result: {
+          ...committedRestore,
+          verification: 'confirmed',
+          message: '隔离数据库恢复完成，在线目标库未切换',
+        },
+      });
+      log.info('隔离数据库恢复完成', { target: data.target, restoredDatabase });
+      return completed.result;
+    };
     let targetLock:
       | Awaited<ReturnType<typeof acquireBackupTargetLock>>
       | undefined;
@@ -1175,26 +1183,7 @@ export function createBackupProcessor(
           },
           progress,
         });
-        publishedStagingDatabase = restoredDatabase;
-        const completed = await mutate({
-          kind: 'completed',
-          result: {
-            operation: 'restore',
-            format: 'custom',
-            message: '隔离数据库恢复完成，在线目标库未切换',
-            filename,
-            target: data.target,
-            restoreMode: 'isolated',
-            restoredDatabase,
-            targetDatabaseChanged: false,
-          },
-          message: '隔离数据库恢复完成，在线目标库未切换',
-        });
-        log.info('TimescaleDB 隔离数据库恢复完成', {
-          target: data.target,
-          restoredDatabase,
-        });
-        return completed.result;
+        return await finishIsolatedRestore(restoredDatabase, filename);
       }
       if (metadata.version !== 3 || metadata.sourceEngine !== 'postgresql')
         throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
@@ -1215,29 +1204,10 @@ export function createBackupProcessor(
           },
           progress,
         });
-        publishedStagingDatabase = restoredDatabase;
-        const completed = await mutate({
-          kind: 'completed',
-          result: {
-            operation: 'restore',
-            format: 'custom',
-            message: '隔离数据库恢复完成，在线目标库未切换',
-            filename,
-            target: data.target,
-            restoreMode: 'isolated',
-            restoredDatabase,
-            targetDatabaseChanged: false,
-          },
-          message: '隔离数据库恢复完成，在线目标库未切换',
-        });
-        log.info('PostgreSQL 隔离数据库恢复完成', {
-          target: data.target,
-          restoredDatabase,
-        });
-        return completed.result;
+        return await finishIsolatedRestore(restoredDatabase, filename);
       }
       if (
-        !sameDatabaseSettings(
+        !sameBackupDatabaseLocale(
           metadata.databaseSettings,
           await lock.readDatabaseSettings(),
         )
@@ -1265,7 +1235,7 @@ export function createBackupProcessor(
       // pg_restore --single-transaction has committed when the process exits
       // successfully. Persist that point of no return before any post-restore
       // lock, health, progress, or cancellation checks can fail.
-      committedInPlaceRestore = {
+      committedRestore = {
         operation: 'restore',
         format: 'custom',
         filename,
@@ -1277,14 +1247,14 @@ export function createBackupProcessor(
       };
       await mutate({
         kind: 'restore-committed',
-        result: committedInPlaceRestore,
+        result: committedRestore,
       });
       await lock.ensureHeld();
       await healthCheck(options.env, data.target);
       const completed = await mutate({
         kind: 'restore-confirmed',
         result: {
-          ...committedInPlaceRestore,
+          ...committedRestore,
           verification: 'confirmed',
           message: '恢复完成',
         },
@@ -1298,15 +1268,15 @@ export function createBackupProcessor(
         await unlink(metadataPartialPath).catch(() => undefined);
       if (metadataPublishedPath)
         await unlink(metadataPublishedPath).catch(() => undefined);
-      if (committedInPlaceRestore) {
-        log.error('PostgreSQL 恢复事务已提交，但完成确认失败', {
+      if (committedRestore) {
+        log.error('数据库恢复已保留，但任务完成确认失败', {
           target: data.target,
           reason: 'backup_restore_postcommit_unconfirmed',
         });
         try {
           const state = await mutate({
             kind: 'restore-committed',
-            result: committedInPlaceRestore,
+            result: committedRestore,
           });
           if (state.status === 'completed') return state.result;
         } catch {
@@ -1317,7 +1287,7 @@ export function createBackupProcessor(
         // BullMQ uses a separate connection from the task registry. Retain
         // this bounded commit receipt in its completed result so query-time
         // reconciliation can recover it when registry writes failed.
-        return committedInPlaceRestore;
+        return committedRestore;
       }
       if (error instanceof TaskStopped) {
         if (error.state.status === 'cancelled') return cancelledResult;

@@ -405,138 +405,150 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).toBe('partition-newer');
     }, 120000);
 
-    it('restores a full plain-PG archive into a clean isolated database', async () => {
-      const taskId = randomUUID();
-      let checkedPublication = false;
-      const created = await runJob(
-        scratchUrl,
-        'create',
-        {},
-        {
-          taskId,
-          onDigestCheckpoint: async () => {
-            const names = (await readdir(directory)).filter((name) =>
-              name.includes(taskId.slice(0, 8)),
-            );
-            expect(names.some((name) => name.endsWith('.dump.partial'))).toBe(
-              true,
-            );
-            expect(names.some((name) => name.endsWith('.dump'))).toBe(false);
-            checkedPublication = true;
+    it.each([false, true])(
+      'retains a full plain-PG isolated restore after registry failure: %s',
+      async (failCommitWrites) => {
+        const taskId = randomUUID();
+        let checkedPublication = false;
+        const created = await runJob(
+          scratchUrl,
+          'create',
+          {},
+          {
+            taskId,
+            onDigestCheckpoint: async () => {
+              const names = (await readdir(directory)).filter((name) =>
+                name.includes(taskId.slice(0, 8)),
+              );
+              expect(names.some((name) => name.endsWith('.dump.partial'))).toBe(
+                true,
+              );
+              expect(names.some((name) => name.endsWith('.dump'))).toBe(false);
+              checkedPublication = true;
+            },
           },
-        },
-      );
-      expect(checkedPublication).toBe(true);
-      const artifact = backupTaskResultDataSchema.parse(created.result);
-      if (!artifact.filename) throw new Error('No full backup artifact');
-      const metadata = JSON.parse(
-        await readFile(
-          join(directory, `${artifact.filename}.meta.json`),
-          'utf8',
-        ),
-      );
-      expect(metadata).toMatchObject({
-        version: 3,
-        scope: 'full',
-        databaseSettings: { timeZone: 'Asia/Shanghai' },
-      });
-      expect(metadata.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
-      const original = (
-        await scratchPool.query(`SELECT note FROM public.${tableA}`)
-      ).rows[0].note;
-      await scratchPool.query(
-        `UPDATE public.${tableA} SET note='online-newer'`,
-      );
-      await scratchPool.query(`CREATE TABLE public.${blocker} (id integer)`);
-      let restoredDatabase: string | undefined;
-      try {
-        // The online connection uses a query-level database override, while
-        // the staging connection must use the newly created database name.
-        const overriddenUrl = new URL(scratchUrl);
-        overriddenUrl.searchParams.set('database', scratchName);
-        const restored = await runJob(overriddenUrl.toString(), 'restore', {
-          filename: artifact.filename,
+        );
+        expect(checkedPublication).toBe(true);
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        if (!artifact.filename) throw new Error('No full backup artifact');
+        const metadata = JSON.parse(
+          await readFile(
+            join(directory, `${artifact.filename}.meta.json`),
+            'utf8',
+          ),
+        );
+        expect(metadata).toMatchObject({
+          version: 3,
+          scope: 'full',
+          databaseSettings: { timeZone: 'Asia/Shanghai' },
         });
-        expect(restored.state.status).toBe('completed');
-        expect(restored.result).toMatchObject({
-          restoreMode: 'isolated',
-          targetDatabaseChanged: false,
-        });
-        restoredDatabase = (restored.result as { restoredDatabase?: string })
-          .restoredDatabase;
-        if (!restoredDatabase) throw new Error('No isolated database');
-        const stagedUrl = new URL(scratchUrl);
-        stagedUrl.pathname = `/${restoredDatabase}`;
-        const stagedPool = createPgPool(stagedUrl.toString(), { max: 1 });
+        expect(metadata.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+        const original = (
+          await scratchPool.query(`SELECT note FROM public.${tableA}`)
+        ).rows[0].note;
+        await scratchPool.query(
+          `UPDATE public.${tableA} SET note='online-newer'`,
+        );
+        await scratchPool.query(`CREATE TABLE public.${blocker} (id integer)`);
+        let restoredDatabase: string | undefined;
         try {
-          expect(
-            (
-              await stagedPool.query(
-                "SELECT current_setting('TimeZone') AS timezone",
-              )
-            ).rows[0].timezone,
-          ).toBe('Asia/Shanghai');
-          const databaseSettingsSql =
-            'SELECT encoding, datcollate, datctype, datlocprovider, daticulocale, daticurules FROM pg_database WHERE datname = current_database()';
-          expect((await stagedPool.query(databaseSettingsSql)).rows[0]).toEqual(
-            (await scratchPool.query(databaseSettingsSql)).rows[0],
+          // The online connection uses a query-level database override, while
+          // the staging connection must use the newly created database name.
+          const overriddenUrl = new URL(scratchUrl);
+          overriddenUrl.searchParams.set('database', scratchName);
+          const restored = await runJob(
+            overriddenUrl.toString(),
+            'restore',
+            {
+              filename: artifact.filename,
+            },
+            { failCommitWrites },
           );
+          expect(restored.state.status).toBe(
+            failCommitWrites ? 'processing' : 'completed',
+          );
+          expect(restored.result).toMatchObject({
+            restoreMode: 'isolated',
+            targetDatabaseChanged: false,
+            verification: failCommitWrites ? 'unconfirmed' : 'confirmed',
+          });
+          restoredDatabase = (restored.result as { restoredDatabase?: string })
+            .restoredDatabase;
+          if (!restoredDatabase) throw new Error('No isolated database');
+          const stagedUrl = new URL(scratchUrl);
+          stagedUrl.pathname = `/${restoredDatabase}`;
+          const stagedPool = createPgPool(stagedUrl.toString(), { max: 1 });
+          try {
+            expect(
+              (
+                await stagedPool.query(
+                  "SELECT current_setting('TimeZone') AS timezone",
+                )
+              ).rows[0].timezone,
+            ).toBe('Asia/Shanghai');
+            const databaseSettingsSql =
+              'SELECT encoding, datcollate, datctype, datlocprovider, daticulocale, daticurules FROM pg_database WHERE datname = current_database()';
+            expect(
+              (await stagedPool.query(databaseSettingsSql)).rows[0],
+            ).toEqual((await scratchPool.query(databaseSettingsSql)).rows[0]);
+            expect(
+              (await stagedPool.query('SELECT current_database() AS name'))
+                .rows[0].name,
+            ).toBe(restoredDatabase);
+            expect(
+              (await stagedPool.query(`SELECT note FROM public.${tableA}`))
+                .rows[0].note,
+            ).toBe(original);
+            expect(
+              (
+                await stagedPool.query('SELECT to_regclass($1) AS extra', [
+                  `public.${blocker}`,
+                ])
+              ).rows[0].extra,
+            ).toBeNull();
+          } finally {
+            await stagedPool.end();
+          }
           expect(
-            (await stagedPool.query('SELECT current_database() AS name'))
-              .rows[0].name,
-          ).toBe(restoredDatabase);
-          expect(
-            (await stagedPool.query(`SELECT note FROM public.${tableA}`))
+            (await scratchPool.query(`SELECT note FROM public.${tableA}`))
               .rows[0].note,
-          ).toBe(original);
+          ).toBe('online-newer');
           expect(
             (
-              await stagedPool.query('SELECT to_regclass($1) AS extra', [
+              await scratchPool.query('SELECT to_regclass($1) AS extra', [
                 `public.${blocker}`,
               ])
             ).rows[0].extra,
-          ).toBeNull();
-        } finally {
-          await stagedPool.end();
-        }
-        expect(
-          (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
-            .note,
-        ).toBe('online-newer');
-        expect(
-          (
-            await scratchPool.query('SELECT to_regclass($1) AS extra', [
-              `public.${blocker}`,
-            ])
-          ).rows[0].extra,
-        ).not.toBeNull();
+          ).not.toBeNull();
 
-        // A syntactically valid selective sidecar for a different archive
-        // cannot make a full dump run --clean against the online database.
-        await writeFile(
-          join(directory, `${artifact.filename}.meta.json`),
-          JSON.stringify({
-            ...metadata,
-            scope: 'selective',
-            tables: [`public.${tableA}`],
-            archiveSha256: '0'.repeat(64),
-          }),
-        );
-        await expect(
-          runJob(scratchUrl, 'restore', { filename: artifact.filename }),
-        ).rejects.toThrow('备份文件与元数据不匹配');
-        expect(
-          (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
-            .note,
-        ).toBe('online-newer');
-      } finally {
-        if (restoredDatabase)
-          await adminPool.query(
-            `DROP DATABASE ${restoredDatabase} WITH (FORCE)`,
+          // A syntactically valid selective sidecar for a different archive
+          // cannot make a full dump run --clean against the online database.
+          await writeFile(
+            join(directory, `${artifact.filename}.meta.json`),
+            JSON.stringify({
+              ...metadata,
+              scope: 'selective',
+              tables: [`public.${tableA}`],
+              archiveSha256: '0'.repeat(64),
+            }),
           );
-        await scratchPool.query(`DROP TABLE IF EXISTS public.${blocker}`);
-      }
-    }, 120000);
+          await expect(
+            runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+          ).rejects.toThrow('备份文件与元数据不匹配');
+          expect(
+            (await scratchPool.query(`SELECT note FROM public.${tableA}`))
+              .rows[0].note,
+          ).toBe('online-newer');
+        } finally {
+          if (restoredDatabase)
+            await adminPool.query(
+              `DROP DATABASE ${restoredDatabase} WITH (FORCE)`,
+            );
+          await scratchPool.query(`DROP TABLE IF EXISTS public.${blocker}`);
+        }
+      },
+      120000,
+    );
 
     it('rejects selective Timescale table dumps', async () => {
       const sourcePool = adminPool;
@@ -674,13 +686,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         } finally {
           await writeFile(metadataPath, JSON.stringify(metadata));
         }
-        const restored = await runJob(timescaleUrl, 'restore', {
-          filename: artifact.filename,
-        });
+        const restored = await runJob(
+          timescaleUrl,
+          'restore',
+          {
+            filename: artifact.filename,
+          },
+          { failCommitWrites: true },
+        );
+        expect(restored.state.status).toBe('processing');
         const result = backupTaskResultDataSchema.parse(restored.result);
         expect(result).toMatchObject({
           restoreMode: 'isolated',
           targetDatabaseChanged: false,
+          verification: 'unconfirmed',
         });
         if (!result.restoredDatabase)
           throw new Error('Missing isolated database');

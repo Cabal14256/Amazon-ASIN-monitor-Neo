@@ -12,6 +12,7 @@ import {
   BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
   backupFileSchema,
+  type BackupDatabaseSettings,
   type BackupFile,
   type BackupTarget,
 } from '@asin-monitor/contracts';
@@ -83,10 +84,11 @@ export async function readBackupMetadata(directory: string, filename: string) {
 
 export async function listBackupFiles(
   directory: string,
-): Promise<BackupFile[]> {
+): Promise<(BackupFile & { databaseSettings?: BackupDatabaseSettings })[]> {
   await ensureBackupDirectory(directory);
   const entries = await readdir(resolve(directory), { withFileTypes: true });
-  const files: BackupFile[] = [];
+  const files: (BackupFile & { databaseSettings?: BackupDatabaseSettings })[] =
+    [];
   for (const entry of entries) {
     if (!entry.isFile() || !BACKUP_FILENAME_PATTERN.test(entry.name)) continue;
     const path = safeBackupPath(directory, entry.name);
@@ -98,8 +100,8 @@ export async function listBackupFiles(
     }
     const target = backupFilenameTarget(entry.name);
     const metadata = await readBackupMetadata(directory, entry.name);
-    files.push(
-      backupFileSchema.parse({
+    files.push({
+      ...backupFileSchema.parse({
         filename: entry.name,
         size: details.size,
         createdAt: details.birthtime.toISOString(),
@@ -116,7 +118,11 @@ export async function listBackupFiles(
             ? metadata.timescale.extensionVersion
             : undefined,
       }),
-    );
+      databaseSettings:
+        metadata && 'databaseSettings' in metadata
+          ? metadata.databaseSettings
+          : undefined,
+    });
   }
   return files.sort((left, right) =>
     right.createdAt.localeCompare(left.createdAt),

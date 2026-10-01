@@ -76,62 +76,87 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
-  it('preserves a committed in-place restore across cancellation and later confirmation', async () => {
-    const { repository } = fixture();
-    const task = await repository.create({
-      taskId: 'restore-task',
-      userId: 'owner-a',
-      taskType: 'backup',
-      taskSubType: 'restore',
-    });
-    const cancelled = await repository.mutate(task.taskId, {
-      kind: 'cancelled',
-    });
-    expect(cancelled?.status).toBe('cancelled');
-    const result = {
-      operation: 'restore' as const,
-      format: 'custom' as const,
-      filename: 'backup_20260927-020000-abcdef01-primary.dump',
-      target: 'primary' as const,
-      restoreMode: 'in-place' as const,
-      targetDatabaseChanged: true as const,
-      verification: 'unconfirmed' as const,
-      message: '恢复事务已提交，健康检查待确认',
-    };
-    const committed = await repository.mutate(task.taskId, {
-      kind: 'restore-committed',
-      result,
-    });
-    expect(committed).toMatchObject({
-      status: 'completed',
-      error: null,
-      cancelledAt: null,
-      result,
-    });
-    expect(
-      await repository.mutate(task.taskId, {
+  it.each(['in-place', 'isolated'] as const)(
+    'preserves a retained %s restore across cancellation and later confirmation',
+    async (restoreMode) => {
+      const { repository } = fixture();
+      const task = await repository.create({
+        taskId: 'restore-task',
+        userId: 'owner-a',
+        taskType: 'backup',
+        taskSubType: 'restore',
+      });
+      const cancelled = await repository.mutate(task.taskId, {
         kind: 'cancelled',
-      }),
-    ).toMatchObject({ status: 'completed', result });
-    const confirmed = await repository.mutate(task.taskId, {
-      kind: 'restore-confirmed',
-      result: {
-        ...result,
-        verification: 'confirmed',
-        message: '恢复完成',
-      },
-    });
-    expect(confirmed).toMatchObject({
-      status: 'completed',
-      result: { targetDatabaseChanged: true, verification: 'confirmed' },
-    });
-    expect(
-      await repository.mutate(task.taskId, {
+      });
+      expect(cancelled?.status).toBe('cancelled');
+      const result = {
+        operation: 'restore' as const,
+        format: 'custom' as const,
+        filename: 'backup_20260927-020000-abcdef01-primary.dump',
+        target: 'primary' as const,
+        ...(restoreMode === 'in-place'
+          ? {
+              restoreMode: 'in-place' as const,
+              targetDatabaseChanged: true as const,
+            }
+          : {
+              restoreMode: 'isolated' as const,
+              targetDatabaseChanged: false as const,
+              restoredDatabase: 'neo_restore_primary_0123456789abcdef',
+            }),
+        verification: 'unconfirmed' as const,
+        message: '恢复事务已提交，健康检查待确认',
+      };
+      const committed = await repository.mutate(task.taskId, {
         kind: 'restore-committed',
         result,
-      }),
-    ).toEqual(confirmed);
-  });
+      });
+      expect(committed).toMatchObject({
+        status: 'completed',
+        error: null,
+        cancelledAt: null,
+        result,
+      });
+      expect(
+        await repository.mutate(task.taskId, {
+          kind: 'cancelled',
+        }),
+      ).toMatchObject({ status: 'completed', result });
+      if (result.restoreMode === 'isolated')
+        expect(
+          await repository.mutate(task.taskId, {
+            kind: 'restore-confirmed',
+            result: {
+              ...result,
+              restoredDatabase: 'neo_restore_primary_fedcba9876543210',
+              verification: 'confirmed',
+            },
+          }),
+        ).toMatchObject({ result });
+      const confirmed = await repository.mutate(task.taskId, {
+        kind: 'restore-confirmed',
+        result: {
+          ...result,
+          verification: 'confirmed',
+          message: '恢复完成',
+        },
+      });
+      expect(confirmed).toMatchObject({
+        status: 'completed',
+        result: {
+          targetDatabaseChanged: restoreMode === 'in-place',
+          verification: 'confirmed',
+        },
+      });
+      expect(
+        await repository.mutate(task.taskId, {
+          kind: 'restore-committed',
+          result,
+        }),
+      ).toEqual(confirmed);
+    },
+  );
 
   it('preserves a check cancellation when an exhausted queue failure is reconciled', async () => {
     const { repository } = fixture();

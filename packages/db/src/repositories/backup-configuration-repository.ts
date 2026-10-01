@@ -35,9 +35,10 @@ class DrizzleBackupConfigUnit
       .select()
       .from(backupConfig)
       .orderBy(asc(backupConfig.id))
-      .limit(2);
+      // Legacy findOne/upsert uses the first row even when an older concurrent
+      // initialization or migration left multiple configuration rows.
+      .limit(1);
     this.ensureOpen();
-    if (rows.length > 1) throw new BackupConfigError('result');
     return rows[0] ? validateBackupConfigRow(rows[0]) : undefined;
   }
 

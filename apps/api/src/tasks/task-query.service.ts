@@ -1,5 +1,5 @@
 import type { Env } from '@asin-monitor/config';
-import { backupInPlaceRestoreResultSchema } from '@asin-monitor/contracts';
+import { backupRestoreReceiptSchema } from '@asin-monitor/contracts';
 import { isTerminalTaskStatus, type TaskState } from '@asin-monitor/db';
 import {
   variantCheckResultOperation,
@@ -110,10 +110,11 @@ export class TaskQueryService {
         : {}),
     };
     if (backupRestoreTask(task) && queued.status === 'completed') {
-      const receipt = backupInPlaceRestoreResultSchema.safeParse(queued.result);
+      const receipt = backupRestoreReceiptSchema.safeParse(queued.result);
       if (receipt.success) {
-        // A successful pg_restore committed before registry/cancellation
-        // acknowledgements. Its immutable queue incarnation is checked above.
+        // The in-place transaction committed or the isolated database was
+        // verified and retained before registry/cancellation acknowledgements.
+        // Its immutable queue incarnation is checked above.
         current = await port.store.mutate(
           task.taskId,
           {

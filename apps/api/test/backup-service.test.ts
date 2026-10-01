@@ -97,10 +97,17 @@ async function fixture(maxBytes = 1024 * 1024) {
   };
   const pools = {
     primaryPool: {
-      query: vi.fn(async () => ({ rows: [] as { extversion: string }[] })),
+      query: vi.fn(async (query: { text: string }) => ({
+        rows: query.text.includes('pg_database')
+          ? ([{ ...databaseSettings, localeProvider: 'c' }] as Record<
+              string,
+              unknown
+            >[])
+          : ([] as Record<string, unknown>[]),
+      })),
     },
     competitorPool: {
-      query: vi.fn(async () => ({ rows: [] as { extversion: string }[] })),
+      query: vi.fn(async () => ({ rows: [] as Record<string, unknown>[] })),
     },
   };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -250,6 +257,82 @@ describe('backup API service', () => {
       service.restore(principal, { filename }),
     ).resolves.toMatchObject({ restoreMode: 'in-place' });
     expect(port.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { encoding: 'LATIN1' },
+    { lcCollate: 'C' },
+    { lcCtype: 'C' },
+    { localeProvider: 'i', icuLocale: 'en-US' },
+  ])(
+    'does not offer or enqueue selective restore when current locale differs: %j',
+    async (difference) => {
+      const { service, port, directory, pools } = await fixture();
+      await writeFile(join(directory, filename), 'PGDMPfixture');
+      await writeMetadata(directory, 'postgresql', 3, 'selective');
+      pools.primaryPool.query.mockImplementation(async (query) => ({
+        rows: query.text.includes('pg_database')
+          ? [{ ...databaseSettings, localeProvider: 'c', ...difference }]
+          : [],
+      }));
+      const files = await service.list(principal);
+      expect(files).toMatchObject([{ filename, restoreSupported: false }]);
+      expect(files[0]).not.toHaveProperty('databaseSettings');
+      await expect(
+        service.restore(principal, { filename }),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(port.enqueue).not.toHaveBeenCalled();
+      // A full archive creates its own source-locale database, so this mismatch
+      // must not prevent isolated recovery.
+      await writeMetadata(directory, 'postgresql', 3, 'full');
+      await expect(service.list(principal)).resolves.toMatchObject([
+        { restoreSupported: true },
+      ]);
+      await expect(
+        service.restore(principal, { filename }),
+      ).resolves.toMatchObject({ restoreMode: 'isolated' });
+    },
+  );
+
+  it('fails closed when the selective locale probe is unavailable or ICU rules differ', async () => {
+    const { service, port, directory, pools } = await fixture();
+    await writeFile(join(directory, filename), 'PGDMPfixture');
+    await writeMetadata(directory, 'postgresql', 3, 'selective');
+    const metadataPath = join(directory, `${filename}.meta.json`);
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+    const icu = {
+      ...databaseSettings,
+      localeProvider: 'icu',
+      icuLocale: 'en-US',
+      icuRules: '&a<b',
+    };
+    await writeFile(
+      metadataPath,
+      JSON.stringify({ ...metadata, databaseSettings: icu }),
+    );
+    pools.primaryPool.query.mockImplementation(async (query) => ({
+      rows: query.text.includes('pg_database')
+        ? [{ ...icu, localeProvider: 'i', icuRules: '&a<c' }]
+        : [],
+    }));
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({ status: 409 });
+    pools.primaryPool.query.mockImplementation(async (query) => {
+      if (query.text.includes('pg_database'))
+        throw new Error('catalog unavailable');
+      return { rows: [] };
+    });
+    await expect(service.list(principal)).resolves.toMatchObject([
+      { restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({ status: 500 });
+    expect(port.enqueue).not.toHaveBeenCalled();
   });
 
   it('does not offer a plain restore when its v3 sidecar lacks an archive digest or source database settings', async () => {

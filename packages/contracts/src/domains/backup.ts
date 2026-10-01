@@ -439,6 +439,47 @@ export const backupInPlaceRestoreResultSchema = z
   })
   .strict();
 
+/** A retained isolated restore must stay discoverable even after a lost Redis
+ * completion acknowledgement. Its database name is bounded, never a URL. */
+export const backupIsolatedRestoreResultSchema = z
+  .object({
+    operation: z.literal('restore'),
+    format: backupArtifactFormatSchema,
+    filename: backupFilenameSchema,
+    target: backupTargetSchema,
+    restoreMode: z.literal('isolated'),
+    restoredDatabase: z
+      .string()
+      .regex(/^neo_restore_(?:primary|competitor)_[a-f0-9]{16}$/),
+    targetDatabaseChanged: z.literal(false),
+    verification: z.enum(['unconfirmed', 'confirmed']),
+    message: z.string().min(1).max(2000),
+  })
+  .strict();
+export const backupRestoreReceiptSchema = z.union([
+  backupInPlaceRestoreResultSchema,
+  backupIsolatedRestoreResultSchema,
+]);
+export type BackupRestoreReceipt = z.infer<typeof backupRestoreReceiptSchema>;
+
+/** In-place restore keeps the live database locale. Timezone is a separate
+ * database setting and does not require matching for selective table restore. */
+export function sameBackupDatabaseLocale(
+  left: BackupDatabaseSettings,
+  right: BackupDatabaseSettings,
+): boolean {
+  return (
+    left.encoding === right.encoding &&
+    left.lcCollate === right.lcCollate &&
+    left.lcCtype === right.lcCtype &&
+    left.localeProvider === right.localeProvider &&
+    (left.localeProvider === 'libc' ||
+      (right.localeProvider === 'icu' &&
+        left.icuLocale === right.icuLocale &&
+        left.icuRules === right.icuRules))
+  );
+}
+
 /**
  * GET /backup/:filename/download：含 dump 与 .meta.json 的 tar 流（非 JSON），
  * 契约仅登记。

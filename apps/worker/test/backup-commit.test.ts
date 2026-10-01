@@ -1,4 +1,4 @@
-import { backupInPlaceRestoreResultSchema } from '@asin-monitor/contracts';
+import { backupRestoreReceiptSchema } from '@asin-monitor/contracts';
 import {
   transitionTask,
   type TaskMutation,
@@ -11,7 +11,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createBackupProcessor } from '../src/backup-processor';
+import {
+  createBackupProcessor,
+  stagingDatabaseName,
+} from '../src/backup-processor';
 
 const dependencies = vi.hoisted(() => ({ pool: vi.fn(), spawn: vi.fn() }));
 vi.mock('@asin-monitor/db', async (original) => ({
@@ -28,9 +31,14 @@ afterEach(async () => {
 });
 
 describe('committed restore recovery when the registry connection fails', () => {
-  it.each([false, true])(
-    'returns a bounded BullMQ receipt after both commit writes fail (late cancellation %s)',
-    async (cancel) => {
+  it.each([
+    { scope: 'selective', cancel: false },
+    { scope: 'selective', cancel: true },
+    { scope: 'full', cancel: false },
+    { scope: 'full', cancel: true },
+  ] as const)(
+    'returns a bounded BullMQ receipt after both commit writes fail (%j)',
+    async ({ scope, cancel }) => {
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-commit-'));
       const taskId = '10000000-0000-4000-8000-000000000161';
       const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -50,8 +58,8 @@ describe('committed restore recovery when the registry connection fails', () => 
           filename,
           target: 'primary',
           sourceEngine: 'postgresql',
-          scope: 'selective',
-          tables: ['public.asins'],
+          scope,
+          ...(scope === 'selective' ? { tables: ['public.asins'] } : {}),
           archiveSha256: createHash('sha256').update(archive).digest('hex'),
           databaseSettings: settings,
         }),
@@ -65,6 +73,10 @@ describe('committed restore recovery when the registry connection fails', () => 
           ? [{ ...settings, localeProvider: 'c' }]
           : sql.includes('AS timezone')
           ? [{ timezone: 'Asia/Shanghai' }]
+          : sql.includes('pg_get_userbyid')
+          ? [{ owned: true }]
+          : sql.includes('SELECT current_database()')
+          ? [{ database: stagingDatabaseName(taskId, 'primary') }]
           : [],
       }));
       dependencies.pool.mockImplementation(() => ({
@@ -151,14 +163,23 @@ describe('committed restore recovery when the registry connection fails', () => 
         },
         log,
       );
-      const result = backupInPlaceRestoreResultSchema.parse(
+      const result = backupRestoreReceiptSchema.parse(
         await processor({ id: taskId, name: 'restore', data } as Job, 'lock'),
       );
       expect(result).toMatchObject({
         filename,
-        targetDatabaseChanged: true,
+        targetDatabaseChanged: scope === 'selective',
         verification: 'unconfirmed',
       });
+      if (scope === 'full') {
+        expect(result).toMatchObject({
+          restoreMode: 'isolated',
+          restoredDatabase: stagingDatabaseName(taskId, 'primary'),
+        });
+        expect(
+          query.mock.calls.some(([sql]) => sql.startsWith('DROP DATABASE')),
+        ).toBe(false);
+      }
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024);
       expect(dependencies.spawn).toHaveBeenCalledOnce();
       expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(

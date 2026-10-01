@@ -12,6 +12,10 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 ## 持久化存储
 
+`PG_DUMP_PATH` 和 `PG_RESTORE_PATH` 最长为 512 字符；启动环境校验与 Worker 执行校验使用同一上限，超限配置在启动时拒绝。只接受可执行文件名或绝对路径，不接受命令参数。
+
+对于普通 PostgreSQL 的选择性归档，列表能力检查及恢复入队前都读取目标数据库的编码、collation、ctype、locale provider 和 ICU locale/rules；不匹配时列表不提供恢复，提交返回 409。目录读取失败时按不可恢复处理。Worker 执行前再次核对，避免排队期间目标配置变化。完整归档在隔离库使用源 locale，因此不要求与在线目标库 locale 相同。
+
 API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BACKUP_STORAGE_DIRECTORY`。未设置时，仓库部署使用 `var/neo/backups`；生产环境必须把它映射到组织批准的持久卷，禁止使用容器临时文件系统。`BACKUP_MAX_BYTES` 限制单个产物大小，`BACKUP_COMMAND_TIMEOUT_MS` 限制外部命令最长运行时间。
 
 `DATABASE_URL` 和 `COMPETITOR_DATABASE_URL` 的连接字段只在 Worker 子进程环境中传递给 PostgreSQL 客户端，绝不写入任务 payload、日志或 HTTP 响应。Worker 先按 node-postgres 规则解析 URL、`PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` 等缺省值，再清除继承的 `PG*` 并把解析后的目标显式交给 libpq；不继承 `PGSERVICE` 等额外重定向项。表名参数只接受限定标识符，不接受 shell 片段；命令使用 `shell: false`。备份卷须限制为 API/Worker 与管理员可读写，避免其他进程替换同名文件。
@@ -37,6 +41,8 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 ## 自动计划
 
+若 Legacy 迁移留下多行 `backup_config`，读取、保存和调度均沿用 Legacy 的最小 ID 行；保存只更新该行，保留后续行供运维核查，不因多行状态中断 API 或自动计划。
+
 `GET/POST /api/v1/backup/config` 保存 daily/weekly/monthly 和上海时间。启用 `SCHEDULER_ENABLED=true` 后，Worker 通过 Redis scheduler lease 选出调度器。计划时间与目标库生成稳定任务 ID；如某一目标入队失败，下次轮询会沿用该 ID 补齐任务，避免重复创建已成功的一项。调度配置在每次计划检查时读取，可热更新。
 
 有 `settings:write` 权限的管理员可在设置页“自动备份执行记录”或 `GET /api/v1/backup/scheduled-tasks` 查看最近 50 次计划任务的待执行、失败、取消与完成状态。该接口只读取系统计划所有者的备份任务，不授予取消或修改任务权限。列表依赖 Redis 任务元数据的保留期；过期记录须从独立审计或运维日志查找。
@@ -45,6 +51,6 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 回滚应用时停止 Neo Worker/API，保留备份持久卷和任务元数据，恢复 Legacy 服务。Legacy SQL 备份不能用于 Neo 恢复；从 Neo custom dump 恢复前，先在隔离库完成演练并记录可恢复性证据。
 
-当原位恢复已经提交，而两次 Redis task registry 完成写入均失败时，Worker 把小于 1 KiB 的已提交、待核实回执返回给 BullMQ，队列保持 completed。备份队列的完成/失败结果至少保留 max(7 天, TASK_META_TTL_SECONDS)，不设置可提前淘汰回执的 count 上限；任务查询按所有者、创建时间和 restore 子类型绑定回执后恢复 registry。即使 registry 保留 cancelling、cancelled 或 failed，已提交的恢复也不能被展示为未执行。若 BullMQ 自身也失联或进程被强制终止，仍须人工核对数据库，不能依赖该回执证明未提交。
+当原位恢复已经提交，或隔离恢复完成验证并保留数据库，而两次 Redis task registry 完成写入均失败时，Worker 把小于 1 KiB 的已恢复、待核实回执返回给 BullMQ，队列保持 completed。隔离恢复回执保留 `restoredDatabase`、`restoreMode: isolated`、`targetDatabaseChanged: false` 和 `verification: unconfirmed`；不得因此自动重试或删除已经保留的恢复库。备份队列的完成/失败结果至少保留 max(7 天, TASK_META_TTL_SECONDS)，不设置可提前淘汰回执的 count 上限；任务查询按所有者、创建时间和 restore 子类型绑定回执后恢复 registry。即使 registry 保留 cancelling、cancelled 或 failed，已完成的恢复也不能被展示为未执行。若 BullMQ 自身也失联或进程被强制终止，仍须人工核对数据库，不能依赖该回执证明未提交。
 
 备份下载以 EXPORT/backup 记录持久审计：保留认证操作人、经过文件名校验的归档标识、路由模板及最终状态，不记录文件内容、查询参数或凭据。
