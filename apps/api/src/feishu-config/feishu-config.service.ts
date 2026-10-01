@@ -58,6 +58,7 @@ export class FeishuConfigService {
         if (error.reason === 'input') fail(400, '配置参数无效');
         if (error.reason === 'capacity')
           fail(429, '配置管理请求繁忙，请稍后再试');
+        if (error.reason === 'conflict') fail(409, '配置已变更，请刷新后重试');
       }
       this.logger.error('飞书配置操作失败', 'FeishuConfigService', {
         operation,

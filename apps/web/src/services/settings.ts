@@ -2,15 +2,18 @@ import {
   errorStatsResultSchema,
   feishuConfigListResultSchema,
   feishuConfigResultSchema,
+  feishuRevisionSchema,
   rateLimiterStatusResultSchema,
   spApiDisplayConfigListResultSchema,
   toggleFeishuConfigRequestSchema,
   updateSpApiConfigsRequestSchema,
   updateSpApiConfigsResultSchema,
+  upsertFeishuConfigRequestSchema,
   type FeishuConfig,
   type SpApiDisplayConfig,
   type ToggleFeishuConfigRequest,
   type UpdateSpApiConfigsRequest,
+  type UpsertFeishuConfigRequest,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
 
@@ -52,6 +55,7 @@ function feishuRevision(row: FeishuConfig | undefined) {
   return row
     ? JSON.stringify([
         row.id,
+        row.revision,
         row.updateTime ?? row.update_time,
         row.enabled,
         Boolean(row.webhookUrl || row.webhook_url),
@@ -142,12 +146,19 @@ export class SettingsApi {
   }
 
   async upsertFeishu(
-    input: { country: string; webhookUrl: string; enabled: boolean },
+    input: Omit<UpsertFeishuConfigRequest, 'expectedRevision'> & {
+      expectedRevision: string | null;
+    },
     signal?: AbortSignal,
   ) {
+    const body = checked(
+      upsertFeishuConfigRequestSchema,
+      input,
+      '飞书配置参数无效',
+    );
     const response = await this.http.request(
       FEISHU,
-      { method: 'POST', json: input, signal, ...READ_OPTIONS },
+      { method: 'POST', json: body, signal, ...READ_OPTIONS },
       feishuConfigResultSchema,
     );
     data(response, '飞书配置保存响应无效');
@@ -224,20 +235,42 @@ export class SettingsApi {
     if (feishuRevision(original) !== feishuRevision(latest))
       throw new ApiError(
         'BUSINESS',
-        '飞书配置已被其他管理员更新；请放弃本地修改后重新编辑',
+        '飞书配置已被其他管理员更新；输入已保留，请查看刷新后的配置并重新编辑',
         409,
         409,
       );
-    await this.upsertFeishu(
-      {
-        country: latest?.country ?? country,
-        webhookUrl: draft.webhookUrl,
-        enabled:
-          draft.enabled ??
-          (latest ? latest.enabled === true || latest.enabled === 1 : false),
-      },
-      signal,
-    );
+    let expectedRevision: string | null = null;
+    if (latest) {
+      const parsed = feishuRevisionSchema.safeParse(latest.revision);
+      if (!parsed.success)
+        throw new ApiError(
+          'INVALID_RESPONSE',
+          '飞书配置缺少版本信息，请刷新后重试',
+        );
+      expectedRevision = parsed.data;
+    }
+    try {
+      await this.upsertFeishu(
+        {
+          country: latest?.country ?? country,
+          webhookUrl: draft.webhookUrl,
+          enabled:
+            draft.enabled ??
+            (latest ? latest.enabled === true || latest.enabled === 1 : false),
+          expectedRevision,
+        },
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409)
+        throw new ApiError(
+          'BUSINESS',
+          '飞书配置已被其他管理员更新；输入已保留，请查看刷新后的配置并重新编辑',
+          409,
+          409,
+        );
+      throw error;
+    }
   }
 
   async quota(signal?: AbortSignal) {
