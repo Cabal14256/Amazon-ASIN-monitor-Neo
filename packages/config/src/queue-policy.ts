@@ -66,13 +66,20 @@ const POLICIES: Record<QueueName, QueuePolicy> = {
 
 export function getQueuePolicy(name: QueueName, env: Env) {
   const policy = POLICIES[name];
+  // A committed restore may have only a BullMQ receipt while the separate
+  // task registry is unavailable. Keep it throughout the metadata lifetime;
+  // no count cap may evict it early when newer jobs complete.
+  const backupRetention =
+    name === 'backup'
+      ? Math.max(7 * 24 * 60 * 60, env.TASK_META_TTL_SECONDS)
+      : undefined;
   const defaultJobOptions = {
     attempts: policy.attempts,
     ...(policy.attempts > 1
       ? { backoff: { type: 'exponential' as const, delay: 5000 } }
       : {}),
-    removeOnComplete: { age: policy.completeAge },
-    removeOnFail: { age: policy.failureAge },
+    removeOnComplete: { age: backupRetention ?? policy.completeAge },
+    removeOnFail: { age: backupRetention ?? policy.failureAge },
   };
   const limiter =
     name === 'monitor'

@@ -82,6 +82,7 @@ export const backupDatabaseSettingsSchema = z.discriminatedUnion(
           .regex(/^[A-Z0-9_]+$/),
         lcCollate: backupLocaleSettingSchema,
         lcCtype: backupLocaleSettingSchema,
+        timeZone: backupLocaleSettingSchema.optional(),
         localeProvider: z.literal('libc'),
       })
       .strict(),
@@ -94,6 +95,7 @@ export const backupDatabaseSettingsSchema = z.discriminatedUnion(
           .regex(/^[A-Z0-9_]+$/),
         lcCollate: backupLocaleSettingSchema,
         lcCtype: backupLocaleSettingSchema,
+        timeZone: backupLocaleSettingSchema.optional(),
         localeProvider: z.literal('icu'),
         icuLocale: backupLocaleSettingSchema,
         icuRules: z
@@ -134,6 +136,18 @@ export const backupArtifactMetadataSchema = z.union([
       target: backupTargetSchema,
       sourceEngine: z.literal('timescaledb'),
       timescale: backupTimescaleManifestSchema,
+      databaseSettings: backupDatabaseSettingsSchema,
+      description: z.string().max(500).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(4),
+      filename: backupFilenameSchema,
+      target: backupTargetSchema,
+      sourceEngine: z.literal('timescaledb'),
+      timescale: backupTimescaleManifestSchema,
+      archiveSha256: backupArchiveSha256Schema,
       databaseSettings: backupDatabaseSettingsSchema,
       description: z.string().max(500).optional(),
     })
@@ -186,7 +200,7 @@ export const backupFileSchema = z
     restoreMode: backupRestoreModeSchema.optional(),
     sourceEngine: backupSourceEngineSchema.optional(),
     metadataVersion: z
-      .union([z.literal(1), z.literal(2), z.literal(3)])
+      .union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)])
       .optional(),
     scope: backupScopeSchema.optional(),
     sourceExtensionVersion: z.string().optional(),

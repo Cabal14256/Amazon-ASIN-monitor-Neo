@@ -1,3 +1,4 @@
+import type { Env } from '@asin-monitor/config';
 import type { BackupJobData } from '@asin-monitor/contracts';
 import {
   backupJobDataSchema,
@@ -52,7 +53,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         BACKUP_MAX_BYTES: 10_000_000,
         PG_DUMP_PATH: 'pg_dump',
         PG_RESTORE_PATH: 'pg_restore',
-      } as never;
+      } as Env;
     }
 
     async function runJob(
@@ -66,6 +67,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         onProgress?: (value: number, taskId: string) => Promise<void>;
         onDigestCheckpoint?: (taskId: string) => Promise<void>;
         failConfirmation?: boolean;
+        failCommitWrites?: boolean;
       } = {},
     ) {
       const taskId = options.taskId ?? randomUUID();
@@ -103,6 +105,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const store = {
         read: vi.fn(async (id: string) => states.get(id) ?? null),
         mutate: vi.fn(async (id: string, change: TaskMutation) => {
+          if (options.failCommitWrites && change.kind === 'restore-committed')
+            throw new Error(
+              'simulated registry connection failure after commit',
+            );
           if (options.failConfirmation && change.kind === 'restore-confirmed')
             throw new Error('simulated confirmation failure');
           const current = states.get(id);
@@ -165,6 +171,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         `CREATE DATABASE ${scratchName} TEMPLATE template0`,
       );
       scratchCreated = true;
+      await adminPool.query(
+        `ALTER DATABASE ${scratchName} SET TimeZone TO 'Asia/Shanghai'`,
+      );
       const target = new URL(sourceUrl);
       target.pathname = `/${scratchName}`;
       scratchUrl = target.toString();
@@ -314,6 +323,29 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           .note,
       ).toBe('original-a');
 
+      await scratchPool.query(
+        `UPDATE public.${tableA} SET note = 'before-registry-failure'`,
+      );
+      const registryUnavailable = await runJob(
+        scratchUrl,
+        'restore',
+        { filename: artifact.filename },
+        { failCommitWrites: true },
+      );
+      expect(registryUnavailable.state.status).toBe('processing');
+      expect(registryUnavailable.result).toMatchObject({
+        operation: 'restore',
+        targetDatabaseChanged: true,
+        verification: 'unconfirmed',
+      });
+      expect(
+        Buffer.byteLength(JSON.stringify(registryUnavailable.result)),
+      ).toBeLessThan(1024);
+      expect(
+        (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
+          .note,
+      ).toBe('original-a');
+
       await writeFile(
         join(directory, `${artifact.filename}.meta.json`),
         JSON.stringify({
@@ -403,7 +435,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           'utf8',
         ),
       );
-      expect(metadata).toMatchObject({ version: 3, scope: 'full' });
+      expect(metadata).toMatchObject({
+        version: 3,
+        scope: 'full',
+        databaseSettings: { timeZone: 'Asia/Shanghai' },
+      });
       expect(metadata.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
       const original = (
         await scratchPool.query(`SELECT note FROM public.${tableA}`)
@@ -433,6 +469,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         stagedUrl.pathname = `/${restoredDatabase}`;
         const stagedPool = createPgPool(stagedUrl.toString(), { max: 1 });
         try {
+          expect(
+            (
+              await stagedPool.query(
+                "SELECT current_setting('TimeZone') AS timezone",
+              )
+            ).rows[0].timezone,
+          ).toBe('Asia/Shanghai');
           const databaseSettingsSql =
             'SELECT encoding, datcollate, datctype, datlocprovider, daticulocale, daticurules FROM pg_database WHERE datname = current_database()';
           expect((await stagedPool.query(databaseSettingsSql)).rows[0]).toEqual(
@@ -529,6 +572,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           `CREATE DATABASE ${sourceName} TEMPLATE template0`,
         );
         sourceCreated = true;
+        await adminPool.query(
+          `ALTER DATABASE ${sourceName} SET TimeZone TO 'Pacific/Auckland'`,
+        );
         timescalePool = createPgPool(timescaleUrl, { max: 1 });
         await timescalePool.query('CREATE EXTENSION timescaledb');
         await timescalePool.query(
@@ -572,13 +618,62 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ),
         );
         expect(metadata).toMatchObject({
-          version: 2,
+          version: 4,
+          archiveSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          databaseSettings: { timeZone: 'Pacific/Auckland' },
           timescale: {
             hypertables: expect.arrayContaining([`public.${hypertable}`]),
             continuousAggregates: expect.arrayContaining([`public.${cagg}`]),
           },
         });
         await timescalePool.query(`UPDATE public.${hypertable} SET value = 99`);
+        // A genuine different recovery point has the same Timescale catalog.
+        // Pairing its digest with this archive must stop before CREATE DATABASE.
+        const newer = await runJob(timescaleUrl, 'create', {});
+        const newerArtifact = backupTaskResultDataSchema.parse(newer.result);
+        const newerMetadata = JSON.parse(
+          await readFile(
+            join(directory, `${newerArtifact.filename}.meta.json`),
+            'utf8',
+          ),
+        );
+        expect(newerMetadata.archiveSha256).not.toBe(metadata.archiveSha256);
+        const mismatchedTaskId = randomUUID();
+        const metadataPath = join(directory, `${artifact.filename}.meta.json`);
+        await writeFile(
+          metadataPath,
+          JSON.stringify({
+            ...metadata,
+            archiveSha256: newerMetadata.archiveSha256,
+          }),
+        );
+        try {
+          await expect(
+            runJob(
+              timescaleUrl,
+              'restore',
+              { filename: artifact.filename },
+              { taskId: mismatchedTaskId },
+            ),
+          ).rejects.toThrow('备份文件与元数据不匹配');
+          expect(
+            (
+              await adminPool.query(
+                'SELECT 1 FROM pg_database WHERE datname = $1',
+                [stagingDatabaseName(mismatchedTaskId, 'primary')],
+              )
+            ).rows,
+          ).toHaveLength(0);
+          expect(
+            (
+              await timescalePool.query(
+                `SELECT value FROM public.${hypertable}`,
+              )
+            ).rows[0].value,
+          ).toBe(99);
+        } finally {
+          await writeFile(metadataPath, JSON.stringify(metadata));
+        }
         const restored = await runJob(timescaleUrl, 'restore', {
           filename: artifact.filename,
         });
@@ -594,6 +689,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         restoredUrl.pathname = `/${result.restoredDatabase}`;
         const restoredPool = createPgPool(restoredUrl.toString(), { max: 1 });
         try {
+          expect(
+            (
+              await restoredPool.query(
+                "SELECT current_setting('TimeZone') AS timezone",
+              )
+            ).rows[0].timezone,
+          ).toBe('Pacific/Auckland');
           expect(
             (await restoredPool.query(`SELECT value FROM public.${hypertable}`))
               .rows[0]?.value,

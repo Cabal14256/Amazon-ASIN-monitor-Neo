@@ -173,6 +173,59 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
+  it.each(['processing', 'cancelling', 'cancelled', 'failed'] as const)(
+    'recovers a committed restore receipt despite stale %s registry state',
+    async (status) => {
+      task = {
+        ...task!,
+        taskType: 'backup',
+        taskSubType: 'restore',
+        status,
+        ...(status === 'cancelling' || status === 'cancelled'
+          ? { cancelRequestedAt: new Date().toISOString() }
+          : {}),
+      };
+      const result = {
+        operation: 'restore',
+        format: 'custom',
+        filename: 'backup_20260927-230000-1234abcd-primary.dump',
+        target: 'primary',
+        restoreMode: 'in-place',
+        targetDatabaseChanged: true,
+        verification: 'unconfirmed',
+        message: '数据库已恢复，请核对',
+      };
+      queue = { ...task, status: 'completed', result };
+      const response = await get();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'completed',
+        result,
+      });
+      expect(port.store.mutate).toHaveBeenCalledWith(
+        'task-95',
+        { kind: 'restore-committed', result },
+        expect.objectContaining({
+          taskType: 'backup',
+          taskSubType: 'restore',
+          createdAt: task!.createdAt,
+        }),
+      );
+    },
+  );
+  it.each(['createdAt', 'taskSubType'] as const)(
+    'rejects a restore receipt from a different queue %s',
+    async (field) => {
+      task = { ...task!, taskType: 'backup', taskSubType: 'restore' };
+      queue = {
+        ...task,
+        status: 'completed',
+        [field]: field === 'createdAt' ? '2020-01-01T00:00:00.000Z' : 'create',
+      };
+      expect((await get()).statusCode).toBe(500);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(['pending', 'processing', 'cancelling'])(
     'does not replace nonterminal %s metadata with queue progress',
     async (status) => {

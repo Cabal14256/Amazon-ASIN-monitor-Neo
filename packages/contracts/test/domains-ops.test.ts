@@ -143,6 +143,29 @@ describe('backup 域', () => {
     expect(backupArtifactMetadataSchema.parse(metadata)).toMatchObject(
       metadata,
     );
+    const verified = {
+      ...metadata,
+      version: 4,
+      archiveSha256: 'a'.repeat(64),
+      databaseSettings: {
+        ...metadata.databaseSettings,
+        timeZone: 'Asia/Shanghai',
+      },
+    };
+    expect(backupArtifactMetadataSchema.parse(verified)).toEqual(verified);
+    for (const archiveSha256 of [undefined, '', 'a'.repeat(63), 'G'.repeat(64)])
+      expect(() =>
+        backupArtifactMetadataSchema.parse({ ...verified, archiveSha256 }),
+      ).toThrow();
+    expect(() =>
+      backupArtifactMetadataSchema.parse({
+        ...verified,
+        databaseSettings: {
+          ...verified.databaseSettings,
+          timeZone: 'UTC\nprivate',
+        },
+      }),
+    ).toThrow();
     expect(() =>
       backupArtifactMetadataSchema.parse({ ...metadata, timescale: undefined }),
     ).toThrow();

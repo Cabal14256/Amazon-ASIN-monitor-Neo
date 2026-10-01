@@ -1,4 +1,5 @@
 import type { Env } from '@asin-monitor/config';
+import { backupInPlaceRestoreResultSchema } from '@asin-monitor/contracts';
 import { isTerminalTaskStatus, type TaskState } from '@asin-monitor/db';
 import {
   variantCheckResultOperation,
@@ -26,9 +27,14 @@ function fail(status: number, message: string): never {
 }
 const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
+const backupRestoreTask = (task: {
+  taskType: string;
+  taskSubType?: string | null;
+}) => task.taskType === 'backup' && task.taskSubType === 'restore';
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
-  (checkTask(task) && task.status === 'failed');
+  (checkTask(task) && task.status === 'failed') ||
+  (backupRestoreTask(task) && ['failed', 'cancelled'].includes(task.status));
 @Injectable()
 export class TaskQueryService {
   private active = 0;
@@ -87,7 +93,7 @@ export class TaskQueryService {
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (checkTask(task)) {
+    if (checkTask(task) || backupRestoreTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -99,8 +105,37 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(checkTask(task) ? { taskSubType: task.taskSubType } : {}),
+      ...(checkTask(task) || backupRestoreTask(task)
+        ? { taskSubType: task.taskSubType }
+        : {}),
     };
+    if (backupRestoreTask(task) && queued.status === 'completed') {
+      const receipt = backupInPlaceRestoreResultSchema.safeParse(queued.result);
+      if (receipt.success) {
+        // A successful pg_restore committed before registry/cancellation
+        // acknowledgements. Its immutable queue incarnation is checked above.
+        current = await port.store.mutate(
+          task.taskId,
+          {
+            kind: 'restore-committed',
+            result: { ...receipt.data, verification: 'unconfirmed' },
+          },
+          identity,
+        );
+        if (receipt.data.verification === 'confirmed')
+          current = await port.store.mutate(
+            task.taskId,
+            {
+              kind: 'restore-confirmed',
+              result: { ...receipt.data, verification: 'confirmed' },
+            },
+            identity,
+          );
+        if (!current) fail(404, '任务不存在');
+        this.owner(current, userId);
+        return current;
+      }
+    }
     if (
       checkTask(task) &&
       (queued.status === 'cancelled' ||

@@ -21,6 +21,7 @@ import {
   readBackupArtifactMetadataFile,
   restoreCommandArgs,
   stagingDatabaseName,
+  stagingDatabaseTimeZoneSql,
   timescaleExtensionCreateSql,
 } from '../src/backup-processor';
 
@@ -370,6 +371,36 @@ describe('backup command boundary', () => {
         lcCollate: 'C\nDROP DATABASE online',
         lcCtype: 'C',
         localeProvider: 'libc',
+      }),
+    ).toThrow();
+  });
+  it('restores source timezone and uses the D8 fallback for old sidecars', () => {
+    const name = 'neo_restore_primary_1000000000004000';
+    const settings = {
+      encoding: 'UTF8',
+      lcCollate: 'C',
+      lcCtype: 'C',
+      localeProvider: 'libc' as const,
+    };
+    expect(stagingDatabaseTimeZoneSql(name, settings)).toBe(
+      `ALTER DATABASE "${name}" SET TimeZone TO E'Asia/Shanghai'`,
+    );
+    expect(
+      stagingDatabaseTimeZoneSql(name, {
+        ...settings,
+        timeZone: 'Pacific/Auckland',
+      }),
+    ).toContain("TO E'Pacific/Auckland'");
+    expect(
+      stagingDatabaseTimeZoneSql(name, {
+        ...settings,
+        timeZone: "UTC'; DROP DATABASE online; --",
+      }),
+    ).toContain("E'UTC\\'; DROP DATABASE online; --'");
+    expect(() =>
+      stagingDatabaseTimeZoneSql(name, {
+        ...settings,
+        timeZone: 'UTC\nprivate',
       }),
     ).toThrow();
   });

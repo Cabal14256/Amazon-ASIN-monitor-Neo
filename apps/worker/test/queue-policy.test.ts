@@ -143,6 +143,19 @@ describe('Legacy to BullMQ queue policy parity', () => {
     });
   });
 
+  it.each([3600, 604800, 1209600])(
+    'retains backup outcomes for the complete %s-second registry lifetime without count eviction',
+    (ttl) => {
+      const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: String(ttl) });
+      const { defaultJobOptions } = getQueueOptions('backup', env, {
+        host: 'localhost',
+      });
+      const expected = { age: Math.max(604800, ttl) };
+      expect(defaultJobOptions?.removeOnComplete).toEqual(expected);
+      expect(defaultJobOptions?.removeOnFail).toEqual(expected);
+    },
+  );
+
   it('preflights missing processors without executing registered handlers', () => {
     const processor = vi.fn();
     const env = loadEnv(source);

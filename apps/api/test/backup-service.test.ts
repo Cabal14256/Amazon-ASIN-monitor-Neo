@@ -20,7 +20,7 @@ const databaseSettings = {
 async function writeMetadata(
   directory: string,
   sourceEngine: 'postgresql' | 'timescaledb',
-  version: 1 | 2 | 3 = sourceEngine === 'postgresql' ? 3 : 1,
+  version: 1 | 2 | 3 | 4 = sourceEngine === 'postgresql' ? 3 : 1,
   scope: 'full' | 'selective' = 'full',
 ) {
   await writeFile(
@@ -38,7 +38,7 @@ async function writeMetadata(
             ...(scope === 'selective' ? { tables: ['public.asins'] } : {}),
           }
         : {}),
-      ...(version === 2 && sourceEngine === 'timescaledb'
+      ...((version === 2 || version === 4) && sourceEngine === 'timescaledb'
         ? {
             timescale: {
               extensionVersion: '2.29.2',
@@ -46,6 +46,7 @@ async function writeMetadata(
               continuousAggregates: ['public.monitor_hourly'],
             },
             databaseSettings,
+            ...(version === 4 ? { archiveSha256 } : {}),
           }
         : {}),
     }),
@@ -370,6 +371,14 @@ describe('backup API service', () => {
     await writeFile(join(directory, filename), 'PGDMPfixture');
     await writeMetadata(directory, 'timescaledb', 2);
     await expect(service.list(principal)).resolves.toMatchObject([
+      { filename, restoreSupported: false },
+    ]);
+    await expect(
+      service.restore(principal, { filename }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(port.enqueue).not.toHaveBeenCalled();
+    await writeMetadata(directory, 'timescaledb', 4);
+    await expect(service.list(principal)).resolves.toMatchObject([
       { filename, restoreSupported: true, restoreMode: 'isolated' },
     ]);
     await expect(
@@ -412,7 +421,7 @@ describe('backup API service', () => {
       rows: [{ extversion: '2.28.0' }],
     });
     await writeFile(join(directory, filename), 'PGDMPfixture');
-    await writeMetadata(directory, 'timescaledb', 2);
+    await writeMetadata(directory, 'timescaledb', 4);
     await expect(service.list(principal)).resolves.toMatchObject([
       { filename, restoreSupported: false },
     ]);

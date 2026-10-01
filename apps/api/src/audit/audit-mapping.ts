@@ -61,6 +61,8 @@ export function auditAction(
     return entry('DELETE', 'backup', backupFilename(params.filename));
   if (path === '/backup/config' && method === 'POST')
     return entry('UPDATE', 'backup_config', null, '备份配置');
+  if (path === '/backup/:filename/download' && method === 'GET')
+    return entry('EXPORT', 'backup', backupFilename(params.filename));
   if (path.startsWith('/export/') || path === '/tasks/export') {
     if (method !== 'GET' && method !== 'POST') return undefined;
     return entry(

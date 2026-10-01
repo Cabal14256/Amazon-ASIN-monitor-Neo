@@ -80,6 +80,7 @@ describe('audit mapping and data', () => {
     ['POST', '/backup/restore', 'RESTORE', 'backup'],
     ['DELETE', '/backup/:filename', 'DELETE', 'backup'],
     ['POST', '/backup/config', 'UPDATE', 'backup_config'],
+    ['GET', '/backup/:filename/download', 'EXPORT', 'backup'],
   ])('%s %s retains action %s', (method, path, action, resource) => {
     expect(auditAction(method, `/api/v1${path}`)).toMatchObject({
       action,
@@ -126,6 +127,14 @@ describe('audit mapping and data', () => {
     expect(
       auditAction('DELETE', '/api/v1/backup/:filename', { filename }),
     ).toMatchObject({ resourceId: filename, action: 'DELETE' });
+    expect(
+      auditAction('GET', '/api/v1/backup/:filename/download', { filename }),
+    ).toMatchObject({ resourceId: filename, action: 'EXPORT' });
+    expect(
+      auditAction('GET', '/api/v1/backup/:filename/download', {
+        filename: 'password=private-token.dump',
+      }),
+    ).toMatchObject({ resourceId: null });
     expect(
       auditAction('DELETE', '/api/v1/backup/:filename', {
         filename: 'password=private-token.dump',
@@ -272,6 +281,13 @@ class AuditFixtureController {
   @UseGuards(AuditFixtureGuard)
   backupConfig() {
     return { success: true };
+  }
+  @Get('backup/:filename/download')
+  @UseGuards(AuditFixtureGuard)
+  backupDownload(@Res() reply: FastifyReply) {
+    return reply
+      .type('application/x-tar')
+      .send(Readable.from(['private-backup-content']));
   }
   @Post('asins')
   async earlyReply(@Req() request: FastifyRequest, @Res() reply: FastifyReply) {
@@ -440,6 +456,35 @@ describe('Neo audit HTTP lifecycle', () => {
     expect(JSON.stringify(entries)).not.toMatch(
       /private-person|private-secret/,
     );
+  });
+
+  it('audits the backup download actor and validated artifact without persisting contents or query secrets', async () => {
+    const filename = 'backup_20260927-230000-1234abcd-primary.dump';
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/backup/${filename}/download?token=private-query`,
+      headers: { authorization: 'Bearer fixture' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('private-backup-content');
+    // Stream response completion can follow inject's payload resolution.
+    await vi.waitFor(() => expect(repository.append).toHaveBeenCalledOnce());
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledOnce();
+    expect(repository.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'actor-23',
+        action: 'EXPORT',
+        resource: 'backup',
+        resourceId: filename,
+        path: '/api/v1/backup/:filename/download',
+        requestData: null,
+        responseStatus: 200,
+      }),
+    );
+    expect(
+      JSON.stringify(vi.mocked(repository.append).mock.calls),
+    ).not.toContain('private-');
   });
 
   it('uses authenticated actor, immutable redacted body and final status, ignoring spoofed proxy headers', async () => {

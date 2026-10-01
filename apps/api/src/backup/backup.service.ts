@@ -238,7 +238,7 @@ export class BackupService implements OnModuleDestroy {
       );
       if (
         !metadata ||
-        (metadata.sourceEngine === 'timescaledb' && metadata.version !== 2) ||
+        (metadata.sourceEngine === 'timescaledb' && metadata.version !== 4) ||
         (metadata.sourceEngine === 'postgresql' && metadata.version !== 3)
       )
         return fail(409, '备份文件来源或恢复范围元数据未验证，禁止自动恢复');
@@ -247,7 +247,7 @@ export class BackupService implements OnModuleDestroy {
       if ((metadata.sourceEngine === 'timescaledb') !== timescaleTarget)
         return fail(409, '备份文件来源数据库类型与恢复目标不一致');
       if (
-        metadata.version === 2 &&
+        metadata.version === 4 &&
         metadata.sourceEngine === 'timescaledb' &&
         metadata.timescale.extensionVersion !== capability.extensionVersion
       )
@@ -295,7 +295,7 @@ export class BackupService implements OnModuleDestroy {
           (file.sourceEngine === 'postgresql' &&
             file.metadataVersion === 3 &&
             (file.scope === 'full' || file.scope === 'selective')) ||
-          (file.sourceEngine === 'timescaledb' && file.metadataVersion === 2);
+          (file.sourceEngine === 'timescaledb' && file.metadataVersion === 4);
         const restoreSupported =
           validSource &&
           file.size <= this.env.BACKUP_MAX_BYTES &&

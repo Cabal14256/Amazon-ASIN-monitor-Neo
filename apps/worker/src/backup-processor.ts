@@ -205,6 +205,31 @@ export function createStagingDatabaseSql(
   );
 }
 
+/** Older artifacts predate this field; D8 requires Shanghai wall-clock defaults. */
+export function stagingDatabaseTimeZoneSql(
+  name: string,
+  settings: BackupDatabaseSettings,
+): string {
+  const parsed = backupDatabaseSettingsSchema.parse(settings);
+  return `ALTER DATABASE ${quoteStagingDatabase(
+    name,
+  )} SET TimeZone TO ${quoteSqlLiteral(parsed.timeZone ?? 'Asia/Shanghai')}`;
+}
+
+// Read the database setting rather than a role/session override. A source
+// without a database override uses its effective session timezone.
+const databaseTimeZoneSql =
+  "SELECT split_part(setting, '=', 2) AS timezone FROM pg_db_role_setting CROSS JOIN LATERAL unnest(setconfig) AS setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()) AND setrole = 0 AND lower(split_part(setting, '=', 1)) = 'timezone'";
+
+async function verifyStagingTimeZone(
+  pool: ReturnType<typeof createPgPool>,
+  settings: BackupDatabaseSettings,
+): Promise<void> {
+  const result = await pool.query(databaseTimeZoneSql);
+  if (result.rows[0]?.timezone !== (settings.timeZone ?? 'Asia/Shanghai'))
+    throw new BackupCommandError('BACKUP_RESTORE_TIMEZONE_MISMATCH');
+}
+
 function sameDatabaseSettings(
   left: BackupDatabaseSettings,
   right: BackupDatabaseSettings,
@@ -485,12 +510,21 @@ export async function acquireBackupTargetLock(
             'SELECT pg_encoding_to_char(encoding) AS encoding, datcollate AS "lcCollate", datctype AS "lcCtype", datlocprovider AS "localeProvider", daticulocale AS "icuLocale", daticurules AS "icuRules" FROM pg_database WHERE datname = current_database()',
           );
           const row = result.rows[0];
+          const timeZone = await lockedClient.query(databaseTimeZoneSql);
+          const effectiveTimeZone =
+            timeZone.rows[0]?.timezone ??
+            (
+              await lockedClient.query(
+                "SELECT current_setting('TimeZone') AS timezone",
+              )
+            ).rows[0]?.timezone;
           const settings = backupDatabaseSettingsSchema.safeParse(
             row?.localeProvider === 'i'
               ? {
                   encoding: row.encoding,
                   lcCollate: row.lcCollate,
                   lcCtype: row.lcCtype,
+                  timeZone: effectiveTimeZone,
                   localeProvider: 'icu',
                   icuLocale: row.icuLocale,
                   ...(row.icuRules ? { icuRules: row.icuRules } : {}),
@@ -500,6 +534,7 @@ export async function acquireBackupTargetLock(
                   encoding: row.encoding,
                   lcCollate: row.lcCollate,
                   lcCtype: row.lcCtype,
+                  timeZone: effectiveTimeZone,
                   localeProvider: 'libc',
                 }
               : null,
@@ -536,6 +571,12 @@ export async function acquireBackupTargetLock(
               name,
             )} FROM PUBLIC`,
           );
+        },
+        async setStagingTimeZone(
+          name: string,
+          settings: BackupDatabaseSettings,
+        ) {
+          await lockedClient.query(stagingDatabaseTimeZoneSql(name, settings));
         },
         async dropStagingDatabase(name: string) {
           await lockedClient.query(
@@ -616,6 +657,7 @@ async function restorePostgresqlIsolated(input: {
     if (!(await input.lock.ownsStagingDatabase(database)))
       throw new BackupCommandError('BACKUP_RESTORE_DATABASE_OWNER_MISMATCH');
     await input.lock.restrictStagingDatabase(database);
+    await input.lock.setStagingTimeZone(database, input.databaseSettings);
     await input.checkpoint();
     await input.progress(50, '正在恢复到隔离 PostgreSQL 数据库');
     await processCommand(
@@ -650,6 +692,7 @@ async function restorePostgresqlIsolated(input: {
       const current = await pool.query('SELECT current_database() AS database');
       if (current.rows[0]?.database !== database)
         throw new BackupCommandError('BACKUP_TARGET_MISMATCH');
+      await verifyStagingTimeZone(pool, input.databaseSettings);
     } finally {
       await pool.end();
     }
@@ -722,6 +765,7 @@ async function restoreTimescaleIsolated(input: {
     if (!(await input.lock.ownsStagingDatabase(database)))
       throw new BackupCommandError('BACKUP_RESTORE_DATABASE_OWNER_MISMATCH');
     await input.lock.restrictStagingDatabase(database);
+    await input.lock.setStagingTimeZone(database, input.databaseSettings);
     pool = openPool();
     await pool.query(
       timescaleExtensionCreateSql(input.manifest.extensionVersion),
@@ -800,6 +844,7 @@ async function restoreTimescaleIsolated(input: {
     const restored = await readTimescaleManifest(pool);
     if (!sameTimescaleManifest(input.manifest, restored))
       throw new BackupCommandError('BACKUP_TIMESCALE_CATALOG_MISMATCH');
+    await verifyStagingTimeZone(pool, input.databaseSettings);
     await input.checkpoint();
     await input.progress(
       100,
@@ -1005,20 +1050,19 @@ export function createBackupProcessor(
           throw new BackupCommandError('BACKUP_TIMESCALE_SCHEMA_CHANGED');
         await chmod(partial, 0o600);
         await progress(96, '正在校验备份文件');
-        const digest = sourceManifest
-          ? undefined
-          : await archiveSha256(partial, async () => {
-              await check();
-              await lock.ensureHeld();
-            });
+        const digest = await archiveSha256(partial, async () => {
+          await check();
+          await lock.ensureHeld();
+        });
         const metadata = backupArtifactMetadataSchema.parse(
           sourceManifest
             ? {
-                version: 2,
+                version: 4,
                 filename,
                 target: data.target,
                 sourceEngine: 'timescaledb',
                 timescale: sourceManifest,
+                archiveSha256: digest,
                 databaseSettings,
                 ...(data.params.description
                   ? { description: data.params.description }
@@ -1099,20 +1143,16 @@ export function createBackupProcessor(
         throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
       if ((metadata.sourceEngine === 'timescaledb') !== lock.hasTimescale)
         throw new BackupCommandError('BACKUP_SOURCE_TARGET_MISMATCH');
-      if (metadata.sourceEngine === 'postgresql') {
-        if (metadata.version !== 3)
-          throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
-        if (
-          (await archiveSha256(input, async () => {
-            await check();
-            await lock.ensureHeld();
-          })) !== metadata.archiveSha256
-        )
-          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
-      }
+      if (metadata.version !== 3 && metadata.version !== 4)
+        throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
+      if (
+        (await archiveSha256(input, async () => {
+          await check();
+          await lock.ensureHeld();
+        })) !== metadata.archiveSha256
+      )
+        throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
       if (metadata.sourceEngine === 'timescaledb') {
-        if (metadata.version !== 2)
-          throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
         const liveManifest = await lock.readTimescaleManifest();
         if (
           metadata.timescale.extensionVersion !== liveManifest.extensionVersion
@@ -1274,9 +1314,10 @@ export function createBackupProcessor(
             reason: 'backup_restore_commit_status_unconfirmed',
           });
         }
-        throw new UnrecoverableError(
-          '数据库恢复事务已提交，但任务状态或健康检查未确认；请人工核对数据库',
-        );
+        // BullMQ uses a separate connection from the task registry. Retain
+        // this bounded commit receipt in its completed result so query-time
+        // reconciliation can recover it when registry writes failed.
+        return committedInPlaceRestore;
       }
       if (error instanceof TaskStopped) {
         if (error.state.status === 'cancelled') return cancelledResult;
