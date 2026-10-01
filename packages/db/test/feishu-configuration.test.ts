@@ -15,6 +15,7 @@ const fixture = (enabled: boolean | null = true) => ({
   id: 7,
   country: 'EU',
   webhookUrl: 'https://example.invalid/fixture-webhook',
+  revision: '11111111-1111-4111-8111-111111111111',
   enabled,
   createTime: new Date('2026-09-13T00:00:00Z'),
   updateTime: null,
@@ -27,6 +28,10 @@ const raw = (enabled: boolean | null) => ({
   create_time: fixture().createTime,
   update_time: null,
 });
+function legacyShape(value: ReturnType<typeof displayFeishuConfiguration>) {
+  const { revision: _revision, ...legacy } = value;
+  return legacy;
+}
 describe('Feishu configuration / actual Legacy result and input rules', () => {
   it.each([true, false, null])(
     'preserves every list field, nullable time and enabled=%s',
@@ -45,7 +50,11 @@ describe('Feishu configuration / actual Legacy result and input rules', () => {
         body: {
           success: true,
           errorCode: 0,
-          data: [displayFeishuConfiguration(fixture(enabled), 'camel', true)],
+          data: [
+            legacyShape(
+              displayFeishuConfiguration(fixture(enabled), 'camel', true),
+            ),
+          ],
         },
       });
       expect(query.mock.calls[0][0]).toContain("country IN ('US', 'EU')");
@@ -68,7 +77,9 @@ describe('Feishu configuration / actual Legacy result and input rules', () => {
         body: {
           success: true,
           errorCode: 0,
-          data: displayFeishuConfiguration(fixture(), 'snake', true),
+          data: legacyShape(
+            displayFeishuConfiguration(fixture(), 'snake', true),
+          ),
         },
       });
     },
@@ -89,13 +100,18 @@ describe('Feishu configuration / actual Legacy result and input rules', () => {
     );
     expect(query.mock.calls[0][1]).toEqual(['EU']);
     expect(query.mock.calls[1][1]).toEqual([body.webhookUrl, 0, 'EU']);
-    expect(feishuConfigurationChange(body)).toEqual(body);
+    expect(feishuConfigurationChange(body)).toEqual({
+      ...body,
+      expectedRevision: undefined,
+    });
     expect(expected).toEqual({
       statusCode: 200,
       body: {
         success: true,
         errorCode: 0,
-        data: displayFeishuConfiguration(fixture(false), 'camel', true),
+        data: legacyShape(
+          displayFeishuConfiguration(fixture(false), 'camel', true),
+        ),
       },
     });
   });
@@ -141,6 +157,7 @@ describe('Feishu configuration / actual Legacy result and input rules', () => {
         country: 'US ',
         webhookUrl: ' URL ',
         enabled: Boolean(enabled),
+        expectedRevision: undefined,
       });
       expect(feishuEnabled({ enabled })).toBe(Boolean(enabled));
     }
@@ -171,6 +188,7 @@ describe('Feishu configuration / actual Legacy result and input rules', () => {
       { country: 'US', webhookUrl: 'x'.repeat(501) },
       { country: 'US', webhookUrl: 'private\0value' },
       { country: 'US', webhookUrl: 'x', enabled: 'false' },
+      { country: 'US', webhookUrl: 'x', expectedRevision: 'stale' },
     ])
       expect(() => feishuConfigurationChange(body)).toThrow(
         'Feishu configuration operation could not be completed',
@@ -199,6 +217,7 @@ describe('Feishu configuration / actual Legacy result and input rules', () => {
       { ...fixture(), id: Number.MAX_SAFE_INTEGER + 1 },
       { ...fixture(), createTime: new Date(NaN) },
       { ...fixture(), webhookUrl: 'x'.repeat(501) },
+      { ...fixture(), revision: 'not-a-uuid' },
     ])
       expect(() => validateFeishuRow(row)).toThrow(FeishuConfigurationError);
   });

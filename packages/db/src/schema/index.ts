@@ -14,6 +14,7 @@ import {
   text,
   unique,
   uniqueIndex,
+  uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
 import { shanghaiTimestamp as timestampColumn } from '../timestamps';
@@ -412,6 +413,9 @@ export const feishuConfig = pgTable(
     id: integer('id').generatedAlwaysAsIdentity().primaryKey(),
     country: varchar('country', { length: 10 }).notNull().unique(),
     webhookUrl: varchar('webhook_url', { length: 500 }).notNull(),
+    revision: uuid('revision')
+      .notNull()
+      .default(sql`pg_catalog.gen_random_uuid()`),
     enabled: boolean('enabled').default(true),
     createTime: timestampColumn('create_time').default(localTimestamp),
     updateTime: timestampColumn('update_time').default(localTimestamp),

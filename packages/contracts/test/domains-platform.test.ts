@@ -12,6 +12,7 @@ import {
   systemAlertResultSchema,
   toggleFeishuConfigRequestSchema,
   updateSpApiConfigsRequestSchema,
+  upsertFeishuConfigRequestSchema,
 } from '../src';
 
 describe('feishu 域', () => {
@@ -44,6 +45,38 @@ describe('feishu 域', () => {
     expect(() =>
       toggleFeishuConfigRequestSchema.parse({ enabled: 'false' }),
     ).toThrow();
+  });
+
+  it('upsert 接受空版本新建和 UUID 版本更新，拒绝无效版本', () => {
+    const request = {
+      country: 'US',
+      webhookUrl: 'https://example.invalid/hook',
+    };
+    expect(
+      upsertFeishuConfigRequestSchema.parse({
+        ...request,
+        expectedRevision: null,
+      }).expectedRevision,
+    ).toBeNull();
+    const revision = '11111111-1111-4111-8111-111111111111';
+    expect(
+      upsertFeishuConfigRequestSchema.parse({
+        ...request,
+        expectedRevision: revision,
+      }).expectedRevision,
+    ).toBe(revision);
+    expect(() =>
+      upsertFeishuConfigRequestSchema.parse({
+        ...request,
+        expectedRevision: 'old',
+      }),
+    ).toThrow();
+    expect(
+      feishuConfigListResultSchema.parse({
+        success: true,
+        data: [{ id: 1, country: 'US', webhookUrl: '', enabled: 1, revision }],
+      }).data?.[0].revision,
+    ).toBe(revision);
   });
 
   it('保留存储中 nullable enabled，但写请求仍拒绝 null', () => {

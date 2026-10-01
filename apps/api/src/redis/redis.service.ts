@@ -68,6 +68,21 @@ export class ApplicationRedisClient implements OnModuleDestroy {
     return this.client.del(...keys);
   }
 
+  async scan(
+    cursor: string,
+    pattern: string,
+    count: number,
+  ): Promise<[string, string[]]> {
+    await this.ensureConnected();
+    return this.client.scan(cursor, 'MATCH', pattern, 'COUNT', count);
+  }
+
+  async unlink(...keys: string[]): Promise<number> {
+    if (keys.length === 0) return 0;
+    await this.ensureConnected();
+    return this.client.unlink(...keys);
+  }
+
   async eval(
     script: string,
     keys: readonly string[],

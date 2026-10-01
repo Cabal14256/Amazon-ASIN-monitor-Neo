@@ -42,13 +42,21 @@ export const clearAnalyticsCacheResultSchema = resultSchema(
   }),
 );
 
-export const refreshAnalyticsRequestSchema = z.object({
-  granularity: z.enum(['hour', 'day', 'month']).optional(),
-  startTime: z.string().optional(),
-  endTime: z.string().optional(),
-});
+export const refreshAnalyticsRequestSchema = z
+  .object({
+    granularity: z.enum(['hour', 'day', 'month']).optional(),
+    startTime: z.string().optional(),
+    endTime: z.string().optional(),
+  })
+  .strict();
 export type RefreshAnalyticsRequest = z.infer<
   typeof refreshAnalyticsRequestSchema
 >;
 
-export const refreshAnalyticsResultSchema = resultSchema(z.unknown());
+export const refreshAnalyticsResultSchema = resultSchema(
+  z.object({
+    refreshed: z.array(z.string()),
+    startTime: z.string(),
+    endTime: z.string(),
+  }),
+);
