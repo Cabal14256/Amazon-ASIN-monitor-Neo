@@ -94,15 +94,21 @@ function normalizedBase(value) {
 }
 
 function requireLocalBases(legacyBase, neoBase, allowRemote) {
-  if (allowRemote) return;
   const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
-  if (
-    ![legacyBase, neoBase].every((base) =>
-      localHosts.has(new URL(base).hostname),
-    )
-  ) {
-    throw new Error('REMOTE_BASE_REQUIRES_OPT_IN');
+  for (const base of [legacyBase, neoBase]) {
+    const url = new URL(base);
+    if (localHosts.has(url.hostname)) continue;
+    if (!allowRemote) throw new Error('REMOTE_BASE_REQUIRES_OPT_IN');
+    if (url.protocol !== 'https:')
+      throw new Error('REMOTE_BASE_REQUIRES_HTTPS');
   }
+  const apiRoot = (base) => {
+    const url = new URL(apiUrl(base, '/'));
+    if (localHosts.has(url.hostname)) url.hostname = 'localhost';
+    return url.toString();
+  };
+  if (apiRoot(legacyBase) === apiRoot(neoBase))
+    throw new Error('IDENTICAL_API_TARGETS');
 }
 
 function apiUrl(base, path, query = {}) {
@@ -147,7 +153,10 @@ function validateManifest(input, registry) {
         entry.method === 'GET' &&
         entry.path === target.path &&
         !entry.deprecatedInNeo &&
-        !entry.special?.length,
+        (!entry.special?.length ||
+          entry.special.every((marker) =>
+            /^timeout-[1-9][0-9]*$/.test(marker),
+          )),
     );
     if (!spec) throw new Error('UNREGISTERED_GET');
     const params = target.params ?? {};

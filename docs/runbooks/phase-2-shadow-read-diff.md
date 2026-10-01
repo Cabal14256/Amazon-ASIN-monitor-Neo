@@ -19,11 +19,13 @@ corepack pnpm shadow:read:diff --manifest scripts/shadow-read-manifest.json --re
 
 基址须为 HTTP(S) URL，可带 `/api` 前缀或尾部斜杠；脚本与契约录制器使用同一 URL 合并规则，避免 `/api/api`。`--timeout-ms` 是单次请求超时，默认 15000、最大 610000；`--max-bytes` 是单个响应体上限，默认 4 MiB、最大 16 MiB。命令行也可用 `--legacy-base`、`--neo-base` 覆盖两个基址。参数不应含凭据。
 
-默认只允许 localhost、127.0.0.1 和 [::1]，避免误把账号提交到远程服务。确认目标是隔离的迁移环境后，才显式追加 `--allow-remote`；这不会改变请求内容或绕过认证。例如：`corepack pnpm shadow:read:diff --allow-remote`。
+默认只允许 localhost、127.0.0.1 和 [::1]，避免误把账号提交到远程服务。确认目标是隔离的迁移环境后，才显式追加 `--allow-remote`；远程目标必须使用 HTTPS，即使已显式允许远程也拒绝明文 HTTP。HTTP 仅允许上述回环地址。例如：`corepack pnpm shadow:read:diff --allow-remote`。
+
+两边必须指向不同的 API 根地址；脚本在登录前统一 `/api`、`/api/v1`、末尾斜杠、默认端口和回环主机别名，拒绝相同目标，防止自身对照误报零差异。不同反向代理地址仍可能路由到同一进程，运行人员需核对两边确实分别部署 Legacy 与 Neo。
 
 ## 目标清单
 
-清单 JSON 以 `targets` 数组为根，至少 1 项、最多 50 项。每项必须有唯一的 `name` 和冻结注册表中的 `path`，例如 `/variant-groups`；不要写 `/api/v1` 前缀。只允许已登记、未废弃、无特殊流式/下载标记的 GET。可选字段如下：
+清单 JSON 以 `targets` 数组为根，至少 1 项、最多 50 项。每项必须有唯一的 `name` 和冻结注册表中的 `path`，例如 `/variant-groups`；不要写 `/api/v1` 前缀。只允许已登记、未废弃的普通 JSON GET，包含仅标注 `timeout-120`、`timeout-300` 或 `timeout-600` 等时长的仪表盘与统计接口；拒绝 SSE、下载、上传等非普通 JSON 标记。长查询应按契约设置 `--timeout-ms`。可选字段如下：
 
 ```json
 {

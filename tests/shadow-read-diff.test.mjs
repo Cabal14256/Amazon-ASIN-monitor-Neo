@@ -108,6 +108,81 @@ test('sanitizes difference paths while preserving stable schema fields', () => {
   );
 });
 
+test('remote opt-in requires encrypted transport before any login', async () => {
+  const config = {
+    targets: [{ name: 'roles', path: '/roles' }],
+    registry: [{ method: 'GET', path: '/roles' }],
+    legacyBase: 'https://legacy.example',
+    neoBase: 'http://neo.example',
+    allowRemote: true,
+  };
+  await assert.rejects(runShadowDiff(config), /REMOTE_BASE_REQUIRES_HTTPS/);
+  await assert.rejects(
+    runShadowDiff({
+      ...config,
+      legacyBase: 'http://legacy.example',
+      neoBase: 'https://neo.example',
+    }),
+    /REMOTE_BASE_REQUIRES_HTTPS/,
+  );
+  const safe = await runShadowDiff({
+    ...config,
+    neoBase: 'https://neo.example',
+  });
+  assert.equal(safe.setup.legacy.errorCode, 'MISSING_CREDENTIALS');
+  assert.equal(safe.setup.neo.errorCode, 'MISSING_CREDENTIALS');
+});
+
+test('rejects the same normalized API root including loopback aliases', async () => {
+  for (const [legacyBase, neoBase] of [
+    ['http://localhost:3100/', 'http://localhost:3100/api/'],
+    ['http://localhost:3100/api', 'http://localhost:3100/api/v1'],
+    ['http://127.0.0.1:3100/api', 'http://[::1]:3100/api/'],
+    ['https://staging.example/', 'https://staging.example:443/api/v1/'],
+  ]) {
+    await assert.rejects(
+      runShadowDiff({
+        targets: [{ name: 'roles', path: '/roles' }],
+        registry: [{ method: 'GET', path: '/roles' }],
+        legacyBase,
+        neoBase,
+        allowRemote: true,
+      }),
+      /IDENTICAL_API_TARGETS/,
+    );
+  }
+});
+
+test('admits duration-marked JSON reads but rejects streams and downloads', () => {
+  for (const special of [
+    undefined,
+    [],
+    ['timeout-120'],
+    ['timeout-300'],
+    ['timeout-600'],
+  ]) {
+    const result = validateManifest(
+      { targets: [{ name: 'dashboard', path: '/dashboard' }] },
+      [{ method: 'GET', path: '/dashboard', special }],
+    );
+    assert.equal(result[0].requestPath, '/dashboard');
+  }
+  for (const special of [
+    ['sse'],
+    ['download'],
+    ['sse', 'timeout-600'],
+    ['upload'],
+  ]) {
+    assert.throws(
+      () =>
+        validateManifest({ targets: [{ name: 'guarded', path: '/guarded' }] }, [
+          { method: 'GET', path: '/guarded', special },
+        ]),
+      /UNREGISTERED_GET/,
+    );
+  }
+});
+
 test('strict response reader rejects empty and non-200 responses', async () => {
   const server = createServer((request, response) => {
     if (request.url === '/empty') {
