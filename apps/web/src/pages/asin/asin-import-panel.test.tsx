@@ -247,6 +247,44 @@ describe('primary ASIN import page', () => {
     ).toBeNull();
   });
 
+  it('restores an unknown 500 task ID after its local gate write fails', async () => {
+    installLocks();
+    const originalSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key,
+      value,
+    ) {
+      if (this === window.localStorage && value.includes('"phase":"uncertain"'))
+        throw new DOMException('Storage quota exceeded', 'QuotaExceededError');
+      originalSetItem.call(this, key, value);
+    });
+    const request = vi.fn(async () => {
+      throw new ApiError('HTTP', '任务提交结果未确认', 500, 500, {
+        taskId,
+        status: 'unknown',
+      });
+    });
+    fixture(request);
+    chooseFile();
+    await screen.findByText(
+      '提交状态未确认，浏览器未能保存任务编号。请立即记录下方编号并到任务中心核实；刷新页面后编号可能丢失。',
+    );
+    expect(
+      window.localStorage.getItem(asinImportGateKey('operator')),
+    ).toContain('sending');
+    expect(
+      window.sessionStorage.getItem(asinImportGateKey('operator')),
+    ).toContain(taskId);
+    cleanup();
+    fixture();
+    await screen.findByText(`任务编号：${taskId}`);
+    expect(request).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole('button', { name: '上传并创建导入任务' }),
+    ).toHaveProperty('disabled', true);
+  });
+
   it('keeps an uncertain lock after local cancellation and does not repeat the upload', async () => {
     installLocks();
     const request = vi.fn(

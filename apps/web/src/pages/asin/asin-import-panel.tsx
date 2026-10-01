@@ -296,9 +296,33 @@ export function AsinImportPanel() {
           const nextGate: AsinImportGate | null = uncertain
             ? { phase: 'uncertain', taskId: unknownId, savedAt: Date.now() }
             : null;
-          writeAsinImportGate(stored, userId, nextGate);
+          const persisted = writeAsinImportGate(stored, userId, nextGate);
+          const fallback: AsinImportGate | null =
+            uncertain && !persisted
+              ? {
+                  phase: 'uncertain',
+                  taskId: unknownId,
+                  savedAt: claim.gate.savedAt,
+                }
+              : nextGate;
+          const session = storage('session');
+          if (session)
+            writeAsinImportGate(
+              session,
+              userId,
+              !persisted && unknownId ? fallback : null,
+            );
           if (owner.current !== userId || !mounted.current) return;
-          setGate(nextGate);
+          setGate(
+            persisted
+              ? nextGate
+              : fallback ??
+                  restoredGate(stored, userId) ?? {
+                    phase: 'uncertain',
+                    taskId: null,
+                    savedAt: claim.gate.savedAt,
+                  },
+          );
           if (uncertain) {
             setFile(null);
             if (fileInput.current) fileInput.current.value = '';
@@ -306,9 +330,15 @@ export function AsinImportPanel() {
           setNotice(
             uncertain
               ? unknownId
-                ? '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。'
-                : '提交状态未确认，请按提交时间和文件到任务中心核实，避免重复导入。'
-              : publicError(error),
+                ? persisted
+                  ? '提交状态未确认，请先按任务编号到任务中心核实，避免重复导入。'
+                  : '提交状态未确认，浏览器未能保存任务编号。请立即记录下方编号并到任务中心核实；刷新页面后编号可能丢失。'
+                : persisted
+                ? '提交状态未确认，请按提交时间和文件到任务中心核实，避免重复导入。'
+                : '提交状态未确认，浏览器未能保存导入门禁。请按提交时间和文件到任务中心核实，避免重复导入。'
+              : persisted
+              ? publicError(error)
+              : '请求已被拒绝，但浏览器未能清除导入门禁；请核实后解锁。',
           );
           if (error instanceof ApiError && error.status === 403)
             void identity.refresh();
