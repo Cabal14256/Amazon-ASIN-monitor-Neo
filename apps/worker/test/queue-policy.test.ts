@@ -94,12 +94,37 @@ describe('Legacy to BullMQ queue policy parity', () => {
         const baseline = legacy(name, raw);
         const policy = getQueuePolicy(name, loadEnv(raw));
         expect(policy.physicalName).toBe(baseline.physicalName);
-        expect(policy.defaultJobOptions).toEqual(
-          baseline.options.defaultJobOptions,
-        );
+        expect(policy.defaultJobOptions).toEqual({
+          ...(baseline.options.defaultJobOptions as object),
+          // Neo monitor completion also serves as the task recovery receipt.
+          ...(name === 'monitor' ? { removeOnComplete: { age: 604_800 } } : {}),
+        });
         expect(policy.limiter).toEqual(baseline.options.limiter);
         expect(policy.concurrency).toBe(baseline.concurrency);
       }
+    },
+  );
+
+  it.each([
+    ['3600', 604_800],
+    ['604800', 604_800],
+    ['1209600', 1_209_600],
+    ['31536000', 31_536_000],
+  ])(
+    'retains monitor completion for the bounded metadata lifetime %s',
+    (ttl, expectedAge) => {
+      const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: ttl });
+      const policy = getQueuePolicy('monitor', env);
+      expect(policy.defaultJobOptions.removeOnComplete).toEqual({
+        age: expectedAge,
+      });
+      expect(
+        getQueueOptions('monitor', env, { host: 'localhost' }).defaultJobOptions
+          ?.removeOnComplete,
+      ).toEqual({ age: expectedAge });
+      expect(
+        getQueuePolicy('competitor-monitor', env).defaultJobOptions,
+      ).toMatchObject({ removeOnComplete: { age: 3600 } });
     },
   );
 

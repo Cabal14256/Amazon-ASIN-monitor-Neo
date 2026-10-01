@@ -4,7 +4,7 @@ import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
 import { buildWorkerPlans } from '../src/processor-registry';
-import { getQueueOptions } from '../src/queue-policy';
+import { getQueueOptions, getQueuePolicy } from '../src/queue-policy';
 import { parseRedisUrl } from '../src/redis-options';
 
 it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
@@ -91,4 +91,73 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     }
   },
   20_000,
+);
+
+it
+  .skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')
+  .each(['604800', '1209600'])(
+  'real monitor cleanup preserves the completion receipt through metadata TTL %s and then expires it',
+  async (ttl) => {
+    const env = loadEnv({
+      ...process.env,
+      BULL_PREFIX: `fixture-${randomUUID()}`,
+      TASK_META_TTL_SECONDS: ttl,
+    });
+    const connection = parseRedisUrl(env.REDIS_URL);
+    const [plan] = buildWorkerPlans(
+      ['monitor'],
+      { monitor: async () => ({ totalChecked: 1, success: true }) },
+      env,
+      connection,
+    );
+    const queue = new Queue(
+      plan!.physicalName,
+      getQueueOptions('monitor', env, connection),
+    );
+    const events = new QueueEvents(queue.name, {
+      connection,
+      prefix: plan!.options.prefix,
+    });
+    const worker = new Worker(queue.name, plan!.processor, plan!.options);
+    const redis = new Redis(connection);
+    const errors: string[] = [];
+    for (const resource of [queue, events, worker, redis])
+      resource.on('error', () => errors.push('fixture connection error'));
+    try {
+      await events.waitUntilReady();
+      const receipt = await queue.add('primary-monitor', {});
+      await receipt.waitUntilFinished(events, 5000);
+      const age = getQueuePolicy('monitor', env).defaultJobOptions
+        .removeOnComplete.age;
+      // Age only this isolated fixture's completed index; no wall-clock wait.
+      await redis.zadd(
+        queue.toKey('completed'),
+        Date.now() - (age - 60) * 1000,
+        receipt.id!,
+      );
+      const cleanup = await queue.add('primary-monitor', {});
+      await cleanup.waitUntilFinished(events, 5000);
+      expect((await queue.getJob(receipt.id!))?.returnvalue).toEqual({
+        totalChecked: 1,
+        success: true,
+      });
+      await redis.zadd(
+        queue.toKey('completed'),
+        Date.now() - (age + 60) * 1000,
+        receipt.id!,
+      );
+      const expiredCleanup = await queue.add('primary-monitor', {});
+      await expiredCleanup.waitUntilFinished(events, 5000);
+      expect(await queue.getJob(receipt.id!)).toBeUndefined();
+      expect(errors).toEqual([]);
+    } finally {
+      await worker.close(true);
+      await events.close();
+      expect(queue.opts.prefix).toBe(`${env.BULL_PREFIX}:neo`);
+      await queue.obliterate({ force: true });
+      await queue.close();
+      await redis.quit();
+    }
+  },
+  15_000,
 );

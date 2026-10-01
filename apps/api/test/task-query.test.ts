@@ -168,7 +168,13 @@ describe('own task query HTTP and bounded reconciliation', () => {
     );
   });
   it('reconciles a completed monitor queue result after its final registry write failed', async () => {
-    task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });
+    const sixDaysAgo = new Date(Date.now() - 6 * 86_400_000).toISOString();
+    task = taskFixture({
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      createdAt: sixDaysAgo,
+      updatedAt: sixDaysAgo,
+    });
     queue = {
       ...task,
       status: 'completed',
@@ -189,6 +195,16 @@ describe('own task query HTTP and bounded reconciliation', () => {
         createdAt: task.createdAt,
       }),
     );
+  });
+  it('keeps monitor metadata unchanged when the completion lookup fails', async () => {
+    task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });
+    const before = structuredClone(task);
+    vi.mocked(port.findJob).mockRejectedValueOnce(
+      new Error('Queue unavailable'),
+    );
+    expect((await get()).statusCode).toBe(500);
+    expect(task).toEqual(before);
+    expect(port.store.mutate).not.toHaveBeenCalled();
   });
   it('finishes a monitor cancellation when it races with queue completion', async () => {
     task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });

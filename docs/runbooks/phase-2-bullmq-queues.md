@@ -8,7 +8,7 @@
 
 | 选择器 | 物理名称 | 尝试次数 | 成功/失败保留 | 限速 | 并发变量（默认 1） |
 | --- | --- | --: | --- | --- | --- |
-| monitor | monitor-task-queue | 3 | 3600 / 86400 | 1 / 200ms | MONITOR_QUEUE_WORKER_CONCURRENCY |
+| monitor | monitor-task-queue | 3 | max(604800, TASK_META_TTL_SECONDS) / 86400 | 1 / 200ms | MONITOR_QUEUE_WORKER_CONCURRENCY |
 | competitor-monitor | competitor-monitor-task-queue | 3 | 3600 / 86400 | 1 / 200ms | COMPETITOR_QUEUE_WORKER_CONCURRENCY |
 | export | export-task-queue | 2 | 86400 / 604800 | 1 / 500ms | EXPORT_QUEUE_WORKER_CONCURRENCY |
 | import | import-task-queue | 2 | 3600 / 86400 | 1 / 1000ms | 固定 1，Legacy 无覆盖变量 |

@@ -187,6 +187,29 @@ describe('primary monitor BullMQ processor', () => {
       notificationResults: { US: 'unconfirmed', DE: 'sent' },
     });
   });
+  it.each([false, true])(
+    'completes a legacy group with an empty name (broken=%s)',
+    async (broken) => {
+      const f = fixture();
+      f.data.countries = ['US'];
+      f.groups.mockResolvedValueOnce([{ country: 'US', groupId: 'g1' }]);
+      f.checkGroup.mockResolvedValueOnce({
+        ...result('g1', broken),
+        groupSnapshot: { ...result('g1', broken).groupSnapshot, name: '' },
+      });
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+        totalChecked: 1,
+        totalBroken: broken ? 1 : 0,
+      });
+      expect(f.state.status).toBe('completed');
+      expect(f.sendCountry).toHaveBeenCalledTimes(1);
+      if (broken) {
+        const summary = f.sendCountry.mock.calls[0][2];
+        expect(summary.brokenGroupNames).toEqual(['']);
+        expect(summary.brokenASINs?.[0]?.groupName).toBe('');
+      }
+    },
+  );
   it('includes every broken group and ASIN when the country has more than 100 groups', async () => {
     const f = fixture();
     f.data.countries = ['US'];

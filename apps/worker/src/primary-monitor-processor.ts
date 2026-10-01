@@ -128,7 +128,8 @@ function addGroup(summary: CountrySummary, result: VariantGroupCheckData) {
   const group = record(result.groupSnapshot);
   const groupId = string(group.id);
   const groupName = string(group.name);
-  if (!groupId || !groupName) throw new Error('MONITOR_GROUP_RESULT_INVALID');
+  if (!groupId || groupName === undefined)
+    throw new Error('MONITOR_GROUP_RESULT_INVALID');
   const children = Array.isArray(group.children)
     ? group.children.map(record)
     : [];
