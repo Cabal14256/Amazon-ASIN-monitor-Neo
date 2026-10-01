@@ -216,6 +216,68 @@ describe('own task query HTTP and bounded reconciliation', () => {
     task = null;
     expect((await get()).statusCode).toBe(404);
   });
+  it.each(['asin-check', 'variant-group-check'])(
+    'settles an old orphan %s only after a successful queue lookup',
+    async (taskSubType) => {
+      task = taskFixture({
+        taskType: 'variant-check',
+        taskSubType,
+        createdAt: new Date(Date.now() - 31_000).toISOString(),
+      });
+      const identity = {
+        userId: task.userId,
+        taskType: task.taskType,
+        taskSubType,
+        createdAt: task.createdAt,
+      };
+      const response = await get();
+      expect(response.json().data).toMatchObject({
+        status: 'failed',
+        error: '检查任务未入队，请重新提交',
+      });
+      expect(port.store.mutate).toHaveBeenCalledWith(
+        task.taskId,
+        { kind: 'check-not-enqueued', message: '检查任务未入队，请重新提交' },
+        identity,
+      );
+    },
+  );
+  it.each(['young', 'queued', 'processing', 'dependency'])(
+    'does not mark a %s check as orphaned',
+    async (condition) => {
+      task = taskFixture({
+        taskType: 'variant-check',
+        taskSubType: 'asin-check',
+        createdAt: new Date(
+          Date.now() - (condition === 'young' ? 1000 : 31_000),
+        ).toISOString(),
+      });
+      if (condition === 'queued') queue = { ...task, status: 'pending' };
+      if (condition === 'processing') task.status = 'processing';
+      if (condition === 'dependency')
+        vi.mocked(port.findJob).mockRejectedValueOnce(new Error('unavailable'));
+      const response = await get();
+      expect(response.statusCode).toBe(condition === 'dependency' ? 500 : 200);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+      expect(task.status).toBe(
+        condition === 'processing' ? 'processing' : 'pending',
+      );
+    },
+  );
+  it('preserves a worker that starts between the absence lookup and registry CAS', async () => {
+    task = taskFixture({
+      taskType: 'variant-check',
+      taskSubType: 'asin-check',
+      createdAt: new Date(Date.now() - 31_000).toISOString(),
+    });
+    vi.mocked(port.store.mutate).mockImplementationOnce(async (_id, change) => {
+      task = transitionTask(task!, { kind: 'processing' }, new Date());
+      task = transitionTask(task, change, new Date());
+      return task;
+    });
+    expect((await get()).json().data.status).toBe('processing');
+    expect(task.error).toBeNull();
+  });
   it('denies queue owner mismatch before touching own registry', async () => {
     queue = { ...task!, status: 'completed', userId: 'other' };
     expect((await get()).statusCode).toBe(403);

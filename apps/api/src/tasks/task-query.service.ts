@@ -83,7 +83,33 @@ export class TaskQueryService {
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
-    if (!queued) return task;
+    if (!queued) {
+      // Queue absence is authoritative only after successful lookup and a
+      // submission grace period. The CAS transition still requires pending.
+      if (
+        task.taskType === 'variant-check' &&
+        ['asin-check', 'variant-group-check'].includes(
+          task.taskSubType ?? '',
+        ) &&
+        task.status === 'pending' &&
+        Date.now() - Date.parse(task.createdAt) >= 30_000
+      ) {
+        const current = await port.store.mutate(
+          task.taskId,
+          { kind: 'check-not-enqueued', message: '检查任务未入队，请重新提交' },
+          {
+            userId: task.userId,
+            taskType: task.taskType,
+            taskSubType: task.taskSubType,
+            createdAt: task.createdAt,
+          },
+        );
+        if (!current) fail(404, '任务不存在');
+        this.owner(current, userId);
+        return current;
+      }
+      return task;
+    }
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');

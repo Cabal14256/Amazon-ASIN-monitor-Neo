@@ -112,6 +112,16 @@ function fixture(type: 'variant-check' | 'batch-check' = 'variant-check') {
   };
 }
 describe('variant and batch BullMQ processor lifecycle', () => {
+  it('does not execute an orphan job that arrives after API reconciliation', async () => {
+    const f = fixture();
+    await f.store.mutate(f.data.taskId, {
+      kind: 'check-not-enqueued',
+      message: '检查任务未入队，请重新提交',
+    });
+    await expect(f.run()).rejects.toThrow('检查任务失败');
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.state()).toMatchObject({ status: 'failed', startedAt: null });
+  });
   it.each(['variant-check', 'batch-check'] as const)(
     'completes %s with a compact durable reference and progress',
     async (type) => {

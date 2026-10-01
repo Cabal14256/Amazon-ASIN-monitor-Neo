@@ -116,11 +116,13 @@ export interface CatalogConfig {
       http: Pick<HttpClient, 'request'>,
       id: string,
       options: { forceRefresh: boolean },
+      signal?: AbortSignal,
     ) => Promise<CatalogCheckResult>;
     asin: (
       http: Pick<HttpClient, 'request'>,
       id: string,
       options: { forceRefresh: boolean },
+      signal?: AbortSignal,
     ) => Promise<CatalogCheckResult>;
   };
   writes?: CatalogWrites;
