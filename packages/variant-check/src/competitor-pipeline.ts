@@ -99,6 +99,8 @@ function groupResult(
       : [],
   );
   const group = value.group;
+  // Legacy findById derives the displayed snapshot from children, including
+  // empty groups; the check result can be broken without mutating the DB row.
   const snapshotBroken = value.asins.some((asin) => asin.isBroken === true);
   const snapshotStatus = snapshotBroken ? 'BROKEN' : 'NORMAL';
   const groupSnapshot = {
@@ -158,6 +160,7 @@ export type CompetitorGroupCheckData = ReturnType<typeof groupResult>;
  * snapshots, history and transactional receipts. Network calls never hold SQL TXs. */
 export class CompetitorCheckPipeline {
   private readonly active = new Set<AbortController>();
+  private readonly cleanups = new Set<AbortController>();
   private closed = false;
   constructor(
     private readonly repository: CompetitorCheckRepositoryPort,
@@ -276,29 +279,51 @@ export class CompetitorCheckPipeline {
       notFound: boolean;
     }[],
   ) {
+    const entries = rows.filter((row) => row.failed || row.notFound);
+    if (!entries.length || this.closed) return;
+    if (this.cleanups.size >= 8) {
+      this.logger.warn('竞品检查已提交，缓存清理容量已满', {
+        reason: 'competitor_check_cache_capacity',
+      });
+      return;
+    }
+    const controller = new AbortController();
+    this.cleanups.add(controller);
+    const timer = setTimeout(
+      () => controller.abort(new SpApiError('TIMEOUT')),
+      2000,
+    );
+    let next = 0;
     let failed = false;
-    for (const row of rows) {
-      const identity = {
-        asin: row.asin,
-        country: normalizeCountry(row.country),
-        owner: 'competitor' as const,
-      };
-      // The checker already wrote successful observations with its fenced claim.
-      if (row.failed)
-        try {
-          await this.cache.invalidate(identity, new AbortController().signal);
-        } catch {
-          failed = true;
+    const work = Promise.all(
+      Array.from({ length: Math.min(8, entries.length) }, async () => {
+        while (!controller.signal.aborted && next < entries.length) {
+          const row = entries[next++];
+          try {
+            const identity = {
+              asin: row.asin,
+              country: normalizeCountry(row.country),
+              owner: 'competitor' as const,
+            };
+            // Successful checker writes retain their fenced claim.
+            if (row.failed)
+              await this.cache.invalidate(identity, controller.signal);
+            if (row.notFound && !controller.signal.aborted)
+              await this.cache.clearDeferred(identity, controller.signal);
+          } catch {
+            failed = true;
+          }
         }
-      if (row.notFound)
-        try {
-          await this.cache.clearDeferred(
-            identity,
-            new AbortController().signal,
-          );
-        } catch {
-          failed = true;
-        }
+      }),
+    ).finally(() => {
+      clearTimeout(timer);
+      // Uncooperative I/O retains its cleanup slot until it actually settles.
+      this.cleanups.delete(controller);
+    });
+    try {
+      await waitFor(work, controller.signal);
+    } catch {
+      failed = true;
     }
     if (failed)
       this.logger.warn('竞品检查已提交，缓存清理失败', {
@@ -464,6 +489,8 @@ export class CompetitorCheckPipeline {
     if (this.closed) return;
     this.closed = true;
     for (const controller of this.active)
+      controller.abort(new SpApiError('CLOSED'));
+    for (const controller of this.cleanups)
       controller.abort(new SpApiError('CLOSED'));
   }
 }

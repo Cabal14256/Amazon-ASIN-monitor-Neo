@@ -21,7 +21,7 @@ describe('competitor immediate check HTTP', () => {
   });
   const post = (
     path: string,
-    body: unknown = {},
+    body: unknown = { useAsync: true },
     headers: Record<string, string> = f.headers,
   ) =>
     f.http.inject({
@@ -53,7 +53,7 @@ describe('competitor immediate check HTTP', () => {
   });
 
   it.each([single, group])(
-    'defaults authenticated requests to a durable async task: %s',
+    'creates a durable async task when explicitly requested: %s',
     async (path) => {
       const response = await post(path);
       expect(response.statusCode).toBe(200);
@@ -81,7 +81,7 @@ describe('competitor immediate check HTTP', () => {
   );
 
   it.each([single, group])(
-    'returns an owned pending task after default enqueue: %s',
+    'returns an owned pending task after explicit enqueue: %s',
     async (path) => {
       const submitted = await post(path);
       expect(submitted.statusCode).toBe(200);
@@ -213,6 +213,42 @@ describe('competitor immediate check HTTP', () => {
     expect(f.pipeline.checkGroup).not.toHaveBeenCalled();
     expect(f.unit.readReceipt).not.toHaveBeenCalled();
   });
+
+  it.each([single, group])(
+    'keeps the active Legacy request synchronous when useAsync is omitted: %s',
+    async (path) => {
+      const response = await post(path, {});
+      expect(response.statusCode).toBe(200);
+      competitorCheckResultSchema.parse(response.json());
+      expect(response.json().data).toMatchObject({ isBroken: false });
+      expect(
+        path === single ? f.pipeline.checkSingle : f.pipeline.checkGroup,
+      ).toHaveBeenCalledWith(
+        path === single ? 'ca1' : 'cg1',
+        expect.objectContaining({ forceRefresh: true }),
+      );
+      expect(f.producer.store.create).not.toHaveBeenCalled();
+      expect(f.producer.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [`/competitor/asins/${'a'.repeat(101)}/check`, 414],
+    [`/competitor/variant-groups/${'g'.repeat(101)}/check`, 414],
+    ['/competitor/asins/invalid%01id/check', 400],
+    ['/competitor/variant-groups/invalid%01id/check', 400],
+  ] as const)(
+    'rejects an invalid path identifier: %s',
+    async (path, status) => {
+      const response = await post(path);
+      // Fastify bounds raw path parameters before the service sees them.
+      expect(response.statusCode).toBe(status);
+      if (status === 400) expect(response.json().errorCode).toBe(400);
+      expect(f.repository.transaction).not.toHaveBeenCalled();
+      expect(f.producer.store.create).not.toHaveBeenCalled();
+      expect(f.producer.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([single, group])(
     'runs an explicit synchronous request through the shared pipeline: %s',

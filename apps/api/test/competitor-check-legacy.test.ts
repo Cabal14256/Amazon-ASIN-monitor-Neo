@@ -305,6 +305,8 @@ function neo(f: ReturnType<typeof fixture>) {
     },
     commitGroup: async (_snapshot, observations, guard) => {
       await guard();
+      if (!children.length)
+        return { group: structuredClone(group), asins: [], observations };
       const detailRows = observations.map(
         (item: CompetitorCheckObservation) => {
           const row = children.find((asin) => asin.id === item.asinId)!;
@@ -443,6 +445,31 @@ const groupResult = (value: unknown) => {
 };
 
 describe('competitor immediate check / actual Legacy service parity', () => {
+  it.each([false, true])(
+    'preserves stored empty-group status %s and creates no history',
+    async (isBroken) => {
+      const left = fixture(),
+        right = fixture();
+      for (const f of [left, right]) {
+        f.children.splice(0);
+        f.group.isBroken = isBroken;
+        f.group.variantStatus = isBroken ? 'BROKEN' : 'NORMAL';
+      }
+      const old = legacy(left),
+        current = neo(right);
+      try {
+        expect(
+          groupResult(await current.service.checkGroup('g1', current.context)),
+        ).toEqual(groupResult(await old.checkGroup('g1')));
+        expect(current.history).toEqual([]);
+        expect(old.history).toEqual([]);
+        expect(right.check).not.toHaveBeenCalled();
+      } finally {
+        current.service.close();
+      }
+    },
+  );
+
   it('matches the successful single-ASIN result and each history record', async () => {
     const left = fixture(),
       right = fixture();

@@ -45,14 +45,42 @@ function legacy(cases: unknown[]): unknown[] {
   );
 }
 
-const timezoneOffsetScript = `
-const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
-process.stdout.write(String(new Date(input.date).getTimezoneOffset()));
+const timezoneViewScript = `
+const fs = require('node:fs'), vm = require('node:vm');
+const { createRequire } = require('node:module');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const localRequire = createRequire(input.filename);
+const ts = localRequire('typescript');
+const compiled = ts.transpileModule(fs.readFileSync(input.filename, 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const model = { exports: {} };
+vm.runInNewContext(compiled, {
+  module: model, exports: model.exports, require: localRequire, Date,
+}, { filename: input.filename });
+process.stdout.write(JSON.stringify({
+  offset: new Date('2024-01-01T00:00:00Z').getTimezoneOffset(),
+  current: model.exports.buildMonitorMonthlyBreakdown([], undefined, new Date(input.now)),
+  monthly: model.exports.buildMonitorMonthlyBreakdown(input.rows, '2024-02', new Date(input.now)),
+  peaks: input.peakCases.map(model.exports.buildMonitorPeakMarkAreas),
+}));
 `;
-function timezoneOffset(tz: string): number {
-  return Number(
-    execFileSync(process.execPath, ['-e', timezoneOffsetScript], {
-      input: JSON.stringify({ date: '2024-01-01T00:00:00Z' }),
+function timezoneView(
+  tz: string,
+  rows: MonitorMonthlySourceRow[],
+  peakCases: unknown[],
+) {
+  return JSON.parse(
+    execFileSync(process.execPath, ['-e', timezoneViewScript], {
+      input: JSON.stringify({
+        filename: resolve(
+          __dirname,
+          '../src/monitor/monitor-analytics-view.ts',
+        ),
+        now: now.toISOString(),
+        rows,
+        peakCases,
+      }),
       encoding: 'utf8',
       env: { ...process.env, TZ: tz },
       timeout: 10_000,
@@ -205,7 +233,8 @@ describe('monitor analytics views / actual Legacy oracle', () => {
   it.each(['UTC', 'America/New_York', 'Asia/Shanghai'])(
     'renders the same view under host TZ=%s',
     (tz) => {
-      expect(timezoneOffset(tz)).toBe(
+      const actual = timezoneView(tz, monthlyRows, peakCases);
+      expect(actual.offset).toBe(
         (
           {
             UTC: 0,
@@ -214,10 +243,11 @@ describe('monitor analytics views / actual Legacy oracle', () => {
           } as Record<string, number>
         )[tz],
       );
-      expect(buildMonitorMonthlyBreakdown([], undefined, now).month).toBe(
-        '2026-10',
+      expect(actual.current.month).toBe('2026-10');
+      expect(actual.monthly).toEqual(
+        legacy([{ kind: 'monthly', rows: monthlyRows, month: '2024-02' }])[0],
       );
-      expect(peakCases.map(buildMonitorPeakMarkAreas)).toEqual(
+      expect(actual.peaks).toEqual(
         legacy(peakCases.map((params) => ({ kind: 'peaks', params }))),
       );
     },

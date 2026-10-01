@@ -80,18 +80,20 @@ export class CompetitorCheckService implements OnModuleDestroy {
     try {
       const body = checkRequestObject(request.body);
       const query = checkRequestObject(request.query);
-      const params =
+      const parsed =
         type === 'competitor-asin-check'
-          ? variantCheckJobSchema.options[2].shape.params.parse({
+          ? variantCheckJobSchema.options[2].shape.params.safeParse({
               asinId: id,
               forceRefresh:
                 query.forceRefresh !== 'false' && body.forceRefresh !== false,
             })
-          : variantCheckJobSchema.options[3].shape.params.parse({
+          : variantCheckJobSchema.options[3].shape.params.safeParse({
               groupId: id,
               forceRefresh:
                 query.forceRefresh !== 'false' && body.forceRefresh !== false,
             });
+      if (!parsed.success) throw new VariantCheckError('invalid-input');
+      const params = parsed.data;
       const principal = request.auth!;
       const scope = {
         forceRefresh: params.forceRefresh,
@@ -112,7 +114,8 @@ export class CompetitorCheckService implements OnModuleDestroy {
         if (type === 'competitor-asin-check') await unit.loadSingle(id);
         else await unit.loadGroup(id);
       }, controller.signal);
-      if (useAsyncCheck(body, query, true)) {
+      // The active Legacy caller expects a completed result when this flag is absent.
+      if (useAsyncCheck(body, query, false)) {
         const deadline = performance.now() + 3000;
         const port = this.tasks.openCheck(() => {
           controller.signal.throwIfAborted();

@@ -128,8 +128,12 @@ function fixture() {
   const cache = {
     claim: vi.fn(async () => 'claim-1'),
     write: vi.fn(async () => undefined),
-    invalidate: vi.fn(async () => undefined),
-    clearDeferred: vi.fn(async () => undefined),
+    invalidate: vi.fn(
+      async (_identity: unknown, _signal: AbortSignal) => undefined,
+    ),
+    clearDeferred: vi.fn(
+      async (_identity: unknown, _signal: AbortSignal) => undefined,
+    ),
   };
   const logger = { info: vi.fn(), warn: vi.fn() };
   const checker = { check: vi.fn() };
@@ -158,6 +162,79 @@ function fixture() {
 }
 
 describe('competitor check pipeline', () => {
+  it.each(['failed', 'not-found'])(
+    'bounds cleanup for 5000 %s observations even if the cache ignores abort',
+    async (kind) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const signals: AbortSignal[] = [];
+      const releases: (() => void)[] = [];
+      const cleanup =
+        kind === 'failed' ? f.cache.invalidate : f.cache.clearDeferred;
+      cleanup.mockImplementation(async (_identity, signal) => {
+        signals.push(signal);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return undefined;
+      });
+      f.snapshot.asins = Array.from({ length: 5000 }, (_, index) => ({
+        ...asin(index),
+        asin: `B${String(index).padStart(9, '0')}`,
+      }));
+      f.checker.check.mockImplementation(async (code: string) => {
+        if (kind === 'failed') throw new Error('upstream failed');
+        return catalogNotFoundResult(code, 'US');
+      });
+      let settled = false;
+      const work = f.pipeline.checkGroup('cg1', f.context).then((result) => {
+        settled = true;
+        return result;
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(f.unit.commitGroup).toHaveBeenCalledOnce();
+        expect(cleanup).toHaveBeenCalledTimes(8);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(2000);
+        expect((await work).isBroken).toBe(true);
+        expect(signals.every((signal) => signal.aborted)).toBe(true);
+        expect(new Set(signals).size).toBe(1);
+        expect(cleanup).toHaveBeenCalledTimes(8);
+        expect(f.logger.warn).toHaveBeenCalledWith(expect.any(String), {
+          reason: 'competitor_check_cache_invalidation_failed',
+        });
+      } finally {
+        f.pipeline.close();
+        releases.forEach((release) => release());
+        await work.catch(() => undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('aborts advisory cleanup on shutdown while returning the confirmed result', async () => {
+    const f = fixture();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const signals: AbortSignal[] = [];
+    f.checker.check.mockRejectedValue(new Error('upstream failed'));
+    f.cache.invalidate.mockImplementation(async (_identity, signal) => {
+      signals.push(signal);
+      started();
+      await new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+      return undefined;
+    });
+    const work = f.pipeline.checkGroup('cg1', f.context);
+    await ready;
+    f.pipeline.close();
+    expect((await work).isBroken).toBe(true);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(f.unit.commitGroup).toHaveBeenCalledOnce();
+  });
+
   it('does not let a delayed earlier commit overwrite the newer checker cache result', async () => {
     const original = asin(1);
     const parent = group();
