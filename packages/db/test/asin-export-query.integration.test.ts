@@ -133,5 +133,101 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await pool.end();
       }
     }, 30_000);
+
+    it('keeps 5,002 ASINs in their original groups during moves in both directions', async () => {
+      const pool = createPgPool(process.env.DATABASE_URL!, {
+        max: 2,
+        connectionTimeoutMillis: 2000,
+      });
+      const repository = new PgAsinExportQueryRepository(pool);
+      const prefix = `snap-${randomUUID().slice(0, 8)}`;
+      const early = `${prefix}-early`;
+      const later = `${prefix}-later`;
+      const movedForward = `${early}-000001`;
+      const movedBackward = `${later}-only`;
+      const seed = randomUUID().replaceAll('-', '').slice(0, 8);
+      try {
+        await pool.query(
+          "INSERT INTO variant_groups(id,name,country,site,create_time) VALUES($1,$1,'US','amazon.com','2026-09-27 02:00:00'),($2,$2,'US','amazon.com','2026-09-27 01:00:00')",
+          [early, later],
+        );
+        await pool.query(
+          `INSERT INTO asins(id,asin,country,site,variant_group_id,create_time)
+          SELECT $1 || '-' || lpad(n::text,6,'0'), 'Z' || $2 || lpad(n::text,6,'0'), 'US','amazon.com',$1,'2026-09-27 00:00:00.123456'
+          FROM generate_series(1,5001) AS n`,
+          [early, seed],
+        );
+        await pool.query(
+          "INSERT INTO asins(id,asin,country,site,variant_group_id,manual_broken,create_time) VALUES($1,$2,'US','amazon.com',$3,true,'2026-09-26 00:00:00')",
+          [movedBackward, `Z${seed}999999`, later],
+        );
+        const captured = await repository.read(async (unit, ensureOpen) => {
+          const query = { keyword: prefix, current: 1, pageSize: 1 };
+          const first = await unit.listExportGroups(query, undefined, true);
+          expect(first.total).toBe(2);
+          expect(first.groups[0]).toMatchObject({
+            id: early,
+            exportHasManualBroken: false,
+          });
+          const children = await unit.listExportChildren(early);
+          expect(children).toHaveLength(5000);
+          // Independent connection commits the same membership mutation as
+          // moveAsin while the snapshot connection stays open.
+          await pool.query(
+            'UPDATE asins SET variant_group_id=CASE id WHEN $1 THEN $3 ELSE $4 END WHERE id IN ($1,$2)',
+            [movedForward, movedBackward, later, early],
+          );
+          const cursor = children[children.length - 1]!;
+          const rest = await unit.listExportChildren(early, {
+            id: cursor.id,
+            createTime: cursor.exportCursorTime,
+          });
+          expect(rest).toHaveLength(1);
+          const lastGroup = first.groups[0]!;
+          const second = await unit.listExportGroups(
+            query,
+            { id: lastGroup.id, createTime: lastGroup.exportCursorTime! },
+            false,
+          );
+          expect(second.groups[0]).toMatchObject({
+            id: later,
+            exportHasManualBroken: true,
+          });
+          const tail = await unit.listExportChildren(later);
+          ensureOpen();
+          return [...children, ...rest, ...tail];
+        });
+        expect(captured).toHaveLength(5002);
+        expect(new Set(captured.map((child) => child.id)).size).toBe(5002);
+        expect(
+          captured.find((child) => child.id === movedForward)?.variantGroupId,
+        ).toBe(early);
+        expect(
+          captured.find((child) => child.id === movedBackward)?.variantGroupId,
+        ).toBe(later);
+        // The live writes really committed; only the export snapshot stayed fixed.
+        expect(
+          (
+            await pool.query(
+              'SELECT id,variant_group_id FROM asins WHERE id IN ($1,$2) ORDER BY id',
+              [movedForward, movedBackward],
+            )
+          ).rows,
+        ).toEqual([
+          { id: movedForward, variant_group_id: later },
+          { id: movedBackward, variant_group_id: early },
+        ]);
+      } finally {
+        await pool.query(
+          'DELETE FROM asins WHERE variant_group_id IN ($1,$2)',
+          [early, later],
+        );
+        await pool.query('DELETE FROM variant_groups WHERE id IN ($1,$2)', [
+          early,
+          later,
+        ]);
+        await pool.end();
+      }
+    }, 30_000);
   },
 );

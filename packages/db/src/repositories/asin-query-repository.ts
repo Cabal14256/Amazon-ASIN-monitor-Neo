@@ -70,7 +70,13 @@ export interface AsinExportQueryUnit extends AsinQueryUnit {
   ): Promise<AsinExportChild[]>;
 }
 export interface AsinExportQueryRepositoryPort {
-  read<T>(operation: (unit: AsinExportQueryUnit) => Promise<T>): Promise<T>;
+  read<T>(
+    operation: (
+      unit: AsinExportQueryUnit,
+      ensureOpen: () => void,
+    ) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T>;
 }
 export class AsinQueryRepositoryError extends Error {
   constructor(
@@ -434,7 +440,9 @@ export class PgAsinQueryRepository implements AsinQueryRepositoryPort {
 export async function withAsinExportDatabaseTransaction<T>(
   pool: Pool,
   operation: (db: Db, ensureOpen: () => void) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
   const client: PoolClient = await pool.connect();
   let destroyed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -449,13 +457,21 @@ export async function withAsinExportDatabaseTransaction<T>(
     client.release(true);
   };
   const ensureOpen = () => {
+    signal?.throwIfAborted();
     if (destroyed) throw new Error('ASIN_EXPORT_QUERY_TIMEOUT');
   };
+  const abort = () => {
+    destroy();
+    connectionError(new Error('ASIN_EXPORT_QUERY_CANCELLED'));
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
   try {
     return await Promise.race([
       connectionFailure,
       (async () => {
-        await client.query('BEGIN READ ONLY');
+        ensureOpen();
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
         ensureOpen();
         await client.query(
           `SET LOCAL statement_timeout = ${ASIN_EXPORT_QUERY_TIMEOUT_MS}`,
@@ -482,6 +498,7 @@ export async function withAsinExportDatabaseTransaction<T>(
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
     client.removeListener('error', connectionError);
     if (!destroyed) client.release();
   }
@@ -493,14 +510,20 @@ export class PgAsinExportQueryRepository
   private active = 0;
   constructor(private readonly pool: Pool) {}
   async read<T>(
-    operation: (unit: AsinExportQueryUnit) => Promise<T>,
+    operation: (
+      unit: AsinExportQueryUnit,
+      ensureOpen: () => void,
+    ) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     if (this.active >= 2) throw new AsinQueryRepositoryError('capacity');
     this.active++;
     try {
       return await withAsinExportDatabaseTransaction(
         this.pool,
-        (db, ensureOpen) => operation(new DrizzleAsinQueryUnit(db, ensureOpen)),
+        (db, ensureOpen) =>
+          operation(new DrizzleAsinQueryUnit(db, ensureOpen), ensureOpen),
+        signal,
       );
     } finally {
       this.active--;

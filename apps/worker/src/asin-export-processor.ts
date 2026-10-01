@@ -185,20 +185,27 @@ export function createAsinExportProcessor(
       let processed = 0;
       let rowCount = 0;
       let groupCursor: AsinExportCursor | undefined;
-      const appendRows = async (
-        group: ReturnType<typeof mapAsinQueryGroups>[number],
-      ) => {
-        for (const row of asinExportRows([group])) {
-          if (++rowCount > MAX_ROWS)
-            throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
-          sheet.addRow(row).commit();
-          if (rowCount % 500 === 0) await check();
-        }
-      };
-      for (let page = 1; ; page++) {
-        await check();
-        const result = await repository.read((unit) =>
-          unit.listExportGroups(
+      // All group membership, filters and status projections belong to one
+      // bounded MVCC snapshot. Redis cancellation/lease checks remain live.
+      await repository.read(async (unit, ensureSnapshotOpen) => {
+        const snapshotCheck = async () => {
+          ensureSnapshotOpen();
+          await check();
+          ensureSnapshotOpen();
+        };
+        const appendRows = async (
+          group: ReturnType<typeof mapAsinQueryGroups>[number],
+        ) => {
+          for (const row of asinExportRows([group])) {
+            if (++rowCount > MAX_ROWS)
+              throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
+            sheet.addRow(row).commit();
+            if (rowCount % 500 === 0) await snapshotCheck();
+          }
+        };
+        for (let page = 1; ; page++) {
+          await snapshotCheck();
+          const result = await unit.listExportGroups(
             {
               keyword: data.params.keyword || undefined,
               country: data.params.country || undefined,
@@ -208,81 +215,85 @@ export function createAsinExportProcessor(
             },
             groupCursor,
             page === 1,
-          ),
-        );
-        if (page === 1) {
-          total = result.total;
-          if (total > MAX_GROUPS)
-            throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
-        }
-        for (const group of result.groups) {
-          if (
-            group.exportHasAutoBroken === undefined ||
-            group.exportHasManualBroken === undefined
-          )
-            throw new Error('EXPORT_GROUP_STATUS_INVALID');
-          const groupStatusSource = effectiveVariantStatus(
-            group.exportHasAutoBroken,
-            group.exportHasManualBroken,
-          ).statusSource;
-          const effectiveGroup = {
-            ...group,
-            isBroken: group.exportIsBroken ?? group.isBroken,
-          };
-          let childCursor: AsinExportCursor | undefined;
-          for (;;) {
-            await check();
-            const children = await repository.read((unit) =>
-              unit.listExportChildren(group.id, childCursor),
-            );
-            if (children.length === 0) {
-              if (!childCursor)
-                await appendRows({
-                  ...mapAsinQueryGroups({
-                    groups: [effectiveGroup],
-                    asins: [],
-                    total: 0,
-                    totalASINs: 0,
-                  })[0]!,
-                  statusSource: groupStatusSource,
-                });
-              break;
-            }
-            await appendRows({
-              ...mapAsinQueryGroups({
-                groups: [effectiveGroup],
-                asins: children,
-                total: 0,
-                totalASINs: 0,
-              })[0]!,
-              statusSource: groupStatusSource,
-            });
-            const lastChild = children[children.length - 1]!;
-            childCursor = {
-              id: lastChild.id,
-              createTime: lastChild.exportCursorTime,
-            };
-            if (children.length < MAX_ASIN_QUERY_CHILDREN) break;
+          );
+          if (page === 1) {
+            total = result.total;
+            if (total > MAX_GROUPS)
+              throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
           }
+          for (const group of result.groups) {
+            if (
+              group.exportHasAutoBroken === undefined ||
+              group.exportHasManualBroken === undefined
+            )
+              throw new Error('EXPORT_GROUP_STATUS_INVALID');
+            const groupStatusSource = effectiveVariantStatus(
+              group.exportHasAutoBroken,
+              group.exportHasManualBroken,
+            ).statusSource;
+            const effectiveGroup = {
+              ...group,
+              isBroken: group.exportIsBroken ?? group.isBroken,
+            };
+            let childCursor: AsinExportCursor | undefined;
+            for (;;) {
+              await snapshotCheck();
+              const children = await unit.listExportChildren(
+                group.id,
+                childCursor,
+              );
+              if (children.length === 0) {
+                if (!childCursor)
+                  await appendRows({
+                    ...mapAsinQueryGroups({
+                      groups: [effectiveGroup],
+                      asins: [],
+                      total: 0,
+                      totalASINs: 0,
+                    })[0]!,
+                    statusSource: groupStatusSource,
+                  });
+                break;
+              }
+              await appendRows({
+                ...mapAsinQueryGroups({
+                  groups: [effectiveGroup],
+                  asins: children,
+                  total: 0,
+                  totalASINs: 0,
+                })[0]!,
+                statusSource: groupStatusSource,
+              });
+              const lastChild = children[children.length - 1]!;
+              childCursor = {
+                id: lastChild.id,
+                createTime: lastChild.exportCursorTime,
+              };
+              if (children.length < MAX_ASIN_QUERY_CHILDREN) break;
+            }
+          }
+          processed += result.groups.length;
+          if (processed > MAX_GROUPS)
+            throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
+          const lastGroup = result.groups[result.groups.length - 1];
+          if (lastGroup) {
+            if (lastGroup.exportCursorTime === undefined)
+              throw new Error('EXPORT_CURSOR_INVALID');
+            groupCursor = {
+              id: lastGroup.id,
+              createTime: lastGroup.exportCursorTime,
+            };
+          }
+          await progress(
+            Math.min(90, 5 + Math.floor((processed / Math.max(total, 1)) * 85)),
+            `正在生成 ASIN 导出（${processed}/${total} 组）`,
+          );
+          ensureSnapshotOpen();
+          if (result.groups.length === 0) break;
         }
-        processed += result.groups.length;
-        if (processed > MAX_GROUPS)
-          throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
-        const lastGroup = result.groups[result.groups.length - 1];
-        if (lastGroup) {
-          if (lastGroup.exportCursorTime === undefined)
-            throw new Error('EXPORT_CURSOR_INVALID');
-          groupCursor = {
-            id: lastGroup.id,
-            createTime: lastGroup.exportCursorTime,
-          };
-        }
-        await progress(
-          Math.min(90, 5 + Math.floor((processed / Math.max(total, 1)) * 85)),
-          `正在生成 ASIN 导出（${processed}/${total} 组）`,
-        );
-        if (result.groups.length === 0) break;
-      }
+      }, controller.signal);
+      // Never commit the writer or publish a file from a timed-out/aborted
+      // snapshot callback that may finish after its connection was destroyed.
       await check();
       await workbook.commit();
       await finished(output.stream);

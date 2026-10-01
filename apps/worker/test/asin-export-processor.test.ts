@@ -140,12 +140,21 @@ async function harness(pages: AsinGroupReadResult[]) {
     return selected.slice(start, start + 5000);
   });
   const repository = {
-    read: async (
-      operation: (unit: {
-        listExportGroups: typeof list;
-        listExportChildren: typeof children;
-      }) => Promise<unknown>,
-    ) => operation({ listExportGroups: list, listExportChildren: children }),
+    read: vi.fn(
+      async (
+        operation: (
+          unit: {
+            listExportGroups: typeof list;
+            listExportChildren: typeof children;
+          },
+          ensureOpen: () => void,
+        ) => Promise<unknown>,
+      ) =>
+        operation(
+          { listExportGroups: list, listExportChildren: children },
+          () => undefined,
+        ),
+    ),
   } as unknown as AsinExportQueryRepositoryPort;
   const options = {
     shutdownSignal: new AbortController().signal,
@@ -175,6 +184,7 @@ async function harness(pages: AsinGroupReadResult[]) {
     job,
     list,
     children,
+    repository,
     options,
     processor,
     get state() {
@@ -225,6 +235,7 @@ describe('ASIN streaming export', () => {
     const h = await harness(pages);
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('completed');
+    expect(h.repository.read).toHaveBeenCalledOnce();
     expect(h.list).toHaveBeenCalledTimes(3);
     const ref = (
       h.state.result as {
@@ -425,6 +436,30 @@ describe('ASIN streaming export', () => {
     });
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('cancelled');
+    expect(await readdir(h.directory)).toEqual([]);
+  });
+
+  it('does not publish a writer when the snapshot fails after all rows were read', async () => {
+    const h = await harness([
+      {
+        groups: [group('g1', 'One')],
+        asins: [asin('B000000001', 'g1')],
+        total: 1,
+        totalASINs: 1,
+      },
+    ] as unknown as AsinGroupReadResult[]);
+    const original = h.repository.read.bind(h.repository);
+    vi.spyOn(h.repository, 'read').mockImplementationOnce(
+      async (operation, signal) => {
+        await original(operation, signal);
+        throw new Error('ASIN_EXPORT_QUERY_TIMEOUT');
+      },
+    );
+    const publish = vi.spyOn(h.artifacts, 'publish');
+    await expect(h.processor(h.job, 'token')).rejects.toThrow(
+      'ASIN_EXPORT_ATTEMPT_FAILED',
+    );
+    expect(publish).not.toHaveBeenCalled();
     expect(await readdir(h.directory)).toEqual([]);
   });
 
