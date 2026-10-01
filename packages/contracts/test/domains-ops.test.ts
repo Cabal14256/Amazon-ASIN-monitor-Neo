@@ -16,6 +16,10 @@ import {
   parentAsinQueryExportQuerySchema,
 } from '../src/domains/export';
 import {
+  refreshAnalyticsRequestSchema,
+  refreshAnalyticsResultSchema,
+} from '../src/domains/ops';
+import {
   createExportTaskRequestSchema,
   taskInfoResultSchema,
   taskListResultSchema,
@@ -436,6 +440,44 @@ describe('export 域（流端点）', () => {
     });
     expect(() =>
       historyExportQuerySchema.parse({ exportType: 'summary' }),
+    ).toThrow();
+  });
+});
+
+describe('ops 域', () => {
+  it('聚合刷新只接受已声明的维护参数', () => {
+    expect(
+      refreshAnalyticsRequestSchema.parse({ granularity: 'hour' }),
+    ).toEqual({
+      granularity: 'hour',
+    });
+    for (const value of [
+      { granularity: 0 },
+      { startTime: 42 },
+      { unknown: 'ignored-before' },
+    ])
+      expect(refreshAnalyticsRequestSchema.safeParse(value).success).toBe(
+        false,
+      );
+  });
+
+  it('聚合刷新成功响应包含刷新对象和时间窗口', () => {
+    const result = refreshAnalyticsResultSchema.parse({
+      success: true,
+      errorCode: 0,
+      data: {
+        refreshed: ['monitor_history_cagg_asin_hour'],
+        startTime: '2026-01-01 00:00:00',
+        endTime: '2026-01-02 00:00:00',
+      },
+    });
+    expect(result.data?.refreshed).toHaveLength(1);
+    expect(() =>
+      refreshAnalyticsResultSchema.parse({
+        success: true,
+        errorCode: 0,
+        data: { refreshed: true },
+      }),
     ).toThrow();
   });
 });

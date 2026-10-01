@@ -90,9 +90,10 @@ describe('application router identity boundary', () => {
     '/competitor-asin',
     '/tasks',
     '/profile',
+    '/settings',
   ])('loads the permitted page %s', async (path) => {
     const f =
-      path === '/ops'
+      path === '/ops' || path === '/settings'
         ? setup(path, async () =>
             jsonResponse({
               success: true,
