@@ -7,6 +7,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import {
+  MetricsService,
+  type AnalyticsCachePrefix,
+} from '../metrics/metrics.service';
 import { ApplicationRedisClient } from '../redis/redis.service';
 import {
   assertMonitorJsonBounds,
@@ -21,6 +25,18 @@ if redis.call('STRLEN', KEYS[1]) > tonumber(ARGV[1]) then return false end
 return redis.call('GET', KEYS[1])`;
 const WRITE_CACHE = `return redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])`;
 type CachedResult = MonitorAnalyticsData & { generatedAt: number };
+const METRIC_PREFIXES: Partial<
+  Record<MonitorAnalyticsOperation, AnalyticsCachePrefix>
+> = {
+  'by-time': 'statisticsByTime',
+  'analytics-monthly-breakdown': 'statisticsByTime',
+  'all-countries-summary': 'allCountriesSummary',
+  'region-summary': 'regionSummary',
+  'period-summary': 'periodSummary',
+  'period-summary/details': 'periodSummaryDetails',
+  'asin-by-country': 'asinStatisticsByCountry',
+  'asin-by-variant-group': 'asinStatisticsByVariantGroup',
+};
 
 @Injectable()
 export class MonitorAnalyticsCache {
@@ -30,6 +46,7 @@ export class MonitorAnalyticsCache {
     @Inject(ApplicationRedisClient)
     private readonly redis: ApplicationRedisClient,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
   ttl(operation: MonitorAnalyticsOperation) {
     switch (operation) {
@@ -65,7 +82,12 @@ export class MonitorAnalyticsCache {
     return `${this.env.BULL_PREFIX.trim()}:neo:analytics:v1:${hash}`;
   }
   private async attempt<T>(action: () => Promise<T>): Promise<T | null> {
-    if (this.active >= 4) return null;
+    if (this.active >= 4) {
+      this.logger.warn('统计缓存暂不可用', 'MonitorAnalyticsCache', {
+        reason: 'analytics_cache_unavailable',
+      });
+      return null;
+    }
     this.active++;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // Retain admission until the underlying command actually settles, including
@@ -92,6 +114,20 @@ export class MonitorAnalyticsCache {
   async get(query: MonitorAnalyticsQuery): Promise<CachedResult | null> {
     const ttl = this.ttl(query.operation);
     if (!ttl) return null;
+    let hit = false;
+    try {
+      const cached = await this.readValidated(query, ttl);
+      hit = cached !== null;
+      return cached;
+    } finally {
+      const prefix = METRIC_PREFIXES[query.operation];
+      if (prefix) this.metrics.recordAnalyticsCacheAccess(prefix, hit);
+    }
+  }
+  private async readValidated(
+    query: MonitorAnalyticsQuery,
+    ttl: number,
+  ): Promise<CachedResult | null> {
     const key = this.key(query);
     const raw = await this.attempt(() =>
       this.redis.eval(
@@ -109,23 +145,26 @@ export class MonitorAnalyticsCache {
       const cached: unknown = JSON.parse(raw);
       assertMonitorJsonBounds(cached, MONITOR_ANALYTICS_CACHE_BYTES);
       if (!cached || typeof cached !== 'object' || Array.isArray(cached))
-        return null;
+        throw new Error('CACHE_INVALID_ENVELOPE');
       const row = cached as Record<string, unknown>;
       const now = Date.now();
       if (
         row.version !== 1 ||
         row.key !== key ||
-        !['raw', 'agg', 'agg:day-fallback'].includes(String(row.source)) ||
+        typeof row.source !== 'string' ||
+        !['raw', 'agg', 'agg:day-fallback'].includes(row.source) ||
         typeof row.generatedAt !== 'number' ||
         !Number.isSafeInteger(row.generatedAt) ||
         row.generatedAt > now ||
         typeof row.expiresAt !== 'number' ||
         !Number.isSafeInteger(row.expiresAt) ||
-        row.expiresAt <= now ||
+        row.expiresAt < row.generatedAt ||
         row.expiresAt > row.generatedAt + ttl ||
-        row.generatedAt + ttl <= now
+        !Number.isSafeInteger(row.generatedAt + ttl)
       )
-        return null;
+        throw new Error('CACHE_INVALID_METADATA');
+      // Ordinary expiration is a cold miss only after envelope validation.
+      if (row.expiresAt <= now || row.generatedAt + ttl <= now) return null;
       validateMonitorAnalyticsData(query.operation, row.data);
       return {
         data: row.data,

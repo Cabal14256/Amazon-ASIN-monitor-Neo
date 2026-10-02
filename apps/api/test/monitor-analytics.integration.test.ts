@@ -310,10 +310,29 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     });
     it('uses real Redis cache with original timestamps, per-range keys and current permission revocation', async () => {
+      const metricCount = async (outcome: 'hits' | 'misses') => {
+        const response = await f.http.inject({
+          method: 'GET',
+          url: '/metrics',
+        });
+        expect(response.statusCode).toBe(200);
+        const line = response.body
+          .split('\n')
+          .find((value) =>
+            value.startsWith(
+              `amazon_asin_monitor_cache_${outcome}_total{cache_key_prefix="statisticsByTime"} `,
+            ),
+          );
+        return line ? Number(line.slice(line.lastIndexOf(' ') + 1)) : 0;
+      };
       const raw = { ...range, country: 'US', groupBy: 'day' };
       await clearCache();
+      const beforeHit = await metricCount('hits');
+      const beforeMiss = await metricCount('misses');
       const first = (await get('by-time', raw)).json(),
         second = (await get('by-time', raw)).json();
+      expect(await metricCount('hits')).toBe(beforeHit + 1);
+      expect(await metricCount('misses')).toBe(beforeMiss + 1);
       expect(second.data).toEqual(first.data);
       expect(second.meta).toEqual({
         ...first.meta,
@@ -334,6 +353,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       try {
         expect((await get('by-time', raw)).statusCode).toBe(403);
+        expect(await metricCount('hits')).toBe(beforeHit + 1);
+        expect(await metricCount('misses')).toBe(beforeMiss + 2);
       } finally {
         await f.pools.primaryPool.query(
           "INSERT INTO role_permissions(role_id,permission_id) SELECT 'reader-71',id FROM permissions WHERE code='analytics:read'",
