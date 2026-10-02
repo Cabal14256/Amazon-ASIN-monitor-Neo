@@ -28,6 +28,9 @@ const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
 const cancellationSensitiveTask = (task: { taskType: string }) =>
   checkTask(task) || task.taskType === 'monitor';
+const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
+  cancellationSensitiveTask(task) ||
+  (task.taskType === 'export' && task.taskSubType === 'asin');
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed');
@@ -92,7 +95,7 @@ export class TaskQueryService {
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (cancellationSensitiveTask(task)) {
+    if (boundTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -104,9 +107,7 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(cancellationSensitiveTask(task)
-        ? { taskSubType: task.taskSubType }
-        : {}),
+      ...(boundTask(task) ? { taskSubType: task.taskSubType } : {}),
     };
     if (
       cancellationSensitiveTask(task) &&

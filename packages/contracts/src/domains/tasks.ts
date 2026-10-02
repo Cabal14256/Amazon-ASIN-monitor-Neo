@@ -51,6 +51,53 @@ export const createExportTaskRequestSchema = z.object({
   exportType: z.enum(EXPORT_TYPES),
   params: z.record(z.string(), z.unknown()).optional(),
 });
+/** First Neo export consumer. Other known export types remain unsupported. */
+export const asinExportParamsSchema = z
+  .object({
+    keyword: z
+      .string()
+      .max(200)
+      .regex(/^[^\x00-\x1f\x7f]*$/u)
+      .optional(),
+    country: z
+      .string()
+      .max(10)
+      .regex(/^[^\x00-\x1f\x7f]*$/u)
+      .optional(),
+    variantStatus: z
+      .union([z.enum(['BROKEN', 'NORMAL']), z.literal('')])
+      .optional(),
+  })
+  .strict();
+export type AsinExportParams = z.infer<typeof asinExportParamsSchema>;
+export const asinExportTaskRequestSchema = z
+  .object({
+    exportType: z.literal('asin'),
+    params: asinExportParamsSchema.default({}),
+  })
+  .strict();
+export const asinExportJobDataSchema = z
+  .object({
+    taskId: z.string().uuid(),
+    taskType: z.literal('export'),
+    taskSubType: z.literal('asin'),
+    exportType: z.literal('asin'),
+    userId: z.string().min(1).max(200),
+    createdAt: z.string().datetime(),
+    params: asinExportParamsSchema,
+  })
+  .strict();
+export type AsinExportJobData = z.infer<typeof asinExportJobDataSchema>;
+export const asinExportArtifactSchema = z
+  .object({
+    taskId: z.string().uuid(),
+    key: z.string().regex(/^export-[0-9a-f-]{36}\.xlsx$/),
+    bytes: z.number().int().positive().max(268_435_456),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict()
+  .refine((value) => value.key === `export-${value.taskId}.xlsx`);
+export type AsinExportArtifact = z.infer<typeof asinExportArtifactSchema>;
 export type CreateExportTaskRequest = z.infer<
   typeof createExportTaskRequestSchema
 >;

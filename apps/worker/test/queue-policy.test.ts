@@ -97,7 +97,8 @@ describe('Legacy to BullMQ queue policy parity', () => {
         expect(policy.defaultJobOptions).toEqual(
           name === 'monitor' ||
             name === 'variant-check' ||
-            name === 'batch-check'
+            name === 'batch-check' ||
+            name === 'export'
             ? {
                 ...(baseline.options.defaultJobOptions as object),
                 removeOnComplete: { age: 604800 },
@@ -126,6 +127,21 @@ describe('Legacy to BullMQ queue policy parity', () => {
       }
     },
   );
+  it.each(
+    ['518400', '604800', '1209600', '31536000'].flatMap((ttl) => [
+      [ttl, 'removeOnComplete'] as const,
+      [ttl, 'removeOnFail'] as const,
+    ]),
+  )('retains export evidence for metadata TTL %s / %s', (ttl, field) => {
+    const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: ttl });
+    const options = getQueuePolicy('export', env).defaultJobOptions;
+    expect(options[field]).toEqual({
+      age: Math.max(field === 'removeOnComplete' ? 86400 : 604800, Number(ttl)),
+    });
+    expect(
+      getQueueOptions('export', env, { host: 'localhost' }).defaultJobOptions,
+    ).toEqual(options);
+  });
 
   it.each([
     ['3600', 604_800],
@@ -182,7 +198,7 @@ describe('Legacy to BullMQ queue policy parity', () => {
     expect(queue).not.toHaveProperty('limiter');
     expect(queue.defaultJobOptions).toMatchObject({
       attempts: 2,
-      removeOnComplete: { age: 86400 },
+      removeOnComplete: { age: Math.max(86400, env.TASK_META_TTL_SECONDS) },
       removeOnFail: { age: 604800 },
     });
     expect(worker).toMatchObject({

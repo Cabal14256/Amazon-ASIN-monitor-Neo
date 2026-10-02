@@ -98,6 +98,15 @@ export function transitionTask(
       ['cancelling', 'cancelled', 'completed'].includes(task.status)
     )
       return task;
+  } else if (
+    change.kind === 'completed' &&
+    task.taskType === 'export' &&
+    task.taskSubType === 'asin' &&
+    (task.cancelRequestedAt || task.status === 'cancelling')
+  ) {
+    // Completion must not win if cancellation reached Redis after the
+    // Worker's last status check. The processor will finalize cancellation.
+    return task;
   } else if (isTerminalTaskStatus(task.status)) return task;
   // A monitor can finish its last country while cancellation is racing with
   // the final acknowledgement. The shared CAS must honor the accepted cancel.
@@ -142,7 +151,8 @@ export function transitionTask(
       break;
     case 'failed':
       if (
-        ['variant-check', 'batch-check', 'monitor'].includes(task.taskType) &&
+        (['variant-check', 'batch-check', 'monitor'].includes(task.taskType) ||
+          (task.taskType === 'export' && task.taskSubType === 'asin')) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';
@@ -150,7 +160,9 @@ export function transitionTask(
         next.completedAt = timestamp;
         next.error = null;
         next.message =
-          task.taskType === 'monitor'
+          task.taskType === 'export'
+            ? '导出任务已取消'
+            : task.taskType === 'monitor'
             ? '监控任务已取消，已提交的结果保留'
             : '检查任务已取消，已提交的检查结果保留';
         break;

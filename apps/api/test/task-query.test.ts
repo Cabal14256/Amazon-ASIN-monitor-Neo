@@ -163,6 +163,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
       {
         userId: before.userId,
         taskType: before.taskType,
+        taskSubType: before.taskSubType,
         createdAt: before.createdAt,
       },
     );
@@ -266,6 +267,29 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
+  it.each(['pending', 'processing', 'cancelling'] as const)(
+    'preserves an old %s export when its queue record is absent',
+    async (status) => {
+      task = taskFixture({
+        taskId: '10000000-0000-4000-8000-000000000166',
+        taskType: 'export',
+        taskSubType: 'asin',
+        status,
+        createdAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+        ...(status === 'cancelling'
+          ? { cancelRequestedAt: new Date().toISOString() }
+          : {}),
+      });
+      rows = [task];
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.status).toBe(status);
+      const list = await get('/tasks');
+      expect(list.statusCode).toBe(200);
+      expect(list.json().data[0].status).toBe(status);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(['pending', 'processing', 'cancelling'])(
     'does not replace nonterminal %s metadata with queue progress',
     async (status) => {

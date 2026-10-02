@@ -6,7 +6,9 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  asinExportJobDataSchema,
   primaryMonitorJobSchema,
+  type AsinExportJobData,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
 } from '@asin-monitor/contracts';
@@ -64,6 +66,15 @@ export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
 }
+export interface ExportProducerPort {
+  store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
+  enqueue(data: AsinExportJobData): Promise<void>;
+}
+export class ExportEnqueueRejected extends Error {
+  constructor(readonly reason: 'unavailable' | 'invalid') {
+    super(`EXPORT_ENQUEUE_${reason.toUpperCase().replace('-', '_')}`);
+  }
+}
 export interface MonitorProducerPort {
   store: Pick<RedisTaskRepository, 'create' | 'mutate'>;
   assertConsumer(): Promise<void>;
@@ -79,7 +90,8 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       : {};
   const status =
     state === 'completed' &&
-    ['variant-check', 'batch-check', 'monitor'].includes(type) &&
+    (['variant-check', 'batch-check', 'monitor'].includes(type) ||
+      (type === 'export' && job.name === 'asin')) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
@@ -95,6 +107,11 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);
+  }
+  if (type === 'export' && job.name === 'asin') {
+    const data = asinExportJobDataSchema.parse(job.data);
+    if (data.taskId !== job.id || data.taskType !== type)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
   }
   if (type === 'monitor') {
     const parsed = primaryMonitorJobSchema.safeParse(job.data);
@@ -144,6 +161,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private exportQueue?: Queue;
   private monitorQueue?: Queue;
   private readonly checkQueues = new Map<
     'variant-check' | 'batch-check',
@@ -214,13 +232,19 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         command(() => cancelQueuedTask(this.redis, this.env, task)),
     };
   }
-  private createStore(ensureOpen: () => void): RedisTaskRepository {
+  private createStore(
+    ensureOpen: () => void,
+    beforeEval?: () => void,
+  ): RedisTaskRepository {
     const command = this.command(ensureOpen);
     // This is the exact four-command subset used by RedisTaskRepository, never an unrestricted client.
     const redis: TaskRedisPort = {
       get: (key: string) => command(() => this.redis.get(key)),
       eval: (script: string, keyCount: number, ...args: (string | number)[]) =>
-        command(() => this.redis.eval(script, keyCount, ...args)),
+        command(() => {
+          beforeEval?.();
+          return this.redis.eval(script, keyCount, ...args);
+        }),
       zrevrange: (key: string, start: number, end: number) =>
         command(() => this.redis.zrevrange(key, start, end)),
       mget: (...keys: string[]) => command(() => this.redis.mget(...keys)),
@@ -396,6 +420,54 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openExport(
+    ensureOpen: () => void,
+    onCreateWriteStarted?: () => void,
+  ): ExportProducerPort {
+    return {
+      store: this.createStore(ensureOpen, onCreateWriteStarted),
+      enqueue: async (input) => {
+        const parsed = asinExportJobDataSchema.safeParse(input);
+        if (!parsed.success) throw new ExportEnqueueRejected('invalid');
+        let queue: Queue;
+        try {
+          ensureOpen();
+          await this.ready();
+          ensureOpen();
+          queue = this.exportQueue ??= new Queue(
+            getPhysicalQueueName('export'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('export', this.env)
+                .defaultJobOptions,
+            },
+          );
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('导出队列连接异常', 'TaskQueryRuntime', {
+                reason: 'export_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.exportQueue === queue) this.exportQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+        } catch (error) {
+          if (error instanceof ExportEnqueueRejected) throw error;
+          throw new ExportEnqueueRejected('unavailable');
+        }
+        // An error from add may follow a committed Redis write. Keep its task
+        // ID for reconciliation instead of claiming the request was rejected.
+        await queue.add('asin', parsed.data, { jobId: parsed.data.taskId });
+        ensureOpen();
+      },
+    };
+  }
   openMonitor(ensureOpen: () => void): MonitorProducerPort {
     const command = this.command(ensureOpen);
     const readyQueue = async () => {
@@ -488,6 +560,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.exportQueue ? [this.exportQueue] : []),
         ...(this.monitorQueue ? [this.monitorQueue] : []),
         ...this.checkQueues.values(),
       ].map((queue) => queue.close()),

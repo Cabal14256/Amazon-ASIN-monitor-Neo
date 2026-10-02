@@ -5,6 +5,7 @@ import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
 import { startAsinBatchDeleteRuntime } from './asin-batch-delete-runtime';
+import { startAsinExportRuntime } from './asin-export-runtime';
 import { startAsinImportRuntime } from './asin-import-runtime';
 import { startAuthMaintenanceRuntime } from './auth-maintenance-runtime';
 import {
@@ -76,6 +77,10 @@ async function bootstrap(): Promise<void> {
     enabled.includes('import') && env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startAsinImportRuntime(env, () => process.exit(1))
       : undefined;
+  const asinExport =
+    enabled.includes('export') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startAsinExportRuntime(env, () => process.exit(1))
+      : undefined;
   const checkQueues = enabled.filter(
     (name): name is 'variant-check' | 'batch-check' | 'monitor' =>
       name === 'variant-check' || name === 'batch-check' || name === 'monitor',
@@ -88,6 +93,7 @@ async function bootstrap(): Promise<void> {
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
     .filter((name) => !(asinImport && name === 'import'))
+    .filter((name) => !(asinExport && name === 'export'))
     .filter(
       (name) =>
         !(
@@ -116,6 +122,7 @@ async function bootstrap(): Promise<void> {
       ...(intervals ? [intervals.queue] : []),
       ...(batchDelete ? [batchDelete.queue] : []),
       ...(asinImport ? [asinImport.queue] : []),
+      ...(asinExport ? [asinExport.queue] : []),
       ...(variantChecks ? variantChecks.queues : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
@@ -134,6 +141,7 @@ async function bootstrap(): Promise<void> {
         ...(intervals ? [intervals] : []),
         ...(batchDelete ? [batchDelete] : []),
         ...(asinImport ? [asinImport] : []),
+        ...(asinExport ? [asinExport] : []),
         ...(variantChecks ? [variantChecks] : []),
       ],
       watchdogRedis,
@@ -146,7 +154,7 @@ async function bootstrap(): Promise<void> {
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode:
-      batchDelete || asinImport || variantChecks
+      batchDelete || asinImport || asinExport || variantChecks
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
@@ -158,6 +166,7 @@ async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
+      Number(!!asinExport) +
       (variantChecks?.workers.length ?? 0),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
@@ -172,6 +181,7 @@ async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
+      Number(!!asinExport) +
       (variantChecks?.queues.length ?? 0),
     schedulerEnabled: !!(maintenance || intervals) && env.SCHEDULER_ENABLED,
   });
