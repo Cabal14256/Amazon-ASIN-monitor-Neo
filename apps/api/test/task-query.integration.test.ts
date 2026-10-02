@@ -5,6 +5,7 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  backupJobDataSchema,
   taskInfoResultSchema,
   taskListResultSchema,
 } from '@asin-monitor/contracts';
@@ -232,6 +233,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           { jobId: id, removeOnComplete: false, removeOnFail: false },
         );
       }
+      if (type === 'backup') {
+        const data = backupJobDataSchema.parse({
+          taskId: id,
+          userId,
+          taskType: 'backup',
+          taskSubType: 'create',
+          operation: 'create',
+          target: 'primary',
+          createdAt: new Date().toISOString(),
+          params: {},
+        });
+        return (await queueFor(type)).add(data.operation, data, {
+          jobId: id,
+          removeOnComplete: false,
+          removeOnFail: false,
+        });
+      }
       return (await queueFor(type)).add(
         'fixture',
         {
@@ -420,7 +438,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(await store.read(id)).toBeNull();
       },
     );
-    it.each(['variant-check', 'batch-check', 'monitor'] as const)(
+    it.each(['variant-check', 'batch-check', 'monitor', 'backup'] as const)(
       'rejects an incomplete %s queue payload without recreating metadata',
       async (type) => {
         const id = randomUUID();

@@ -71,6 +71,7 @@ function filesystemErrorCode(error: unknown): string | undefined {
       'EBUSY',
       'EMFILE',
       'ENFILE',
+      'EISDIR',
     ]).has(code)
     ? code
     : undefined;

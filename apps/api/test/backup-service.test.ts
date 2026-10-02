@@ -24,6 +24,7 @@ import { taskFixture } from './helpers/task-query-fixtures';
 const sidecarFailure = vi.hoisted(() => ({
   stat: null as Error | null,
   read: null as Error | null,
+  remove: null as Error | null,
 }));
 const archiveFailure = vi.hoisted(() => ({
   phase: null as 'stat' | 'open' | 'read' | null,
@@ -44,6 +45,11 @@ vi.mock('node:fs/promises', async (original) => {
       if (sidecarFailure.read && String(args[0]).endsWith('.meta.json'))
         throw sidecarFailure.read;
       return Reflect.apply(fs.readFile, fs, args);
+    },
+    unlink: async (...args: unknown[]) => {
+      if (sidecarFailure.remove && String(args[0]).endsWith('.meta.json'))
+        throw sidecarFailure.remove;
+      return Reflect.apply(fs.unlink, fs, args);
     },
     open: async (...args: unknown[]) => {
       if (String(args[0]).endsWith('.dump')) {
@@ -116,6 +122,7 @@ afterEach(async () => {
   archiveFailure.error = null;
   sidecarFailure.stat = null;
   sidecarFailure.read = null;
+  sidecarFailure.remove = null;
   await Promise.all(
     directories
       .splice(0)
@@ -276,6 +283,44 @@ describe('backup submission HTTP / global exception boundary', () => {
       }
     },
   );
+  it('reports EISDIR from partial sidecar deletion as a fixed server failure', async () => {
+    const f = await fixture();
+    const path = join(f.directory, filename);
+    await writeFile(path, 'PGDMPfixture');
+    await writeMetadata(f.directory, 'postgresql');
+    const app = await http(f.service);
+    sidecarFailure.remove = Object.assign(
+      new Error(`private-delete-token ${f.directory}`),
+      { code: 'EISDIR' },
+    );
+    try {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/backup/${filename}`,
+      });
+      expect(response.statusCode).toBe(500);
+      expect(f.logger.error).toHaveBeenLastCalledWith(
+        '备份操作失败',
+        'BackupService',
+        {
+          operation: 'delete',
+          reason: 'backup_operation_failed',
+          code: 'EISDIR',
+        },
+      );
+      expect(
+        response.body + JSON.stringify(f.logger.error.mock.calls),
+      ).not.toContain('private-delete-token');
+      expect(
+        response.body + JSON.stringify(f.logger.error.mock.calls),
+      ).not.toContain(f.directory);
+      await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(`${path}.meta.json`, 'utf8')).toContain(filename);
+    } finally {
+      sidecarFailure.remove = null;
+      await app.close();
+    }
+  });
   it.each(['create', 'enqueue'] as const)(
     'retains the generated UUID after an uncertain %s acknowledgement',
     async (phase) => {
