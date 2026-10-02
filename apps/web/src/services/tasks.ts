@@ -25,7 +25,8 @@ export const isTaskMessage = (message: WsMessage) =>
 // Check results can reach 32 MiB before the HTTP envelope and task metadata.
 const TASK_READ_RESPONSE_LIMIT = 40 * 1024 * 1024;
 
-function taskPath(taskId: string): string {
+/** Same constraints used by every task URL and response receipt. */
+export function isValidTaskId(taskId: string): boolean {
   if (
     !taskId ||
     taskId.length > 200 ||
@@ -36,12 +37,19 @@ function taskPath(taskId: string): string {
       (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
     )
   )
-    throw new ApiError('INVALID_INPUT', '任务标识无效');
+    return false;
   try {
-    return `/api/v1/tasks/${encodeURIComponent(taskId)}`;
+    encodeURIComponent(taskId);
+    return true;
   } catch {
-    throw new ApiError('INVALID_INPUT', '任务标识无效');
+    return false;
   }
+}
+
+function taskPath(taskId: string): string {
+  if (!isValidTaskId(taskId))
+    throw new ApiError('INVALID_INPUT', '任务标识无效');
+  return `/api/v1/tasks/${encodeURIComponent(taskId)}`;
 }
 
 function requireData<T>(result: { success?: boolean; data?: T }): T {

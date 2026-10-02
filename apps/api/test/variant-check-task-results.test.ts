@@ -257,6 +257,46 @@ describe('owned full check task results and downloads', () => {
       expect((await get('/download')).statusCode).toBe(200);
     },
   );
+  it.each(['pending', 'processing'] as const)(
+    'keeps %s metadata uncertain after queue cleanup despite an existing receipt',
+    async (status) => {
+      data = parseVariantCheckJob({
+        ...data,
+        createdAt: new Date(Date.now() - 2 * 86400_000).toISOString(),
+      });
+      operation = variantCheckJobOperation(data);
+      task = taskFixture({ ...data, status, result: null });
+      f.tasks.set(task.taskId, task);
+      f.receipts.clear();
+      f.receipts.set(operation.operationKey, { operation, result: full });
+      const original = structuredClone(task);
+      // The job's original request digest is gone. Finding no queue record
+      // cannot prove that the business transaction was never committed.
+      const detail = await get();
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().data).toMatchObject({
+        status,
+        error: null,
+        result: null,
+      });
+      const list = await f.http.inject({
+        method: 'GET',
+        url: '/api/v1/tasks',
+        headers: f.headers,
+      });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().data[0]).toMatchObject({
+        status,
+        error: null,
+        result: null,
+      });
+      expect((await get('/download')).statusCode).toBe(409);
+      expect(f.unit.readReceipt).not.toHaveBeenCalled();
+      expect(f.port.store.mutate).not.toHaveBeenCalled();
+      expect(f.tasks.get(task.taskId)).toEqual(original);
+      expect(f.receipts.has(operation.operationKey)).toBe(true);
+    },
+  );
   it('recovers a receipt that becomes visible after a failed queue reconciliation', async () => {
     task.status = 'processing';
     task.result = null;
