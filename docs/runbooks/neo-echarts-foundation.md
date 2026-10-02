@@ -45,12 +45,12 @@
 
 ## 生产产物证据
 
-运行 `corepack pnpm --filter web exec node scripts/chart-build-evidence.mjs`。脚本读取实际 Vite / Rollup 模块图：先构建当前生产应用，再在临时目录构建一个仅导出真实 NeoChart 的 ES 库消费者。两次构建均在内存生成产物，不修改生产入口，不包含虚构业务数据。
+基础封装交付时，`corepack pnpm --filter web exec node scripts/chart-build-evidence.mjs` 读取实际 Vite / Rollup 模块图：先构建生产应用，再在临时目录构建一个仅导出真实 NeoChart 的 ES 库消费者。下列数字属于该阶段的历史证据。Issue #200 已把该脚本改为验证真实 Home 生产消费者、动态引擎和入口的静态依赖；当前接线与产物记录见 [Home 工作台](phase-3-home-workspace.md)。构建仍在内存生成产物，不修改生产入口，不包含虚构业务数据。
 
 - 当前生产应用：33 个 JavaScript chunk，ECharts / zrender 模块数为 **0**，因为 DEV 路由被裁剪。此阶段没有新增生产首屏图表下载。
 - 本轮实际消费者探针：入口 `neo-chart-probe.js` 为 93,236 字节 / gzip 18,261，包含 0 个引擎模块，仅动态引用 `echarts-runtime-BavVQwdy.js`。
 - 动态引擎 chunk：850,502 字节 / gzip 239,169，包含 270 个 ECharts / zrender 模块；不在入口的递归静态依赖中。
-- 上述大小是 ES 库探针产物，不是当前生产页面的新增大小。实际业务消费者上线后应重新检查其产物和首屏网络请求；脚本当前生产零引擎断言适用于本任务未接业务图表的阶段。
+- 上述大小是当时的 ES 库探针产物，不是 Home 实际消费者的新增大小。原生产零引擎断言只适用于基础封装尚未接业务的阶段，已由 Issue #200 的实际生产动态分包断言替代。
 
 ## 本地验证
 
