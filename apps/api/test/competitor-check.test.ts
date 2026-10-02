@@ -57,6 +57,9 @@ describe('competitor immediate check HTTP', () => {
     async (path) => {
       const response = await post(path);
       expect(response.statusCode).toBe(200);
+      expect(competitorCheckResultSchema.parse(response.json()).data).toEqual(
+        response.json().data,
+      );
       expect(response.headers['cache-control']).toBe('no-store');
       expect(response.json().data).toMatchObject({
         status: 'pending',
