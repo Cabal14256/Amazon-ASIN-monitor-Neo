@@ -13,7 +13,10 @@ import {
 import { ExportArtifactStore } from '@asin-monitor/export';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
-import { createAsinExportProcessor } from './asin-export-processor';
+import {
+  ASIN_EXPORT_TASK_TIMEOUT_MS,
+  createAsinExportProcessor,
+} from './asin-export-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -127,12 +130,20 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     const cleanup = async () => {
       const deadline = performance.now() + 2000;
       try {
+        // A retry owns a new random partial. Never retain a crashed attempt's
+        // unreachable file for the lifetime of downloadable task metadata.
+        const partials = await artifacts.cleanup(
+          Date.now() - ASIN_EXPORT_TASK_TIMEOUT_MS - 15 * 60_000,
+          100,
+          async (_taskId, kind) =>
+            !closing && performance.now() < deadline && kind === 'partial',
+        );
         const removed = await artifacts.cleanup(
           Date.now() - Math.max(86_400, env.TASK_META_TTL_SECONDS) * 1000,
           100,
           async (taskId, kind) => {
-            if (closing || performance.now() >= deadline) return false;
-            if (kind === 'partial') return true;
+            if (closing || performance.now() >= deadline || kind !== 'final')
+              return false;
             const task = await store.read(taskId);
             if (task || closing || performance.now() >= deadline) return false;
             return !(await queue.getJob(taskId));
@@ -148,9 +159,9 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
             return task?.status === 'cancelled' || task?.status === 'failed';
           },
         );
-        if (removed || abandoned)
+        if (partials || removed || abandoned)
           logger.info('过期 ASIN 导出文件已清理', {
-            removed: removed + abandoned,
+            removed: partials + removed + abandoned,
           });
       } catch {
         if (!closing)

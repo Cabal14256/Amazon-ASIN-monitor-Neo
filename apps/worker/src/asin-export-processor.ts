@@ -29,7 +29,7 @@ import { logger } from './logger';
 const GROUP_PAGE_SIZE = 50;
 const MAX_GROUPS = 10_000;
 const MAX_ROWS = 100_000;
-const TASK_TIMEOUT_MS = 30 * 60_000;
+export const ASIN_EXPORT_TASK_TIMEOUT_MS = 30 * 60_000;
 const WRITER_CLOSE_TIMEOUT_MS = 5000;
 const cancelledResult = { cancelled: true, message: '导出任务已取消' };
 const identity = (data: AsinExportJobData) => ({
@@ -98,7 +98,7 @@ export function createAsinExportProcessor(
     if (options.shutdownSignal.aborted) shutdown();
     const deadline = setTimeout(
       () => controller.abort(new Error('EXPORT_TASK_TIMEOUT')),
-      TASK_TIMEOUT_MS,
+      ASIN_EXPORT_TASK_TIMEOUT_MS,
     );
     deadline.unref();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
