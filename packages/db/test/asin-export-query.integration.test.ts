@@ -148,17 +148,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const seed = randomUUID().replaceAll('-', '').slice(0, 8);
       try {
         await pool.query(
-          "INSERT INTO variant_groups(id,name,country,site,create_time) VALUES($1,$1,'US','amazon.com','2026-09-27 02:00:00'),($2,$2,'US','amazon.com','2026-09-27 01:00:00')",
+          "INSERT INTO variant_groups(id,name,country,site,brand,create_time) VALUES($1,$1,'US','amazon.com','Fixture','2026-09-27 02:00:00'),($2,$2,'US','amazon.com','Fixture','2026-09-27 01:00:00')",
           [early, later],
         );
         await pool.query(
-          `INSERT INTO asins(id,asin,country,site,variant_group_id,create_time)
-          SELECT $1 || '-' || lpad(n::text,6,'0'), 'Z' || $2 || lpad(n::text,6,'0'), 'US','amazon.com',$1,'2026-09-27 00:00:00.123456'
+          `INSERT INTO asins(id,asin,country,site,brand,variant_group_id,create_time)
+          SELECT $1 || '-' || lpad(n::text,6,'0'), 'Z' || $2 || lpad(n::text,6,'0'), 'US','amazon.com','Fixture',$1,'2026-09-27 00:00:00.123456'
           FROM generate_series(1,5001) AS n`,
           [early, seed],
         );
         await pool.query(
-          "INSERT INTO asins(id,asin,country,site,variant_group_id,manual_broken,create_time) VALUES($1,$2,'US','amazon.com',$3,true,'2026-09-26 00:00:00')",
+          "INSERT INTO asins(id,asin,country,site,brand,variant_group_id,manual_broken,create_time) VALUES($1,$2,'US','amazon.com','Fixture',$3,true,'2026-09-26 00:00:00')",
           [movedBackward, `Z${seed}999999`, later],
         );
         const captured = await repository.read(async (unit, ensureOpen) => {
