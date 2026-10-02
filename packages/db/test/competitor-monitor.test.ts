@@ -283,7 +283,10 @@ describe('competitor monitor snapshot and control', () => {
   });
 });
 
-function deliveryFixture(state: unknown) {
+function deliveryFixture(
+  state: unknown,
+  stored: { expiryMatches?: unknown } = {},
+) {
   const group = {
     groupId: snapshot.group.id,
     country: 'US',
@@ -293,7 +296,17 @@ function deliveryFixture(state: unknown) {
     Object.assign(new EventEmitter(), {
       query: vi.fn(
         async (
-          input: string | { text: string },
+          input:
+            | string
+            | {
+                text: string;
+                types?: {
+                  getTypeParser(
+                    oid: number,
+                    format: string,
+                  ): (value: string) => unknown;
+                };
+              },
           params: unknown[] = [],
         ): Promise<{ rows: Record<string, unknown>[] }> => {
           const text = typeof input === 'string' ? input : input.text;
@@ -301,13 +314,30 @@ function deliveryFixture(state: unknown) {
           if (text.includes('FROM competitor_monitor_runs'))
             return {
               rows:
-                params[0] === job.taskId
+                params[text.includes('AS expiry_matches') ? 1 : 0] ===
+                job.taskId
                   ? [
                       {
                         user_id: job.userId,
                         task_created_at: job.createdAt,
                         countries: job.countries,
-                        expires_at: new Date(job.expiresAt),
+                        // Use the real Drizzle query's driver override rather
+                        // than assuming node-postgres's default Date decoder.
+                        expires_at:
+                          typeof input === 'string'
+                            ? new Date(job.expiresAt)
+                            : input.types!.getTypeParser(
+                                1184,
+                                'text',
+                              )(
+                                job.expiresAt
+                                  .replace('T', ' ')
+                                  .replace('Z', '+00'),
+                              ),
+                        expiry_matches:
+                          'expiryMatches' in stored
+                            ? stored.expiryMatches
+                            : params[0] === job.expiresAt,
                         groups: [group],
                       },
                     ]
@@ -341,6 +371,23 @@ describe('identity-bound persisted competitor delivery reads through the public 
         const queries = f.c.query.mock.calls.map(([q]) =>
           typeof q === 'string' ? q : q.text,
         );
+        const fixed = f.c.query.mock.calls.find(
+          ([q]) =>
+            typeof q !== 'string' &&
+            q.text.includes('FROM competitor_monitor_runs'),
+        )!;
+        expect(
+          typeof (
+            fixed[0] as Exclude<(typeof fixed)[0], string>
+          ).types!.getTypeParser(
+            1184,
+            'text',
+          )('2026-10-10 01:00:00+00'),
+        ).toBe('string');
+        expect(queries.join('\n')).toMatch(
+          /expires_at=\$1::timestamptz AS expiry_matches/,
+        );
+        expect(fixed[1]).toEqual([job.expiresAt, job.taskId]);
         expect(queries.join('\n')).not.toMatch(
           /competitor_asins|competitor_variant_groups|competitor_monitor_history|INSERT|UPDATE|DELETE/,
         );
@@ -350,6 +397,24 @@ describe('identity-bound persisted competitor delivery reads through the public 
         expect(notice[1]).toEqual([job.taskId, 'US']);
         expect(f.p.release).toHaveBeenCalledExactlyOnceWith(false);
         expect(f.c.release).toHaveBeenCalledExactlyOnceWith(false);
+      } finally {
+        f.repository.close();
+      }
+    },
+  );
+  it.each([false, null, undefined, 1, 'true'])(
+    'refuses a mismatching or untrusted PostgreSQL expiry comparison %s',
+    async (expiryMatches) => {
+      const f = deliveryFixture('sent', { expiryMatches });
+      try {
+        await expect(
+          f.repository.readNotification(job, 'US', f.authorize),
+        ).rejects.toThrow('COMPETITOR_MONITOR_SNAPSHOT_IDENTITY_CHANGED');
+        expect(
+          f.c.query.mock.calls.some(
+            ([q]) => typeof q !== 'string' && q.text.includes('SELECT state'),
+          ),
+        ).toBe(false);
       } finally {
         f.repository.close();
       }

@@ -80,7 +80,8 @@ export class PgCompetitorMonitorRepository {
         sql`SELECT pg_advisory_xact_lock(hashtextextended('neo:competitor-monitor:' || ${parsed.taskId},0))`,
       );
     const stored =
-      await db.execute(sql`SELECT user_id,task_created_at,countries,groups,expires_at
+      await db.execute(sql`SELECT user_id,task_created_at,countries,groups,
+      expires_at=${parsed.expiresAt}::timestamptz AS expiry_matches
       FROM competitor_monitor_runs WHERE task_id=${parsed.taskId}`);
     const row = stored.rows[0];
     if (!row) return undefined;
@@ -88,8 +89,7 @@ export class PgCompetitorMonitorRepository {
       row.user_id !== parsed.userId ||
       row.task_created_at !== parsed.createdAt ||
       JSON.stringify(row.countries) !== JSON.stringify(parsed.countries) ||
-      !(row.expires_at instanceof Date) ||
-      row.expires_at.toISOString() !== parsed.expiresAt ||
+      row.expiry_matches !== true ||
       !Array.isArray(row.groups) ||
       row.groups.length > COMPETITOR_MONITOR_MAX_GROUPS ||
       new Set(row.groups.map((g: CompetitorMonitorGroup) => g?.groupId))
