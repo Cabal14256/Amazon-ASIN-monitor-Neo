@@ -4,7 +4,7 @@
 
 ## 升级与准入
 
-先完成竞品查询/写入策略、`0014_competitor_check_receipts.sql`、共享 SP-API 与飞书配置升级及 PostgreSQL 权威源验收。执行 `npm run db:upgrade:competitor-monitor`，只在竞品库创建 `0015_competitor_monitor.sql` 的固定快照、通知声明及历史 `monitor_task_id` 列。脚本拒绝与主库同名的目标数据库。Worker 启动前验证存储，缺失则不发布消费心跳。生产仍受 #48 阶段门禁限制，本 Issue 不切流、不修改 Legacy 队列或调度。
+先完成竞品查询/写入策略、`0014_competitor_check_receipts.sql`、共享 SP-API 与飞书配置升级及 PostgreSQL 权威源验收。部署本版 API/Worker 前执行 `npm run db:upgrade:competitor-monitor`，只在竞品库创建 `0015_competitor_monitor.sql` 的固定快照、通知声明及历史 `monitor_task_id` 列。新 Drizzle 历史定义也用于竞品即时检查，因此即使未启用手动监控队列，仍须先升级该列；隔离 fixture 的 `LIKE public.competitor_monitor_history` 建表同样必须晚于升级。脚本拒绝与主库同名的目标数据库。Worker 启动前验证存储，缺失则不发布消费心跳。生产仍受 #48 阶段门禁限制，本 Issue 不切流、不修改 Legacy 队列或调度。
 
 隔离验证可设置 `WORKER_ENABLED_QUEUES=competitor-monitor`。每个消费者独立续租 10 秒 ready 心跳，最后一个退出立即撤销 ready；退出中的迟到刷新不会恢复心跳。API 同实例最多 4 个在途提交，多个实例共享 Redis 准入租约，在同一租约内核对心跳与待处理/延迟/运行任务总数，50 个积压时返回 429，无消费者返回 503。元数据创建或入队确认不确定时返回固定 500 与 `data.taskId/status=unknown`；先查询该 ID，勿直接再次提交。
 

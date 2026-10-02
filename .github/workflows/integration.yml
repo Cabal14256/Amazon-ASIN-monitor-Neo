@@ -295,6 +295,15 @@ jobs:
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT 1 FROM public.competitor_variant_check_receipts LIMIT 1"
           test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_variant_check_receipts') IS NULL")" = t
 
+      - name: Upgrade competitor manual monitor storage twice before competitor schema consumers
+        run: |
+          docker cp packages/db/docker/apply-competitor-monitor.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-monitor.sh"
+          docker cp packages/db/migrations/0015_competitor_monitor.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0015_competitor_monitor.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
+          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='competitor_monitor_history' AND column_name='monitor_task_id')")" = t
+          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_monitor_runs') IS NULL")" = t
+
       - name: Compare competitor writes with Legacy MySQL and verify dual-database transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-write.integration.test.ts
 
@@ -347,14 +356,6 @@ jobs:
 
       - name: Run ASIN manual actions and atomic monitor history transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-manual.integration.test.ts
-
-      - name: Upgrade competitor manual monitor storage twice
-        run: |
-          docker cp packages/db/docker/apply-competitor-monitor.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-monitor.sh"
-          docker cp packages/db/migrations/0015_competitor_monitor.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0015_competitor_monitor.sql"
-          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
-          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
-          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_monitor_runs') IS NULL")" = t
 
       - name: Run ASIN batch creation and PostgreSQL savepoint recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-create.integration.test.ts
