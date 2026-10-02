@@ -746,81 +746,104 @@ spApi.CatalogVariantChecker.prototype.check=async function(asin,country,options)
     35_000,
   );
 
-  it('keeps identical ASIN codes in different countries bound to their own child identities and notification flags', async () => {
-    await hookServer();
-    await enableNotifications();
-    await competitorPool!.query(
-      "INSERT INTO competitor_asins(id,asin,name,country,brand,variant_group_id,feishu_notify_enabled,create_time,update_time) VALUES('a-de-normal','B000000002','German normal','DE','Fixture','c-one',false,'2026-01-01','2026-01-01')",
-    );
-    const germanItem = { ...catalog[0], asin: 'B000000002' };
-    const germanResult = parseCatalogVariantResult(germanItem, germanItem.asin);
-    expect(germanResult.hasVariants).toBe(true);
-    expect(germanResult).toEqual(
-      await legacyService(germanItem).service.doCheckASINVariants(
-        germanItem.asin,
-        'DE',
-        true,
-      ),
-    );
-    const cache = new RedisCatalogCheckStore(f.redis, getNeoQueuePrefix(f.env));
-    try {
-      const signal = new AbortController().signal;
-      const identity = {
-        asin: germanItem.asin,
-        country: 'DE' as const,
-        owner: 'competitor' as const,
-      };
-      const claim = await cache.claim(identity, signal);
-      await cache.write(identity, claim, germanResult, 600, signal);
-    } finally {
-      cache.close();
-    }
-    await start();
-    const data = await job();
-    expect(await finish(await enqueue(data))).toMatchObject({
-      success: true,
-      totalBroken: 1,
-      notificationResults: { US: 'sent' },
-    });
-    expect(await counts(data.taskId)).toEqual({
-      runs: 1,
-      receipts: 1,
-      history: 4,
-      claims: 1,
-    });
-    const rows = (
+  it.each([{ foreignBroken: false }, { foreignBroken: true }])(
+    'keeps identical ASIN codes in different countries bound to their own notification country (foreignBroken=$foreignBroken)',
+    async ({ foreignBroken }) => {
+      await hookServer();
+      await enableNotifications();
+      const foreignId = foreignBroken ? 'a-de-broken' : 'a-de-normal';
+      const foreignName = foreignBroken ? 'German broken' : 'German normal';
       await competitorPool!.query(
-        "SELECT asin_id,country,is_broken,check_result->'currentResult' AS current_result FROM competitor_monitor_history WHERE monitor_task_id=$1 AND check_type='ASIN' AND asin_code='B000000002' ORDER BY asin_id",
-        [data.taskId],
-      )
-    ).rows;
-    expect(rows).toEqual([
-      expect.objectContaining({
-        asin_id: 'a-broken',
-        country: 'US',
-        is_broken: true,
-        current_result: expect.objectContaining({ hasVariants: false }),
-      }),
-      expect.objectContaining({
-        asin_id: 'a-de-normal',
-        country: 'DE',
-        is_broken: false,
-        current_result: expect.objectContaining({ hasVariants: true }),
-      }),
-    ]);
-    expect(
-      (
+        "INSERT INTO competitor_asins(id,asin,name,country,brand,variant_group_id,feishu_notify_enabled,create_time,update_time) VALUES($1,'B000000002',$2,'DE','Foreign-only brand','c-one',$3,'2026-01-01','2026-01-01')",
+        [foreignId, foreignName, foreignBroken],
+      );
+      const germanItem = {
+        ...catalog[foreignBroken ? 1 : 0],
+        asin: 'B000000002',
+      };
+      const germanResult = parseCatalogVariantResult(
+        germanItem,
+        germanItem.asin,
+      );
+      expect(germanResult.hasVariants).toBe(!foreignBroken);
+      expect(germanResult).toEqual(
+        await legacyService(germanItem).service.doCheckASINVariants(
+          germanItem.asin,
+          'DE',
+          true,
+        ),
+      );
+      const cache = new RedisCatalogCheckStore(
+        f.redis,
+        getNeoQueuePrefix(f.env),
+      );
+      try {
+        const signal = new AbortController().signal;
+        const identity = {
+          asin: germanItem.asin,
+          country: 'DE' as const,
+          owner: 'competitor' as const,
+        };
+        const claim = await cache.claim(identity, signal);
+        await cache.write(identity, claim, germanResult, 600, signal);
+      } finally {
+        cache.close();
+      }
+      await start();
+      const data = await job();
+      expect(await finish(await enqueue(data))).toMatchObject({
+        success: true,
+        totalBroken: 1,
+        notificationResults: { US: 'sent' },
+      });
+      expect(await counts(data.taskId)).toEqual({
+        runs: 1,
+        receipts: 1,
+        history: 4,
+        claims: 1,
+      });
+      const rows = (
         await competitorPool!.query(
-          'SELECT country,state FROM competitor_monitor_notifications WHERE task_id=$1',
+          "SELECT asin_id,country,is_broken,notification_sent,check_result->'currentResult' AS current_result FROM competitor_monitor_history WHERE monitor_task_id=$1 AND check_type='ASIN' AND asin_code='B000000002' ORDER BY asin_id",
           [data.taskId],
         )
-      ).rows,
-    ).toEqual([{ country: 'US', state: 'sent' }]);
-    expect(cards).toHaveLength(1);
-    expect(JSON.stringify(cards[0])).toContain('B000000002');
-    expect(JSON.stringify(cards[0])).not.toContain('B000000001');
-    expect(JSON.stringify(cards[0])).not.toContain('German normal');
-  }, 35_000);
+      ).rows;
+      expect(rows).toEqual([
+        expect.objectContaining({
+          asin_id: 'a-broken',
+          country: 'US',
+          is_broken: true,
+          notification_sent: true,
+          current_result: expect.objectContaining({ hasVariants: false }),
+        }),
+        expect.objectContaining({
+          asin_id: foreignId,
+          country: 'DE',
+          is_broken: foreignBroken,
+          notification_sent: false,
+          current_result: expect.objectContaining({
+            hasVariants: !foreignBroken,
+          }),
+        }),
+      ]);
+      expect(
+        (
+          await competitorPool!.query(
+            'SELECT country,state FROM competitor_monitor_notifications WHERE task_id=$1',
+            [data.taskId],
+          )
+        ).rows,
+      ).toEqual([{ country: 'US', state: 'sent' }]);
+      expect(cards).toHaveLength(1);
+      expect(JSON.stringify(cards[0])).toContain('B000000002');
+      expect(JSON.stringify(cards[0])).not.toContain('B000000001');
+      expect(JSON.stringify(cards[0])).not.toContain('German normal');
+      expect(JSON.stringify(cards[0])).not.toContain('German broken');
+      expect(JSON.stringify(cards[0])).not.toContain('Foreign-only brand');
+      expect((await store.read(data.taskId))?.status).toBe('completed');
+    },
+    35_000,
+  );
 
   it.each(['cancelled', 'revoked'] as const)(
     'keeps a committed first group when %s interrupts the next group',

@@ -150,7 +150,11 @@ function addGroup(
   // A group can contain the same code in different countries. Notification
   // identity follows the committed canonical child, never a code-only map.
   const enabled = children.filter(
-    (child) => child.isBroken === 1 && child.feishuNotifyEnabled === 1,
+    (child) =>
+      child.isBroken === 1 &&
+      child.feishuNotifyEnabled === 1 &&
+      typeof child.country === 'string' &&
+      child.country.replace(/ +$/, '').toUpperCase() === group.country,
   );
   if (!enabled.length) return;
   const name = text(snapshot.name);

@@ -1,7 +1,9 @@
 import { type CompetitorMonitorJob } from '@asin-monitor/contracts';
 import {
+  assertCompetitorMonitorNotificationCandidate,
   transitionTask,
   type CompetitorMonitorControlUnit,
+  type CompetitorMonitorNotificationCandidate,
   type NotificationClaim,
   type TaskState,
 } from '@asin-monitor/db';
@@ -277,6 +279,101 @@ function fixture() {
   };
 }
 describe('competitor manual monitor consumer and real notification service', () => {
+  it.each([
+    { localCountry: 'US', localBroken: true },
+    { localCountry: 'us  ', localBroken: true },
+    { localCountry: 'US', localBroken: false },
+  ])(
+    'keeps foreign broken enabled members in results while selecting only canonical $localCountry notification candidates (localBroken=$localBroken)',
+    async ({ localCountry, localBroken }) => {
+      const f = fixture();
+      f.result.groupSnapshot.country = 'uS  ';
+      f.result.groupSnapshot.children[0].country = localCountry;
+      f.result.groupSnapshot.children[0].isBroken = localBroken ? 1 : 0;
+      f.result.groupSnapshot.children.push({
+        ...f.result.groupSnapshot.children[0],
+        id: 'foreign-broken-enabled',
+        country: 'de  ',
+        brand: 'Foreign-only brand',
+        isBroken: 1,
+        feishuNotifyEnabled: 1,
+      });
+      f.result.details!.totalASINs = 2;
+      f.result.details!.brokenCount = localBroken ? 2 : 1;
+      f.result.brokenByType.NO_VARIANTS = localBroken ? 2 : 1;
+      // Execute the actual repository domain guard against current persisted
+      // identities; no country-check stub may allow the old invalid candidate.
+      f.assertNotificationInputs.mockImplementation(
+        async (_data, country, candidates, authorize) => {
+          await authorize(f.authorization);
+          for (const candidate of candidates as CompetitorMonitorNotificationCandidate[]) {
+            const child = f.result.groupSnapshot.children.find(
+              (row) => row.id === candidate.asinId,
+            )!;
+            assertCompetitorMonitorNotificationCandidate(
+              country as 'US',
+              candidate,
+              {
+                id: f.group.groupId,
+                name: 'Canonical group',
+                country: f.result.groupSnapshot.country,
+                brand: 'Brand',
+                isBroken: true,
+                variantStatus: 'BROKEN',
+                feishuNotifyEnabled: true,
+                createTime: new Date(f.data.createdAt),
+                updateTime: new Date(f.data.createdAt),
+                lastCheckTime: new Date(f.data.createdAt),
+              },
+              {
+                id: child.id,
+                asin: child.asin,
+                name: child.name ?? null,
+                asinType: child.asinType ?? null,
+                country: child.country,
+                brand: child.brand!,
+                variantGroupId: f.group.groupId,
+                isBroken: child.isBroken === 1,
+                variantStatus: 'BROKEN',
+                feishuNotifyEnabled: true,
+                createTime: new Date(f.data.createdAt),
+                updateTime: new Date(f.data.createdAt),
+                lastCheckTime: new Date(f.data.createdAt),
+              },
+            );
+          }
+        },
+      );
+      try {
+        expect(await f.processor(f.job, 'lock')).toMatchObject({
+          success: true,
+          totalBroken: 1,
+          notificationResults: { US: localBroken ? 'sent' : 'skipped' },
+          countryResults: {
+            US: { brokenByType: { NO_VARIANTS: localBroken ? 2 : 1 } },
+          },
+        });
+        expect(f.state.status).toBe('completed');
+        expect(f.checkGroup).toHaveBeenCalledOnce();
+        expect(f.result.groupSnapshot.children).toHaveLength(2);
+        if (localBroken) {
+          expect(f.send).toHaveBeenCalledOnce();
+          expect(f.claimNotification.mock.calls[0][2]).toEqual([
+            expect.objectContaining({ asinId: ' raw Asín ', brand: 'Brand' }),
+          ]);
+        } else {
+          expect(f.send).not.toHaveBeenCalled();
+          expect(f.claimNotification).not.toHaveBeenCalled();
+          expect(f.assertNotificationInputs).not.toHaveBeenCalled();
+        }
+        expect(JSON.stringify(f.send.mock.calls)).not.toContain(
+          'Foreign-only brand',
+        );
+      } finally {
+        f.notifications.close();
+      }
+    },
+  );
   it('selects the committed canonical child when another country has the same code with its switch off', async () => {
     const f = fixture();
     f.result.groupSnapshot.children.push({
