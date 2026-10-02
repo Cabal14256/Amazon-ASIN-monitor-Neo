@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
+import type { PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { createPgPool } from '../src/client';
 import {
@@ -46,7 +47,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         return 'export completed';
       });
       void snapshot.catch(() => undefined);
-      let administration: Awaited<ReturnType<typeof pool.connect>> | undefined;
+      let administration: PoolClient | undefined;
       try {
         await ready;
         administration = await pool.connect();
@@ -211,7 +212,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             id: early,
             exportHasManualBroken: false,
           });
-          const children = await unit.listExportChildren(early);
+          const children = await unit.listExportChildrenPage([early, later]);
           expect(children).toHaveLength(5000);
           // Independent connection commits the same membership mutation as
           // moveAsin while the snapshot connection stays open.
@@ -220,11 +221,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             [movedForward, movedBackward, later, early],
           );
           const cursor = children[children.length - 1]!;
-          const rest = await unit.listExportChildren(early, {
+          const rest = await unit.listExportChildrenPage([early, later], {
+            groupId: early,
             id: cursor.id,
             createTime: cursor.exportCursorTime,
           });
-          expect(rest).toHaveLength(1);
+          expect(rest).toHaveLength(2);
+          expect(rest.map((child) => child.variantGroupId)).toEqual([
+            early,
+            later,
+          ]);
           const lastGroup = first.groups[0]!;
           const second = await unit.listExportGroups(
             query,
@@ -235,9 +241,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             id: later,
             exportHasManualBroken: true,
           });
-          const tail = await unit.listExportChildren(later);
           ensureOpen();
-          return [...children, ...rest, ...tail];
+          return [...children, ...rest];
         });
         expect(captured).toHaveLength(5002);
         expect(new Set(captured.map((child) => child.id)).size).toBe(5002);

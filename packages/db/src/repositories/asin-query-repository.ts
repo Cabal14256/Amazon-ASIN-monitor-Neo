@@ -25,6 +25,7 @@ import { withAuthDatabaseDeadline } from './bounded-auth-repository';
 import { DrizzleRoleUnit, type RoleWriteUnit } from './role-repository';
 
 export const MAX_ASIN_QUERY_CHILDREN = 5000;
+export const MAX_ASIN_EXPORT_GROUP_PAGE_SIZE = 50;
 export const ASIN_EXPORT_QUERY_TIMEOUT_MS = 60_000;
 const ASIN_EXPORT_TRANSACTION_TIMEOUT_MS = 65_000;
 export interface AsinGroupQuery {
@@ -51,6 +52,9 @@ export interface AsinExportCursor {
   createTime: string | null;
 }
 export type AsinExportChild = Asin & { exportCursorTime: string | null };
+export interface AsinExportChildrenCursor extends AsinExportCursor {
+  groupId: string;
+}
 export interface AsinQueryUnit extends RoleWriteUnit {
   list(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
   detail(groupId: string): Promise<AsinGroupReadResult>;
@@ -67,6 +71,10 @@ export interface AsinExportQueryUnit extends AsinQueryUnit {
   listExportChildren(
     groupId: string,
     cursor?: AsinExportCursor,
+  ): Promise<AsinExportChild[]>;
+  listExportChildrenPage(
+    groupIds: readonly string[],
+    cursor?: AsinExportChildrenCursor,
   ): Promise<AsinExportChild[]>;
 }
 export interface AsinExportQueryRepositoryPort {
@@ -268,6 +276,88 @@ export class DrizzleAsinQueryUnit
       .limit(MAX_ASIN_QUERY_CHILDREN);
     this.ensureOpen();
     return children;
+  }
+  /** One bounded child query covers an ordered group page. The native cursor
+   * can continue a dense group and then its later siblings without N+1 reads. */
+  async listExportChildrenPage(
+    groupIds: readonly string[],
+    cursor?: AsinExportChildrenCursor,
+  ): Promise<AsinExportChild[]> {
+    if (
+      !Array.isArray(groupIds) ||
+      !groupIds.length ||
+      groupIds.length > MAX_ASIN_EXPORT_GROUP_PAGE_SIZE ||
+      new Set(groupIds).size !== groupIds.length
+    )
+      throw new AsinQueryRepositoryError('input');
+    groupIds.forEach(validateGroupId);
+    validateExportCursor(cursor);
+    const position = cursor ? groupIds.indexOf(cursor.groupId) : -1;
+    if (cursor && position < 0) throw new AsinQueryRepositoryError('input');
+    const selected = sql.join(
+      groupIds.map((id, index) => sql`(${id}::text,${index}::integer)`),
+      sql`, `,
+    );
+    const after = cursor
+      ? sql`selected.ordinal>${position} OR (selected.ordinal=${position} AND ${
+          cursor.createTime === null
+            ? sql`((a.create_time IS NULL AND a.id COLLATE "C">${cursor.id}) OR a.create_time IS NOT NULL)`
+            : sql`(a.create_time>${cursor.createTime}::timestamp OR (a.create_time=${cursor.createTime}::timestamp AND a.id COLLATE "C">${cursor.id}))`
+        })`
+      : sql`true`;
+    this.ensureOpen();
+    const result = await this.db.execute(sql`
+      WITH selected(id,ordinal) AS (VALUES ${selected})
+      SELECT a.*,a.create_time::text AS export_cursor_time
+      FROM ${asins} AS a INNER JOIN selected ON a.variant_group_id=selected.id
+      WHERE ${after}
+      ORDER BY selected.ordinal,a.create_time ASC NULLS FIRST,a.id COLLATE "C" ASC
+      LIMIT ${MAX_ASIN_QUERY_CHILDREN}
+    `);
+    this.ensureOpen();
+    if (
+      !Array.isArray(result.rows) ||
+      result.rows.length > MAX_ASIN_QUERY_CHILDREN
+    )
+      throw new AsinQueryRepositoryError('result');
+    let previous = cursor;
+    return result.rows.map((row: Record<string, unknown>) => {
+      if (
+        typeof row.variant_group_id !== 'string' ||
+        typeof row.id !== 'string' ||
+        (row.export_cursor_time !== null &&
+          typeof row.export_cursor_time !== 'string')
+      )
+        throw new AsinQueryRepositoryError('result');
+      const next = {
+        groupId: row.variant_group_id,
+        id: row.id,
+        createTime: row.export_cursor_time as string | null,
+      };
+      validateExportCursor(next);
+      const ordinal = groupIds.indexOf(next.groupId);
+      if (ordinal < 0) throw new AsinQueryRepositoryError('result');
+      if (previous) {
+        const before = groupIds.indexOf(previous.groupId);
+        const advances =
+          ordinal > before ||
+          (ordinal === before &&
+            (previous.createTime === null
+              ? next.createTime !== null ||
+                Buffer.compare(Buffer.from(next.id), Buffer.from(previous.id)) >
+                  0
+              : next.createTime !== null &&
+                (next.createTime > previous.createTime ||
+                  (next.createTime === previous.createTime &&
+                    Buffer.compare(
+                      Buffer.from(next.id),
+                      Buffer.from(previous.id),
+                    ) > 0))));
+        if (!advances) throw new AsinQueryRepositoryError('result');
+      }
+      previous = next;
+      return { ...hydrate(asins, row), exportCursorTime: next.createTime };
+    });
   }
   detail(groupId: string) {
     validateGroupId(groupId);

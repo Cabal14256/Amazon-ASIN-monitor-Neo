@@ -3,9 +3,11 @@ import {
   type AsinExportJobData,
 } from '@asin-monitor/contracts';
 import {
+  MAX_ASIN_EXPORT_GROUP_PAGE_SIZE,
   MAX_ASIN_QUERY_CHILDREN,
   effectiveVariantStatus,
   isTerminalTaskStatus,
+  type AsinExportChildrenCursor,
   type AsinExportCursor,
   type AsinExportQueryRepositoryPort,
   type RedisTaskRepository,
@@ -26,7 +28,7 @@ import {
 } from './asin-export-rows';
 import { logger } from './logger';
 
-const GROUP_PAGE_SIZE = 50;
+const GROUP_PAGE_SIZE = MAX_ASIN_EXPORT_GROUP_PAGE_SIZE;
 const MAX_GROUPS = 10_000;
 const MAX_ROWS = 100_000;
 export const ASIN_EXPORT_TASK_TIMEOUT_MS = 30 * 60_000;
@@ -264,6 +266,27 @@ export function createAsinExportProcessor(
             if (total > MAX_GROUPS)
               throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
           }
+          const groupIds = result.groups.map((group) => group.id);
+          let children: Awaited<
+            ReturnType<typeof unit.listExportChildrenPage>
+          > = [];
+          let childIndex = 0;
+          let childrenExhausted = !groupIds.length;
+          let childCursor: AsinExportChildrenCursor | undefined;
+          const readChildren = async () => {
+            await snapshotCheck();
+            children = await unit.listExportChildrenPage(groupIds, childCursor);
+            childIndex = 0;
+            childrenExhausted = children.length < MAX_ASIN_QUERY_CHILDREN;
+            const last = children[children.length - 1];
+            if (last)
+              childCursor = {
+                groupId: last.variantGroupId!,
+                id: last.id,
+                createTime: last.exportCursorTime,
+              };
+          };
+          if (groupIds.length) await readChildren();
           for (const group of result.groups) {
             if (
               group.exportHasAutoBroken === undefined ||
@@ -278,43 +301,43 @@ export function createAsinExportProcessor(
               ...group,
               isBroken: group.exportIsBroken ?? group.isBroken,
             };
-            let childCursor: AsinExportCursor | undefined;
+            let hasChildren = false;
             for (;;) {
-              await snapshotCheck();
-              const children = await unit.listExportChildren(
-                group.id,
-                childCursor,
-              );
-              if (children.length === 0) {
-                if (!childCursor)
-                  await appendRows({
-                    ...mapAsinQueryGroups({
-                      groups: [effectiveGroup],
-                      asins: [],
-                      total: 0,
-                      totalASINs: 0,
-                    })[0]!,
-                    statusSource: groupStatusSource,
-                  });
-                break;
+              const groupChildren: typeof children = [];
+              while (
+                childIndex < children.length &&
+                children[childIndex]!.variantGroupId === group.id
+              ) {
+                groupChildren.push(children[childIndex++]!);
               }
+              if (groupChildren.length) {
+                hasChildren = true;
+                await appendRows({
+                  ...mapAsinQueryGroups({
+                    groups: [effectiveGroup],
+                    asins: groupChildren,
+                    total: 0,
+                    totalASINs: 0,
+                  })[0]!,
+                  statusSource: groupStatusSource,
+                });
+              }
+              if (childIndex < children.length || childrenExhausted) break;
+              await readChildren();
+            }
+            if (!hasChildren)
               await appendRows({
                 ...mapAsinQueryGroups({
                   groups: [effectiveGroup],
-                  asins: children,
+                  asins: [],
                   total: 0,
                   totalASINs: 0,
                 })[0]!,
                 statusSource: groupStatusSource,
               });
-              const lastChild = children[children.length - 1]!;
-              childCursor = {
-                id: lastChild.id,
-                createTime: lastChild.exportCursorTime,
-              };
-              if (children.length < MAX_ASIN_QUERY_CHILDREN) break;
-            }
           }
+          if (childIndex !== children.length)
+            throw new Error('EXPORT_CHILD_PAGE_INVALID');
           processed += result.groups.length;
           if (processed > MAX_GROUPS)
             throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');

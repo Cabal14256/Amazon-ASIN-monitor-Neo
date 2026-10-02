@@ -2,6 +2,7 @@ import type { Env } from '@asin-monitor/config';
 import type { AsinExportJobData } from '@asin-monitor/contracts';
 import {
   transitionTask,
+  type AsinExportChildrenCursor,
   type AsinExportCursor,
   type AsinExportQueryRepositoryPort,
   type AsinGroupReadResult,
@@ -133,28 +134,51 @@ async function harness(pages: AsinGroupReadResult[], maxBytes?: number) {
           };
     },
   );
-  const children = vi.fn(async (groupId: string, cursor?: AsinExportCursor) => {
-    const selected = pages
-      .flatMap((page) => page.asins)
-      .filter((asin) => asin.variantGroupId === groupId);
-    const start = cursor
-      ? selected.findIndex((asin) => asin.id === cursor.id) + 1
-      : 0;
-    return selected.slice(start, start + 5000);
-  });
+  const legacyChildren = vi.fn(
+    async (groupId: string, cursor?: AsinExportCursor) => {
+      const selected = pages
+        .flatMap((page) => page.asins)
+        .filter((asin) => asin.variantGroupId === groupId);
+      const start = cursor
+        ? selected.findIndex((asin) => asin.id === cursor.id) + 1
+        : 0;
+      return selected.slice(start, start + 5000);
+    },
+  );
+  const children = vi.fn(
+    async (groupIds: readonly string[], cursor?: AsinExportChildrenCursor) => {
+      const selected = groupIds.flatMap((groupId) =>
+        pages
+          .flatMap((page) => page.asins)
+          .filter((asin) => asin.variantGroupId === groupId),
+      );
+      const start = cursor
+        ? selected.findIndex(
+            (asin) =>
+              asin.id === cursor.id && asin.variantGroupId === cursor.groupId,
+          ) + 1
+        : 0;
+      return selected.slice(start, start + 5000);
+    },
+  );
   const repository = {
     read: vi.fn(
       async (
         operation: (
           unit: {
             listExportGroups: typeof list;
-            listExportChildren: typeof children;
+            listExportChildren: typeof legacyChildren;
+            listExportChildrenPage: typeof children;
           },
           ensureOpen: () => void,
         ) => Promise<unknown>,
       ) =>
         operation(
-          { listExportGroups: list, listExportChildren: children },
+          {
+            listExportGroups: list,
+            listExportChildren: legacyChildren,
+            listExportChildrenPage: children,
+          },
           () => undefined,
         ),
     ),
@@ -187,6 +211,7 @@ async function harness(pages: AsinGroupReadResult[], maxBytes?: number) {
     job,
     list,
     children,
+    legacyChildren,
     repository,
     options,
     processor,
@@ -531,6 +556,8 @@ describe('ASIN streaming export', () => {
     expect(h.state.status).toBe('completed');
     expect(h.state.result).toMatchObject({ rowCount: 6000 });
     expect(h.list).toHaveBeenCalledTimes(4);
+    expect(h.children).toHaveBeenCalledTimes(3);
+    expect(h.legacyChildren).not.toHaveBeenCalled();
     expect(
       (await readdir(h.directory)).filter((name) => name.endsWith('.part')),
     ).toEqual([]);
@@ -551,11 +578,131 @@ describe('ASIN streaming export', () => {
     await h.processor(h.job, 'token');
     expect(h.state.status).toBe('completed');
     expect(h.state.result).toMatchObject({ rowCount: 5001 });
-    expect(h.children).toHaveBeenCalledWith('g-dense', undefined);
-    expect(h.children).toHaveBeenCalledWith('g-dense', {
+    expect(h.children).toHaveBeenCalledWith(['g-dense'], undefined);
+    expect(h.children).toHaveBeenCalledWith(['g-dense'], {
+      groupId: 'g-dense',
       id: asins[4999]!.id,
       createTime: asins[4999]!.exportCursorTime,
     });
+  });
+
+  it.each(['empty', 'small'] as const)(
+    'batches all fifty %s groups with one child query and preserves Legacy group order',
+    async (kind) => {
+      const groups = Array.from({ length: 50 }, (_, index) =>
+        group(`g-${49 - index}`, `Group ${index}`),
+      );
+      const asins =
+        kind === 'empty'
+          ? []
+          : groups.map((g, index) =>
+              asin(`B${String(index).padStart(9, '0')}`, g.id),
+            );
+      const h = await harness([
+        { groups, asins, total: 50, totalASINs: asins.length },
+      ] as unknown as AsinGroupReadResult[]);
+      await h.processor(h.job, 'token');
+      expect(h.state.status).toBe('completed');
+      expect(h.state.result).toMatchObject({ rowCount: 50 });
+      expect(h.children).toHaveBeenCalledExactlyOnceWith(
+        groups.map((g) => g.id),
+        undefined,
+      );
+      expect(h.legacyChildren).not.toHaveBeenCalled();
+      const artifact = (
+        h.state.result as {
+          artifact: Parameters<typeof h.artifacts.verifiedPath>[0];
+        }
+      ).artifact;
+      const book = new ExcelJS.Workbook();
+      await book.xlsx.readFile(
+        await h.artifacts.verifiedPath(artifact, new AbortController().signal),
+      );
+      const sheet = book.worksheets[0]!;
+      expect(
+        Array.from(
+          { length: 50 },
+          (_, i) => sheet.getRow(i + 2).getCell(2).value,
+        ),
+      ).toEqual(groups.map((g) => g.id));
+    },
+  );
+
+  it('exports the supported 10,000 empty groups in 200 bounded child queries', async () => {
+    const pages = Array.from({ length: 200 }, (_, page) => ({
+      groups: Array.from({ length: 50 }, (_, index) =>
+        group(`g-${page * 50 + index}`, `Group ${page * 50 + index}`),
+      ),
+      asins: [],
+      total: 10_000,
+      totalASINs: 0,
+    })) as unknown as AsinGroupReadResult[];
+    const h = await harness(pages);
+    await h.processor(h.job, 'token');
+    expect(h.state.status).toBe('completed');
+    expect(h.state.result).toMatchObject({ rowCount: 10_000 });
+    expect(h.repository.read).toHaveBeenCalledTimes(1);
+    expect(h.list).toHaveBeenCalledTimes(201);
+    expect(h.children).toHaveBeenCalledTimes(200);
+    expect(h.legacyChildren).not.toHaveBeenCalled();
+    expect(h.children.mock.calls.every(([ids]) => ids.length === 50)).toBe(
+      true,
+    );
+    const artifact = (
+      h.state.result as {
+        artifact: Parameters<typeof h.artifacts.verifiedPath>[0];
+      }
+    ).artifact;
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.readFile(
+      await h.artifacts.verifiedPath(artifact, new AbortController().signal),
+    );
+    const sheet = book.worksheets[0]!;
+    expect(sheet.rowCount).toBe(10_001);
+    expect(sheet.getRow(2).getCell(2).value).toBe('g-0');
+    expect(sheet.getRow(10_001).getCell(2).value).toBe('g-9999');
+  });
+
+  it('continues a dense group into later small and empty siblings in two bounded queries', async () => {
+    const groups = [
+      group('z-dense', 'Dense'),
+      group('empty', 'Empty'),
+      group('a-small', 'Small'),
+    ];
+    const dense = Array.from({ length: 5001 }, (_, index) =>
+      asin(`D${String(index).padStart(9, '0')}`, 'z-dense'),
+    );
+    const h = await harness([
+      {
+        groups,
+        asins: [...dense, asin('B000000174', 'a-small')],
+        total: 3,
+        totalASINs: 5002,
+      },
+    ] as unknown as AsinGroupReadResult[]);
+    await h.processor(h.job, 'token');
+    expect(h.state.result).toMatchObject({ rowCount: 5003 });
+    expect(h.children).toHaveBeenCalledTimes(2);
+    expect(h.children).toHaveBeenLastCalledWith(
+      ['z-dense', 'empty', 'a-small'],
+      {
+        groupId: 'z-dense',
+        id: dense[4999]!.id,
+        createTime: dense[4999]!.exportCursorTime,
+      },
+    );
+    expect(h.legacyChildren).not.toHaveBeenCalled();
+    const artifact = (
+      h.state.result as {
+        artifact: Parameters<typeof h.artifacts.verifiedPath>[0];
+      }
+    ).artifact;
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.readFile(
+      await h.artifacts.verifiedPath(artifact, new AbortController().signal),
+    );
+    expect(book.worksheets[0]!.getRow(5003).getCell(2).value).toBe('empty');
+    expect(book.worksheets[0]!.getRow(5004).getCell(2).value).toBe('a-small');
   });
 
   it('keeps group status source stable across child pages', async () => {
