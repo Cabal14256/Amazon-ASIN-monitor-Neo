@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import type { Pool } from 'pg';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Db } from '../src/client';
+import { PgCompetitorTransactions } from '../src/repositories/competitor-transactions';
+import { PgCompetitorWriteRepository } from '../src/repositories/competitor-write-repository';
 import { DrizzleCompetitorWriteUnit } from '../src/repositories/competitor-write-unit';
 
 function database(reads: Record<string, unknown>[][], allowWrites = false) {
@@ -30,8 +33,18 @@ function database(reads: Record<string, unknown>[][], allowWrites = false) {
     if (!allowWrites) throw new Error('Unexpected insert');
     return { values };
   });
-  const db = { select, update, delete: remove, insert } as unknown as Db;
+  const execute = vi.fn(async () => ({
+    rows: [{ triggers: 2, identity: true }],
+  }));
+  const db = {
+    select,
+    update,
+    delete: remove,
+    insert,
+    execute,
+  } as unknown as Db;
   return {
+    db,
     unit: new DrizzleCompetitorWriteUnit(db, () => undefined),
     select,
     update,
@@ -42,7 +55,123 @@ function database(reads: Record<string, unknown>[][], allowWrites = false) {
   };
 }
 
+afterEach(() => vi.restoreAllMocks());
+
+/** Exercise the public repository wrapper, policy preparation and real write
+ * unit. Only borrowed transaction plumbing and the database rows are fixtures. */
+function repository(f: ReturnType<typeof database>) {
+  vi.spyOn(PgCompetitorTransactions.prototype, 'run').mockImplementation(
+    async (_readOnly, operation) =>
+      operation({
+        authorization: {
+          lockOperator: async () => undefined,
+          lockSession: async () => undefined,
+          operatorPermissionCodes: async () => [],
+        },
+        database: async () => f.db,
+        ensureOpen: () => undefined,
+      }),
+  );
+  return new PgCompetitorWriteRepository({} as Pool, {} as Pool);
+}
+
 describe('competitor confirmed mutation snapshots', () => {
+  it.each([
+    { name: 'Concurrent rename' },
+    { country: 'DE' },
+    { brand: 'Concurrent brand' },
+    { updateTime: new Date('2020-01-01T00:00:01.000Z') },
+  ])(
+    'retains the parent snapshot through the actual repository adapter: %j',
+    async (changed) => {
+      const expectedParent = {
+        name: 'Confirmed group',
+        country: 'US',
+        brand: 'Confirmed brand',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const f = database([
+        [
+          {
+            id: 'g1',
+            ...expectedParent,
+            updateTime: new Date(expectedParent.updateTime),
+            ...changed,
+          },
+        ],
+      ]);
+      const writer = repository(f);
+      try {
+        await expect(
+          writer.transaction((unit) =>
+            unit.createAsin(
+              {
+                asin: 'B000000121',
+                name: null,
+                country: 'US',
+                brand: 'Own brand',
+                asinType: null,
+                parentId: 'g1',
+              },
+              expectedParent,
+            ),
+          ),
+        ).rejects.toMatchObject({ code: 'source-changed' });
+        expect(f.locks).toEqual(['update']);
+        expect(f.select).toHaveBeenCalledOnce();
+        expect(f.insert).not.toHaveBeenCalled();
+        expect(f.update).not.toHaveBeenCalled();
+      } finally {
+        writer.close();
+      }
+    },
+  );
+  it.each([false, true])(
+    'keeps compatible creation through the actual adapter with snapshot=%s',
+    async (guarded) => {
+      const expectedParent = {
+        name: 'Confirmed group',
+        country: 'US',
+        brand: 'Confirmed brand',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const fields = {
+        asin: 'B000000121',
+        name: null,
+        country: 'US',
+        brand: 'Own brand',
+        asinType: null,
+        parentId: 'g1',
+      };
+      const row = { id: 'a1', ...fields, variantGroupId: 'g1' };
+      const f = database(
+        [
+          [
+            {
+              id: 'g1',
+              ...expectedParent,
+              updateTime: new Date(expectedParent.updateTime),
+            },
+          ],
+          [],
+          [row],
+        ],
+        true,
+      );
+      const writer = repository(f);
+      try {
+        await expect(
+          writer.transaction((unit) =>
+            unit.createAsin(fields, guarded ? expectedParent : undefined),
+          ),
+        ).resolves.toEqual(row);
+        expect(f.insert).toHaveBeenCalledOnce();
+        expect(f.locks).toEqual(['update']);
+      } finally {
+        writer.close();
+      }
+    },
+  );
   it.each([false, true])(
     'creates with a matching optional parent snapshot (%s) while preserving Legacy omission',
     async (guarded) => {
