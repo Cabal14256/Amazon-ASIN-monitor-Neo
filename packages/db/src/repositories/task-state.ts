@@ -103,7 +103,7 @@ export function transitionTask(
   // the final acknowledgement. The shared CAS must honor the accepted cancel.
   if (
     change.kind === 'completed' &&
-    task.taskType === 'monitor' &&
+    ['monitor', 'competitor-monitor'].includes(task.taskType) &&
     (task.cancelRequestedAt || task.status === 'cancelling')
   )
     return task;
@@ -142,17 +142,21 @@ export function transitionTask(
       break;
     case 'failed':
       if (
-        ['variant-check', 'batch-check', 'monitor'].includes(task.taskType) &&
+        [
+          'variant-check',
+          'batch-check',
+          'monitor',
+          'competitor-monitor',
+        ].includes(task.taskType) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';
         next.cancelledAt = timestamp;
         next.completedAt = timestamp;
         next.error = null;
-        next.message =
-          task.taskType === 'monitor'
-            ? '监控任务已取消，已提交的结果保留'
-            : '检查任务已取消，已提交的检查结果保留';
+        next.message = ['monitor', 'competitor-monitor'].includes(task.taskType)
+          ? '监控任务已取消，已提交的结果保留'
+          : '检查任务已取消，已提交的检查结果保留';
         break;
       }
       next.status = 'failed';

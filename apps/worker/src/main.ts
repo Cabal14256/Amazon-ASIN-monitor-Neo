@@ -77,8 +77,17 @@ async function bootstrap(): Promise<void> {
       ? await startAsinImportRuntime(env, () => process.exit(1))
       : undefined;
   const checkQueues = enabled.filter(
-    (name): name is 'variant-check' | 'batch-check' | 'monitor' =>
-      name === 'variant-check' || name === 'batch-check' || name === 'monitor',
+    (
+      name,
+    ): name is
+      | 'variant-check'
+      | 'batch-check'
+      | 'monitor'
+      | 'competitor-monitor' =>
+      name === 'variant-check' ||
+      name === 'batch-check' ||
+      name === 'monitor' ||
+      name === 'competitor-monitor',
   );
   const variantChecks =
     checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
@@ -94,7 +103,8 @@ async function bootstrap(): Promise<void> {
           variantChecks &&
           (name === 'variant-check' ||
             name === 'batch-check' ||
-            name === 'monitor')
+            name === 'monitor' ||
+            name === 'competitor-monitor')
         ),
     )
     .map((name) => {

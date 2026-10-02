@@ -9,6 +9,7 @@ import type { Redis } from 'ioredis';
 
 export const CANCELLABLE_TASK_TYPES = [
   'monitor',
+  'competitor-monitor',
   'export',
   'import',
   'variant-check',
@@ -65,6 +66,10 @@ local dataOk, data = pcall(cjson.decode, redis.call('HGET', KEYS[1], 'data') or 
 if not dataOk or type(data) ~= 'table' then error('TASK_CANCEL_INVALID_JOB') end
 if data.userId ~= ARGV[4] then return 7 end
 if data.createdAt ~= ARGV[6] then return 4 end
+if ARGV[5] == 'competitor-monitor' and (
+   data.taskId ~= ARGV[1] or data.taskType ~= ARGV[5] or
+   data.taskSubType ~= 'competitor' or meta.taskSubType ~= 'competitor' or
+   redis.call('HGET', KEYS[1], 'name') ~= 'competitor-monitor') then return 4 end
 local prefix = ARGV[3]
 for _, suffix in ipairs({'completed', 'failed', 'delayed', 'prioritized', 'waiting-children', 'repeat'}) do
   checkType(prefix .. suffix, 'zset')

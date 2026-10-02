@@ -224,19 +224,35 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       options: JobsOptions = {},
     ) {
       const task = await store.create({
-        taskId: `job97-${randomUUID()}`,
+        taskId:
+          type === 'competitor-monitor'
+            ? randomUUID()
+            : `job97-${randomUUID()}`,
         userId: owner.userId,
         taskType: type,
+        ...(type === 'competitor-monitor' ? { taskSubType: 'competitor' } : {}),
       });
       const queue = await queueFor(type);
       const job = await queue.add(
-        'fixture',
-        {
-          userId: task.userId,
-          createdAt: task.createdAt,
-          groups: [],
-          nested: { ids: ['id-a'] },
-        },
+        type === 'competitor-monitor' ? 'competitor-monitor' : 'fixture',
+        type === 'competitor-monitor'
+          ? {
+              taskId: task.taskId,
+              userId: task.userId,
+              taskType: type,
+              taskSubType: 'competitor',
+              createdAt: task.createdAt,
+              expiresAt: new Date(
+                Date.parse(task.createdAt) + 604800000,
+              ).toISOString(),
+              countries: ['US'],
+            }
+          : {
+              userId: task.userId,
+              createdAt: task.createdAt,
+              groups: [],
+              nested: { ids: ['id-a'] },
+            },
         {
           attempts: 1,
           removeOnComplete: false,
@@ -362,6 +378,34 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         } finally {
           if (state === 'paused') await queue.resume();
         }
+      },
+    );
+    it.each(['taskId', 'taskType', 'taskSubType', 'name'] as const)(
+      'does not atomically remove a competitor job with replaced %s identity',
+      async (field) => {
+        const { task, queue, job } = await enqueued('competitor-monitor');
+        beforeAtomic(async () => {
+          if (field === 'name')
+            await redis.hset(
+              queue.toKey(task.taskId),
+              'name',
+              'primary-monitor',
+            );
+          else
+            await job.updateData({
+              ...job.data,
+              [field]:
+                field === 'taskId'
+                  ? randomUUID()
+                  : field === 'taskType'
+                  ? 'monitor'
+                  : 'primary',
+            });
+        });
+        expect((await cancel(task.taskId)).statusCode).toBe(409);
+        expect(await queue.getJob(task.taskId)).toBeDefined();
+        expect((await store.read(task.taskId))?.status).toBe('pending');
+        expect(events).toEqual([]);
       },
     );
     it.each(['export', 'variant-check'] as const)(
