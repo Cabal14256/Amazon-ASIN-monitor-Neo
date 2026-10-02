@@ -60,10 +60,6 @@ const mutationSchema = z.discriminatedUnion('kind', [
     message,
   }),
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
-  z.object({
-    kind: z.literal('check-not-enqueued'),
-    message: z.string().min(1).max(2000),
-  }),
   // Only callers that confirmed the immutable PostgreSQL receipt may use this.
   z.object({
     kind: z.literal('check-completed'),
@@ -84,17 +80,6 @@ export function transitionTask(
   now: Date,
 ): TaskState {
   const change = mutationSchema.parse(mutation);
-  // Re-evaluated by every CAS attempt: an orphan lookup must never fail a
-  // worker that has started, a cancellation, or a different task family.
-  if (
-    change.kind === 'check-not-enqueued' &&
-    (task.taskType !== 'variant-check' ||
-      !['asin-check', 'variant-group-check'].includes(task.taskSubType ?? '') ||
-      task.status !== 'pending' ||
-      task.startedAt ||
-      task.cancelRequestedAt)
-  )
-    return task;
   if (change.kind === 'check-completed') {
     const { kind: _kind, version: _version, ...reference } = change.result;
     parseVariantCheckOperation({
@@ -147,7 +132,6 @@ export function transitionTask(
       next.error = null;
       next.message = change.message ?? '任务已完成';
       break;
-    case 'check-not-enqueued':
     case 'failed':
       if (
         ['variant-check', 'batch-check'].includes(task.taskType) &&

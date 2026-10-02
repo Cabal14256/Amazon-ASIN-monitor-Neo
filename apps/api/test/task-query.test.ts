@@ -217,33 +217,33 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect((await get()).statusCode).toBe(404);
   });
   it.each(['asin-check', 'variant-group-check'])(
-    'settles an old orphan %s only after a successful queue lookup',
+    'keeps an old %s pending when successful queue lookup finds no job',
     async (taskSubType) => {
       task = taskFixture({
         taskType: 'variant-check',
         taskSubType,
         createdAt: new Date(Date.now() - 31_000).toISOString(),
       });
-      const identity = {
-        userId: task.userId,
-        taskType: task.taskType,
-        taskSubType,
-        createdAt: task.createdAt,
-      };
-      const response = await get();
-      expect(response.json().data).toMatchObject({
-        status: 'failed',
-        error: '检查任务未入队，请重新提交',
+      rows = [task];
+      const original = structuredClone(task);
+      const detail = await get();
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().data).toMatchObject({
+        status: 'pending',
+        error: null,
       });
-      expect(port.store.mutate).toHaveBeenCalledWith(
-        task.taskId,
-        { kind: 'check-not-enqueued', message: '检查任务未入队，请重新提交' },
-        identity,
-      );
+      const list = await get('/tasks');
+      expect(list.statusCode).toBe(200);
+      expect(list.json().data[0]).toMatchObject({
+        status: 'pending',
+        error: null,
+      });
+      expect(port.store.mutate).not.toHaveBeenCalled();
+      expect(task).toEqual(original);
     },
   );
   it.each(['young', 'queued', 'processing', 'dependency'])(
-    'does not mark a %s check as orphaned',
+    'preserves uncertain check metadata for %s',
     async (condition) => {
       task = taskFixture({
         taskType: 'variant-check',
@@ -264,18 +264,15 @@ describe('own task query HTTP and bounded reconciliation', () => {
       );
     },
   );
-  it('preserves a worker that starts between the absence lookup and registry CAS', async () => {
+  it('does not turn a successful queue absence lookup into a metadata mutation', async () => {
     task = taskFixture({
       taskType: 'variant-check',
       taskSubType: 'asin-check',
-      createdAt: new Date(Date.now() - 31_000).toISOString(),
+      createdAt: new Date(Date.now() - 2 * 86400_000).toISOString(),
     });
-    vi.mocked(port.store.mutate).mockImplementationOnce(async (_id, change) => {
-      task = transitionTask(task!, { kind: 'processing' }, new Date());
-      task = transitionTask(task, change, new Date());
-      return task;
-    });
-    expect((await get()).json().data.status).toBe('processing');
+    expect((await get()).json().data.status).toBe('pending');
+    expect(port.findJob).toHaveBeenCalledWith(task.taskId, task.taskType);
+    expect(port.store.mutate).not.toHaveBeenCalled();
     expect(task.error).toBeNull();
   });
   it('denies queue owner mismatch before touching own registry', async () => {

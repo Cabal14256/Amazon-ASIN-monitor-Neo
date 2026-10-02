@@ -95,10 +95,32 @@ describe('Legacy to BullMQ queue policy parity', () => {
         const policy = getQueuePolicy(name, loadEnv(raw));
         expect(policy.physicalName).toBe(baseline.physicalName);
         expect(policy.defaultJobOptions).toEqual(
-          baseline.options.defaultJobOptions,
+          name === 'variant-check' || name === 'batch-check'
+            ? {
+                ...(baseline.options.defaultJobOptions as object),
+                removeOnComplete: { age: 604800 },
+                removeOnFail: { age: 604800 },
+              }
+            : baseline.options.defaultJobOptions,
         );
         expect(policy.limiter).toEqual(baseline.options.limiter);
         expect(policy.concurrency).toBe(baseline.concurrency);
+      }
+    },
+  );
+
+  it.each(['variant-check', 'batch-check'] as const)(
+    '%s retains terminal evidence for at least the configured metadata lifetime',
+    (name) => {
+      for (const ttl of [60, 604800, 1209600]) {
+        const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: String(ttl) });
+        expect(getQueuePolicy(name, env).defaultJobOptions).toMatchObject({
+          removeOnComplete: { age: Math.max(3600, ttl) },
+          removeOnFail: { age: Math.max(86400, ttl) },
+        });
+        expect(
+          getQueueOptions(name, env, { host: 'localhost' }).defaultJobOptions,
+        ).toEqual(getQueuePolicy(name, env).defaultJobOptions);
       }
     },
   );

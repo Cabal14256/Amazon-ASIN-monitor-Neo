@@ -112,11 +112,11 @@ function fixture(type: 'variant-check' | 'batch-check' = 'variant-check') {
   };
 }
 describe('variant and batch BullMQ processor lifecycle', () => {
-  it('does not execute an orphan job that arrives after API reconciliation', async () => {
+  it('does not execute a check that is already terminal', async () => {
     const f = fixture();
     await f.store.mutate(f.data.taskId, {
-      kind: 'check-not-enqueued',
-      message: '检查任务未入队，请重新提交',
+      kind: 'failed',
+      message: '检查任务执行失败',
     });
     await expect(f.run()).rejects.toThrow('检查任务失败');
     expect(f.execute).not.toHaveBeenCalled();

@@ -76,62 +76,17 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
-  it('fails an orphan check without permitting a delayed worker to restart it', async () => {
+  it('rejects the retired absence-only check transition without altering metadata', async () => {
     const { repository } = fixture();
     const task = await repository.create(checkInput);
     await expect(
       repository.mutate(
         task.taskId,
-        { kind: 'check-not-enqueued', message: 'not queued' },
+        { kind: 'check-not-enqueued', message: 'not queued' } as never,
         task,
       ),
-    ).resolves.toMatchObject({ status: 'failed' });
-    await expect(
-      repository.mutate(task.taskId, { kind: 'processing' }, task),
-    ).resolves.toMatchObject({ status: 'failed', startedAt: null });
-  });
-  it.each(['processing', 'cancel-request'] as const)(
-    'does not replace a %s transition with an orphan failure',
-    async (kind) => {
-      const { repository } = fixture();
-      const task = await repository.create(checkInput);
-      const started = await repository.mutate(task.taskId, { kind }, task);
-      expect(
-        await repository.mutate(
-          task.taskId,
-          { kind: 'check-not-enqueued', message: 'not queued' },
-          task,
-        ),
-      ).toEqual(started);
-    },
-  );
-  it('does not apply immediate-check orphan transitions to another task family', async () => {
-    const { repository } = fixture();
-    const task = await repository.create(input);
-    expect(
-      await repository.mutate(
-        task.taskId,
-        { kind: 'check-not-enqueued', message: 'not queued' },
-        task,
-      ),
-    ).toEqual(task);
-  });
-  it('rechecks pending status after a worker wins the orphan mutation CAS race', async () => {
-    const { repository, redis, rows } = fixture();
-    const task = await repository.create(checkInput);
-    const started = transitionTask(task, { kind: 'processing' }, new Date());
-    redis.eval.mockImplementationOnce(async (...args) => {
-      rows.set(args[2], JSON.stringify(started));
-      return 0;
-    });
-    expect(
-      await repository.mutate(
-        task.taskId,
-        { kind: 'check-not-enqueued', message: 'not queued' },
-        task,
-      ),
-    ).toEqual(started);
-    expect(await repository.read(task.taskId)).toEqual(started);
+    ).rejects.toThrow();
+    expect(await repository.read(task.taskId)).toEqual(task);
   });
   it('preserves a check cancellation when an exhausted queue failure is reconciled', async () => {
     const { repository } = fixture();
