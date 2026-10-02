@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  catalogSafetyKey,
   readCatalogSafetyGate,
   writeCatalogSafetyGate,
 } from './catalog-safety-gate';
@@ -18,6 +19,33 @@ class MemoryStorage {
 }
 
 describe('catalog write safety across page loads', () => {
+  it.each(['asin', 'competitor'])(
+    'preserves fifty-codepoint detail IDs while rejecting fifty-one in the %s catalog',
+    (source) => {
+      const storage = new MemoryStorage();
+      const detailId = ` ${'😀'.repeat(48)} `;
+      const gate = {
+        phase: 'refresh' as const,
+        message: null,
+        detailId,
+        createUncertain: false,
+        operationId: 'fixture-operation',
+      };
+      expect([...detailId]).toHaveLength(50);
+      expect(detailId.length).toBeGreaterThan(50);
+      expect(writeCatalogSafetyGate(storage, 'owner', source, gate)).toBe(true);
+      expect(readCatalogSafetyGate(storage, 'owner', source)).toEqual(gate);
+      expect(storage.getItem(catalogSafetyKey('owner', source))).not.toBeNull();
+
+      storage.setItem(
+        catalogSafetyKey('owner', source),
+        JSON.stringify({ ...gate, detailId: `${detailId}x` }),
+      );
+      expect(readCatalogSafetyGate(storage, 'owner', source)).toBeNull();
+      expect(storage.getItem(catalogSafetyKey('owner', source))).toBeNull();
+    },
+  );
+
   it('keeps uncertain creation locked for the same user and catalog until explicit reconciliation', () => {
     const storage = new MemoryStorage();
     const gate = {

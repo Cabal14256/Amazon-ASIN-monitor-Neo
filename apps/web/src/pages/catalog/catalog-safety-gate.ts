@@ -57,7 +57,8 @@ export function readCatalogSafetyGate(
       (gate.message !== null &&
         (typeof gate.message !== 'string' || gate.message.length > 300)) ||
       (gate.detailId !== null &&
-        (typeof gate.detailId !== 'string' || gate.detailId.length > 50)) ||
+        (typeof gate.detailId !== 'string' ||
+          [...gate.detailId].length > 50)) ||
       typeof gate.createUncertain !== 'boolean'
     )
       throw new Error('invalid');
