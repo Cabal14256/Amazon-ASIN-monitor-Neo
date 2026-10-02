@@ -53,7 +53,7 @@ interface MonitorProcessorOptions {
     'groups' | 'claimNotification' | 'completeNotification'
   >;
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>;
-  notifications: Pick<FeishuNotifications, 'sendCountry'>;
+  notifications: Pick<FeishuNotifications, 'withCountryDelivery'>;
   shutdownSignal: AbortSignal;
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
@@ -325,27 +325,33 @@ export function createPrimaryMonitorProcessor(
       for (let index = 0; index < data.countries.length; index++) {
         await check();
         const country = data.countries[index];
-        const claim = await options.repository.claimNotification(
-          data.taskId,
+        await options.notifications.withCountryDelivery(
+          'primary',
           country,
+          notificationSnapshots[country],
+          async (send) => {
+            await check();
+            const claim = await options.repository.claimNotification(
+              data.taskId,
+              country,
+            );
+            if (claim === 'new') {
+              const outcome = await send();
+              await options.repository.completeNotification(
+                data.taskId,
+                country,
+                outcome.success,
+              );
+              notificationResults[country] = outcome.success
+                ? 'sent'
+                : 'failed';
+            } else {
+              notificationResults[country] =
+                claim === 'claimed' ? 'unconfirmed' : claim;
+            }
+          },
+          controller.signal,
         );
-        if (claim === 'new') {
-          const outcome = await options.notifications.sendCountry(
-            'primary',
-            country,
-            notificationSnapshots[country],
-            controller.signal,
-          );
-          await options.repository.completeNotification(
-            data.taskId,
-            country,
-            outcome.success,
-          );
-          notificationResults[country] = outcome.success ? 'sent' : 'failed';
-        } else {
-          notificationResults[country] =
-            claim === 'claimed' ? 'unconfirmed' : claim;
-        }
         if (index + 1 < data.countries.length)
           await delay(500, undefined, { signal: controller.signal });
       }

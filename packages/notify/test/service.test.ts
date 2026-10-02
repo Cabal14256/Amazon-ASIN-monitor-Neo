@@ -220,6 +220,60 @@ describe('notification lifetime, bounds and secrecy', () => {
     service.close();
     vi.useRealTimers();
   });
+  it('reserves the same host capacity as every other sender before invoking a durable claim', async () => {
+    const releases: (() => void)[] = [];
+    source.read = vi.fn(
+      () =>
+        new Promise<{ webhookUrl: string }>((resolve) => {
+          releases.push(() => resolve({ webhookUrl: webhook }));
+        }),
+    );
+    const running = Array.from({ length: 4 }, () =>
+      service.sendOnce('competitor', 'US', {}),
+    );
+    const claim = vi.fn(async (send: () => Promise<unknown>) => send());
+    await expect(
+      service.withCountryDelivery('primary', 'US', {}, claim),
+    ).rejects.toMatchObject({ reason: 'capacity' });
+    expect(claim).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    for (const release of releases) release();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(running);
+    vi.mocked(source.read).mockResolvedValue({ webhookUrl: webhook });
+    expect(
+      await service.withCountryDelivery('primary', 'US', {}, claim),
+    ).toEqual({ success: true, skipped: false });
+    expect(claim).toHaveBeenCalledOnce();
+  });
+  it('allows an existing delivery claim to skip I/O and prevents an admitted sender escaping its lifetime', async () => {
+    let escaped!: () => Promise<unknown>;
+    expect(
+      await service.withCountryDelivery('primary', 'US', {}, async (send) => {
+        escaped = send;
+        return 'unconfirmed';
+      }),
+    ).toBe('unconfirmed');
+    expect(source.read).not.toHaveBeenCalled();
+    await expect(escaped()).rejects.toMatchObject({ reason: 'closed' });
+    expect(service.getDiagnostics().activeOperations).toBe(0);
+    expect(transport.send).not.toHaveBeenCalled();
+  });
+  it('uses one admitted send and snapshots its card before the claim', async () => {
+    const data = { brokenGroups: 1, brokenASINs: [{ asin: 'ORIGINAL' }] };
+    await service.withCountryDelivery('primary', 'US', data, async (send) => {
+      data.brokenASINs[0].asin = 'CHANGED';
+      expect(await send()).toEqual({ success: true, skipped: false });
+      await expect(send()).rejects.toMatchObject({ reason: 'invalid-input' });
+    });
+    expect(transport.send).toHaveBeenCalledOnce();
+    expect(JSON.stringify(vi.mocked(transport.send).mock.calls)).toContain(
+      'ORIGINAL',
+    );
+    expect(JSON.stringify(vi.mocked(transport.send).mock.calls)).not.toContain(
+      'CHANGED',
+    );
+  });
   it('cancels a pending configuration read, discards its late credential and never posts', async () => {
     let release!: (value: { webhookUrl: string }) => void;
     source.read = vi.fn(

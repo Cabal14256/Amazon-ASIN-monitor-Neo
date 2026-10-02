@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { legacyService } from '../../../packages/sp-api/test/catalog-legacy-fixture';
+import { MonitorConsumerHeartbeat } from '../src/monitor-consumer-heartbeat';
 import { monitorGroupOperation } from '../src/primary-monitor-processor';
 import { getQueueOptions } from '../src/queue-policy';
 import { parseRedisUrl } from '../src/redis-options';
@@ -126,6 +127,7 @@ describe.skipIf(
           'fixture-owner',
         )}`,
         `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`,
+        `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready:owners`,
       );
     } finally {
       child = undefined;
@@ -186,6 +188,30 @@ describe.skipIf(
     });
     return `https://127.0.0.1:${(webhook.address() as AddressInfo).port}/hook`;
   }
+  it('keeps another live consumer ready and removes the last owner immediately', async () => {
+    const key = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
+    const a = new MonitorConsumerHeartbeat(f.redis, key);
+    const b = new MonitorConsumerHeartbeat(f.redis, key);
+    try {
+      await a.start();
+      await b.start();
+      expect(await f.redis.zcard(`${key}:owners`)).toBe(2);
+      const [seconds, microseconds] = await f.redis.time();
+      await f.redis.zadd(
+        `${key}:owners`,
+        Number(seconds) * 1000 + Math.floor(Number(microseconds) / 1000) - 1,
+        'expired-fixture-consumer',
+      );
+      await b.stop();
+      expect(await f.redis.get(key)).toBe('1');
+      expect(await f.redis.zcard(`${key}:owners`)).toBe(1);
+      expect(await f.redis.pttl(key)).toBeLessThanOrEqual(10_000);
+      await a.stop();
+      expect(await f.redis.exists(key, `${key}:owners`)).toBe(0);
+    } finally {
+      await Promise.all([a.stop(), b.stop()]);
+    }
+  });
   it('processes a six-country request through the real queue and writes only selected country history', async () => {
     child = spawn(process.execPath, [resolve(__dirname, '../dist/main.js')], {
       cwd: resolve(__dirname, '..'),
@@ -257,6 +283,10 @@ describe.skipIf(
         )
       ).rows[0].count,
     ).toBe(2);
+    child.kill('SIGTERM');
+    await eventually(async () => exited, 12_000);
+    const key = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
+    expect(await f.redis.exists(key, `${key}:owners`)).toBe(0);
   });
   it('matches a fixed Legacy Catalog fixture through real ASIN checks, history, notification and receipt replay', async () => {
     const webhookUrl = await startWebhook();

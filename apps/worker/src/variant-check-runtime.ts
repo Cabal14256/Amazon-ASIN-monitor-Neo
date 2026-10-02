@@ -23,6 +23,7 @@ import { VariantCheckRuntime } from '@asin-monitor/variant-check';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { logger } from './logger';
+import { MonitorConsumerHeartbeat } from './monitor-consumer-heartbeat';
 import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -94,13 +95,13 @@ export async function startVariantCheckRuntime(
     spApi: SpApiRuntime | undefined,
     runtime: VariantCheckRuntime | undefined;
   let notifications: FeishuNotifications | undefined;
+  let monitorHeartbeat: MonitorConsumerHeartbeat | undefined;
   let transport: NodeHttpTransport | undefined,
     htmlTransport: NodeHttpTransport | undefined;
   let closing = false,
     cleanupRunning = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined,
-    cleanupTimer: ReturnType<typeof setInterval> | undefined,
-    monitorReadyTimer: ReturnType<typeof setInterval> | undefined;
+    cleanupTimer: ReturnType<typeof setInterval> | undefined;
   const ensureOpen = () => {
     if (closing) throw new Error('Variant check startup stopped');
   };
@@ -108,7 +109,7 @@ export async function startVariantCheckRuntime(
     closing = true;
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
-    if (monitorReadyTimer) clearInterval(monitorReadyTimer);
+    void monitorHeartbeat?.stop();
     runtime?.close();
     notifications?.close();
     spApi?.close();
@@ -276,19 +277,12 @@ export async function startVariantCheckRuntime(
         }
       });
     if (selected.includes('monitor')) {
-      const readyKey = `${getNeoQueuePrefix(env)}:monitor:consumer:ready`;
-      const heartbeat = async () => {
-        if (!closing) await control.set(readyKey, '1', 'EX', 10);
-      };
-      await heartbeat();
-      monitorReadyTimer = setInterval(() => {
-        void heartbeat().catch(() =>
-          logger.warn('监控消费者心跳未确认', {
-            reason: 'monitor_heartbeat_failed',
-          }),
-        );
-      }, 3000);
-      monitorReadyTimer.unref();
+      monitorHeartbeat = new MonitorConsumerHeartbeat(
+        control,
+        `${getNeoQueuePrefix(env)}:monitor:consumer:ready`,
+      );
+      await monitorHeartbeat.start();
+      ensureOpen();
     }
     const cleanup = async () => {
       if (closing || cleanupRunning) return;
@@ -323,6 +317,7 @@ export async function startVariantCheckRuntime(
         stopBusiness();
         closed ??= (async () => {
           try {
+            await monitorHeartbeat?.stop();
             await Promise.all(workers.map((worker) => worker.close()));
           } finally {
             await Promise.allSettled([
@@ -338,6 +333,7 @@ export async function startVariantCheckRuntime(
     };
   } catch {
     stopBusiness();
+    await monitorHeartbeat?.stop();
     control.disconnect(false);
     await Promise.allSettled([
       ...workers.map((worker) => worker.close(true)),

@@ -304,6 +304,43 @@ export class FeishuNotifications {
         : { success: false, skipped: false, errorCode: result.errorCode };
     });
   }
+  /** Reserve shared host capacity before a durable delivery claim. A caller
+   * rejected by admission has not claimed or attempted an external send. */
+  withCountryDelivery<T>(
+    domain: NotificationDomain,
+    country: string,
+    data: NotificationData,
+    run: (send: () => Promise<CountryNotificationResult>) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.operation(signal, async (child) => {
+      const target = notificationDomain(domain);
+      const selected = notificationCountry(country);
+      const snapshot = countryData(selected, snapshotNotification(data));
+      notificationCard(target, snapshot);
+      let sent = false;
+      let admitted = true;
+      try {
+        return await run(async () => {
+          ensureActive(child);
+          if (!admitted) throw new NotificationError('closed');
+          if (sent) throw new NotificationError('invalid-input');
+          sent = true;
+          const result = await this.retry(
+            target,
+            regionFor(selected),
+            snapshot,
+            child,
+          );
+          return result.success
+            ? { success: true, skipped: false }
+            : { success: false, skipped: false, errorCode: result.errorCode };
+        });
+      } finally {
+        admitted = false;
+      }
+    });
+  }
   sendBatch(
     domain: NotificationDomain,
     input: Record<string, NotificationData>,

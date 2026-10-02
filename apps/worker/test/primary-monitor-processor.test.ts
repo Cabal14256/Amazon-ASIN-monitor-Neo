@@ -8,7 +8,10 @@ import {
   type NotificationClaim,
   type TaskState,
 } from '@asin-monitor/db';
-import type { NotificationData } from '@asin-monitor/notify';
+import {
+  FeishuNotifications,
+  type NotificationData,
+} from '@asin-monitor/notify';
 import type { VariantCheckContext } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
@@ -49,7 +52,9 @@ function result(id: string, broken: boolean): VariantGroupCheckData {
     details: { results: [] },
   };
 }
-function fixture() {
+function fixture(
+  notifications?: Pick<FeishuNotifications, 'withCountryDelivery'>,
+) {
   const data = jobData();
   let state: TaskState = {
     taskId: data.taskId,
@@ -109,7 +114,10 @@ function fixture() {
     pipeline: { checkGroup },
     repository: { groups, claimNotification, completeNotification },
     store,
-    notifications: { sendCountry },
+    notifications: notifications ?? {
+      withCountryDelivery: async (domain, country, summary, run) =>
+        run(() => sendCountry(domain, country, summary)),
+    },
     shutdownSignal: new AbortController().signal,
     assertJobLock: async () => undefined,
     updateProgress: async () => undefined,
@@ -186,6 +194,59 @@ describe('primary monitor BullMQ processor', () => {
     expect(output).toMatchObject({
       notificationResults: { US: 'unconfirmed', DE: 'sent' },
     });
+  });
+  it('rejects a fifth concurrent notification before its claim and sends it once on retry', async () => {
+    const releases: (() => void)[] = [];
+    const read = vi.fn(
+      () =>
+        new Promise<{ webhookUrl: string }>((resolve) => {
+          releases.push(() =>
+            resolve({ webhookUrl: 'https://example.invalid' }),
+          );
+        }),
+    );
+    const send = vi.fn(async () => ({ statusCode: 200, code: 0 }));
+    const notifications = new FeishuNotifications({
+      source: { read },
+      transport: { send, close() {} },
+      logger: { info() {}, warn() {}, error() {} },
+    });
+    const fixtures = Array.from({ length: 5 }, () => {
+      const f = fixture(notifications);
+      f.data.countries = ['US'];
+      f.groups.mockResolvedValue([{ country: 'US', groupId: 'g1' }]);
+      return f;
+    });
+    const running = fixtures.map((f) =>
+      f.processor(f.job, 'fixture-lock').then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      ),
+    );
+    try {
+      await vi.waitFor(() => expect(releases).toHaveLength(4));
+      await vi.waitFor(() => expect(fixtures[4].checkGroup).toHaveBeenCalled());
+      expect(await running[4]).toHaveProperty('error');
+      expect(fixtures[4].claimNotification).not.toHaveBeenCalled();
+      expect(fixtures[4].completeNotification).not.toHaveBeenCalled();
+      expect(fixtures[4].state.status).toBe('processing');
+      for (const release of releases) release();
+      for (const task of running.slice(0, 4))
+        expect(await task).toHaveProperty('value');
+      read.mockResolvedValue({ webhookUrl: 'https://example.invalid' });
+      fixtures[4].job.attemptsMade = 1;
+      expect(
+        await fixtures[4].processor(fixtures[4].job, 'fixture-lock'),
+      ).toMatchObject({ notificationResults: { US: 'sent' } });
+      expect(fixtures[4].claimNotification).toHaveBeenCalledOnce();
+      expect(fixtures[4].completeNotification).toHaveBeenCalledOnce();
+      expect(send).toHaveBeenCalledTimes(5);
+      expect(fixtures.every((f) => f.state.status === 'completed')).toBe(true);
+    } finally {
+      notifications.close();
+      for (const release of releases) release();
+      await Promise.all(running);
+    }
   });
   it.each([false, true])(
     'completes a legacy group with an empty name (broken=%s)',
