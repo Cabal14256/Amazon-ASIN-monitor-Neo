@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
 import { ApiError } from '../../lib/http';
+import { sessionFixture } from '../../lib/transport-fixtures';
 import type { createTransportRuntime } from '../../services/runtime';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { catalogSafetyKey } from './catalog-safety-gate';
@@ -110,6 +111,9 @@ function fixture(
   const runtime = {
     http: { request: vi.fn() },
     queryClient,
+    session: sessionFixture().store,
+    tasks: { get: vi.fn() },
+    ws: { onMessage: vi.fn(() => () => undefined) },
     clearUserWork,
   } as unknown as ReturnType<typeof createTransportRuntime>;
   const detail = vi.fn(async () => original);

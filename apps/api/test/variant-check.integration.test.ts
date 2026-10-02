@@ -446,53 +446,103 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(digest(result[1])).toBe(digest(result[0]));
       expect(await history(g.children[0].id)).toEqual([]);
     }, 25_000);
-    it('recovers an exhausted Redis completion acknowledgement without repeating the upstream check or history', async () => {
-      const g = await group(),
-        child = g.children[0];
-      const db = compiled(
-        '@asin-monitor/db',
-      ) as typeof import('@asin-monitor/db');
-      const original = db.RedisTaskRepository.prototype.mutate;
-      const mutation = vi
-        .spyOn(db.RedisTaskRepository.prototype, 'mutate')
-        .mockImplementation(function (
-          this: RedisTaskRepository,
-          id,
-          change,
-          identity,
-        ) {
-          if (change.kind === 'check-completed')
-            return Promise.reject(
-              new Error('Fixture lost Redis completion acknowledgement'),
-            );
-          return original.call(this, id, change, identity);
-        });
-      try {
-        await start();
-        const id = await submitted(`/asins/${child.id}/check`);
-        const queue = runtime!.queues.find(
-          (queue) => queue.name === getPhysicalQueueName('variant-check'),
-        )!;
-        await vi.waitFor(
-          async () =>
-            expect(await (await queue.getJob(id))?.getState()).toBe('failed'),
-          { timeout: 15_000, interval: 50 },
-        );
-        expect(await history(child.id)).toHaveLength(1);
-        const catalogCalls = transport.request.mock.calls.filter(([input]) =>
-          input.url.pathname.endsWith(child.asin),
-        );
-        expect(catalogCalls).toHaveLength(1);
-        mutation.mockRestore();
-        const recovered = await get(id);
-        expect(recovered.statusCode).toBe(200);
-        expect(recovered.json().data.status).toBe('completed');
-        await complete(id);
-        expect(await history(child.id)).toHaveLength(1);
-      } finally {
-        mutation.mockRestore();
-      }
-    }, 25_000);
+    it.each(['retained', 'removed'] as const)(
+      'preserves execution after two lost Redis completion acknowledgements when the failed job is %s',
+      async (evidence) => {
+        const g = await group(),
+          child = g.children[0];
+        const db = compiled(
+          '@asin-monitor/db',
+        ) as typeof import('@asin-monitor/db');
+        const original = db.RedisTaskRepository.prototype.mutate;
+        let lostAcknowledgements = 0;
+        const mutation = vi
+          .spyOn(db.RedisTaskRepository.prototype, 'mutate')
+          .mockImplementation(function (
+            this: RedisTaskRepository,
+            id,
+            change,
+            identity,
+          ) {
+            if (change.kind === 'check-completed') {
+              lostAcknowledgements++;
+              return Promise.reject(
+                new Error('Fixture lost Redis completion acknowledgement'),
+              );
+            }
+            return original.call(this, id, change, identity);
+          });
+        try {
+          await start();
+          const id = await submitted(`/asins/${child.id}/check`);
+          const queue = runtime!.queues.find(
+            (queue) => queue.name === getPhysicalQueueName('variant-check'),
+          )!;
+          await vi.waitFor(
+            async () =>
+              expect(await (await queue.getJob(id))?.getState()).toBe('failed'),
+            { timeout: 15_000, interval: 50 },
+          );
+          expect(await history(child.id)).toHaveLength(1);
+          const catalogCalls = transport.request.mock.calls.filter(([input]) =>
+            input.url.pathname.endsWith(child.asin),
+          );
+          expect(catalogCalls).toHaveLength(1);
+          expect(lostAcknowledgements).toBe(2);
+          expect(
+            (
+              await f.pools.primaryPool.query(
+                "SELECT operation_key FROM variant_check_receipts WHERE task_id=$1 AND step='result'",
+                [id],
+              )
+            ).rows,
+          ).toHaveLength(1);
+          mutation.mockRestore();
+          if (evidence === 'removed') {
+            // Explicit cleanup can remove evidence even before an age-based
+            // retention period ends. This is the first HTTP read of the task.
+            await (await queue.getJob(id))!.remove();
+            expect(await queue.getJob(id)).toBeUndefined();
+            const before = await store.read(id);
+            expect(before?.status).toBe('processing');
+            const detail = await get(id);
+            expect(detail.statusCode).toBe(200);
+            expect(detail.json().data).toMatchObject({
+              status: 'processing',
+              error: null,
+              result: null,
+            });
+            const list = await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/tasks',
+              headers: owner.headers,
+            });
+            expect(list.statusCode).toBe(200);
+            expect(
+              list
+                .json()
+                .data.find((task: { taskId: string }) => task.taskId === id),
+            ).toMatchObject({
+              status: 'processing',
+              error: null,
+              result: null,
+            });
+            expect((await get(id, '/download')).statusCode).toBe(409);
+            expect(await store.read(id)).toEqual(before);
+            expect(await history(child.id)).toHaveLength(1);
+            return;
+          }
+          const recovered = await get(id);
+          expect(recovered.statusCode).toBe(200);
+          expect(recovered.json().data.status).toBe('completed');
+          await complete(id);
+          expect(await history(child.id)).toHaveLength(1);
+        } finally {
+          mutation.mockRestore();
+        }
+      },
+      25_000,
+    );
     it('cancels a submitted batch before execution without producing receipts or history', async () => {
       const g = await group();
       const id = await submitted('/variant-groups/batch-check', {
