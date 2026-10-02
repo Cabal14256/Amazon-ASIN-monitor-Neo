@@ -31,7 +31,12 @@ function timedOut(error: unknown): boolean {
     depth++
   ) {
     const row = error as { code?: unknown; cause?: unknown };
-    if (['57014', '55P03', 'timeout'].includes(String(row.code))) return true;
+    if (
+      ['57014', '55P03', 'timeout', 'AUTH_QUERY_TIMEOUT'].includes(
+        String(row.code),
+      )
+    )
+      return true;
     error = row.cause;
   }
   return false;

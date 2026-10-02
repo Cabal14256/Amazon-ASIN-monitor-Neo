@@ -663,11 +663,25 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
               ];
               if (intervalQuery) {
                 readers.push(async () => {
-                  const result = await intervals.refetch({
-                    throwOnError: true,
-                  });
-                  if (!result.isSuccess) throw result.error;
-                  return result.data;
+                  try {
+                    const result = await intervals.refetch({
+                      throwOnError: true,
+                    });
+                    if (!result.isSuccess) throw result.error;
+                    return result.data;
+                  } catch (error) {
+                    // A deliberate feature-disabled response has no interval
+                    // data to authorize; the fresh history read still proves
+                    // access. Other failures keep all previous data hidden.
+                    if (
+                      error instanceof ApiError &&
+                      error.status === 503 &&
+                      error.message ===
+                        '状态区间读取已关闭，请联系管理员启用后再试'
+                    )
+                      return;
+                    throw error;
+                  }
                 });
               }
               void readAccess.recover(readers);
