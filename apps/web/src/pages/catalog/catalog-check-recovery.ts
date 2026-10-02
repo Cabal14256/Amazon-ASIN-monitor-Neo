@@ -88,6 +88,7 @@ export class CatalogCheckRecovery {
   }
   private clearCurrent(expected: CatalogCheckGate): boolean {
     const current = this.read();
+    if (!current) return true;
     if (
       current?.requestId !== expected.requestId ||
       (current.taskId !== undefined && current.taskId !== expected.taskId)
@@ -107,6 +108,7 @@ export class CatalogCheckRecovery {
   async reconcile(
     expected: CatalogCheckGate,
     readTask: (id: string) => Promise<{ taskId: string; status: string }>,
+    beforeClear: () => Promise<void> = async () => undefined,
   ) {
     if (expected.taskId) {
       const task = await readTask(expected.taskId).catch((error: unknown) => {
@@ -117,6 +119,7 @@ export class CatalogCheckRecovery {
         throw new Error('CHECK_TASK_IDENTITY_CHANGED');
       if (task && !isTerminalTask(task.status)) return 'active' as const;
     }
+    await beforeClear();
     return (await this.clear(expected))
       ? ('cleared' as const)
       : ('changed' as const);

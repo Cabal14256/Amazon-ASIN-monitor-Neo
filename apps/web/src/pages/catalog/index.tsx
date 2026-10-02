@@ -904,6 +904,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     }
   }, [config.checks, config.id, userId]);
   const handledTasks = useRef(new Set<string>());
+  const handlingTasks = useRef(new Set<string>());
   const checkBusy =
     checkState?.phase === 'submitting' ||
     checkState?.phase === 'task' ||
@@ -1052,10 +1053,11 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       !checkState.taskId ||
       task?.taskId !== checkState.taskId ||
       !isTerminalTask(task.status) ||
-      handledTasks.current.has(task.taskId)
+      handledTasks.current.has(task.taskId) ||
+      handlingTasks.current.has(task.taskId)
     )
       return;
-    handledTasks.current.add(task.taskId);
+    handlingTasks.current.add(task.taskId);
     setCheckState((current) =>
       current?.taskId === task.taskId
         ? { ...current, phase: 'refreshing' }
@@ -1078,6 +1080,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       }
       const cleared = !gate || Boolean(await recovery?.clear(gate));
       if (!mounted.current || checkOwner.current !== userId) return;
+      if (cleared) handledTasks.current.add(task.taskId);
       checkBusyRef.current = !cleared;
       setCheckState((current) =>
         current?.taskId === task.taskId
@@ -1094,18 +1097,20 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
             }
           : current,
       );
-    })().catch(() => {
-      if (mounted.current && checkOwner.current === userId)
-        setCheckState((current) =>
-          current?.taskId === task.taskId
-            ? {
-                ...current,
-                phase: 'unknown',
-                message: '无法保存任务核实结果，请恢复浏览器存储后重试。',
-              }
-            : current,
-        );
-    });
+    })()
+      .catch(() => {
+        if (mounted.current && checkOwner.current === userId)
+          setCheckState((current) =>
+            current?.taskId === task.taskId
+              ? {
+                  ...current,
+                  phase: 'unknown',
+                  message: '无法保存任务核实结果，请恢复浏览器存储后重试。',
+                }
+              : current,
+          );
+      })
+      .finally(() => handlingTasks.current.delete(task.taskId));
   }, [
     checkState,
     checkTask.data,
@@ -1228,8 +1233,10 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     const gate = checkState?.gate;
     if (!gate || !recovery || checkRequest.current) return;
     try {
-      const outcome = await recovery.reconcile(gate, (id) =>
-        runtime.tasks.get(id),
+      const outcome = await recovery.reconcile(
+        gate,
+        (id) => runtime.tasks.get(id),
+        refreshCheckedCatalog,
       );
       if (!mounted.current || checkOwner.current !== userId) return;
       if (outcome === 'active') {
@@ -1255,7 +1262,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       if (catalogAccessDenied(error)) reportAccessDenied();
       else
         setNotice(
-          '任务状态仍无法确认，防重记录继续保留。请到任务中心核实后重试读取。',
+          '任务核实或目录重读未完成，防重记录继续保留。请到任务中心核实后重试读取。',
         );
     }
   }

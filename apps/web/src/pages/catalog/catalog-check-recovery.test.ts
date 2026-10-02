@@ -212,6 +212,70 @@ describe('durable immediate check recovery', () => {
     expect(await f.store.clear(old)).toBe(false);
     expect(f.store.read()?.taskId).toBe('task-2');
   });
+  it('accepts a guard already cleared by another tab without removing a replacement', async () => {
+    const f = fixture();
+    await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'pending',
+    }));
+    const gate = f.store.read()!;
+    const otherTab = f.create();
+    expect(await otherTab.clear(gate)).toBe(true);
+    expect(await f.store.clear(gate)).toBe(true);
+    await otherTab.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-2',
+      status: 'pending',
+    }));
+    expect(await f.store.clear(gate)).toBe(false);
+    expect(otherTab.read()?.taskId).toBe('task-2');
+  });
+  it('keeps the guard until the confirmed terminal catalog refresh succeeds', async () => {
+    const f = fixture();
+    await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'pending',
+    }));
+    const gate = f.store.read()!;
+    const refresh = vi.fn(async (): Promise<void> => {
+      expect(f.store.read()).toEqual(gate);
+      throw new ApiError('NETWORK', 'catalog offline');
+    });
+    const readTask = vi.fn(async () => ({
+      taskId: 'task-1',
+      status: 'completed',
+    }));
+    await expect(f.store.reconcile(gate, readTask, refresh)).rejects.toThrow(
+      'catalog offline',
+    );
+    expect(f.store.read()).toEqual(gate);
+    refresh.mockImplementation(async () => {
+      expect(f.store.read()).toEqual(gate);
+    });
+    expect(await f.store.reconcile(gate, readTask, refresh)).toBe('cleared');
+    expect(f.store.read()).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+  it('does not refresh or unlock a task still confirmed active', async () => {
+    const f = fixture();
+    await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'pending',
+    }));
+    const refresh = vi.fn();
+    expect(
+      await f.store.reconcile(
+        f.store.read()!,
+        async () => ({ taskId: 'task-1', status: 'processing' }),
+        refresh,
+      ),
+    ).toBe('active');
+    expect(refresh).not.toHaveBeenCalled();
+    expect(f.store.read()?.taskId).toBe('task-1');
+  });
   it('does not let an old no-ID snapshot unlock a task accepted while reconciliation waited', async () => {
     const f = fixture();
     let initial: ReturnType<typeof f.store.read> = null;
