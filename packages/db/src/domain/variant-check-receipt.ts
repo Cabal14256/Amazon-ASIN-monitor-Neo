@@ -1,5 +1,6 @@
 import {
   batchCheckSyncDataSchema,
+  competitorCheckDataSchema,
   parentAsinQueryItemSchema,
   variantGroupCheckDataSchema,
   variantViewSchema,
@@ -43,6 +44,8 @@ const operationSchema = z
     taskSubType: z.enum([
       'asin-check',
       'variant-group-check',
+      'competitor-asin-check',
+      'competitor-variant-group-check',
       'parent-asin-query',
       'variant-group',
       'primary',
@@ -50,7 +53,14 @@ const operationSchema = z
     step: z
       .string()
       .regex(/^(result|group-(?:0|[1-9]\d{0,2})|monitor-[a-f0-9]{24})$/),
-    resultKind: z.enum(['asin', 'group', 'parent', 'batch']),
+    resultKind: z.enum([
+      'asin',
+      'group',
+      'parent',
+      'batch',
+      'competitor-asin',
+      'competitor-group',
+    ]),
     expiresAt: z.string().datetime(),
   })
   .strict();
@@ -130,6 +140,8 @@ export function parseVariantCheckOperation(
     ![
       'variant-check/asin-check/asin',
       'variant-check/variant-group-check/group',
+      'variant-check/competitor-asin-check/competitor-asin',
+      'variant-check/competitor-variant-group-check/competitor-group',
       'variant-check/parent-asin-query/parent',
       'batch-check/variant-group/group',
       'batch-check/variant-group/batch',
@@ -167,7 +179,9 @@ export function decodeVariantCheckReceiptResult(
       throw new VariantCheckError('capacity');
     const detached: unknown = JSON.parse(raw);
     const schema =
-      kind === 'asin'
+      kind === 'competitor-asin' || kind === 'competitor-group'
+        ? competitorCheckDataSchema
+        : kind === 'asin'
         ? variantViewSchema
         : kind === 'group'
         ? variantGroupCheckDataSchema.required({

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CompetitorCheckStorageModule } from '../competitor/competitor-check-storage.module';
 import { ImportStorageModule } from '../import/import-storage.module';
 import { VariantCheckStorageModule } from '../variant-check/variant-check-storage.module';
 import { WebSocketModule } from '../websocket/websocket.module';
@@ -17,6 +18,7 @@ import { VariantCheckTaskResults } from './variant-check-task-results';
     WebSocketModule,
     ImportStorageModule,
     VariantCheckStorageModule,
+    CompetitorCheckStorageModule,
   ],
   controllers: [
     TaskQueryController,

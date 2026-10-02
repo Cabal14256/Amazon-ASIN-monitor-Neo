@@ -11,6 +11,7 @@ export const CANCELLABLE_TASK_TYPES = [
   'monitor',
   'export',
   'import',
+  'variant-check',
   'batch-check',
   'batch-delete',
   'backup',

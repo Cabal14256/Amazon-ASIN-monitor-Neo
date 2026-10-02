@@ -320,7 +320,7 @@ export const competitorCheckDataSchema = z
   })
   .passthrough();
 export const competitorCheckResultSchema = resultSchema(
-  competitorCheckDataSchema,
+  z.union([competitorCheckDataSchema, variantCheckTaskDataSchema]),
 );
 
 /** 竞对批量检查：同步结果或异步受理 */

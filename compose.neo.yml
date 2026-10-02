@@ -58,6 +58,10 @@ services:
       - ./packages/db/docker/apply-feishu-revision.sh:/opt/asin-monitor/apply-feishu-revision.sh:ro
       - ./packages/db/migrations/0013_feishu_revision.sql:/opt/asin-monitor/0013_feishu_revision.sql:ro
       - ./packages/db/migrations/0013_feishu_revision.rollback.sql:/opt/asin-monitor/0013_feishu_revision.rollback.sql:ro
+      # Competitor immediate-check receipts belong only to the competitor database.
+      - ./packages/db/docker/apply-competitor-check-receipts.sh:/opt/asin-monitor/apply-competitor-check-receipts.sh:ro
+      - ./packages/db/migrations/0014_competitor_check_receipts.sql:/opt/asin-monitor/0014_competitor_check_receipts.sql:ro
+      - ./packages/db/migrations/0014_competitor_check_receipts.rollback.sql:/opt/asin-monitor/0014_competitor_check_receipts.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

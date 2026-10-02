@@ -21,6 +21,7 @@ const CANCELLABLE_TYPES = new Set([
   'monitor',
   'export',
   'import',
+  'variant-check',
   'batch-check',
   'batch-delete',
   'backup',

@@ -24,6 +24,7 @@
 
 - 本地：契约、API `monitor-trigger.test.ts`、Worker `primary-monitor-processor.test.ts`、DB/variant-check 单测，以及构建、格式和 `npm run test:api-url`。
 - 隔离 Linux CI（`RUN_INTEGRATION_TESTS=true`，提供专用 PostgreSQL/Redis）：`packages/variant-check/test/repository.integration.test.ts` 验证组快照、事务历史和重试去重；`apps/worker/test/primary-monitor-entry.integration.test.ts` 启动编译后的 Worker，真实 BullMQ 消费六国请求并检查 PostgreSQL 记录；`apps/api/test/task-query.integration.test.ts` 用两个独立 API runtime 争最后一个监控队列名额。Windows 或缺少两项服务时测试明确跳过，不能视为集成已通过。
+- `apps/worker/test/variant-check-entry.integration.test.ts` 在同一个编译后的 Worker 同时启用 monitor、variant-check、batch-check，真实处理主营监控、普通组检查、竞品组检查和批量检查，核对两库回执与主营历史隔离，并确认正常退出立即删除最后一个 monitor 心跳租约。
 - 回滚先停止 Neo API 新入口和 monitor Worker，记录仍在途的 taskId、通知 `claimed` 状态并处理，避免删除回执后重放旧任务。确认不再需要 Neo 监控任务及其通知对账记录后，在主营库应用 `0012_primary_monitor.rollback.sql`；该脚本删除 Neo 运行快照/通知声明与 `monitor_task_id` 列，不删除既有监控历史、ASIN 或 Legacy 队列。不要在仍有 Neo job 可重试时执行回滚。
 
 本 Issue 跨 contracts、API、Worker、DB、共享检查管线和运行手册，因为真实入队、原子持久化及消费去重必须同时交付；因此超过单 PR 的文件数/模块警戒线。它不包含定时调度、竞品监控、生产 drain 或生产切流。
