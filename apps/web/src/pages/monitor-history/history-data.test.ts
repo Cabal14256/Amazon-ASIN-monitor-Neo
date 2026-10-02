@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
   historyError,
+  historyHasIntervalWindow,
+  historyIntervalPosition,
   historyLinkFilter,
   historyNotification,
   historyPageInfo,
@@ -24,6 +26,27 @@ const record = (
 });
 
 describe('monitor history display boundaries', () => {
+  it('requires a positive, valid wall-clock span for interval requests', () => {
+    const start = '2026-09-01 12:00:00';
+    expect(historyHasIntervalWindow(start, start)).toBe(false);
+    expect(historyHasIntervalWindow(start, '2026-09-01 11:59:59')).toBe(false);
+    expect(historyHasIntervalWindow(start, '2026-09-01 12:00:01')).toBe(true);
+    expect(historyHasIntervalWindow('2026-02-30 12:00:00', start)).toBe(false);
+    expect(historyHasIntervalWindow('', start)).toBe(false);
+  });
+
+  it('explains disabled interval reads and recoverable query timeouts', () => {
+    expect(
+      historyError(
+        new ApiError('HTTP', '状态区间读取已关闭，请联系管理员启用后再试', 503),
+        '状态区间',
+      ),
+    ).toContain('已关闭');
+    expect(
+      historyError(new ApiError('HTTP', 'Gateway timeout', 504), '状态区间'),
+    ).toContain('缩小时间范围');
+  });
+
   it('maps Legacy catalog links to the matching history scope', () => {
     expect(historyLinkFilter('?type=group&id=group-1')).toEqual({
       key: 'variantGroupId',
@@ -88,6 +111,33 @@ describe('monitor history display boundaries', () => {
     expect(historyWallTime('2026-09-23T09:45:30')).toBe('2026-09-23 09:45:30');
     expect(historyWallTime('2026-02-30T09:45')).toBeUndefined();
     expect(historyWallTime('0000-01-01T00:00')).toBeUndefined();
+  });
+
+  it('clips interval bars to the selected Shanghai wall-clock window', () => {
+    expect(
+      historyIntervalPosition(
+        '2026-09-01 06:00:00',
+        '2026-09-01 18:00:00',
+        '2026-09-01 00:00:00',
+        '2026-09-02 00:00:00',
+      ),
+    ).toEqual({ left: '25%', width: '50%' });
+    expect(
+      historyIntervalPosition(
+        '2026-08-31 23:00:00',
+        null,
+        '2026-09-01 00:00:00',
+        '2026-09-02 00:00:00',
+      ),
+    ).toEqual({ left: '0%', width: '100%' });
+    expect(
+      historyIntervalPosition(
+        '2026-09-03 00:00:00',
+        '2026-09-04 00:00:00',
+        '2026-09-01 00:00:00',
+        '2026-09-02 00:00:00',
+      ),
+    ).toBeUndefined();
   });
 
   it.each([
