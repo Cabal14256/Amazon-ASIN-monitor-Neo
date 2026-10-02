@@ -172,6 +172,28 @@ describe('competitor 域', () => {
     expect(parsed.data).toMatchObject({ isBroken: false });
   });
 
+  it.each(['competitor-asin-check', 'competitor-variant-group-check'])(
+    '竞对单项检查支持显式异步受理 %s',
+    (taskType) => {
+      const data = { taskId: 'ct1', status: 'pending', taskType };
+      expect(
+        competitorCheckResultSchema.parse({ success: true, data }).data,
+      ).toEqual(data);
+      for (const invalid of [
+        { taskId: 'ct1' },
+        { status: 'pending' },
+        { ...data, taskId: 1 },
+        { ...data, status: false },
+      ])
+        expect(
+          competitorCheckResultSchema.safeParse({
+            success: true,
+            data: invalid,
+          }).success,
+        ).toBe(false);
+    },
+  );
+
   it('竞对批量检查支持异步受理形态', () => {
     const parsed = competitorBatchCheckResultSchema.parse({
       success: true,

@@ -179,6 +179,11 @@ export class VariantCheckExecutor {
     context: CheckExecutionContext,
   ): Promise<VariantCheckResultReference> {
     const data = parseVariantCheckJob(raw);
+    if (
+      data.taskSubType === 'competitor-asin-check' ||
+      data.taskSubType === 'competitor-variant-group-check'
+    )
+      throw new VariantCheckError('invalid-input');
     const operation = variantCheckJobOperation(data);
     return this.run(context, async (scope) => {
       const existing = await this.read(operation, scope);

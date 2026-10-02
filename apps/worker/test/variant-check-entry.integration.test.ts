@@ -1,6 +1,8 @@
 import { getNeoQueuePrefix, getPhysicalQueueName } from '@asin-monitor/config';
 import type { VariantCheckJobData } from '@asin-monitor/contracts';
 import {
+  createPgPool,
+  PgCompetitorCheckRepository,
   PgVariantCheckRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
@@ -21,14 +23,20 @@ import {
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
 
-/** Real compiled entry, two BullMQ consumers and PG completion storage. Empty
- * groups and a pre-existing parent receipt avoid contacting live Amazon in CI.
+/** Real compiled entry, two BullMQ consumers and isolated PG completion storage.
+ * Empty groups and pre-existing receipts avoid contacting live Amazon in CI.
  * This suite does not prove HTTP submission or live Amazon integration. */
 describe.skipIf(
   process.env.RUN_INTEGRATION_TESTS !== 'true' || process.platform === 'win32',
 )('Compiled check consumers on isolated PostgreSQL and Redis', () => {
   let f: Awaited<ReturnType<typeof maintenanceFixture>>;
   let store: RedisTaskRepository, repository: PgVariantCheckRepository;
+  let competitorPool: ReturnType<typeof createPgPool> | undefined;
+  let competitorBootstrap: ReturnType<typeof createPgPool> | undefined;
+  let competitorRepository: PgCompetitorCheckRepository;
+  let competitorSchema = '';
+  let competitorDatabaseUrl = '';
+  let competitorInstalled = false;
   const queues = new Map<'variant-check' | 'batch-check', Queue>();
   const events = new Map<'variant-check' | 'batch-check', QueueEvents>();
   let child: ChildProcess | undefined,
@@ -67,8 +75,92 @@ describe.skipIf(
     await f.pool.query(
       "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g1','Empty one','US','amazon.com','Fixture'),('g2','Empty two','US','amazon.com','Fixture')",
     );
+    competitorSchema = `competitor_worker_178_${randomUUID().replace(
+      /-/g,
+      '',
+    )}`;
+    if (!/^competitor_worker_178_[a-f0-9]{32}$/.test(competitorSchema))
+      throw new Error('Unexpected competitor fixture schema');
+    competitorBootstrap = createPgPool(process.env.COMPETITOR_DATABASE_URL!, {
+      max: 1,
+      connectionTimeoutMillis: 2000,
+    });
+    const competitorUrl = new URL(process.env.COMPETITOR_DATABASE_URL!);
+    competitorUrl.searchParams.set(
+      'options',
+      `-c search_path=${competitorSchema} -c timezone=UTC`,
+    );
+    competitorDatabaseUrl = competitorUrl.toString();
+    competitorPool = createPgPool(competitorDatabaseUrl, {
+      max: 4,
+      connectionTimeoutMillis: 2000,
+    });
+    const [primaryDatabase, competitorDatabase] = await Promise.all([
+      f.pool.query('SELECT current_database() AS name'),
+      competitorPool.query('SELECT current_database() AS name'),
+    ]);
+    if (primaryDatabase.rows[0]?.name === competitorDatabase.rows[0]?.name)
+      throw new Error('Competitor fixture must use a distinct database');
+    await competitorBootstrap.query(`CREATE SCHEMA ${competitorSchema}`);
+    competitorInstalled = true;
+    if (
+      (await competitorPool.query('SELECT current_schema() AS name')).rows[0]
+        ?.name !== competitorSchema
+    )
+      throw new Error('Competitor fixture escaped private schema');
+    await competitorBootstrap.query(
+      `CREATE TABLE ${competitorSchema}.competitor_variant_groups (LIKE public.competitor_variant_groups INCLUDING ALL)`,
+    );
+    await competitorBootstrap.query(
+      `CREATE TABLE ${competitorSchema}.competitor_asins (LIKE public.competitor_asins INCLUDING ALL EXCLUDING INDEXES)`,
+    );
+    await competitorBootstrap.query(
+      `CREATE TABLE ${competitorSchema}.competitor_monitor_history (LIKE public.competitor_monitor_history INCLUDING ALL)`,
+    );
+    await competitorBootstrap.query(
+      `ALTER TABLE ${competitorSchema}.competitor_asins ADD PRIMARY KEY(id), ADD CONSTRAINT uk_competitor_asins_asin_country UNIQUE(asin,country), ADD CONSTRAINT fk_competitor_asins_variant_group FOREIGN KEY(variant_group_id) REFERENCES ${competitorSchema}.competitor_variant_groups(id) ON DELETE CASCADE`,
+    );
+    let policy = readFileSync(
+      resolve(
+        __dirname,
+        '../../../packages/db/migrations/0011_competitor_write_policy.sql',
+      ),
+      'utf8',
+    );
+    for (const name of [
+      'competitor_variant_groups',
+      'competitor_asins',
+      'set_competitor_update_timestamp',
+      'idx_neo_competitor_write_asin_country',
+    ])
+      policy = policy.replaceAll(
+        `public.${name}`,
+        `${competitorSchema}.${name}`,
+      );
+    const competitorConnection = await competitorPool.connect();
+    try {
+      await competitorConnection.query(policy);
+    } catch (error) {
+      await competitorConnection.query('ROLLBACK');
+      throw error;
+    } finally {
+      competitorConnection.release();
+    }
+    await competitorPool.query(
+      readFileSync(
+        resolve(
+          __dirname,
+          '../../../packages/db/migrations/0014_competitor_check_receipts.sql',
+        ),
+        'utf8',
+      ).replaceAll('public', competitorSchema),
+    );
     store = new RedisTaskRepository(f.redis, f.env);
     repository = new PgVariantCheckRepository(f.pool);
+    competitorRepository = new PgCompetitorCheckRepository(
+      f.pool,
+      competitorPool,
+    );
     for (const name of ['variant-check', 'batch-check'] as const) {
       const queue = new Queue(
         getPhysicalQueueName(name),
@@ -131,7 +223,23 @@ describe.skipIf(
       child = undefined;
       queues.clear();
       events.clear();
-      await f?.close();
+      try {
+        await competitorPool?.end();
+      } finally {
+        try {
+          if (competitorInstalled)
+            await competitorBootstrap?.query(
+              `DROP SCHEMA ${competitorSchema} CASCADE`,
+            );
+        } finally {
+          await competitorBootstrap?.end();
+          await f?.close();
+          competitorPool = undefined;
+          competitorBootstrap = undefined;
+          competitorDatabaseUrl = '';
+          competitorInstalled = false;
+        }
+      }
     }
   });
   async function start() {
@@ -143,6 +251,7 @@ describe.skipIf(
         PROCESS_ROLE: 'worker',
         AUTH_DATA_AUTHORITY: 'postgresql',
         DATABASE_URL: f.env.DATABASE_URL,
+        COMPETITOR_DATABASE_URL: competitorDatabaseUrl,
         REDIS_URL: f.env.REDIS_URL,
         BULL_PREFIX: f.env.BULL_PREFIX,
         WORKER_ENABLED_QUEUES: 'variant-check,batch-check',
@@ -279,5 +388,77 @@ describe.skipIf(
         )
       ).rows[0].count,
     ).toBe(1);
+  }, 30_000);
+  it('routes competitor group checks and completed ASIN retries to the isolated competitor database', async () => {
+    await competitorPool!.query(
+      "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES('cg1','Empty competitor group','US','Fixture')",
+    );
+    const groupJob = await data(
+      'variant-check',
+      'competitor-variant-group-check',
+      {
+        groupId: 'cg1',
+        forceRefresh: true,
+      },
+    );
+    const asinJob = await data('variant-check', 'competitor-asin-check', {
+      asinId: 'ca1',
+      forceRefresh: true,
+    });
+    const completedAsin = {
+      isBroken: false,
+      details: {
+        asin: 'B000000001',
+        result: { hasVariants: true, variantCount: 1 },
+      },
+    };
+    await competitorRepository.transaction((unit) =>
+      unit.saveReceipt(variantCheckJobOperation(asinJob), completedAsin),
+    );
+    await store.mutate(asinJob.taskId, { kind: 'processing' }, asinJob);
+    await start();
+    const groupReference = await enqueue(groupJob);
+    const asinReference = await enqueue(asinJob);
+    expect(groupReference).toMatchObject({ resultKind: 'competitor-group' });
+    expect(asinReference).toMatchObject({ resultKind: 'competitor-asin' });
+    expect((await store.read(groupJob.taskId))?.status).toBe('completed');
+    expect((await store.read(asinJob.taskId))?.status).toBe('completed');
+    const groupResult = await competitorRepository.transaction((unit) =>
+      unit.readReceipt(variantCheckResultOperation(groupJob, groupReference)),
+    );
+    expect(groupResult).toMatchObject({
+      isBroken: true,
+      groupSnapshot: { id: 'cg1' },
+      details: { message: '竞品变体组中没有ASIN' },
+    });
+    expect(
+      await competitorRepository.transaction((unit) =>
+        unit.readReceipt(variantCheckResultOperation(asinJob, asinReference)),
+      ),
+    ).toEqual(completedAsin);
+    expect(
+      (
+        await competitorPool!.query(
+          'SELECT count(*)::int AS count FROM competitor_variant_check_receipts',
+        )
+      ).rows[0].count,
+    ).toBe(2);
+    expect(
+      (
+        await f.pool.query(
+          'SELECT count(*)::int AS count FROM variant_check_receipts',
+        )
+      ).rows[0].count,
+    ).toBe(0);
+    expect(
+      (
+        await competitorPool!.query(
+          'SELECT count(*)::int AS count FROM competitor_monitor_history',
+        )
+      ).rows[0].count,
+    ).toBe(0);
+    expect(await f.redis.lrange(f.legacyKey, 0, -1)).toEqual([
+      'legacy-fixture',
+    ]);
   }, 30_000);
 });

@@ -10,6 +10,7 @@ import type { Redis } from 'ioredis';
 export const CANCELLABLE_TASK_TYPES = [
   'export',
   'import',
+  'variant-check',
   'batch-check',
   'batch-delete',
   'backup',
