@@ -1,4 +1,7 @@
 import {
+  backupCreationFilename,
+  backupCreationReceiptSchema,
+  backupFilenameCreatedAt,
   backupRestoreReceiptSchema,
   variantCheckResultReferenceSchema,
 } from '@asin-monitor/contracts';
@@ -62,6 +65,12 @@ const mutationSchema = z.discriminatedUnion('kind', [
     result: z.unknown().optional(),
     message,
   }),
+  // Only callers with a verified durable publication receipt may use this.
+  z.object({
+    kind: z.literal('backup-create-committed'),
+    result: backupCreationReceiptSchema,
+    message,
+  }),
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
   z.object({
     kind: z.literal('restore-committed'),
@@ -95,7 +104,28 @@ export function transitionTask(
   now: Date,
 ): TaskState {
   const change = mutationSchema.parse(mutation);
-  if (
+  if (change.kind === 'backup-create-committed') {
+    const proof = change.result.backupCreationCommit;
+    if (
+      task.taskType !== 'backup' ||
+      task.taskSubType !== 'create' ||
+      proof.taskId !== task.taskId ||
+      proof.userId !== task.userId ||
+      proof.taskCreatedAt !== task.createdAt ||
+      change.result.filename !==
+        backupCreationFilename(
+          task.taskId,
+          task.createdAt,
+          change.result.target,
+        ) ||
+      change.result.createdAt !==
+        backupFilenameCreatedAt(change.result.filename)
+    )
+      throw new Error('BACKUP_CREATION_TASK_INVALID');
+    // A later cancellation cannot undo the final archive rename. Idempotently
+    // preserve an existing completed result; never affect restore/other tasks.
+    if (task.status === 'completed') return task;
+  } else if (
     change.kind === 'restore-committed' ||
     change.kind === 'restore-confirmed'
   ) {
@@ -160,6 +190,7 @@ export function transitionTask(
       next.message = change.message ?? '任务已取消';
       break;
     case 'completed':
+    case 'backup-create-committed':
     case 'check-completed':
     case 'restore-committed':
     case 'restore-confirmed':
@@ -169,6 +200,7 @@ export function transitionTask(
       next.result = change.result ?? null;
       next.error = null;
       if (
+        change.kind === 'backup-create-committed' ||
         change.kind === 'restore-committed' ||
         change.kind === 'restore-confirmed'
       )

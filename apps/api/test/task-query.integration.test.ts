@@ -30,6 +30,7 @@ import {
   TASK_QUERY_QUEUES,
   TaskQueryRuntime,
 } from '../src/tasks/task-query.runtime';
+import { backupCreationFixture } from './helpers/backup-creation-fixtures';
 import { spApiConfigApp } from './helpers/sp-api-config-app';
 
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
@@ -251,6 +252,57 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await worker.close(true);
       }
     }
+    it('recovers a cancelled creation from actual immutable BullMQ publication data without exposing its proof', async () => {
+      const published = backupCreationFixture(owner.userId);
+      const task = await store.create({
+        taskId: published.data.taskId,
+        userId: owner.userId,
+        taskType: 'backup',
+        taskSubType: 'create',
+      });
+      const source = backupCreationFixture(owner.userId, task.createdAt);
+      await store.mutate(task.taskId, { kind: 'cancelled' });
+      const queue = await queueFor('backup');
+      await queue.add('create', source.data, {
+        jobId: task.taskId,
+        removeOnComplete: false,
+      });
+      const worker = new Worker(queue.name, undefined, {
+        autorun: false,
+        prefix: getNeoQueuePrefix(env),
+        connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+      });
+      worker.on('error', () => undefined);
+      try {
+        await worker.waitUntilReady();
+        const job = await worker.getNextJob('fixture-backup-proof-161', {
+          block: false,
+        });
+        expect(job?.id).toBe(task.taskId);
+        await job!.moveToCompleted(
+          source.result,
+          'fixture-backup-proof-161',
+          false,
+        );
+      } finally {
+        await worker.close(true);
+      }
+      const response = await get(task.taskId);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'completed',
+        result: {
+          filename: source.result.filename,
+          createdAt: source.result.createdAt,
+        },
+      });
+      expect((await store.read(task.taskId))?.status).toBe('completed');
+      expect(response.body).not.toContain('backupCreationCommit');
+      expect(response.body).not.toContain('params');
+      expect(response.body).not.toContain(
+        source.result.backupCreationCommit.creationIdentity,
+      );
+    });
     it('returns only current owner and filters the complete index before limit', async () => {
       await create('active-old');
       await create('foreign', 'export', (await login()).userId);

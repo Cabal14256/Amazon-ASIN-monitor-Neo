@@ -18,17 +18,24 @@ import { BackupController } from '../src/backup/backup.controller';
 import { BackupService } from '../src/backup/backup.service';
 import { configureHttpApp } from '../src/http-app';
 import type { QueueTaskSnapshot } from '../src/tasks/task-query-values';
+import { backupCreationFixture } from './helpers/backup-creation-fixtures';
 import { taskFixture } from './helpers/task-query-fixtures';
 
 const sidecarFailure = vi.hoisted(() => ({
   stat: null as Error | null,
   read: null as Error | null,
 }));
+const archiveFailure = vi.hoisted(() => ({
+  phase: null as 'stat' | 'open' | 'read' | null,
+  error: null as Error | null,
+}));
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return {
     ...fs,
     lstat: async (...args: unknown[]) => {
+      if (archiveFailure.phase === 'stat' && String(args[0]).endsWith('.dump'))
+        throw archiveFailure.error;
       if (sidecarFailure.stat && String(args[0]).endsWith('.meta.json'))
         throw sidecarFailure.stat;
       return Reflect.apply(fs.lstat, fs, args);
@@ -37,6 +44,21 @@ vi.mock('node:fs/promises', async (original) => {
       if (sidecarFailure.read && String(args[0]).endsWith('.meta.json'))
         throw sidecarFailure.read;
       return Reflect.apply(fs.readFile, fs, args);
+    },
+    open: async (...args: unknown[]) => {
+      if (String(args[0]).endsWith('.dump')) {
+        if (archiveFailure.phase === 'open') throw archiveFailure.error;
+        const handle = await Reflect.apply(fs.open, fs, args);
+        if (archiveFailure.phase === 'read')
+          return {
+            read: async () => {
+              throw archiveFailure.error;
+            },
+            close: () => handle.close(),
+          };
+        return handle;
+      }
+      return Reflect.apply(fs.open, fs, args);
     },
   };
 });
@@ -90,6 +112,8 @@ async function writeMetadata(
 }
 
 afterEach(async () => {
+  archiveFailure.phase = null;
+  archiveFailure.error = null;
   sidecarFailure.stat = null;
   sidecarFailure.read = null;
   await Promise.all(
@@ -204,6 +228,54 @@ describe('backup submission HTTP / global exception boundary', () => {
     await app.getHttpAdapter().getInstance().ready();
     return app;
   }
+  it.each(['list', 'restore', 'download'] as const)(
+    'reports native archive I/O failures in actual %s HTTP responses',
+    async (operation) => {
+      const f = await fixture();
+      await writeFile(join(f.directory, filename), 'PGDMPfixture');
+      await writeMetadata(f.directory, 'postgresql');
+      const app = await http(f.service);
+      try {
+        for (const [phase, code] of [
+          ['stat', 'EACCES'],
+          ['open', 'EIO'],
+          ['read', 'ESTALE'],
+        ] as const) {
+          archiveFailure.phase = phase;
+          archiveFailure.error = Object.assign(
+            new Error(`private-token ${f.directory}`),
+            { code },
+          );
+          const response = await app.inject({
+            method: operation === 'restore' ? 'POST' : 'GET',
+            url:
+              operation === 'list'
+                ? '/api/v1/backup'
+                : operation === 'restore'
+                ? '/api/v1/backup/restore'
+                : `/api/v1/backup/${filename}/download`,
+            ...(operation === 'restore' ? { payload: { filename } } : {}),
+          });
+          expect(response.statusCode).toBe(500);
+          expect(f.logger.error).toHaveBeenLastCalledWith(
+            '备份操作失败',
+            'BackupService',
+            { operation, reason: 'backup_operation_failed', code },
+          );
+          expect(
+            response.body + JSON.stringify(f.logger.error.mock.calls),
+          ).not.toContain('private-token');
+          expect(
+            response.body + JSON.stringify(f.logger.error.mock.calls),
+          ).not.toContain(f.directory);
+          expect(f.port.enqueue).not.toHaveBeenCalled();
+        }
+      } finally {
+        archiveFailure.phase = null;
+        await app.close();
+      }
+    },
+  );
   it.each(['create', 'enqueue'] as const)(
     'retains the generated UUID after an uncertain %s acknowledgement',
     async (phase) => {
@@ -279,6 +351,77 @@ describe('backup submission HTTP / global exception boundary', () => {
 });
 
 describe('scheduled backup queue reconciliation and sidecar storage errors', () => {
+  it.each(['cancelling', 'cancelled', 'failed'] as const)(
+    'recovers a scheduled durable creation from %s with shared receipt validation',
+    async (status) => {
+      const f = await fixture();
+      const published = backupCreationFixture(
+        BACKUP_SCHEDULER_USER_ID,
+        createdAt,
+      );
+      let task = taskFixture({
+        ...published.data,
+        status,
+        cancelRequestedAt: createdAt,
+      });
+      f.scheduledStore.listUser.mockImplementation(async () => [task]);
+      f.scheduledPort.findJob.mockResolvedValue({
+        ...task,
+        status: 'completed',
+        result: published.result,
+        backupData: published.data,
+      });
+      f.scheduledStore.mutate.mockImplementation(async (...args: unknown[]) => {
+        task = transitionTask(task, args[1] as never, new Date());
+        return task;
+      });
+      const result = await f.service.scheduledTasks(principal);
+      expect(result).toMatchObject([
+        {
+          status: 'completed',
+          canCancel: false,
+          result: { filename: published.result.filename },
+        },
+      ]);
+      expect(JSON.stringify(result)).not.toContain('backupCreationCommit');
+      expect(JSON.stringify(result)).not.toContain('params');
+    },
+  );
+  it('retries a scheduled receipt after lost CAS ACK and preserves absence of queue proof', async () => {
+    const f = await fixture();
+    const published = backupCreationFixture(
+      BACKUP_SCHEDULER_USER_ID,
+      createdAt,
+    );
+    let task = taskFixture({ ...published.data, status: 'cancelled' });
+    f.scheduledStore.listUser.mockImplementation(async () => [task]);
+    expect(await f.service.scheduledTasks(principal)).toMatchObject([
+      { status: 'cancelled' },
+    ]);
+    expect(f.scheduledStore.mutate).not.toHaveBeenCalled();
+    f.scheduledPort.findJob.mockResolvedValue({
+      ...task,
+      status: 'completed',
+      result: published.result,
+      backupData: published.data,
+    });
+    f.scheduledStore.mutate
+      .mockImplementation(async (...args: unknown[]) => {
+        task = transitionTask(task, args[1] as never, new Date());
+        return task;
+      })
+      .mockRejectedValueOnce(new Error('private-cas-token'));
+    await expect(f.service.scheduledTasks(principal)).rejects.toMatchObject({
+      status: 500,
+    });
+    expect(task.status).toBe('cancelled');
+    expect(await f.service.scheduledTasks(principal)).toMatchObject([
+      { status: 'completed' },
+    ]);
+    expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain(
+      'private-cas',
+    );
+  });
   const scheduled = () =>
     taskFixture({
       taskId: '10000000-0000-4000-8000-000000000161',

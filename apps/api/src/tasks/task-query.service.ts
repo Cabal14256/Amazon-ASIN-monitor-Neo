@@ -9,6 +9,7 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { backupCreationResult } from './backup-creation-result';
 import {
   parseTaskId,
   parseTaskQuery,
@@ -31,10 +32,11 @@ const backupRestoreTask = (task: {
   taskType: string;
   taskSubType?: string | null;
 }) => task.taskType === 'backup' && task.taskSubType === 'restore';
+const backupTask = (task: { taskType: string }) => task.taskType === 'backup';
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed') ||
-  (backupRestoreTask(task) && ['failed', 'cancelled'].includes(task.status));
+  (backupTask(task) && ['failed', 'cancelled'].includes(task.status));
 @Injectable()
 export class TaskQueryService {
   private active = 0;
@@ -93,7 +95,7 @@ export class TaskQueryService {
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (checkTask(task) || backupRestoreTask(task)) {
+    if (checkTask(task) || backupTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -105,10 +107,34 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(checkTask(task) || backupRestoreTask(task)
+      ...(checkTask(task) || backupTask(task)
         ? { taskSubType: task.taskSubType }
         : {}),
     };
+    if (
+      task.taskType === 'backup' &&
+      task.taskSubType === 'create' &&
+      queued.status === 'completed'
+    ) {
+      const receipt = backupCreationResult(task, queued);
+      if (receipt) {
+        ensureOpen();
+        current = await port.store.mutate(
+          task.taskId,
+          {
+            kind: 'backup-create-committed',
+            result: receipt,
+            message: '备份完成（已从队列恢复）',
+          },
+          identity,
+        );
+        ensureOpen();
+        if (!current) fail(404, '任务不存在');
+        this.owner(current, userId);
+        return current;
+      }
+      if (isTerminalTaskStatus(task.status)) return task;
+    }
     if (backupRestoreTask(task) && queued.status === 'completed') {
       const receipt = backupRestoreReceiptSchema.safeParse(queued.result);
       if (receipt.success) {

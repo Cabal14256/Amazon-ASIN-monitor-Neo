@@ -11,6 +11,7 @@ import {
   TaskQueryRuntime,
   type TaskQueryPort,
 } from '../src/tasks/task-query.runtime';
+import { backupCreationFixture } from './helpers/backup-creation-fixtures';
 import { sessionApp } from './helpers/session-app';
 import {
   taskAuthFixture,
@@ -68,6 +69,122 @@ describe('own task query HTTP and bounded reconciliation', () => {
       url: `/api/v1${path}`,
       headers: requestHeaders,
     });
+  it.each(['cancelling', 'cancelled', 'failed'] as const)(
+    'recovers a published create receipt from %s without leaking internal proof in actual HTTP',
+    async (status) => {
+      const published = backupCreationFixture(taskUserId);
+      task = taskFixture({
+        ...published.data,
+        status,
+        result: null,
+        cancelRequestedAt: '2026-09-02T00:00:00.000Z',
+      });
+      rows = [task];
+      queue = {
+        ...task,
+        status: 'completed',
+        result: published.result,
+        backupData: published.data,
+      };
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'completed',
+        result: {
+          filename: published.result.filename,
+          createdAt: published.result.createdAt,
+        },
+      });
+      expect(response.body).not.toContain('backupCreationCommit');
+      expect(response.body).not.toContain('creationIdentity');
+      expect(response.body).not.toContain(
+        published.result.backupCreationCommit.archiveSha256,
+      );
+      expect(response.body).not.toContain('params');
+      expect(port.store.mutate).toHaveBeenCalledWith(
+        task.taskId,
+        expect.objectContaining({ kind: 'backup-create-committed' }),
+        {
+          userId: taskUserId,
+          taskType: 'backup',
+          taskSubType: 'create',
+          createdAt: task.createdAt,
+        },
+      );
+    },
+  );
+  it('retries a lost receipt CAS acknowledgement on the next actual HTTP read', async () => {
+    const published = backupCreationFixture(taskUserId);
+    task = taskFixture({ ...published.data, status: 'cancelled' });
+    queue = {
+      ...task,
+      status: 'completed',
+      result: published.result,
+      backupData: published.data,
+    };
+    vi.mocked(port.store.mutate).mockRejectedValueOnce(
+      new Error('private-redis-token'),
+    );
+    const failed = await get(`/tasks/${task.taskId}`);
+    expect(failed.statusCode).toBe(500);
+    expect(failed.body).not.toContain('private-redis');
+    expect(task.status).toBe('cancelled');
+    const recovered = await get(`/tasks/${task.taskId}`);
+    expect(recovered.json().data.status).toBe('completed');
+  });
+  it.each([null, 'legacy-completion'] as const)(
+    'preserves a cancelled create when queue publication evidence is %s',
+    async (proof) => {
+      const published = backupCreationFixture(taskUserId);
+      task = taskFixture({ ...published.data, status: 'cancelled' });
+      queue = proof
+        ? {
+            ...task,
+            status: 'completed',
+            result: { filename: published.result.filename },
+          }
+        : null;
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.json().data.status).toBe('cancelled');
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'owner',
+    'task',
+    'version',
+    'params',
+    'digest',
+    'target',
+    'restore',
+  ] as const)(
+    'rejects changed creation %s evidence before actual HTTP registry mutation',
+    async (field) => {
+      const published = backupCreationFixture(taskUserId);
+      task = taskFixture({ ...published.data, status: 'cancelled' });
+      const result = structuredClone(published.result);
+      const data = structuredClone(published.data);
+      if (field === 'owner') result.backupCreationCommit.userId = 'foreign';
+      if (field === 'task')
+        result.backupCreationCommit.taskId =
+          '10000000-0000-4000-8000-000000000162';
+      if (field === 'version')
+        (result.backupCreationCommit as { version: number }).version = 2;
+      if (field === 'params') data.params.description = 'changed request';
+      if (field === 'digest')
+        result.backupCreationCommit.creationIdentity = 'f'.repeat(64);
+      if (field === 'target') result.target = 'competitor';
+      if (field === 'restore')
+        Object.assign(data, {
+          operation: 'restore',
+          taskSubType: 'restore',
+          params: { filename: result.filename },
+        });
+      queue = { ...task, status: 'completed', result, backupData: data };
+      expect((await get(`/tasks/${task.taskId}`)).statusCode).toBe(500);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(paths)('requires login: %s', async (path) => {
     expect((await get(path, {} as never)).statusCode).toBe(401);
     expect(runtime.open).not.toHaveBeenCalled();
@@ -173,7 +290,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
-  it('recovers a published creation receipt after registry completion ACK loss', async () => {
+  it('keeps nonterminal recovery compatibility for an older creation queue result without commit proof', async () => {
     task = {
       ...task!,
       taskId: '10000000-0000-4000-8000-000000000161',
@@ -207,6 +324,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
       {
         userId: taskUserId,
         taskType: 'backup',
+        taskSubType: 'create',
         createdAt: task!.createdAt,
       },
     );

@@ -31,6 +31,7 @@ import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
+import { backupCreationResult } from '../tasks/backup-creation-result';
 import type { QueueTaskSnapshot } from '../tasks/task-query-values';
 import { serializeTask } from '../tasks/task-query-values';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
@@ -38,6 +39,7 @@ import {
   backupFilenameTarget,
   deleteBackupFile,
   inspectBackupFile,
+  isUnavailableBackupArtifact,
   listBackupFiles,
   readBackupMetadata,
   resolveBackupPath,
@@ -57,7 +59,19 @@ function filesystemErrorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error))
     return undefined;
   const code = error.code;
-  return typeof code === 'string' && /^E[A-Z0-9_]{1,32}$/.test(code)
+  return typeof code === 'string' &&
+    new Set([
+      'ENOENT',
+      'EACCES',
+      'EPERM',
+      'EIO',
+      'ESTALE',
+      'EROFS',
+      'ENOSPC',
+      'EBUSY',
+      'EMFILE',
+      'ENFILE',
+    ]).has(code)
     ? code
     : undefined;
 }
@@ -256,7 +270,8 @@ export class BackupService implements OnModuleDestroy {
       let fileSize: number;
       try {
         fileSize = (await inspectBackupFile(path)).size;
-      } catch {
+      } catch (error) {
+        if (!isUnavailableBackupArtifact(error)) throw error;
         return fail(404, '备份文件不存在或格式无效');
       }
       if (fileSize > this.env.BACKUP_MAX_BYTES)
@@ -401,7 +416,7 @@ export class BackupService implements OnModuleDestroy {
       for (const task of scheduled) {
         ensureOpen();
         let current = task;
-        if (!isTerminalTaskStatus(task.status)) {
+        if (task.status !== 'completed') {
           const queued = await port.findJob(task.taskId, 'backup');
           ensureOpen();
           const verify = (candidate: TaskState | QueueTaskSnapshot | null) => {
@@ -418,9 +433,23 @@ export class BackupService implements OnModuleDestroy {
           if (queued) {
             verify(queued);
             if (queued.status === 'completed' || queued.status === 'failed') {
+              const creation =
+                queued.status === 'completed'
+                  ? backupCreationResult(task, queued)
+                  : undefined;
+              if (!creation && isTerminalTaskStatus(task.status)) {
+                reconciled.push(task);
+                continue;
+              }
               const recovered = await port.store.mutate(
                 task.taskId,
-                queued.status === 'completed'
+                creation
+                  ? {
+                      kind: 'backup-create-committed',
+                      result: creation,
+                      message: '备份完成（已从队列恢复）',
+                    }
+                  : queued.status === 'completed'
                   ? {
                       kind: 'completed',
                       result: queued.result ?? task.result,
@@ -456,7 +485,8 @@ export class BackupService implements OnModuleDestroy {
       const path = resolveBackupPath(this.directory(), filename);
       try {
         await inspectBackupFile(path);
-      } catch {
+      } catch (error) {
+        if (!isUnavailableBackupArtifact(error)) throw error;
         fail(404, '备份文件不存在');
       }
       const metadata = await readBackupMetadata(this.directory(), filename);

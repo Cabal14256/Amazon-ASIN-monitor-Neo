@@ -73,7 +73,7 @@ afterEach(async () => {
   vi.resetAllMocks();
 });
 
-async function fixture() {
+async function fixture(createdAt = new Date().toISOString()) {
   const directory = await mkdtemp(join(tmpdir(), 'neo-backup-replay-'));
   directories.push(directory);
   const data: BackupJobData = {
@@ -83,7 +83,7 @@ async function fixture() {
     operation: 'create',
     target: 'primary',
     userId: 'backup-owner',
-    createdAt: new Date().toISOString(),
+    createdAt,
     params: { description: 'nightly fixture' },
   };
   let current: TaskState = {
@@ -147,6 +147,10 @@ async function fixture() {
       return current;
     }),
   };
+  const execution = {
+    isClosing: vi.fn(() => false),
+    assertJobLock: vi.fn(async () => undefined),
+  };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const processor = createBackupProcessor(
     store,
@@ -160,8 +164,7 @@ async function fixture() {
         BACKUP_MAX_BYTES: 1024,
       } as never,
       shutdownSignal: new AbortController().signal,
-      isClosing: () => false,
-      assertJobLock: vi.fn(async () => undefined),
+      ...execution,
       updateProgress: vi.fn(async () => undefined),
     },
     log,
@@ -180,6 +183,7 @@ async function fixture() {
     store,
     processor,
     log,
+    execution,
     state: () => current,
     setState: (value: TaskState) => {
       current = value;
@@ -191,6 +195,45 @@ async function fixture() {
 }
 
 describe('creation attempts and durable publication', () => {
+  it.each(['cancelling', 'cancelled', 'failed'] as const)(
+    'recovers a durable publication before respecting later %s metadata',
+    async (status) => {
+      const f = await fixture();
+      const result = await f.processor(f.job, 'lock');
+      f.setState({
+        ...f.state(),
+        status,
+        result: null,
+        cancelRequestedAt: new Date().toISOString(),
+        cancelledAt: status === 'cancelled' ? new Date().toISOString() : null,
+      });
+      f.job.attemptsMade = 1;
+      expect(await f.processor(f.job, 'lock')).toEqual(result);
+      expect(f.state()).toMatchObject({
+        status: 'completed',
+        result,
+        cancelledAt: null,
+      });
+      expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('does not turn a damaged committed archive into a successful cancellation', async () => {
+    const f = await fixture();
+    const result = (await f.processor(f.job, 'lock')) as { filename: string };
+    await writeFile(join(f.directory, result.filename), 'PGDMPcorrupt');
+    f.setState({
+      ...f.state(),
+      status: 'cancelling',
+      result: null,
+      cancelRequestedAt: new Date().toISOString(),
+    });
+    f.job.attemptsMade = 1;
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state().status).not.toBe('completed');
+    expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+  });
   it('stops before a replacement dump when its previous partial cannot be removed', async () => {
     const f = await fixture();
     f.failDumps(1);
@@ -298,7 +341,7 @@ describe('creation attempts and durable publication', () => {
       const mutate = f.store.mutate.getMockImplementation()!;
       let lose = true;
       f.store.mutate.mockImplementation(async (id, change) => {
-        if (lose && change.kind === 'completed') {
+        if (lose && change.kind === 'backup-create-committed') {
           lose = false;
           if (commit) await mutate(id, change);
           throw new Error('private-redis-token');
@@ -314,12 +357,94 @@ describe('creation attempts and durable publication', () => {
       expect(
         JSON.stringify(result) + JSON.stringify(f.log.warn.mock.calls),
       ).not.toContain('private-redis');
+      // No registry completion was committed: model process exit after the
+      // final archive rename, followed by cancellation before redelivery.
+      if (!commit)
+        f.setState({
+          ...f.state(),
+          status: 'cancelling',
+          cancelRequestedAt: new Date().toISOString(),
+        });
       f.job.attemptsMade = 1;
       expect(await f.processor(f.job, 'lock')).toEqual(result);
       expect(dependencies.spawn).toHaveBeenCalledTimes(1);
       expect(f.state().status).toBe('completed');
     },
   );
+  it('recovers a validated published archive after execution lease and shutdown loss without database work', async () => {
+    const f = await fixture();
+    const result = await f.processor(f.job, 'lock');
+    f.setState({ ...f.state(), status: 'processing', result: null });
+    f.execution.isClosing.mockReturnValue(true);
+    f.execution.assertJobLock.mockRejectedValue(
+      new Error('private-lease-token'),
+    );
+    dependencies.pool.mockClear();
+    expect(await f.processor(f.job, 'expired-lock')).toEqual(result);
+    expect(dependencies.pool).not.toHaveBeenCalled();
+    expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+    expect(f.state().status).toBe('completed');
+  });
+  it('accepts cancellation while hashing an already published file and keeps its original recovery point', async () => {
+    const f = await fixture('2026-09-01T16:00:00.123Z');
+    const result = (await f.processor(f.job, 'lock')) as {
+      filename: string;
+      createdAt: string;
+    };
+    f.setState({ ...f.state(), status: 'processing', result: null });
+    const read = f.store.read.getMockImplementation()!;
+    let reads = 0;
+    f.store.read.mockImplementation(async () => {
+      if (++reads === 3)
+        f.setState({
+          ...f.state(),
+          status: 'cancelling',
+          cancelRequestedAt: new Date().toISOString(),
+        });
+      return read();
+    });
+    expect(await f.processor(f.job, 'lock')).toEqual(result);
+    expect(f.state().status).toBe('completed');
+    expect(result.createdAt).toBe('2026-09-01T16:00:00.000Z');
+    expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+  });
+  it('still cancels an unpublished creation without running a dump or database lease', async () => {
+    const f = await fixture();
+    f.setState({
+      ...f.state(),
+      status: 'cancelling',
+      cancelRequestedAt: new Date().toISOString(),
+    });
+    expect(await f.processor(f.job, 'lock')).toMatchObject({ cancelled: true });
+    expect(f.state().status).toBe('cancelled');
+    expect(dependencies.spawn).not.toHaveBeenCalled();
+    expect(dependencies.pool).not.toHaveBeenCalled();
+  });
+  it('fails closed when task ownership changes during published archive verification', async () => {
+    const f = await fixture();
+    await f.processor(f.job, 'lock');
+    f.setState({ ...f.state(), status: 'processing', result: null });
+    const read = f.store.read.getMockImplementation()!;
+    let reads = 0;
+    f.store.read.mockImplementation(async () => {
+      if (++reads === 3)
+        f.setState({ ...f.state(), userId: 'replacement-owner' });
+      return read();
+    });
+    f.job.attemptsMade = 1;
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state()).toMatchObject({
+      userId: 'replacement-owner',
+      status: 'processing',
+      result: null,
+    });
+    expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(f.log.error.mock.calls)).not.toContain(
+      'replacement-owner',
+    );
+  });
   it('refuses a published file when the immutable request differs and does not dump again', async () => {
     const f = await fixture();
     const result = (await f.processor(f.job, 'lock')) as { filename: string };

@@ -86,6 +86,12 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   const failure = status === 'failed' ? '任务执行失败' : null;
   const owner = job.data?.userId;
   let checkOperation: QueueTaskSnapshot['checkOperation'];
+  let backupData: QueueTaskSnapshot['backupData'];
+  if (type === 'backup') {
+    backupData = backupJobDataSchema.parse(job.data);
+    if (backupData.taskId !== job.id || job.name !== backupData.operation)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+  }
   if (['variant-check', 'batch-check'].includes(type)) {
     const data = parseVariantCheckJob(job.data);
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
@@ -94,6 +100,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   }
   return {
     ...(checkOperation ? { checkOperation } : {}),
+    ...(backupData ? { backupData } : {}),
     taskId: job.id!,
     taskType: type,
     userId:

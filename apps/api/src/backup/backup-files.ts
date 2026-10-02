@@ -2,8 +2,8 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   readdir,
+  readFile,
   unlink,
 } from 'node:fs/promises';
 import { basename, resolve, sep } from 'node:path';
@@ -11,6 +11,7 @@ import { basename, resolve, sep } from 'node:path';
 import {
   BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
+  backupFilenameCreatedAt,
   backupFileSchema,
   type BackupDatabaseSettings,
   type BackupFile,
@@ -46,16 +47,29 @@ export function resolveBackupPath(directory: string, filename: string): string {
   return safeBackupPath(directory, filename);
 }
 
+class InvalidBackupArtifact extends Error {}
+
+/** Only a missing or deliberately rejected artifact may be treated as absent. */
+export function isUnavailableBackupArtifact(error: unknown): boolean {
+  return (
+    error instanceof InvalidBackupArtifact ||
+    (typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ENOENT')
+  );
+}
+
 export async function inspectBackupFile(path: string) {
   const details = await lstat(path);
   if (!details.isFile() || details.size < 5)
-    throw new Error('BACKUP_ARTIFACT_INVALID');
+    throw new InvalidBackupArtifact('BACKUP_ARTIFACT_INVALID');
   const file = await open(path, 'r');
   try {
     const header = Buffer.alloc(5);
     const { bytesRead } = await file.read(header, 0, header.length, 0);
     if (bytesRead !== 5 || header.toString('ascii') !== 'PGDMP')
-      throw new Error('BACKUP_ARTIFACT_INVALID');
+      throw new InvalidBackupArtifact('BACKUP_ARTIFACT_INVALID');
   } finally {
     await file.close();
   }
@@ -103,8 +117,9 @@ export async function listBackupFiles(
     let details;
     try {
       details = await inspectBackupFile(path);
-    } catch {
-      continue;
+    } catch (error) {
+      if (isUnavailableBackupArtifact(error)) continue;
+      throw error;
     }
     const target = backupFilenameTarget(entry.name);
     const metadata = await readBackupMetadata(directory, entry.name);
@@ -112,7 +127,10 @@ export async function listBackupFiles(
       ...backupFileSchema.parse({
         filename: entry.name,
         size: details.size,
-        createdAt: details.birthtime.toISOString(),
+        // Re-extraction changes birthtime. Old non-calendar stamps can only
+        // fall back to the mtime retained by tar; they are not newly created.
+        createdAt:
+          backupFilenameCreatedAt(entry.name) ?? details.mtime.toISOString(),
         target,
         format: 'custom',
         sourceEngine: metadata?.sourceEngine,

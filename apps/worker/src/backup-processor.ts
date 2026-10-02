@@ -6,16 +6,21 @@ import {
 import {
   BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
+  backupCreationFilename,
   backupDatabaseSettingsSchema,
+  backupFilenameCreatedAt,
   backupJobDataSchema,
   backupTimescaleManifestSchema,
   sameBackupDatabaseLocale,
+  type BackupArtifactMetadata,
+  type BackupCreationReceipt,
   type BackupDatabaseSettings,
   type BackupJobData,
   type BackupRestoreReceipt,
   type BackupTimescaleManifest,
 } from '@asin-monitor/contracts';
 import {
+  backupCreationIdentity,
   createPgPool,
   isTerminalTaskStatus,
   RedisTaskRepository,
@@ -252,11 +257,16 @@ async function verifyStagingTimeZone(
 async function archiveSha256(
   path: string,
   checkpoint: () => Promise<void>,
+  maxBytes: number,
 ): Promise<string> {
   const hash = createHash('sha256');
   let bytesSinceCheckpoint = 0;
+  let bytes = 0;
   await checkpoint();
   for await (const chunk of createReadStream(path)) {
+    bytes += chunk.length;
+    if (bytes > maxBytes)
+      throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
     hash.update(chunk);
     bytesSinceCheckpoint += chunk.length;
     if (bytesSinceCheckpoint >= 8 * 1024 * 1024) {
@@ -942,7 +952,8 @@ export function createBackupProcessor(
     let metadataPublishedPath: string | undefined;
     let publishedStagingDatabase: string | undefined;
     let committedRestore: BackupRestoreReceipt | undefined;
-    let publishedCreation: Record<string, unknown> | undefined;
+    let publishedCreation: BackupCreationReceipt | undefined;
+    let publishedCreationObserved = false;
     let cleanupFailed = false;
     const cleanupOwnedArtifact = async (
       path: string,
@@ -971,17 +982,82 @@ export function createBackupProcessor(
         return false;
       }
     };
-    const creationIdentity = createHash('sha256')
-      .update(
-        JSON.stringify([
-          data.taskId,
-          data.userId,
-          data.createdAt,
-          data.target,
-          data.params,
-        ]),
+    const creationIdentity =
+      data.operation === 'create' ? backupCreationIdentity(data) : undefined;
+    const directory = resolve(getBackupStorageDirectory(options.env));
+    const creationFilename =
+      data.operation === 'create'
+        ? backupCreationFilename(data.taskId, data.createdAt, data.target)
+        : undefined;
+    const resultFor = (
+      metadata: BackupArtifactMetadata & { archiveSha256: string },
+      details: { size: number },
+    ): BackupCreationReceipt => ({
+      operation: 'create',
+      filename: creationFilename!,
+      size: details.size,
+      createdAt: backupFilenameCreatedAt(creationFilename!)!,
+      target: data.target,
+      format: 'custom',
+      sourceEngine: metadata.sourceEngine,
+      restoreSupported: true,
+      ...(metadata.version !== 1 && metadata.description
+        ? { description: metadata.description }
+        : {}),
+      backupCreationCommit: {
+        version: 1,
+        taskId: data.taskId,
+        userId: data.userId,
+        taskCreatedAt: data.createdAt,
+        creationIdentity: creationIdentity!,
+        archiveSha256: metadata.archiveSha256,
+      },
+    });
+    const recoverPublishedCreation = async (): Promise<boolean> => {
+      if (!creationFilename) return false;
+      const output = resolve(directory, creationFilename);
+      try {
+        await lstat(output);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+        publishedCreationObserved = true;
+        throw error;
+      }
+      publishedCreationObserved = true;
+      const metadata = await readBackupArtifactMetadataFile(
+        `${output}.meta.json`,
+      );
+      if (
+        (metadata.version !== 3 && metadata.version !== 4) ||
+        metadata.creationIdentity !== creationIdentity ||
+        metadata.filename !== creationFilename ||
+        metadata.target !== data.target
       )
-      .digest('hex');
+        throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
+      const details = await assertCustomDump(
+        output,
+        options.env.BACKUP_MAX_BYTES,
+      );
+      // Recovery reads an already committed artifact and original identity. It
+      // neither needs the expired execution lease nor starts database work.
+      if (
+        (await archiveSha256(
+          output,
+          async () => {
+            verify(await store.read(data.taskId));
+          },
+          options.env.BACKUP_MAX_BYTES,
+        )) !== metadata.archiveSha256
+      )
+        throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+      publishedCreation = resultFor(metadata, details);
+      await mutate({
+        kind: 'backup-create-committed',
+        result: publishedCreation,
+        message: '备份完成（已恢复发布结果）',
+      });
+      return true;
+    };
     const finishIsolatedRestore = async (
       restoredDatabase: string,
       filename: string,
@@ -1020,6 +1096,8 @@ export function createBackupProcessor(
       await options.updateProgress(job, value);
     };
     try {
+      verify(await store.read(data.taskId));
+      if (await recoverPublishedCreation()) return publishedCreation;
       const initial = await check();
       if (
         data.operation === 'restore' &&
@@ -1035,85 +1113,18 @@ export function createBackupProcessor(
         lock.hasTimescale
       )
         throw new BackupCommandError('BACKUP_TIMESCALE_TABLE_DUMP_UNSUPPORTED');
-      const directory = resolve(getBackupStorageDirectory(options.env));
       await mkdir(directory, { recursive: true });
       const databaseUrl = targetUrl(options.env, data.target);
       const environment = commandEnvironment(databaseUrl);
       const timeoutMs = options.env.BACKUP_COMMAND_TIMEOUT_MS;
       const maxBytes = options.env.BACKUP_MAX_BYTES;
       if (data.operation === 'create') {
-        const stamp = new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'Asia/Shanghai',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false,
-        })
-          .formatToParts(new Date(data.createdAt))
-          .reduce<Record<string, string>>((out, part) => {
-            if (part.type !== 'literal') out[part.type] = part.value;
-            return out;
-          }, {});
-        const filename = `backup_${stamp.year}${stamp.month}${stamp.day}-${
-          stamp.hour
-        }${stamp.minute}${stamp.second}-${data.taskId
-          .replaceAll('-', '')
-          .toLowerCase()}-${data.target}.dump`;
+        const filename = creationFilename!;
         const output = resolve(directory, basename(filename));
         const partial = `${output}.partial`;
-        const resultFor = (
-          metadata: { sourceEngine: string; description?: string },
-          details: { size: number; birthtime: Date },
-        ) => ({
-          operation: 'create' as const,
-          filename,
-          size: details.size,
-          createdAt: details.birthtime.toISOString(),
-          target: data.target,
-          format: 'custom' as const,
-          sourceEngine: metadata.sourceEngine,
-          restoreSupported: true,
-          ...(metadata.description
-            ? { description: metadata.description }
-            : {}),
-        });
-        let existing = false;
-        try {
-          await lstat(output);
-          existing = true;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
-        }
-        if (existing) {
-          const metadata = await readBackupArtifactMetadataFile(
-            `${output}.meta.json`,
-          );
-          if (
-            (metadata.version !== 3 && metadata.version !== 4) ||
-            metadata.creationIdentity !== creationIdentity ||
-            metadata.filename !== filename ||
-            metadata.target !== data.target
-          )
-            throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
-          const details = await assertCustomDump(output, maxBytes);
-          if (
-            (await archiveSha256(output, async () => {
-              await check();
-              await lock.ensureHeld();
-            })) !== metadata.archiveSha256
-          )
-            throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
-          publishedCreation = resultFor(metadata, details);
-          const completed = await mutate({
-            kind: 'completed',
-            result: publishedCreation,
-            message: '备份完成（已恢复发布结果）',
-          });
-          return completed.result;
-        }
+        // Re-check after obtaining the lease: a previous publisher may have
+        // committed between the initial read and advisory lock acquisition.
+        if (await recoverPublishedCreation()) return publishedCreation;
         // The target lease excludes another active publisher. Partial names
         // contain the full immutable task UUID, so an interrupted attempt can
         // clean only its own unpublished files before starting another dump.
@@ -1174,10 +1185,14 @@ export function createBackupProcessor(
           throw new BackupCommandError('BACKUP_TIMESCALE_SCHEMA_CHANGED');
         await chmod(partial, 0o600);
         await progress(96, '正在校验备份文件');
-        const digest = await archiveSha256(partial, async () => {
-          await check();
-          await lock.ensureHeld();
-        });
+        const digest = await archiveSha256(
+          partial,
+          async () => {
+            await check();
+            await lock.ensureHeld();
+          },
+          maxBytes,
+        );
         const metadata = backupArtifactMetadataSchema.parse(
           sourceManifest
             ? {
@@ -1227,9 +1242,11 @@ export function createBackupProcessor(
         await rename(partial, output);
         artifactPath = undefined;
         metadataPublishedPath = undefined;
+        if (metadata.version !== 3 && metadata.version !== 4)
+          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
         publishedCreation = resultFor(metadata, details);
         const completed = await mutate({
-          kind: 'completed',
+          kind: 'backup-create-committed',
           result: publishedCreation,
           message: '备份完成',
         });
@@ -1264,10 +1281,14 @@ export function createBackupProcessor(
       if (metadata.version !== 3 && metadata.version !== 4)
         throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
       if (
-        (await archiveSha256(input, async () => {
-          await check();
-          await lock.ensureHeld();
-        })) !== metadata.archiveSha256
+        (await archiveSha256(
+          input,
+          async () => {
+            await check();
+            await lock.ensureHeld();
+          },
+          maxBytes,
+        )) !== metadata.archiveSha256
       )
         throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
       if (metadata.sourceEngine === 'timescaledb') {
@@ -1468,7 +1489,8 @@ export function createBackupProcessor(
             error instanceof BackupCommandError &&
             error.reason === 'BACKUP_RESTORE_CLEANUP_FAILED'
           ) &&
-          !publishedStagingDatabase
+          !publishedStagingDatabase &&
+          !publishedCreationObserved
         ) {
           await mutate({ kind: 'cancelled', message: cancelledResult.message });
           cancelled = true;

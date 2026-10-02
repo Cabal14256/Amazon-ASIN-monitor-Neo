@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   backupArtifactMetadataSchema,
   backupConfigResultSchema,
+  backupCreationFilename,
+  backupCreationReceiptSchema,
+  backupFilenameCreatedAt,
   backupFilenameSchema,
   backupJobDataSchema,
   backupListResultSchema,
@@ -79,6 +82,70 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('keeps Shanghai midnight filenames and rejects rolled calendar dates as recovery points', () => {
+    const filename = backupCreationFilename(
+      '10000000-0000-4000-8000-000000000161',
+      '2026-09-01T16:00:00.123Z',
+      'primary',
+    );
+    expect(backupFilenameCreatedAt(filename)).toBe('2026-09-01T16:00:00.000Z');
+    expect(
+      backupFilenameCreatedAt('backup_20260902-240001-abcdef01-primary.dump'),
+    ).toBe('2026-09-01T16:00:01.000Z');
+    for (const invalid of [
+      '20260230-020000',
+      '20261301-020000',
+      '20260902-250000',
+      '20260902-020060',
+    ])
+      expect(
+        backupFilenameCreatedAt(`backup_${invalid}-abcdef01-primary.dump`),
+      ).toBeUndefined();
+  });
+  it('bounds the private durable creation proof and rejects restore or unknown proof fields', () => {
+    const result = {
+      operation: 'create',
+      format: 'custom',
+      target: 'primary',
+      size: 12,
+      filename:
+        'backup_20260901-080000-10000000000040008000000000000161-primary.dump',
+      createdAt: '2026-09-01T00:00:00.000Z',
+      sourceEngine: 'postgresql',
+      restoreSupported: true,
+      backupCreationCommit: {
+        version: 1,
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: 'owner',
+        taskCreatedAt: '2026-09-01T00:00:00.000Z',
+        creationIdentity: 'a'.repeat(64),
+        archiveSha256: 'b'.repeat(64),
+      },
+    };
+    expect(backupCreationReceiptSchema.parse(result)).toEqual(result);
+    for (const changed of [
+      { ...result, operation: 'restore' },
+      {
+        ...result,
+        backupCreationCommit: { ...result.backupCreationCommit, version: 2 },
+      },
+      {
+        ...result,
+        backupCreationCommit: {
+          ...result.backupCreationCommit,
+          archiveSha256: 'private-token',
+        },
+      },
+      {
+        ...result,
+        backupCreationCommit: {
+          ...result.backupCreationCommit,
+          params: { password: 'private-token' },
+        },
+      },
+    ])
+      expect(() => backupCreationReceiptSchema.parse(changed)).toThrow();
+  });
   it('accepts complete UUID filenames and binds creation metadata to a bounded digest', () => {
     const filename =
       'backup_20261002-020000-10000000000040008000000000000161-primary.dump';

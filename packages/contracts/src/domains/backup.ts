@@ -44,6 +44,51 @@ export const backupFilenameSchema = z
   );
 export type BackupFilename = z.infer<typeof backupFilenameSchema>;
 
+/** The worker's immutable Shanghai timestamp, independent of host timezone. */
+export function backupCreationFilename(
+  taskId: string,
+  createdAt: string,
+  target: BackupTarget,
+): string {
+  const stamp = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+    .formatToParts(new Date(createdAt))
+    .reduce<Record<string, string>>((out, part) => {
+      if (part.type !== 'literal') out[part.type] = part.value;
+      return out;
+    }, {});
+  return `backup_${stamp.year}${stamp.month}${stamp.day}-${stamp.hour}${
+    stamp.minute
+  }${stamp.second}-${taskId.replaceAll('-', '').toLowerCase()}-${target}.dump`;
+}
+
+/** Older Intl h24 filenames encode midnight as 24 on that calendar day. */
+export function backupFilenameCreatedAt(filename: string): string | undefined {
+  if (!backupFilenameSchema.safeParse(filename).success) return undefined;
+  const parts = /^backup_(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(
+    filename,
+  );
+  if (!parts) return undefined;
+  const [, year, month, day, rawHour, minute, second] = parts;
+  const hour = rawHour === '24' ? '00' : rawHour;
+  const local = `${year}-${month}-${day}T${hour}:${minute}:${second}.000`;
+  const value = Date.parse(`${local}+08:00`);
+  if (
+    !Number.isFinite(value) ||
+    new Date(value + 8 * 3600_000).toISOString().slice(0, 23) !== local
+  )
+    return undefined;
+  return new Date(value).toISOString();
+}
+
 /** Sidecar written atomically with each new dump. Missing metadata is unsafe
  * for automated restore, including artifacts from an older Neo deployment. */
 const backupArtifactMetadataV1Schema = z
@@ -361,6 +406,33 @@ export const backupJobDataSchema = z
       });
   });
 export type BackupJobData = z.infer<typeof backupJobDataSchema>;
+
+/** Private queue/registry proof emitted only after complete durable publication
+ * validation. The API must remove backupCreationCommit from public results. */
+export const backupCreationReceiptSchema = z
+  .object({
+    operation: z.literal('create'),
+    filename: backupFilenameSchema,
+    format: backupArtifactFormatSchema,
+    target: backupTargetSchema,
+    size: z.number().int().min(5),
+    createdAt: z.string().datetime(),
+    sourceEngine: backupSourceEngineSchema,
+    restoreSupported: z.literal(true),
+    description: z.string().max(500).optional(),
+    backupCreationCommit: z
+      .object({
+        version: z.literal(1),
+        taskId: z.string().uuid(),
+        userId: z.string().min(1).max(200),
+        taskCreatedAt: z.string().datetime(),
+        creationIdentity: backupArchiveSha256Schema,
+        archiveSha256: backupArchiveSha256Schema,
+      })
+      .strict(),
+  })
+  .strict();
+export type BackupCreationReceipt = z.infer<typeof backupCreationReceiptSchema>;
 
 /** POST /backup、POST /backup/restore：同步结果或异步任务受理 */
 export const backupTaskDataSchema = z.object({

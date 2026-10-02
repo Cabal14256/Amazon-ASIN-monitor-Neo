@@ -1,5 +1,12 @@
 import { BACKUP_ARTIFACT_METADATA_MAX_BYTES } from '@asin-monitor/contracts';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -11,6 +18,52 @@ import {
 } from '../src/backup/backup-files';
 
 describe('backup file boundary', () => {
+  it('retains the Shanghai filename recovery point when an old archive is extracted today', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filenames = [
+      'backup_20260927-020000-abcdef01-primary.dump',
+      'backup_20260928-000000-10000000000040008000000000000161-primary.dump',
+      'backup_20260929-240000-abcdef03-primary.dump',
+    ];
+    try {
+      for (const filename of filenames) {
+        await writeFile(join(directory, filename), 'PGDMPfixture');
+        // A transferred tar can retain mtime while the new filesystem assigns
+        // today's birthtime. Neither should replace the immutable filename.
+        await utimes(
+          join(directory, filename),
+          new Date(),
+          new Date('2026-09-01T00:00:00Z'),
+        );
+      }
+      expect(
+        (await listBackupFiles(directory)).map(({ filename, createdAt }) => ({
+          filename,
+          createdAt,
+        })),
+      ).toEqual([
+        { filename: filenames[2], createdAt: '2026-09-28T16:00:00.000Z' },
+        { filename: filenames[1], createdAt: '2026-09-27T16:00:00.000Z' },
+        { filename: filenames[0], createdAt: '2026-09-26T18:00:00.000Z' },
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it('uses preserved mtime for an older filename with an invalid calendar stamp', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filename = 'backup_20260230-020000-abcdef01-primary.dump';
+    try {
+      await writeFile(join(directory, filename), 'PGDMPfixture');
+      const recoveryPoint = new Date('2026-02-28T18:00:00.000Z');
+      await utimes(join(directory, filename), recoveryPoint, recoveryPoint);
+      expect(await listBackupFiles(directory)).toMatchObject([
+        { filename, createdAt: recoveryPoint.toISOString() },
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('keeps expected absent, malformed and schema-invalid sidecars unrestorable', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
     const filename = 'backup_20260927-020000-abcdef01-primary.dump';
