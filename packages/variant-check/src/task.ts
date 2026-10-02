@@ -26,7 +26,11 @@ export function variantCheckJobOperation(
   groupIndex?: number,
 ): VariantCheckOperation {
   const kind =
-    data.taskSubType === 'asin-check'
+    data.taskSubType === 'competitor-asin-check'
+      ? 'competitor-asin'
+      : data.taskSubType === 'competitor-variant-group-check'
+      ? 'competitor-group'
+      : data.taskSubType === 'asin-check'
       ? 'asin'
       : data.taskSubType === 'parent-asin-query'
       ? 'parent'

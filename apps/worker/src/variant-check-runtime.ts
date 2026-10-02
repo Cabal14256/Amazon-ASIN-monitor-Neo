@@ -5,6 +5,7 @@ import {
 } from '@asin-monitor/config';
 import {
   createPgPool,
+  PgCompetitorCheckRepository,
   PgSpApiConfigurationRepository,
   PgVariantCheckRepository,
   RedisTaskRepository,
@@ -14,7 +15,11 @@ import {
   NodeHttpTransport,
   SpApiRuntime,
 } from '@asin-monitor/sp-api';
-import { VariantCheckRuntime } from '@asin-monitor/variant-check';
+import {
+  CompetitorCheckRuntime,
+  parseVariantCheckJob,
+  VariantCheckRuntime,
+} from '@asin-monitor/variant-check';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { logger } from './logger';
@@ -62,9 +67,24 @@ export async function startVariantCheckRuntime(
     ),
     statement_timeout: 1500,
   });
+  const competitorPool = selected.includes('variant-check')
+    ? createPgPool(env.COMPETITOR_DATABASE_URL, {
+        max: 8,
+        connectionTimeoutMillis: Math.min(
+          env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+          2000,
+        ),
+        statement_timeout: 5000,
+      })
+    : undefined;
   pool.on('error', () =>
     logger.error('检查数据库连接异常', {
       reason: 'variant_check_database_error',
+    }),
+  );
+  competitorPool?.on('error', () =>
+    logger.error('竞品检查数据库连接异常', {
+      reason: 'competitor_check_database_error',
     }),
   );
   const shutdown = new AbortController();
@@ -72,7 +92,8 @@ export async function startVariantCheckRuntime(
     workers: Worker[] = [];
   let source: DatabaseConfigSource | undefined,
     spApi: SpApiRuntime | undefined,
-    runtime: VariantCheckRuntime | undefined;
+    runtime: VariantCheckRuntime | undefined,
+    competitorRuntime: CompetitorCheckRuntime | undefined;
   let transport: NodeHttpTransport | undefined,
     htmlTransport: NodeHttpTransport | undefined;
   let closing = false,
@@ -87,6 +108,7 @@ export async function startVariantCheckRuntime(
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
     runtime?.close();
+    competitorRuntime?.close();
     spApi?.close();
     source?.close();
     transport?.close();
@@ -141,6 +163,17 @@ export async function startVariantCheckRuntime(
       batchThreshold: env.MONITOR_BATCH_ASIN_THRESHOLD,
       batchConcurrency: env.BATCH_CHECK_GROUP_CONCURRENCY,
     });
+    const competitorRepository = competitorPool
+      ? new PgCompetitorCheckRepository(pool, competitorPool)
+      : undefined;
+    if (competitorRepository)
+      competitorRuntime = new CompetitorCheckRuntime({
+        spApi,
+        redis: control,
+        repository: competitorRepository,
+        logger,
+        prefix: getNeoQueuePrefix(env),
+      });
     const business = runtime;
     const store = new RedisTaskRepository(
       control,
@@ -155,6 +188,10 @@ export async function startVariantCheckRuntime(
       ensureOpen();
       // Require the primary completion-table upgrade before registering consumers.
       await repository.transaction((unit) => unit.purgeExpiredReceipts());
+      if (competitorRepository)
+        await competitorRepository.transaction((unit) =>
+          unit.purgeExpiredReceipts(),
+        );
       ensureOpen();
       for (const name of new Set(selected)) {
         const queue = new Queue(
@@ -171,28 +208,40 @@ export async function startVariantCheckRuntime(
         ensureOpen();
         const worker = new Worker(
           getPhysicalQueueName(name),
-          createVariantCheckProcessor(business.executor, store, {
-            taskType: name,
-            shutdownSignal: shutdown.signal,
-            assertJobLock: async (job, token) => {
-              if (
-                !token ||
-                !job.id ||
-                (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
-              )
-                throw new Error('CHECK_JOB_LOCK_LOST');
+          createVariantCheckProcessor(
+            {
+              execute: (raw, context) => {
+                const data = parseVariantCheckJob(raw);
+                return data.taskSubType === 'competitor-asin-check' ||
+                  data.taskSubType === 'competitor-variant-group-check'
+                  ? competitorRuntime!.executor.execute(data, context)
+                  : business.executor.execute(data, context);
+              },
             },
-            updateProgress: async (job, value) => {
-              const current = await queue.getJob(job.id!);
-              if (
-                !current ||
-                current.data?.createdAt !== job.data.createdAt ||
-                current.data?.userId !== job.data.userId
-              )
-                throw new Error('CHECK_JOB_IDENTITY_CHANGED');
-              await current.updateProgress(value);
+            store,
+            {
+              taskType: name,
+              shutdownSignal: shutdown.signal,
+              assertJobLock: async (job, token) => {
+                if (
+                  !token ||
+                  !job.id ||
+                  (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
+                )
+                  throw new Error('CHECK_JOB_LOCK_LOST');
+              },
+              updateProgress: async (job, value) => {
+                const current = await queue.getJob(job.id!);
+                if (
+                  !current ||
+                  current.data?.createdAt !== job.data.createdAt ||
+                  current.data?.userId !== job.data.userId
+                )
+                  throw new Error('CHECK_JOB_IDENTITY_CHANGED');
+                await current.updateProgress(value);
+              },
             },
-          }),
+          ),
           { ...getWorkerOptions(name, env, connection), autorun: false },
         );
         workers.push(worker);
@@ -230,7 +279,16 @@ export async function startVariantCheckRuntime(
         const removed = await repository.transaction((unit) =>
           unit.purgeExpiredReceipts(),
         );
+        const competitorRemoved = competitorRepository
+          ? await competitorRepository.transaction((unit) =>
+              unit.purgeExpiredReceipts(),
+            )
+          : 0;
         if (removed) logger.info('过期检查结果已清理', { removed });
+        if (competitorRemoved)
+          logger.info('过期竞品检查结果已清理', {
+            removed: competitorRemoved,
+          });
       } catch {
         if (!closing)
           logger.warn('检查结果清理暂不可用', {
@@ -257,6 +315,7 @@ export async function startVariantCheckRuntime(
             await Promise.allSettled([
               ...queues.map((queue) => queue.close()),
               pool.end(),
+              ...(competitorPool ? [competitorPool.end()] : []),
             ]);
             control.disconnect(false);
           }
@@ -271,6 +330,7 @@ export async function startVariantCheckRuntime(
       ...workers.map((worker) => worker.close(true)),
       ...queues.map((queue) => queue.close()),
       pool.end(),
+      ...(competitorPool ? [competitorPool.end()] : []),
     ]);
     throw new Error('Variant check initialization failed');
   } finally {

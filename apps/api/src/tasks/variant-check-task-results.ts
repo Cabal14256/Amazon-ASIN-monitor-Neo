@@ -1,12 +1,14 @@
 import { variantCheckResultReferenceSchema } from '@asin-monitor/contracts';
 import {
   VariantCheckError,
+  type CompetitorCheckRepositoryPort,
   type VariantCheckRepositoryPort,
 } from '@asin-monitor/db';
 import { variantCheckResultOperation } from '@asin-monitor/variant-check';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import { COMPETITOR_CHECK_REPOSITORY } from '../competitor/competitor-check-storage.module';
 import { VARIANT_CHECK_REPOSITORY } from '../variant-check/variant-check-storage.module';
 
 type OwnedCheckTask = Parameters<typeof variantCheckResultOperation>[0] & {
@@ -48,6 +50,8 @@ export class VariantCheckTaskResults {
   constructor(
     @Inject(VARIANT_CHECK_REPOSITORY)
     private readonly repository: VariantCheckRepositoryPort,
+    @Inject(COMPETITOR_CHECK_REPOSITORY)
+    private readonly competitorRepository: CompetitorCheckRepositoryPort,
   ) {}
   isReference(value: unknown): boolean {
     return variantCheckResultReferenceSchema.safeParse(value).success;
@@ -65,7 +69,14 @@ export class VariantCheckTaskResults {
     try {
       ensureOpen();
       const operation = variantCheckResultOperation(task, task.result);
-      const result = await this.repository.transaction(async (unit) => {
+      const read = async (
+        unit: {
+          readReceipt: (
+            value: typeof operation,
+            lock?: boolean,
+          ) => Promise<unknown | undefined>;
+        } & Parameters<typeof authorizeAdministration>[0],
+      ) => {
         ensureOpen();
         await authorizeAdministration(unit, principal, 'asin:read');
         // Recovery waits for an in-flight COMMIT before concluding that no
@@ -74,7 +85,12 @@ export class VariantCheckTaskResults {
         await authorizeAdministration(unit, principal, 'asin:read');
         ensureOpen();
         return value;
-      });
+      };
+      const result =
+        operation.resultKind === 'competitor-asin' ||
+        operation.resultKind === 'competitor-group'
+          ? await this.competitorRepository.transaction(read)
+          : await this.repository.transaction(read);
       if (result === undefined) {
         if (allowMissing) return undefined;
         fail(404, '检查结果不存在或已过期');
