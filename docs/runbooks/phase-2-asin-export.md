@@ -26,4 +26,5 @@
 ## 验证与回滚
 
 - 运行 `corepack pnpm --filter contracts test`、`corepack pnpm --filter export test`、`corepack pnpm --filter api test`、`corepack pnpm --filter worker test`、`corepack pnpm build:api`、`corepack pnpm build:worker`。隔离 PostgreSQL/Redis 集成测试需设置 `RUN_INTEGRATION_TESTS=true` 和仓库测试环境变量；API 集成测试使用编译后的 Worker 文件、独立 PostgreSQL schema、唯一 Redis 前缀及临时导出目录。
+- 启动故障测试使用操作系统临时目录创建私有夹具，真实文件存储校验同样覆盖 Windows 和 Linux；队列或消费者未就绪仍必须在原 5 秒截止清理全部已分配连接。真实 BullMQ 保留期测试分别验证监控与导出成功/失败回执在 7 天和 14 天元数据期限内保留原始任务身份、到期后清理，不仅验证配置对象。
 - 回滚时停止 API 创建此类型的 Neo 任务并停止 Neo `export` Worker，保留共享卷直到已创建任务的下载/保留期结束，再按任务元数据和队列状态清理。Legacy SSE 导出始终可用；没有数据库结构变化或数据回滚步骤。

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => ({
   stalled: 'queue' as 'queue' | 'worker' | 'none',
-  directory: 'C:\\fixture-exports',
+  directory: '',
   tasks: new Map<string, { status: string }>(),
   queueClosed: 0,
   workerClosed: 0,
@@ -112,7 +112,7 @@ afterEach(async () => {
   fixture.redisDisconnected = 0;
   fixture.poolEnded = 0;
   fixture.tasks.clear();
-  fixture.directory = 'C:\\fixture-exports';
+  fixture.directory = '';
   for (const directory of directories.splice(0)) {
     if (
       dirname(resolve(directory)) !== resolve(tmpdir()) ||
@@ -179,6 +179,8 @@ describe('ASIN export startup deadline', () => {
     'closes every owned connection when %s readiness stalls',
     async (stalled) => {
       fixture.stalled = stalled;
+      fixture.directory = await mkdtemp(join(tmpdir(), 'neo-export-runtime-'));
+      directories.push(fixture.directory);
       vi.useFakeTimers();
       const start = startAsinExportRuntime(env, vi.fn());
       const failed = expect(start).rejects.toThrow(
