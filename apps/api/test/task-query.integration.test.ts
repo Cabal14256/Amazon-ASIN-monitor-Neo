@@ -338,6 +338,74 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         source.result.backupCreationCommit.creationIdentity,
       );
     });
+    it.each(['cancelled', 'failed'] as const)(
+      'preserves terminal restore %s after a real completed BullMQ cancellation marker',
+      async (status) => {
+        const task = await store.create({
+          taskId: randomUUID(),
+          userId: owner.userId,
+          taskType: 'backup',
+          taskSubType: 'restore',
+        });
+        await store.mutate(
+          task.taskId,
+          status === 'cancelled'
+            ? { kind: 'cancelled', message: '备份任务已取消' }
+            : { kind: 'failed', message: '恢复未提交' },
+        );
+        const before = await redis.get(metaKey(task.taskId));
+        const data = backupJobDataSchema.parse({
+          taskId: task.taskId,
+          userId: owner.userId,
+          createdAt: task.createdAt,
+          taskType: 'backup',
+          taskSubType: 'restore',
+          operation: 'restore',
+          target: 'primary',
+          params: { filename: 'backup_20260927-230000-1234abcd-primary.dump' },
+        });
+        const queue = await queueFor('backup');
+        await queue.add('restore', data, {
+          jobId: task.taskId,
+          removeOnComplete: false,
+        });
+        const worker = new Worker(queue.name, undefined, {
+          autorun: false,
+          prefix: getNeoQueuePrefix(env),
+          connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+        });
+        worker.on('error', () => undefined);
+        try {
+          await worker.waitUntilReady();
+          const queued = await worker.getNextJob(
+            'fixture-restore-cancellation-161',
+            { block: false },
+          );
+          expect(queued?.id).toBe(task.taskId);
+          await queued!.moveToCompleted(
+            { cancelled: true, message: '备份任务已取消' },
+            'fixture-restore-cancellation-161',
+            false,
+          );
+        } finally {
+          await worker.close(true);
+        }
+        const detail = await get(task.taskId);
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().data).toMatchObject({ status, result: null });
+        const listed = await list();
+        expect(listed.statusCode).toBe(200);
+        expect(
+          listed
+            .json()
+            .data.find((row: TaskState) => row.taskId === task.taskId),
+        ).toMatchObject({ status, result: null });
+        expect(await redis.get(metaKey(task.taskId))).toBe(before);
+        expect(await (await queue.getJob(task.taskId))!.getState()).toBe(
+          'completed',
+        );
+      },
+    );
     it('admits only one final monitor slot across independent API runtimes', async () => {
       const queue = await queueFor('monitor');
       const createdAt = new Date().toISOString();

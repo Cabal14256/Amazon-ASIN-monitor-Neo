@@ -167,6 +167,9 @@ export class TaskQueryService {
         this.owner(current, userId);
         return current;
       }
+      // BullMQ completes the processor's cancellation marker too. Only a
+      // validated commit receipt may override confirmed restore cancellation.
+      if (isTerminalTaskStatus(task.status)) return task;
     }
     if (
       cancellationSensitiveTask(task) &&

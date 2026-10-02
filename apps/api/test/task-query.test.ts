@@ -473,6 +473,52 @@ describe('own task query HTTP and bounded reconciliation', () => {
       );
     },
   );
+  it.each(
+    (['cancelled', 'failed'] as const).flatMap((status) =>
+      (['cancel-marker', 'missing', 'invalid'] as const).flatMap((evidence) =>
+        (['detail', 'list'] as const).map((endpoint) => ({
+          status,
+          evidence,
+          endpoint,
+        })),
+      ),
+    ),
+  )(
+    'preserves a terminal restore without commit evidence in actual HTTP: %j',
+    async ({ status, evidence, endpoint }) => {
+      task = taskFixture({
+        taskType: 'backup',
+        taskSubType: 'restore',
+        status,
+        result: null,
+      });
+      rows = [task];
+      queue = {
+        ...task,
+        status: 'completed',
+        result:
+          evidence === 'cancel-marker'
+            ? { cancelled: true, message: '备份任务已取消' }
+            : evidence === 'missing'
+            ? null
+            : { operation: 'restore', verification: 'confirmed' },
+      };
+      const response = await get(
+        endpoint === 'detail' ? `/tasks/${task.taskId}` : '/tasks',
+      );
+      expect(response.statusCode).toBe(200);
+      const result =
+        endpoint === 'detail'
+          ? response.json().data
+          : response
+              .json()
+              .data.find((row: TaskState) => row.taskId === task!.taskId);
+      expect(result).toMatchObject({ status, result: null });
+      expect(task.status).toBe(status);
+      expect(task.result).toBeNull();
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(['createdAt', 'taskSubType'] as const)(
     'rejects a restore receipt from a different queue %s',
     async (field) => {
