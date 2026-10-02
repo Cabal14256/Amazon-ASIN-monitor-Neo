@@ -20,6 +20,8 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 `DATABASE_URL` 和 `COMPETITOR_DATABASE_URL` 的连接字段只在 Worker 子进程环境中传递给 PostgreSQL 客户端，绝不写入任务 payload、日志或 HTTP 响应。Worker 先按 node-postgres 规则解析 URL、`PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` 等缺省值，再清除继承的 `PG*` 并把解析后的目标显式交给 libpq；不继承 `PGSERVICE` 等额外重定向项。表名参数只接受限定标识符，不接受 shell 片段；命令使用 `shell: false`。备份卷须限制为 API/Worker 与管理员可读写，避免其他进程替换同名文件。
 
+数据库解析直接复用共享配置的 `pg-connection-string`，与应用使用的 node-postgres 保持一致：URL 路径中的数据库优先于 `?database=`；空路径不采用该查询参数，而沿用 `PGDATABASE` 或用户缺省值。旧实现让查询参数覆盖路径，可能使锁和元数据来自一个库、`pg_dump` 或原位 `pg_restore` 实际操作另一个库，现已更正。隔离恢复仍移除冗余 `database`/`dbname` 参数，并显式传递新建数据库路径。验证用实际 `pg.Client` 的连接参数与命令环境对照，覆盖主库/竞品库相互冲突、保留转义字符、中文空格和空路径；不建立真实数据库连接。五个新回归在旧实现全部失败，修复后 `corepack pnpm --filter worker exec vitest run test/backup-processor.test.ts --maxWorkers=1` 的 19 个测试全部通过。
+
 ## 普通 PostgreSQL 恢复演练
 
 1. 在不含 TimescaleDB 扩展的隔离 PostgreSQL 实例上挂载同一备份目录，确认备份文件的 target 与恢复目标一致。完整归档恢复需要目标角色有 `CREATEDB` 及删除失败隔离库的权限，并预留双份数据库容量。

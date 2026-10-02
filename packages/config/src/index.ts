@@ -7,6 +7,7 @@ import { z } from 'zod';
 
 export * from './queue-policy';
 export * from './queues';
+export { parsePostgresConnectionString };
 
 /**
  * 共享环境变量校验。

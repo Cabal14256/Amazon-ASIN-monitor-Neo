@@ -1,6 +1,7 @@
 import {
   BACKUP_COMMAND_PATH_MAX_LENGTH,
   getBackupStorageDirectory,
+  parsePostgresConnectionString,
   type Env,
 } from '@asin-monitor/config';
 import {
@@ -97,28 +98,22 @@ export function commandEnvironment(
   const url = new URL(connectionString);
   if (!['postgres:', 'postgresql:'].includes(url.protocol))
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
-  // node-postgres resolves each missing URL field from PG* before its own
-  // defaults. Resolve the same values before clearing libpq's inherited PG*.
-  const parameter = (name: string, fromUrl?: string, fallback?: string) =>
-    url.searchParams.get(name) || fromUrl || fallback || undefined;
-  const user = parameter(
-    'user',
-    decodeURIComponent(url.username),
+  // Reuse the application's node-postgres parser, including pathname database
+  // precedence and reserved-character decoding, before isolating libpq's PG*.
+  let parsed: ReturnType<typeof parsePostgresConnectionString>;
+  try {
+    parsed = parsePostgresConnectionString(connectionString);
+  } catch {
+    throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
+  }
+  const user =
+    parsed.user ||
     defaults.PGUSER ||
-      (process.platform === 'win32' ? defaults.USERNAME : defaults.USER),
-  );
-  const database = parameter(
-    'database',
-    decodeURIComponent(url.pathname.replace(/^\//, '')),
-    defaults.PGDATABASE || user,
-  );
-  const host = parameter('host', url.hostname, defaults.PGHOST || 'localhost');
-  const port = parameter('port', url.port, defaults.PGPORT || '5432');
-  const password = parameter(
-    'password',
-    decodeURIComponent(url.password),
-    defaults.PGPASSWORD,
-  );
+    (process.platform === 'win32' ? defaults.USERNAME : defaults.USER);
+  const database = parsed.database || defaults.PGDATABASE || user;
+  const host = parsed.host || defaults.PGHOST || 'localhost';
+  const port = parsed.port || defaults.PGPORT || '5432';
+  const password = parsed.password || defaults.PGPASSWORD;
   const passfile = !password ? defaults.PGPASSFILE : undefined;
   if (passfile && (passfile.length > 1024 || /[\0\r\n]/.test(passfile)))
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
@@ -281,8 +276,8 @@ async function archiveSha256(
 export function connectionForDatabase(url: string, database: string): string {
   const parsed = new URL(url);
   parsed.pathname = `/${database}`;
-  // node-postgres gives the query-level database option precedence over the
-  // path. Keeping it would reconnect staging work to the online database.
+  // Remove redundant aliases so the isolated pathname is unambiguous for all
+  // clients used during staging and selective restore.
   parsed.searchParams.delete('database');
   parsed.searchParams.delete('dbname');
   return parsed.toString();

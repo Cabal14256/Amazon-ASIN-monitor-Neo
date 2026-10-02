@@ -9,6 +9,7 @@ import {
 } from '@asin-monitor/db';
 import type { Job } from 'bullmq';
 import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -301,6 +302,53 @@ describe('backup command boundary', () => {
     expect(args).toContain('--dbname=backup_ci');
     expect(args).toContain('--single-transaction');
     expect(args.join(' ')).not.toContain('private_password');
+  });
+
+  it.each([
+    ['postgresql://backup@localhost/main?database=competitor', 'main'],
+    ['postgresql://backup@localhost/competitor?database=main', 'competitor'],
+    [
+      'postgresql://backup@localhost/finance%2F2026?database=other',
+      'finance%2F2026',
+    ],
+    [
+      'postgresql://backup@localhost/%E6%95%B0%E6%8D%AE%20%E5%BA%93?database=other',
+      '数据 库',
+    ],
+  ])(
+    'uses the application driver target for CLI database %s',
+    (connectionString, expected) => {
+      // Construct the actual driver used by the application's db package without
+      // opening a connection. Do not duplicate its URL parsing rules in a fixture.
+      const { Client } = createRequire(
+        join(__dirname, '../../../packages/db/package.json'),
+      )('pg') as {
+        Client: new (config: { connectionString: string }) => {
+          connectionParameters: { database: string };
+        };
+      };
+      const client = new Client({ connectionString });
+      const environment = commandEnvironment(connectionString, {
+        PGDATABASE: 'fallback_database',
+      });
+      expect(client.connectionParameters.database).toBe(expected);
+      expect(environment.PGDATABASE).toBe(client.connectionParameters.database);
+      expect(
+        restoreCommandArgs(environment.PGDATABASE!, '/tmp/test.dump'),
+      ).toContain(`--dbname=${expected}`);
+    },
+  );
+
+  it('ignores a query-only database exactly as the application driver does', () => {
+    expect(
+      commandEnvironment('postgresql://backup@localhost/?database=other', {
+        PGDATABASE: 'fallback_database',
+      }).PGDATABASE,
+    ).toBe('fallback_database');
+    expect(
+      commandEnvironment('postgresql://backup@localhost/?database=other', {})
+        .PGDATABASE,
+    ).toBe('backup');
   });
 
   it('derives a bounded isolated database name from a validated task ID and target', () => {
