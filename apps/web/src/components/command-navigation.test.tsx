@@ -16,6 +16,7 @@ import { AppShell } from './app-shell';
 
 const navigate = vi.hoisted(() => vi.fn());
 const routerState = vi.hoisted(() => ({ pathname: '/home' }));
+vi.mock('./system-announcement', () => ({ SystemAnnouncement: () => null }));
 vi.mock('@tanstack/react-router', async () => {
   const { forwardRef } = await import('react');
   return {
