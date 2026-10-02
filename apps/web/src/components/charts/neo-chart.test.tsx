@@ -273,6 +273,53 @@ describe('mounted NeoChart lifecycle', () => {
 });
 
 describe('chart option policy', () => {
+  it('inherits global motion while preserving explicit series overrides within the cap', () => {
+    const host = document.createElement('div');
+    const source: NeoChartOption = {
+      animation: false,
+      animationDuration: 60,
+      animationDurationUpdate: 90,
+      series: [
+        { type: 'bar', data: [3] },
+        {
+          type: 'line',
+          data: [2],
+          animation: true,
+          animationDurationUpdate: 800,
+        },
+      ],
+    };
+    const prepared = prepareChartOption(source, host, false);
+    expect(prepared).toMatchObject({
+      animation: false,
+      animationDuration: 60,
+      animationDurationUpdate: 90,
+    });
+    expect(prepared.series).toEqual([
+      expect.objectContaining({
+        animation: false,
+        animationDuration: 60,
+        animationDurationUpdate: 90,
+      }),
+      expect.objectContaining({
+        animation: true,
+        animationDuration: 60,
+        animationDurationUpdate: 400,
+      }),
+    ]);
+    expect(prepareChartOption(source, host, true).series).toEqual([
+      expect.objectContaining({
+        animation: false,
+        animationDuration: 0,
+        animationDurationUpdate: 0,
+      }),
+      expect.objectContaining({
+        animation: false,
+        animationDuration: 0,
+        animationDurationUpdate: 0,
+      }),
+    ]);
+  });
   it('reads Neo colors from the host and preserves explicit series colors without mutating input', () => {
     const host = document.createElement('div');
     host.style.setProperty('--color-module-monitor', '#123456');

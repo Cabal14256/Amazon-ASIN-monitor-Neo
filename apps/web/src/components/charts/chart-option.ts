@@ -82,6 +82,14 @@ export function prepareChartOption(
       animationDurationUpdate: option.animationDurationUpdate,
     }),
     aria: { enabled: true, ...option.aria },
-    series: series.map((item) => ({ ...item, ...motion(item) })),
+    series: series.map((item) => ({
+      ...item,
+      ...motion({
+        animation: item.animation ?? option.animation,
+        animationDuration: item.animationDuration ?? option.animationDuration,
+        animationDurationUpdate:
+          item.animationDurationUpdate ?? option.animationDurationUpdate,
+      }),
+    })),
   };
 }
