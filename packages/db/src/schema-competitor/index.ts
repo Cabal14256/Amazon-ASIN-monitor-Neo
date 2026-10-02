@@ -143,3 +143,5 @@ export type NewCompetitorMonitorHistory =
 export type CompetitorFeishuConfig = typeof competitorFeishuConfig.$inferSelect;
 export type NewCompetitorFeishuConfig =
   typeof competitorFeishuConfig.$inferInsert;
+
+export { competitorVariantCheckReceipts } from './variant-check-receipts';

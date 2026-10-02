@@ -37,12 +37,22 @@ export class PgCompetitorTransactions {
     private readonly primary: Pool,
     private readonly competitor: Pool,
     private readonly maximumOperations = 8,
+    private readonly limits: {
+      durationMs: number;
+      statementTimeoutMs: number;
+    } = { durationMs: 4000, statementTimeoutMs: 1500 },
   ) {
     if (
       primary === competitor ||
       !Number.isInteger(maximumOperations) ||
       maximumOperations < 1 ||
-      maximumOperations > 16
+      maximumOperations > 16 ||
+      !Number.isInteger(limits.durationMs) ||
+      limits.durationMs < 1000 ||
+      limits.durationMs > 30000 ||
+      !Number.isInteger(limits.statementTimeoutMs) ||
+      limits.statementTimeoutMs < 500 ||
+      limits.statementTimeoutMs >= limits.durationMs
     )
       throw new CompetitorTransactionError('dependency');
   }
@@ -110,14 +120,17 @@ export class PgCompetitorTransactions {
     };
     signal?.addEventListener('abort', abort, { once: true });
     this.stops.add(close);
-    const timer = setTimeout(() => stop('timeout'), 4000);
+    const timer = setTimeout(() => stop('timeout'), this.limits.durationMs);
     if (signal?.aborted) abort();
     const work = (async () => {
       let success = false;
       try {
         const primary = await acquire(this.primary);
         await query(primary, 'BEGIN');
-        await query(primary, 'SET LOCAL statement_timeout = 1500');
+        await query(
+          primary,
+          `SET LOCAL statement_timeout = ${this.limits.statementTimeoutMs}`,
+        );
         await query(
           primary,
           'SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)',
@@ -132,7 +145,10 @@ export class PgCompetitorTransactions {
         const acquireBusiness = async () => {
           businessClient = await acquire(this.competitor);
           await query(businessClient, readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
-          await query(businessClient, 'SET LOCAL statement_timeout = 1500');
+          await query(
+            businessClient,
+            `SET LOCAL statement_timeout = ${this.limits.statementTimeoutMs}`,
+          );
           const name = (
             await query(businessClient, 'SELECT current_database() AS name')
           ).rows[0]?.name;

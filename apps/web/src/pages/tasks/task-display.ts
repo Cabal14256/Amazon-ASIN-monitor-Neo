@@ -20,6 +20,7 @@ const STATUSES: Record<string, { label: string; badge: Badge }> = {
 const CANCELLABLE_TYPES = new Set([
   'export',
   'import',
+  'variant-check',
   'batch-check',
   'batch-delete',
   'backup',

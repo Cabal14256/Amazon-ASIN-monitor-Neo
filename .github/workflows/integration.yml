@@ -286,8 +286,20 @@ jobs:
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.sql
 
+      - name: Apply competitor immediate-check receipts to the competitor database twice
+        run: |
+          docker cp packages/db/docker/apply-competitor-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-check-receipts.sh"
+          docker cp packages/db/migrations/0014_competitor_check_receipts.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0014_competitor_check_receipts.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT 1 FROM public.competitor_variant_check_receipts LIMIT 1"
+          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_variant_check_receipts') IS NULL")" = t
+
       - name: Compare competitor writes with Legacy MySQL and verify dual-database transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-write.integration.test.ts
+
+      - name: Verify competitor immediate-check transactions and receipts in isolated PostgreSQL databases
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-check.integration.test.ts
 
       - name: Compare competitor batch creation with Legacy MySQL and verify savepoint recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-create.integration.test.ts
@@ -410,6 +422,15 @@ jobs:
           docker cp packages/db/migrations/0011_competitor_write_policy.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0011_competitor_write_policy.rollback.sql"
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.rollback.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.rollback.sql
+
+      - name: Smoke test competitor immediate-check receipt rollback and reapply
+        run: |
+          docker cp packages/db/migrations/0014_competitor_check_receipts.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0014_competitor_check_receipts.rollback.sql"
+          docker cp packages/db/docker/apply-competitor-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-check-receipts.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
 
       - name: Smoke test competitor query rollback twice
         run: |
