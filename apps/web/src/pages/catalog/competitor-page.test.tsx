@@ -210,6 +210,68 @@ describe('competitor catalog refresh and authority transitions', () => {
     f.queryClient.clear();
   });
 
+  it('ignores peer storage probes in both catalog tabs while synchronizing real safety events', async () => {
+    const first = fixture(
+      vi.fn().mockResolvedValue(listData(original)),
+      vi.fn(),
+    );
+    const second = fixture(
+      vi.fn().mockResolvedValue(listData(original)),
+      vi.fn(),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('button', { name: '新建变体组' }),
+      ).toHaveLength(2),
+    );
+    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const removals = vi.spyOn(Storage.prototype, 'removeItem');
+    // Browser probe set/remove broadcasts reach the other catalog tab. Each
+    // mounted listener must ignore them without generating another broadcast.
+    for (const newValue of ['1', null])
+      fireEvent(
+        window,
+        new StorageEvent('storage', {
+          key: 'neo:catalog-write-safety-probe',
+          storageArea: window.localStorage,
+          newValue,
+        }),
+      );
+    expect(writes).not.toHaveBeenCalled();
+    expect(removals).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('button', { name: '新建变体组' })).toHaveLength(
+      2,
+    );
+    const key = catalogSafetyKey('operator', 'competitor');
+    const gate = {
+      phase: 'refresh',
+      message: null,
+      detailId: null,
+      createUncertain: true,
+      operationId: 'peer-create',
+    };
+    window.localStorage.setItem(key, JSON.stringify(gate));
+    fireEvent(
+      window,
+      new StorageEvent('storage', { key, storageArea: window.localStorage }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.queryAllByRole('button', { name: '新建变体组' }),
+      ).toHaveLength(0);
+      for (const tab of [first, second])
+        expect(
+          tab.queryClient.getQueryData([
+            'catalog-write-safety',
+            'operator',
+            'competitor',
+          ]),
+        ).toEqual(gate);
+    });
+    first.queryClient.clear();
+    second.queryClient.clear();
+  });
+
   it('restores an actual outstanding mutation after storage recovery instead of unlocking it', async () => {
     window.localStorage.setItem(
       catalogSafetyKey('operator', 'competitor'),

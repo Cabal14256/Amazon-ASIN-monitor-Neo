@@ -26,6 +26,22 @@ const text = (max: number) =>
     .refine((value) => [...value].length <= max)
     .refine((value) => !/[\x00-\x1f\x7f]/.test(value));
 const required = (max: number) => text(max).refine((value) => !!value.trim());
+// Snapshots describe persisted Legacy values, including empty or control
+// whitespace. PostgreSQL varchar limits count characters and cannot store NUL.
+const persistedText = (max: number) =>
+  z
+    .string()
+    .max(max * 2)
+    .refine((value) => [...value].length <= max)
+    .refine((value) => !value.includes('\u0000'));
+const groupSource = competitorGroupSourceSchema
+  .extend({
+    name: persistedText(255),
+    country: persistedText(10),
+    brand: persistedText(100),
+    updateTime: z.string().max(50).nullable().optional(),
+  })
+  .strict();
 const normalizedCode = (max: number) =>
   z
     .string()
@@ -49,7 +65,11 @@ const groupSchema = competitorGroupUpsertRequestSchema
   .extend({ ...common, name: required(255) })
   .strict();
 const createSchema = competitorCreateAsinRequestSchema
-  .extend({ ...asinFields, parentId: id })
+  .extend({
+    ...asinFields,
+    parentId: id,
+    expectedParent: groupSource.optional(),
+  })
   .strict();
 const updateSchema = competitorGuardedUpdateAsinRequestSchema
   .extend({
@@ -57,10 +77,10 @@ const updateSchema = competitorGuardedUpdateAsinRequestSchema
     expectedSource: competitorAsinSourceSchema
       .extend({
         variantGroupId: id,
-        asin: required(20),
-        name: text(500).nullable(),
-        country: required(10),
-        brand: text(100).nullable(),
+        asin: persistedText(20),
+        name: persistedText(500).nullable(),
+        country: persistedText(10),
+        brand: persistedText(100).nullable(),
         asinType: z.enum(['1', '2']).nullable(),
         updateTime: z.string().max(50).nullable().optional(),
       })
@@ -72,15 +92,7 @@ const updateGroupSchema = competitorUpdateGroupRequestSchema
   .extend({
     ...common,
     name: required(255),
-    expectedSource: competitorGroupSourceSchema
-      .extend({
-        name: required(255),
-        country: required(10),
-        brand: required(100),
-        updateTime: z.string().max(50).nullable().optional(),
-      })
-      .strict()
-      .optional(),
+    expectedSource: groupSource.optional(),
   })
   .strict();
 const deleteAsinSchema = competitorDeleteAsinRequestSchema.extend({

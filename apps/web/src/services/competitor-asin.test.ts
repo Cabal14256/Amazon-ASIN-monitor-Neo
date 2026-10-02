@@ -47,6 +47,41 @@ function client(baseURL: string, fetcher: typeof fetch) {
 
 describe('competitor catalog transport', () => {
   it.each(['/api', 'https://app.test/api/'])(
+    'preserves the full parent snapshot on the actual %s create request',
+    async (baseURL) => {
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        jsonResponse({
+          success: true,
+          data: {
+            id: 'a1',
+            asin: 'B00RIVAL00',
+            country: 'DE',
+            brand: 'Own brand',
+            variantGroupId: group.id,
+          },
+        }),
+      );
+      const expectedParent = {
+        name: '\n ',
+        country: 'DE',
+        brand: '',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const input = {
+        asin: 'B00RIVAL00',
+        country: 'DE',
+        brand: 'Own brand',
+        parentId: group.id,
+        expectedParent,
+      };
+      await createCompetitorAsin(client(baseURL, fetcher), input);
+      expect(fetcher.mock.calls[0][0]).toBe(
+        'https://app.test/api/v1/competitor/asins',
+      );
+      expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual(input);
+    },
+  );
+  it.each(['/api', 'https://app.test/api/'])(
     'normalizes %s for list/detail while preserving response display status',
     async (baseURL) => {
       const fetcher = vi.fn<typeof fetch>(async (url) =>

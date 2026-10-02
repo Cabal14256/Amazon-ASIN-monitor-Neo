@@ -36,6 +36,7 @@ export interface CompetitorWriteUnit
   ): Promise<CompetitorGroupReadResult>;
   createAsin(
     fields: CompetitorAsinWriteFields & { parentId: string },
+    expectedParent?: CompetitorGroupSource,
   ): Promise<CompetitorAsin>;
   updateAsin(
     id: string,

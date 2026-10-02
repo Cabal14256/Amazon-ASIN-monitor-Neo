@@ -158,6 +158,7 @@ export const competitorCreateAsinRequestSchema = z.object({
   brand: z.string().min(1, 'brand 为必填项'),
   parentId: z.string().min(1, 'parentId 为必填项'),
   asinType: competitorAsinTypeInputSchema,
+  expectedParent: competitorGroupSourceSchema.optional(),
 });
 export type CompetitorCreateAsinRequest = z.infer<
   typeof competitorCreateAsinRequestSchema

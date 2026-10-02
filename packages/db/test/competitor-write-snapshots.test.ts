@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Db } from '../src/client';
 import { DrizzleCompetitorWriteUnit } from '../src/repositories/competitor-write-unit';
 
-function database(reads: Record<string, unknown>[][]) {
+function database(reads: Record<string, unknown>[][], allowWrites = false) {
   const locks: string[] = [];
   const select = vi.fn(() => {
     const rows = reads.shift();
@@ -21,20 +21,131 @@ function database(reads: Record<string, unknown>[][]) {
     return query;
   });
   const update = vi.fn(() => {
-    throw new Error('Unexpected update');
+    if (!allowWrites) throw new Error('Unexpected update');
+    return { set: () => ({ where: async () => undefined }) };
   });
   const remove = vi.fn(() => ({ where: async () => undefined }));
-  const db = { select, update, delete: remove } as unknown as Db;
+  const values = vi.fn(async (_record: Record<string, unknown>) => undefined);
+  const insert = vi.fn(() => {
+    if (!allowWrites) throw new Error('Unexpected insert');
+    return { values };
+  });
+  const db = { select, update, delete: remove, insert } as unknown as Db;
   return {
     unit: new DrizzleCompetitorWriteUnit(db, () => undefined),
     select,
     update,
     remove,
+    insert,
+    values,
     locks,
   };
 }
 
 describe('competitor confirmed mutation snapshots', () => {
+  it.each([false, true])(
+    'creates with a matching optional parent snapshot (%s) while preserving Legacy omission',
+    async (guarded) => {
+      const expectedParent = {
+        name: '\n ',
+        country: 'US',
+        brand: '',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const fields = {
+        asin: 'B000000121',
+        name: null,
+        country: 'US',
+        brand: 'Own brand',
+        asinType: null,
+        parentId: 'g1',
+      };
+      const row = { id: 'a1', ...fields, variantGroupId: 'g1' };
+      const f = database(
+        [
+          [
+            {
+              id: 'g1',
+              ...expectedParent,
+              updateTime: new Date(expectedParent.updateTime),
+            },
+          ],
+          [],
+          [row],
+        ],
+        true,
+      );
+      await expect(
+        f.unit.createAsin(fields, guarded ? expectedParent : undefined),
+      ).resolves.toEqual(row);
+      expect(f.locks).toEqual(['update']);
+      expect(f.insert).toHaveBeenCalledOnce();
+      expect(f.values).toHaveBeenCalledWith(
+        expect.objectContaining({ asin: fields.asin, variantGroupId: 'g1' }),
+      );
+      expect(f.values.mock.calls[0][0]).not.toHaveProperty('expectedParent');
+      expect(f.values.mock.calls[0][0]).not.toHaveProperty('parentId');
+      expect(f.update).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([
+    { name: 'Concurrent rename' },
+    { country: 'DE' },
+    { brand: 'Concurrent brand' },
+    { updateTime: new Date('2020-01-01T00:00:01.000Z') },
+  ])(
+    'rejects a stale create parent only after obtaining its lock: %j',
+    async (changed) => {
+      const expectedParent = {
+        name: 'Confirmed group',
+        country: 'US',
+        brand: 'Confirmed brand',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const f = database([
+        [
+          {
+            id: 'g1',
+            ...expectedParent,
+            updateTime: new Date(expectedParent.updateTime),
+            ...changed,
+          },
+        ],
+      ]);
+      await expect(
+        f.unit.createAsin(
+          {
+            asin: 'B000000121',
+            name: null,
+            country: 'US',
+            brand: 'Own brand',
+            asinType: null,
+            parentId: 'g1',
+          },
+          expectedParent,
+        ),
+      ).rejects.toMatchObject({ code: 'source-changed' });
+      expect(f.locks).toEqual(['update']);
+      expect(f.select).toHaveBeenCalledOnce();
+      expect(f.insert).not.toHaveBeenCalled();
+      expect(f.update).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['', ' ', '\n\t\r'])(
+    'deletes an exactly matching persisted Legacy group %j under lock',
+    async (oldText) => {
+      const expectedSource = {
+        name: oldText,
+        country: oldText,
+        brand: oldText,
+        updateTime: null,
+      };
+      const f = database([[{ id: 'g1', ...expectedSource }], []]);
+      await f.unit.deleteGroup('g1', [], expectedSource);
+      expect(f.locks).toEqual(['update', 'update']);
+      expect(f.remove).toHaveBeenCalledOnce();
+    },
+  );
   it('retains Legacy bodyless group deletion without imposing a child snapshot or response limit', async () => {
     const f = database([[{ id: 'g1' }]]);
     await f.unit.deleteGroup('g1');

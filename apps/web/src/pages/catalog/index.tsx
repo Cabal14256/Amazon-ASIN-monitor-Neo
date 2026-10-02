@@ -987,17 +987,15 @@ export function CatalogPage({
     if (!ownerId || !config.writes) return;
     let active = true;
     const syncSafety = (event?: StorageEvent) => {
+      // The writable-storage probe broadcasts its own set/remove events to
+      // other tabs. Ignore unrelated keys before any probe can broadcast again.
+      if (event && event.key !== catalogSafetyKey(ownerId, config.id)) return;
       const stored = catalogSafetyStorage();
       if (!stored) {
         setStorageUnavailable(true);
         return;
       }
-      if (
-        event &&
-        (event.storageArea !== stored ||
-          event.key !== catalogSafetyKey(ownerId, config.id))
-      )
-        return;
+      if (event && event.storageArea !== stored) return;
       const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {

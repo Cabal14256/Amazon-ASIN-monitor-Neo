@@ -176,11 +176,12 @@ export class CompetitorWriteService implements OnModuleDestroy {
     });
   }
   createAsin(principal: AuthPrincipal, body: unknown) {
-    return this.write(principal, 'create-asin', async (unit) =>
-      mapCompetitorAsinWrite(
-        await unit.createAsin(parseCompetitorAsinCreate(body)),
-      ),
-    );
+    return this.write(principal, 'create-asin', async (unit) => {
+      const { expectedParent, ...fields } = parseCompetitorAsinCreate(body);
+      return mapCompetitorAsinWrite(
+        await unit.createAsin(fields, expectedParent),
+      );
+    });
   }
   updateAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'update-asin', async (unit) => {

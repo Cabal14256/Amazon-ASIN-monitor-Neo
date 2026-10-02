@@ -30,6 +30,7 @@ const group = {
   name: 'Rival group',
   country: 'DE',
   brand: 'Rival',
+  updateTime: '2020-01-01T00:00:00.000Z',
   children: [child],
 };
 const target = {
@@ -43,6 +44,7 @@ const target = {
 afterEach(() => cleanup());
 
 function actionFixture(action: CatalogAction) {
+  const source = 'group' in action ? action.group : group;
   const request = vi.fn(
     async (...args: [string, { method?: string; json?: unknown }?]) => {
       void args;
@@ -50,7 +52,7 @@ function actionFixture(action: CatalogAction) {
     },
   );
   const detail = vi.fn(async (_http: Pick<HttpClient, 'request'>, id: string) =>
-    id === target.id ? target : group,
+    id === target.id ? target : source,
   );
   const list = vi.fn(async () => ({
     list: [group, target, { ...target, id: 'foreign', country: 'US' }],
@@ -97,6 +99,70 @@ function actionFixture(action: CatalogAction) {
 }
 
 describe('competitor catalog single-item controls', () => {
+  it('sends the confirmed parent after a matching preflight and reports a server lock conflict without claiming success', async () => {
+    const original = { ...group, name: '\n ', brand: '' };
+    const f = actionFixture({ type: 'create-asin', group: original });
+    f.request.mockRejectedValue(
+      new ApiError('HTTP', '竞品记录已变化，请刷新后重试', 409),
+    );
+    fireEvent.change(screen.getAllByLabelText(/^ASIN/)[0], {
+      target: { value: child.asin },
+    });
+    fireEvent.change(screen.getByLabelText(/^品牌/), {
+      target: { value: 'Own brand' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByRole('alert');
+    expect(f.detail).toHaveBeenCalledOnce();
+    expect(f.request).toHaveBeenCalledOnce();
+    expect(f.request.mock.calls[0][1]?.json).toMatchObject({
+      parentId: original.id,
+      brand: 'Own brand',
+      expectedParent: {
+        name: original.name,
+        country: original.country,
+        brand: original.brand,
+        updateTime: original.updateTime,
+      },
+    });
+    expect(screen.getByRole('alert').textContent).toContain('目标状态已变化');
+    expect(f.saved).not.toHaveBeenCalled();
+    expect(f.close).not.toHaveBeenCalled();
+    expect(f.uncertain).not.toHaveBeenCalled();
+    expect(f.denied).not.toHaveBeenCalled();
+  });
+  it.each(['edit-group', 'delete-group'] as const)(
+    'preserves persisted whitespace in the mounted %s request',
+    async (type) => {
+      const original = { ...group, name: '\n ', country: '', brand: '' };
+      const f = actionFixture({ type, group: original });
+      if (type === 'edit-group') {
+        fireEvent.change(screen.getByLabelText(/^变体组名称/), {
+          target: { value: 'Repaired group' },
+        });
+        fireEvent.change(screen.getByLabelText(/^国家代码/), {
+          target: { value: 'US' },
+        });
+        fireEvent.change(screen.getByLabelText(/^品牌/), {
+          target: { value: 'Repaired brand' },
+        });
+      }
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: type === 'edit-group' ? '保存' : '确认删除',
+        }),
+      );
+      await waitFor(() => expect(f.saved).toHaveBeenCalledOnce());
+      expect(f.request.mock.calls[0][1]?.json).toMatchObject({
+        expectedSource: {
+          name: original.name,
+          country: '',
+          brand: '',
+          updateTime: original.updateTime,
+        },
+      });
+    },
+  );
   it('accepts a competitor identifier beyond the primary ten-character domain', async () => {
     const f = actionFixture({ type: 'create-asin', group });
     const input = screen.getAllByLabelText(/^ASIN/)[0];
@@ -265,6 +331,12 @@ describe('competitor catalog single-item controls', () => {
           asin: child.asin,
           country: 'DE',
           parentId: group.id,
+          expectedParent: {
+            name: group.name,
+            country: group.country,
+            brand: group.brand,
+            updateTime: group.updateTime,
+          },
         });
       if (action.type === 'edit-group' || action.type === 'delete-group')
         expect(options.json).toMatchObject({

@@ -321,6 +321,7 @@ export function CatalogActionPanel({
                   brand: brand.trim(),
                   parentId: action.group.id,
                   asinType: asinType ? (asinType as '1' | '2') : null,
+                  expectedParent: competitorExpectedGroup(action.group),
                 });
               else
                 await config.writes!.createAsin(http, {

@@ -335,10 +335,14 @@ export class DrizzleCompetitorWriteUnit {
       );
     return this.reader.detail(group.id);
   }
-  async createAsin(fields: CompetitorAsinWriteFields & { parentId: string }) {
+  async createAsin(
+    fields: CompetitorAsinWriteFields & { parentId: string },
+    expectedParent?: CompetitorGroupSource,
+  ) {
     asinFields(fields);
     const parent = await this.group(fields.parentId);
     if (!parent) invalid('所属竞品变体组不存在');
+    assertGroupSource(parent!, expectedParent);
     if (parent!.country !== fields.country)
       invalid(`ASIN国家必须与所属变体组一致（${parent!.country}）`);
     await this.checkDuplicate(fields);

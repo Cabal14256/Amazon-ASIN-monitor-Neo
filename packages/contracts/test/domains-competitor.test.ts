@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   competitorBatchCheckResultSchema,
   competitorCheckResultSchema,
+  competitorCreateAsinRequestSchema,
   competitorDeleteAsinResultSchema,
   competitorDeleteGroupRequestSchema,
   competitorDeleteGroupResultSchema,
@@ -18,6 +19,36 @@ import {
  */
 
 describe('competitor 域', () => {
+  it('keeps Legacy create requests and exact optional persisted parent snapshots', () => {
+    const input = {
+      asin: 'B000000121',
+      country: 'US',
+      brand: 'Own brand',
+      parentId: 'g1',
+    };
+    expect(competitorCreateAsinRequestSchema.parse(input)).toEqual(input);
+    const expectedParent = {
+      name: '\n',
+      country: '',
+      brand: ' ',
+      updateTime: null,
+    };
+    expect(
+      competitorCreateAsinRequestSchema.parse({ ...input, expectedParent }),
+    ).toEqual({ ...input, expectedParent });
+    expect(
+      competitorCreateAsinRequestSchema.safeParse({
+        ...input,
+        expectedParent: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      competitorCreateAsinRequestSchema.safeParse({
+        ...input,
+        expectedParent: { ...expectedParent, extra: true },
+      }).success,
+    ).toBe(false);
+  });
   it('keeps the Legacy move shape and preserves an optional confirmed source group', () => {
     expect(
       competitorMoveAsinRequestSchema.parse({ targetGroupId: 'g2' }),
