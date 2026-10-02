@@ -1,6 +1,6 @@
 # 竞品基础写入与双库授权事务
 
-关联 #121。本批迁移五个实际端点，均要求登录、`asin:write` 和当前主库授权，返回 Legacy 信封及 `Cache-Control: no-store`；POST 成功仍返回 200。
+关联 #121。本批迁移五个实际端点，均要求登录、`asin:write` 和当前主库授权，返回 Legacy 信封及 `Cache-Control: no-store`；POST 成功仍返回 200。后续 #163 的单项删除组与子项同样保留共享 Legacy 端点的 `asin:write` 权限，守卫和事务内授权一致；独立批量删除端点仍要求 `asin:delete`。
 
 | 方法 | `/api/v1/competitor` 下的路径 | 操作           |
 | ---- | ----------------------------- | -------------- |

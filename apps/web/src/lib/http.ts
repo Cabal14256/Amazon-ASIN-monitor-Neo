@@ -63,7 +63,9 @@ export function transportURL(
     if (
       route.includes('\\') ||
       base?.includes('\\') ||
-      [...route].some((char) => char.charCodeAt(0) <= 32)
+      [...route].some(
+        (char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127,
+      )
     )
       throw new Error();
     const page = new URL(pageOrigin);
@@ -89,7 +91,11 @@ export function transportURL(
       const next = decodeURIComponent(decoded);
       if (
         next.includes('\\') ||
-        [...next].some((char) => char.charCodeAt(0) <= 32) ||
+        // Encoded spaces are valid identifier bytes (including Legacy PADSPACE
+        // IDs); raw route whitespace above and decoded controls remain invalid.
+        [...next].some(
+          (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+        ) ||
         next.split('/').some((part) => part === '.' || part === '..')
       )
         throw new Error();

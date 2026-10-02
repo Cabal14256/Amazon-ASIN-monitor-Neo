@@ -66,7 +66,7 @@ const cases = [
   {
     method: 'DELETE',
     url: '/competitor/variant-groups/group-119',
-    body: undefined,
+    body: { expectedChildIds: ['asin-119'] },
     action: 'deleteGroup',
   },
   {
@@ -269,6 +269,31 @@ describe('competitor writes HTTP / current primary authorization', () => {
       expect(f.unit[value.action]).not.toHaveBeenCalled();
     },
   );
+  it.each([cases[5], cases[6]])(
+    'retains Legacy asin:write without asin:delete for $action',
+    async (value) => {
+      f.auth.getPermissionCodes.mockResolvedValue(['asin:write']);
+      f.permissions.splice(0, f.permissions.length, 'asin:write');
+      expect((await request(value)).statusCode).toBe(200);
+      expect(f.unit[value.action]).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([cases[5], cases[6]])(
+    'rejects asin:delete without Legacy asin:write before $action starts',
+    async (value) => {
+      f.auth.getPermissionCodes.mockResolvedValue(['asin:delete']);
+      expect((await request(value)).statusCode).toBe(403);
+      expect(f.repository.transaction).not.toHaveBeenCalled();
+    },
+  );
+  it.each([cases[5], cases[6]])(
+    'rechecks Legacy asin:write inside the transaction for $action',
+    async (value) => {
+      f.permissions.splice(0, f.permissions.length, 'asin:delete');
+      expect((await request(value)).statusCode).toBe(403);
+      expect(f.unit[value.action]).not.toHaveBeenCalled();
+    },
+  );
   it.each(cases)(
     'rejects an unexpected Origin before transaction on $action',
     async (value) => {
@@ -304,15 +329,282 @@ describe('competitor writes HTTP / current primary authorization', () => {
       country: 'US',
       brand: 'Brand',
     });
-    expect(f.unit.createAsin).toHaveBeenCalledWith({
+    expect(f.unit.createAsin).toHaveBeenCalledWith(
+      {
+        asin: 'B000000121',
+        country: 'US',
+        brand: 'Own brand',
+        asinType: '2',
+        name: null,
+        parentId: 'group-119',
+      },
+      undefined,
+    );
+    expect(f.unit.moveAsin).toHaveBeenCalledWith(
+      'asin-119',
+      'group-target',
+      undefined,
+      undefined,
+    );
+  });
+  it('forwards the original move parent and reports a locked source conflict', async () => {
+    const body = {
+      targetGroupId: 'group-target',
+      expectedSourceGroup: 'group-119',
+    };
+    expect((await request(cases[4], headers, body)).statusCode).toBe(200);
+    expect(f.unit.moveAsin).toHaveBeenCalledWith(
+      'asin-119',
+      'group-target',
+      'group-119',
+      undefined,
+    );
+    vi.mocked(f.unit.moveAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    expect((await request(cases[4], headers, body)).statusCode).toBe(409);
+    for (const expectedSourceGroup of ['', null, [], 'g'.repeat(51)]) {
+      expect(
+        (await request(cases[4], headers, { ...body, expectedSourceGroup }))
+          .statusCode,
+      ).toBe(400);
+    }
+    expect(f.unit.moveAsin).toHaveBeenCalledTimes(2);
+  });
+  it('forwards optional parent snapshots separately from new ASIN fields and sanitizes locked conflicts', async () => {
+    const expectedParent = {
+      name: 'Original parent',
+      country: 'US',
+      brand: 'Original brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const body = { ...cases[2].body, expectedParent };
+    expect((await request(cases[2], headers, body)).statusCode).toBe(200);
+    expect(f.unit.createAsin).toHaveBeenCalledWith(
+      {
+        asin: 'B000000121',
+        country: 'US',
+        brand: 'Own brand',
+        asinType: '2',
+        name: null,
+        parentId: 'group-119',
+      },
+      expectedParent,
+    );
+    vi.mocked(f.unit.createAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[2], headers, body);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toBe('竞品记录已变化，请刷新后重试');
+    expect(conflict.body).not.toContain(expectedParent.name);
+    f.permissions.splice(0);
+    expect((await request(cases[2], headers, body)).statusCode).toBe(403);
+    expect(f.unit.createAsin).toHaveBeenCalledTimes(2);
+  });
+  it('passes the complete target snapshot to the locked move and sanitizes stale target conflicts', async () => {
+    const expectedTargetSnapshot = {
+      id: 'group-target',
+      name: 'Original target',
+      country: 'US',
+      brand: 'Original brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const body = {
+      targetGroupId: 'group-target',
+      expectedSourceGroup: 'group-119',
+      expectedTargetSnapshot,
+    };
+    expect((await request(cases[4], headers, body)).statusCode).toBe(200);
+    expect(f.unit.moveAsin).toHaveBeenCalledWith(
+      'asin-119',
+      'group-target',
+      'group-119',
+      expectedTargetSnapshot,
+    );
+    vi.mocked(f.unit.moveAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[4], headers, body);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toBe('竞品记录已变化，请刷新后重试');
+    expect(conflict.body).not.toContain(expectedTargetSnapshot.name);
+    f.permissions.splice(0);
+    expect((await request(cases[4], headers, body)).statusCode).toBe(403);
+    expect(f.unit.moveAsin).toHaveBeenCalledTimes(2);
+  });
+  it.each(['', ' ', '\n\t\r'])(
+    'allows repairing and deleting Legacy persisted group text %j',
+    async (oldText) => {
+      const expectedSource = {
+        name: oldText,
+        country: oldText,
+        brand: oldText,
+        updateTime: null,
+      };
+      expect(
+        (await request(cases[1], headers, { ...groupBody, expectedSource }))
+          .statusCode,
+      ).toBe(200);
+      expect(f.unit.updateGroup).toHaveBeenCalledWith(
+        'group-119',
+        { name: 'Group', country: 'US', brand: 'Brand' },
+        expectedSource,
+      );
+      expect(
+        (
+          await request(cases[5], headers, {
+            expectedSource,
+            expectedChildIds: [],
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+        'group-119',
+        [],
+        expectedSource,
+      );
+    },
+  );
+  it('passes source snapshots into locked writes and returns a conflict when they change', async () => {
+    const expectedGroup = {
+      name: 'Previous group',
+      country: 'US',
+      brand: 'Previous brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const expectedAsin = {
+      variantGroupId: 'group-119',
       asin: 'B000000121',
+      name: null,
       country: 'US',
       brand: 'Own brand',
       asinType: '2',
-      name: null,
-      parentId: 'group-119',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    expect(
+      (
+        await request(cases[1], headers, {
+          ...groupBody,
+          expectedSource: expectedGroup,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(f.unit.updateGroup).toHaveBeenCalledWith(
+      'group-119',
+      { name: 'Group', country: 'US', brand: 'Brand' },
+      expectedGroup,
+    );
+    expect(
+      (
+        await request(cases[3], headers, {
+          ...asinBody,
+          expectedSource: expectedAsin,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(f.unit.updateAsin).toHaveBeenCalledWith(
+      'asin-119',
+      expect.anything(),
+      expectedAsin,
+    );
+    expect(
+      (await request(cases[6], headers, { expectedSource: expectedAsin }))
+        .statusCode,
+    ).toBe(200);
+    expect(f.unit.deleteAsin).toHaveBeenCalledWith('asin-119', expectedAsin);
+    vi.mocked(f.unit.deleteAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[6], headers, {
+      expectedSource: expectedAsin,
     });
-    expect(f.unit.moveAsin).toHaveBeenCalledWith('asin-119', 'group-target');
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toContain('已变化');
+  });
+  it('preserves bodyless Legacy deletes and validates optional Neo child snapshots', async () => {
+    expect(
+      (
+        await app.http.inject({
+          method: 'DELETE',
+          url: '/api/v1/competitor/variant-groups/group-119',
+          headers,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+      'group-119',
+      undefined,
+      undefined,
+    );
+    expect((await request(cases[5], headers, {})).statusCode).toBe(200);
+    vi.mocked(f.unit.deleteGroup).mockClear();
+    for (const body of [
+      { expectedChildIds: null },
+      { expectedChildIds: 'asin-119' },
+      { expectedChildIds: ['asin-119', 'asin-119'] },
+      { expectedChildIds: [''] },
+    ]) {
+      expect((await request(cases[5], headers, body)).statusCode).toBe(400);
+    }
+    expect(f.unit.deleteGroup).not.toHaveBeenCalled();
+    expect((await request(cases[5])).statusCode).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+      'group-119',
+      ['asin-119'],
+      undefined,
+    );
+    expect(
+      (await request(cases[5], headers, { expectedChildIds: [] })).statusCode,
+    ).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', [], undefined);
+  });
+  it('forwards the confirmed group source and members to locked deletion and reports source conflicts', async () => {
+    const expectedSource = {
+      name: 'Confirmed group',
+      country: 'US',
+      brand: 'Confirmed brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const body = { expectedChildIds: ['asin-119'], expectedSource };
+    expect((await request(cases[5], headers, body)).statusCode).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+      'group-119',
+      ['asin-119'],
+      expectedSource,
+    );
+    vi.mocked(f.unit.deleteGroup).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[5], headers, body);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toBe('竞品记录已变化，请刷新后重试');
+    expect(conflict.body).not.toContain(expectedSource.name);
+    for (const invalid of [
+      null,
+      {},
+      { ...expectedSource, name: '\u0000' },
+      { ...expectedSource, country: 'x'.repeat(11) },
+    ]) {
+      expect(
+        (await request(cases[5], headers, { ...body, expectedSource: invalid }))
+          .statusCode,
+      ).toBe(400);
+    }
+    expect(f.unit.deleteGroup).toHaveBeenCalledTimes(2);
+  });
+  it('reports changed group membership as a conflict without exposing child IDs', async () => {
+    vi.mocked(f.unit.deleteGroup).mockRejectedValue(
+      new CompetitorWriteError('members-changed'),
+    );
+    const response = await request(cases[5]);
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      success: false,
+      errorCode: 409,
+      errorMessage: '竞品组成员已变化，请刷新后重新确认删除',
+    });
+    expect(response.body).not.toContain('asin-119');
   });
   it.each(cases.filter((value) => value.method !== 'DELETE'))(
     'rejects invalid bodies without writes on $action',

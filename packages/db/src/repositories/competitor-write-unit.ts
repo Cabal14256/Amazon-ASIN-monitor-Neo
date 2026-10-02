@@ -1,3 +1,8 @@
+import type {
+  CompetitorAsinSource,
+  CompetitorGroupSource,
+  CompetitorMoveTargetSnapshot,
+} from '@asin-monitor/contracts';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { randomUUID } from 'node:crypto';
@@ -56,6 +61,45 @@ function asinFields(value: CompetitorAsinWriteFields) {
 const invalid = (message: string): never => {
   throw new CompetitorWriteError('validation', message);
 };
+const sameTime = (actual: Date | null, expected: string | null | undefined) =>
+  expected === undefined || (actual?.toISOString() ?? null) === expected;
+const visibleAsinType = (value: string | null) => {
+  const normalized = value?.trim();
+  return normalized === '1' || normalized === 'MAIN_LINK'
+    ? '1'
+    : normalized === '2' || normalized === 'SUB_REVIEW'
+    ? '2'
+    : null;
+};
+function assertGroupSource(
+  group: typeof g.$inferSelect,
+  expected?: CompetitorGroupSource,
+) {
+  if (
+    expected &&
+    (group.name !== expected.name ||
+      group.country !== expected.country ||
+      group.brand !== expected.brand ||
+      !sameTime(group.updateTime, expected.updateTime))
+  )
+    throw new CompetitorWriteError('source-changed');
+}
+function assertAsinSource(
+  asin: CompetitorAsin,
+  expected?: CompetitorAsinSource,
+) {
+  if (
+    expected &&
+    (asin.variantGroupId !== expected.variantGroupId ||
+      asin.asin !== expected.asin ||
+      (asin.name ?? null) !== expected.name ||
+      asin.country !== expected.country ||
+      (asin.brand ?? null) !== expected.brand ||
+      visibleAsinType(asin.asinType) !== expected.asinType ||
+      !sameTime(asin.updateTime, expected.updateTime))
+  )
+    throw new CompetitorWriteError('source-changed');
+}
 
 /** All mutations run after current primary authorization in one competitor
  * transaction. Lock parents in one deterministic order, then affected children. */
@@ -148,14 +192,46 @@ export class DrizzleCompetitorWriteUnit {
         .where(inArray(g.id, [...new Set(ids)])),
     );
   }
-  async deleteGroup(id: string) {
+  async deleteGroup(
+    id: string,
+    expectedChildIds?: string[],
+    expectedSource?: CompetitorGroupSource,
+  ) {
+    if (expectedChildIds !== undefined) {
+      if (!Array.isArray(expectedChildIds) || expectedChildIds.length > 5000)
+        throw new CompetitorWriteError('input');
+      for (const childId of expectedChildIds) text(childId, 50);
+      if (new Set(expectedChildIds).size !== expectedChildIds.length)
+        throw new CompetitorWriteError('input');
+    }
     const group = await this.group(id);
     if (!group) throw new CompetitorWriteError('group-not-found');
+    assertGroupSource(group, expectedSource);
+    if (expectedChildIds !== undefined) {
+      const children = await this.query(() =>
+        this.db
+          .select({ id: a.id })
+          .from(a)
+          .where(eq(a.variantGroupId, group.id))
+          .orderBy(sql`${a.id} COLLATE "C"`)
+          .limit(5001)
+          .for('update'),
+      );
+      if (children.length > 5000)
+        throw new CompetitorQueryError('too-many-children');
+      const expected = new Set(expectedChildIds);
+      if (
+        children.length !== expected.size ||
+        children.some((child) => !expected.has(child.id))
+      )
+        throw new CompetitorWriteError('members-changed');
+    }
     // The real FK cascades children; monitor history has no FK and is retained.
     await this.query(() => this.db.delete(g).where(eq(g.id, group.id)));
   }
-  async deleteAsin(id: string) {
+  async deleteAsin(id: string, expectedSource?: CompetitorAsinSource) {
     const { asin, parent } = await this.lockAsin(id);
+    assertAsinSource(asin, expectedSource);
     await this.query(() => this.db.delete(a).where(eq(a.id, asin.id)));
     await this.touchGroups([parent.id]);
   }
@@ -201,10 +277,15 @@ export class DrizzleCompetitorWriteUnit {
     );
     return this.reader.detail(id);
   }
-  async updateGroup(id: string, fields: CompetitorGroupWriteFields) {
+  async updateGroup(
+    id: string,
+    fields: CompetitorGroupWriteFields,
+    expectedSource?: CompetitorGroupSource,
+  ) {
     groupFields(fields);
     const group = await this.group(id);
     if (!group) throw new CompetitorWriteError('group-not-found');
+    assertGroupSource(group, expectedSource);
     const children = await this.query(() =>
       this.db
         .select({ id: a.id })
@@ -255,10 +336,14 @@ export class DrizzleCompetitorWriteUnit {
       );
     return this.reader.detail(group.id);
   }
-  async createAsin(fields: CompetitorAsinWriteFields & { parentId: string }) {
+  async createAsin(
+    fields: CompetitorAsinWriteFields & { parentId: string },
+    expectedParent?: CompetitorGroupSource,
+  ) {
     asinFields(fields);
     const parent = await this.group(fields.parentId);
     if (!parent) invalid('所属竞品变体组不存在');
+    assertGroupSource(parent!, expectedParent);
     if (parent!.country !== fields.country)
       invalid(`ASIN国家必须与所属变体组一致（${parent!.country}）`);
     await this.checkDuplicate(fields);
@@ -279,9 +364,14 @@ export class DrizzleCompetitorWriteUnit {
     await this.touchGroups([parent!.id]);
     return this.asin(id);
   }
-  async updateAsin(id: string, fields: CompetitorAsinWriteFields) {
+  async updateAsin(
+    id: string,
+    fields: CompetitorAsinWriteFields,
+    expectedSource?: CompetitorAsinSource,
+  ) {
     asinFields(fields);
     const { asin, parent } = await this.lockAsin(id);
+    assertAsinSource(asin, expectedSource);
     if (parent.country !== fields.country)
       invalid(`ASIN国家必须与所属变体组一致（${parent.country}）`);
     await this.checkDuplicate(fields, asin.id);
@@ -294,9 +384,23 @@ export class DrizzleCompetitorWriteUnit {
     await this.touchGroups([parent.id]);
     return this.asin(asin.id);
   }
-  async moveAsin(id: string, targetGroupId: string): Promise<CompetitorAsin> {
+  async moveAsin(
+    id: string,
+    targetGroupId: string,
+    expectedSourceGroup?: string,
+    expectedTargetSnapshot?: CompetitorMoveTargetSnapshot,
+  ): Promise<CompetitorAsin> {
+    if (expectedSourceGroup !== undefined) text(expectedSourceGroup, 50);
     const { asin, target } = await this.lockAsin(id, targetGroupId);
+    if (
+      expectedSourceGroup !== undefined &&
+      asin.variantGroupId !== expectedSourceGroup
+    )
+      throw new CompetitorWriteError('source-changed');
     if (!target) invalid('目标竞品变体组不存在');
+    if (expectedTargetSnapshot && target!.id !== expectedTargetSnapshot.id)
+      throw new CompetitorWriteError('source-changed');
+    assertGroupSource(target!, expectedTargetSnapshot);
     if (target!.id === asin.variantGroupId) return asin;
     if (target!.country !== asin.country)
       invalid(

@@ -9,14 +9,22 @@ import {
   catalogActionSourceCurrent,
   catalogError,
   catalogWriteError,
+  catalogWriteOutcomeUncertain,
   checkedAt,
   childStatus,
+  competitorAsinCode,
   groupStatus,
   singleAsinCode,
   statusSource,
 } from './catalog-data';
 
 describe('shared ASIN catalog display data', () => {
+  it('normalizes competitor identifiers up to 20 characters while keeping primary ASINs strict', () => {
+    expect(competitorAsinCode(' retail-code-2026 ')).toBe('RETAIL-CODE-2026');
+    expect(competitorAsinCode(' x '.repeat(11))).toBeNull();
+    expect(competitorAsinCode('item\ncode')).toBeNull();
+    expect(singleAsinCode('retail-code-2026')).toBeNull();
+  });
   it('uses effective status before the stored automatic flag', () => {
     expect(
       groupStatus({
@@ -115,6 +123,57 @@ describe('shared ASIN catalog display data', () => {
     expect(
       catalogWriteError(new ApiError('HTTP', 'raw sensitive details', 413)),
     ).not.toContain('raw sensitive');
+    expect(
+      catalogWriteError(
+        new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503),
+      ),
+    ).toContain('勿直接重试');
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', '写入结果未确认，请刷新数据后再操作', 503),
+        'competitor',
+      ),
+    ).toBe(true);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', '鉴权权威源尚未切换，请使用现有竞品入口', 503),
+        'competitor',
+      ),
+    ).toBe(false);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', 'server error', 500),
+        'competitor',
+      ),
+    ).toBe(false);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', 'upstream', 503),
+        'asin',
+      ),
+    ).toBe(true);
+    for (const message of [
+      '鉴权权威源尚未切换，请使用现有 ASIN 入口',
+      'ASIN 写入暂不可用，请使用现有 ASIN 入口',
+    ])
+      expect(
+        catalogWriteOutcomeUncertain(
+          new ApiError('HTTP', message, 503),
+          'asin',
+        ),
+      ).toBe(false);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('TIMEOUT', 'late'),
+        'competitor',
+      ),
+    ).toBe(true);
+    expect(
+      catalogWriteOutcomeUncertain(
+        new ApiError('HTTP', 'duplicate', 409),
+        'competitor',
+      ),
+    ).toBe(false);
   });
   it('rejects an edit when another operator changed the source record', () => {
     const group = {
@@ -142,6 +201,12 @@ describe('shared ASIN catalog display data', () => {
       catalogActionSourceCurrent(
         { type: 'edit-group', group },
         { ...group, brand: 'New brand' },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'delete-group', group },
+        { ...group, children: [] },
       ),
     ).toBe(false);
     const manualGroup = {
@@ -186,6 +251,18 @@ describe('shared ASIN catalog display data', () => {
         group,
       ),
     ).toBe(true);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'move-asin', group, child: group.children[0] },
+        { ...group, country: 'DE' },
+      ),
+    ).toBe(false);
+    expect(
+      catalogActionSourceCurrent(
+        { type: 'delete-asin', group, child: group.children[0] },
+        { ...group, children: [{ ...group.children[0], brand: 'Changed' }] },
+      ),
+    ).toBe(false);
     expect(
       catalogActionSourceCurrent(
         { type: 'asin-notify', group, child: group.children[0] },
