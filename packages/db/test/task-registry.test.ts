@@ -126,6 +126,66 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it.each(['create', 'restore'])(
+    're-evaluates accepted cancel after an uncommitted %s failure loses CAS',
+    async (operation) => {
+      const { repository, redis, rows } = fixture();
+      const task = await repository.create({
+        ...input,
+        taskType: 'backup',
+        taskSubType: operation,
+      });
+      redis.eval.mockImplementationOnce(async () => {
+        rows.set(
+          'fixture:neo:task:meta:task-a',
+          JSON.stringify(
+            transitionTask(task, { kind: 'cancel-request' }, new Date()),
+          ),
+        );
+        return 0;
+      });
+      expect(
+        await repository.mutate(
+          task.taskId,
+          { kind: 'backup-uncommitted-failed', message: 'unpublished failure' },
+          task,
+        ),
+      ).toMatchObject({ status: 'cancelled', error: null });
+      expect(
+        (await repository.read(task.taskId))?.cancelRequestedAt,
+      ).not.toBeNull();
+    },
+  );
+  it('retains cleanup uncertainty failure and restricts the specialized backup transition', async () => {
+    const { repository } = fixture();
+    const task = await repository.create({
+      ...input,
+      taskType: 'backup',
+      taskSubType: 'restore',
+    });
+    await repository.mutate(task.taskId, { kind: 'cancel-request' }, task);
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'failed', message: 'cleanup unconfirmed' },
+        task,
+      ),
+    ).toMatchObject({ status: 'failed', error: 'cleanup unconfirmed' });
+    expect(() =>
+      transitionTask(
+        { ...task, taskType: 'export' },
+        { kind: 'backup-uncommitted-failed', message: 'wrong caller' },
+        new Date(),
+      ),
+    ).toThrow('BACKUP_TASK_IDENTITY_INVALID');
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'backup-uncommitted-failed', message: 'late failure' },
+        task,
+      ),
+    ).toMatchObject({ status: 'failed' });
+  });
   it.each(['cancelling', 'cancelled', 'failed'] as const)(
     'corrects postpublication %s only with identity-bound creation proof',
     async (status) => {

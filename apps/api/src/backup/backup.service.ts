@@ -1,4 +1,8 @@
-import { getBackupStorageDirectory, type Env } from '@asin-monitor/config';
+import {
+  assertBackupTaskRetention,
+  getBackupStorageDirectory,
+  type Env,
+} from '@asin-monitor/config';
 import {
   BACKUP_SCHEDULER_USER_ID,
   backupDatabaseSettingsSchema,
@@ -185,6 +189,18 @@ export class BackupService implements OnModuleDestroy {
     principal: AuthPrincipal,
     data: Omit<BackupJobData, 'taskId' | 'createdAt' | 'userId'>,
   ) {
+    try {
+      assertBackupTaskRetention(this.env);
+    } catch {
+      this.logger.warn(
+        '备份任务元数据保留配置不满足执行窗口',
+        'BackupService',
+        {
+          reason: 'backup_task_retention_too_short',
+        },
+      );
+      fail(503, '备份任务元数据须至少保留七天');
+    }
     const taskId = randomUUID();
     const deadline = performance.now() + 3000;
     let closed = false;

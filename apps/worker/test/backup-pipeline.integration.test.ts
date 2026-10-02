@@ -51,6 +51,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         DATABASE_POOL_CONNECTION_TIMEOUT_MS: 2000,
         BACKUP_COMMAND_TIMEOUT_MS: 30000,
         BACKUP_MAX_BYTES: 10_000_000,
+        TASK_META_TTL_SECONDS: 604800,
         PG_DUMP_PATH: 'pg_dump',
         PG_RESTORE_PATH: 'pg_restore',
       } as Env;
@@ -212,6 +213,49 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
       await adminPool?.end();
       if (directory) await rm(directory, { recursive: true, force: true });
+    }, 30000);
+
+    it('backs up and restores only the literal mixed-case table using the real pg_dump parser', async () => {
+      const mixed = `BackupMixed_${scratchName.slice(-12)}`;
+      const folded = mixed.toLowerCase();
+      await scratchPool.query(
+        `CREATE TABLE public."${mixed}" (id integer PRIMARY KEY, note text NOT NULL)`,
+      );
+      await scratchPool.query(
+        `CREATE TABLE public.${folded} (id integer PRIMARY KEY, note text NOT NULL)`,
+      );
+      await scratchPool.query(
+        `INSERT INTO public."${mixed}" VALUES (1, 'mixed-original')`,
+      );
+      await scratchPool.query(
+        `INSERT INTO public.${folded} VALUES (1, 'folded-original')`,
+      );
+      const created = await runJob(scratchUrl, 'create', {
+        tables: [`public.${mixed}`],
+      });
+      const result = backupTaskResultDataSchema.parse(created.result);
+      if (!result.filename) throw new Error('No mixed-case archive');
+      expect(
+        JSON.parse(
+          await readFile(
+            join(directory, `${result.filename}.meta.json`),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ tables: [`public.${mixed}`] });
+      await scratchPool.query(
+        `UPDATE public."${mixed}" SET note = 'mixed-after'`,
+      );
+      await scratchPool.query(
+        `UPDATE public.${folded} SET note = 'folded-after'`,
+      );
+      await runJob(scratchUrl, 'restore', { filename: result.filename });
+      expect(
+        (await scratchPool.query(`SELECT note FROM public."${mixed}"`)).rows,
+      ).toEqual([{ note: 'mixed-original' }]);
+      expect(
+        (await scratchPool.query(`SELECT note FROM public.${folded}`)).rows,
+      ).toEqual([{ note: 'folded-after' }]);
     }, 30000);
 
     it('serializes sessions, restores real data, and rolls back a failed restore', async () => {

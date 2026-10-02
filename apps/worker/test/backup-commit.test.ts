@@ -32,13 +32,14 @@ afterEach(async () => {
 
 describe('committed restore recovery when the registry connection fails', () => {
   it.each([
-    { scope: 'selective', cancel: false },
-    { scope: 'selective', cancel: true },
-    { scope: 'full', cancel: false },
-    { scope: 'full', cancel: true },
+    { scope: 'selective', cancel: false, expires: false },
+    { scope: 'selective', cancel: true, expires: false },
+    { scope: 'full', cancel: false, expires: false },
+    { scope: 'full', cancel: true, expires: false },
+    { scope: 'selective', cancel: false, expires: true },
   ] as const)(
     'returns a bounded BullMQ receipt after both commit writes fail (%j)',
-    async ({ scope, cancel }) => {
+    async ({ scope, cancel, expires }) => {
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-commit-'));
       const taskId = '10000000-0000-4000-8000-000000000161';
       const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -91,13 +92,19 @@ describe('committed restore recovery when the registry connection fails', () => 
           stderr: { resume: vi.fn() },
           kill: vi.fn(),
         });
-        queueMicrotask(() => {
+        const committed = () => {
           child.exitCode = 0;
           child.emit('close', 0, null);
-        });
+        };
+        // A zero exit is the irreversible database commit even if the
+        // deadline signal races with its close callback.
+        if (expires) setTimeout(committed, 100);
+        else queueMicrotask(committed);
         return child;
       });
-      const createdAt = new Date().toISOString();
+      const createdAt = new Date(
+        Date.now() - (expires ? 6 * 86400000 - 50 : 0),
+      ).toISOString();
       const data = {
         taskId,
         taskType: 'backup',
@@ -155,6 +162,7 @@ describe('committed restore recovery when the registry connection fails', () => 
             DATABASE_POOL_CONNECTION_TIMEOUT_MS: 2000,
             BACKUP_COMMAND_TIMEOUT_MS: 2000,
             BACKUP_MAX_BYTES: 1024,
+            TASK_META_TTL_SECONDS: 604800,
           } as never,
           shutdownSignal: new AbortController().signal,
           isClosing: () => false,

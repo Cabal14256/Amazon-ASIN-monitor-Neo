@@ -8,6 +8,12 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 创建和恢复始终提交到 `backup-task-queue` 异步执行。任务元数据先写入 Redis task registry， Worker 再执行 `pg_dump`/`pg_restore`，每次检查 BullMQ lease、任务身份和取消状态。
 
+备份创建与恢复的总执行窗口为受理时不可变 `createdAt` 起六天，包含排队、退避、全部尝试、归档哈希和外部命令；重新投递不重置窗口。`TASK_META_TTL_SECONDS` 对备份至少为 604800（七天，默认不变），API 在创建元数据和入队前拒绝更短配置并返回 503，Worker 在建立消费者或自动计划连接前同样拒绝。其他队列仍可使用原有较短保留期。排队接近截止时仅获得剩余窗口，过期的未发布任务明确失败；静默恢复命令和流式哈希也受同一 AbortSignal 控制，原 `BACKUP_COMMAND_TIMEOUT_MS` 的单命令上限不会延长。停止与清理留出一天保留余量，不新增无界 Redis touch。若 Worker 离线超过保留期，历史元数据按既有 TTL 过期，不复建或猜测任务身份；查询原任务的可用队列证据并人工核对，禁止自动补偿未知恢复。
+
+已发布创建文件与已提交恢复结果优先保留：到期、退出、取消或旧租约丢失不能撤销真实完成点。未发布且清理已确认的最终失败通过绑定原任务身份的专用 CAS 重新读取共享状态，保留已接受的取消；隔离库创建或清理结果不确定、已观察到正式产物或临时文件清理失败时仍保留失败与人工核对提示，不能把不确定状态包装为安全取消。回滚本次生命周期限制前应先停止 Neo 备份生产者和消费者，核对所有长时间排队任务及未知恢复，不降低元数据保留配置作为回滚手段。
+
+按表参数继续仅接受一个表标识符或 `schema.table`，每一段单独转为双引号 literal pattern 交给 `pg_dump --table-and-children`；不能用未引用的混合大小写名称折叠到另一个小写表。sidecar 保存原请求表名，恢复时真实 CLI 仅改变该表，大小写冲突的其他表保持不变。参数规则依据 [PostgreSQL 16 pg_dump](https://www.postgresql.org/docs/16/app-pgdump.html) 和 [psql pattern 规则](https://www.postgresql.org/docs/16/app-psql.html#APP-PSQL-PATTERNS)。
+
 **当前支持边界：**完整 TimescaleDB 与普通 PostgreSQL custom dump 均恢复到同一 PostgreSQL 实例上的**新建隔离数据库**。Neo 不自动替换在线主库或竞品库，不修改 `DATABASE_URL`/`COMPETITOR_DATABASE_URL`，不执行生产切换。异步任务受理与完成结果分别标记 `restoreMode: isolated`；完成结果提供 `restoredDatabase` 和 `targetDatabaseChanged: false`，运维须独立验证并决定切换。仅 v3 `scope: selective` 的普通 PostgreSQL 按表归档执行原位部分恢复，标记 `restoreMode: in-place`。TimescaleDB 不支持按表 `pg_dump`；该模式缺少重建 hypertable 所需的目录元数据。`GET /api/v1/backup` 仅在备份来源、范围、当前目标库扩展类型与版本相符且文件未超过当前 `BACKUP_MAX_BYTES` 时返回 `restoreSupported: true`；未验证文件与早期缺少 Timescale 目录清单的文件返回 `false`。API 和 Worker 均会拒绝来源/目标类型不一致的任务。
 
 ## 持久化存储

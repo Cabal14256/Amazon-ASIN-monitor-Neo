@@ -1,5 +1,7 @@
 import {
+  assertBackupTaskRetention,
   BACKUP_COMMAND_PATH_MAX_LENGTH,
+  BACKUP_TASK_MAX_AGE_MS,
   getBackupStorageDirectory,
   parsePostgresConnectionString,
   type Env,
@@ -178,6 +180,15 @@ function validTable(value: string): boolean {
   return /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?$/.test(value);
 }
 
+function literalTablePattern(value: string): string {
+  if (!validTable(value)) throw new BackupCommandError('BACKUP_TABLES_INVALID');
+  // pg_dump uses psql patterns; quote each identifier to prevent case folding.
+  return value
+    .split('.')
+    .map((identifier) => `"${identifier}"`)
+    .join('.');
+}
+
 export function stagingDatabaseName(
   taskId: string,
   target: BackupJobData['target'],
@@ -253,12 +264,13 @@ async function archiveSha256(
   path: string,
   checkpoint: () => Promise<void>,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<string> {
   const hash = createHash('sha256');
   let bytesSinceCheckpoint = 0;
   let bytes = 0;
   await checkpoint();
-  for await (const chunk of createReadStream(path)) {
+  for await (const chunk of createReadStream(path, { signal })) {
     bytes += chunk.length;
     if (bytes > maxBytes)
       throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
@@ -905,6 +917,7 @@ export function createBackupProcessor(
   options: BackupProcessorOptions,
   log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
 ): Processor<unknown, unknown, string> {
+  assertBackupTaskRetention(options.env);
   return async (job, token) => {
     const parsed = backupJobDataSchema.safeParse(job.data);
     if (
@@ -915,6 +928,16 @@ export function createBackupProcessor(
       throw new UnrecoverableError('备份任务数据无效');
     const data = parsed.data;
     const controller = new AbortController();
+    const deadline = Date.parse(data.createdAt) + BACKUP_TASK_MAX_AGE_MS;
+    let lifecycleTimer: ReturnType<typeof setTimeout> | undefined;
+    const checkDeadline = () => {
+      if (Date.now() >= deadline) {
+        const error = new BackupCommandError('BACKUP_TASK_EXPIRED');
+        controller.abort(error);
+        throw error;
+      }
+      controller.signal.throwIfAborted();
+    };
     const shutdown = () =>
       controller.abort(new Error('BACKUP_WORKER_SHUTDOWN'));
     options.shutdownSignal.addEventListener('abort', shutdown, { once: true });
@@ -939,6 +962,7 @@ export function createBackupProcessor(
       if (isTerminalTaskStatus(state.status)) throw new TaskStopped(state);
       if (state.cancelRequestedAt || state.status === 'cancelling')
         throw new TaskStopped(state);
+      checkDeadline();
       return state;
     };
     let progressBytes = 0;
@@ -1094,6 +1118,10 @@ export function createBackupProcessor(
       verify(await store.read(data.taskId));
       if (await recoverPublishedCreation()) return publishedCreation;
       const initial = await check();
+      lifecycleTimer = setTimeout(() => {
+        controller.abort(new BackupCommandError('BACKUP_TASK_EXPIRED'));
+      }, Math.min(BACKUP_TASK_MAX_AGE_MS, Math.max(1, deadline - Date.now())));
+      lifecycleTimer.unref();
       if (
         data.operation === 'restore' &&
         (initial.startedAt || initial.status === 'processing')
@@ -1148,7 +1176,9 @@ export function createBackupProcessor(
             '--no-owner',
             '--no-acl',
             `--file=${partial}`,
-            ...tables.map((table) => `--table-and-children=${table}`),
+            ...tables.map(
+              (table) => `--table-and-children=${literalTablePattern(table)}`,
+            ),
           ],
           environment,
           {
@@ -1187,6 +1217,7 @@ export function createBackupProcessor(
             await lock.ensureHeld();
           },
           maxBytes,
+          controller.signal,
         );
         const metadata = backupArtifactMetadataSchema.parse(
           sourceManifest
@@ -1226,6 +1257,7 @@ export function createBackupProcessor(
         });
         await check();
         await lock.ensureHeld();
+        checkDeadline();
         await rename(metadataPartialPath, `${output}.meta.json`);
         metadataPartialPath = undefined;
         metadataPublishedPath = `${output}.meta.json`;
@@ -1234,6 +1266,7 @@ export function createBackupProcessor(
         // orphan sidecar and partial archive in the catch path.
         await check();
         await lock.ensureHeld();
+        checkDeadline();
         await rename(partial, output);
         artifactPath = undefined;
         metadataPublishedPath = undefined;
@@ -1283,6 +1316,7 @@ export function createBackupProcessor(
             await lock.ensureHeld();
           },
           maxBytes,
+          controller.signal,
         )) !== metadata.archiveSha256
       )
         throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
@@ -1388,7 +1422,18 @@ export function createBackupProcessor(
       await options.updateProgress(job, 100);
       log.info('PostgreSQL 恢复任务完成', { target: data.target });
       return completed.result;
-    } catch (error) {
+    } catch (caught) {
+      const error =
+        caught instanceof BackupCommandError &&
+        [
+          'BACKUP_RESTORE_CLEANUP_FAILED',
+          'BACKUP_RESTORE_CREATE_UNCONFIRMED',
+        ].includes(caught.reason)
+          ? caught
+          : !(caught instanceof TaskStopped) &&
+            controller.signal.reason instanceof BackupCommandError
+          ? controller.signal.reason
+          : caught;
       if (artifactPath)
         await cleanupOwnedArtifact(artifactPath, 'archive-partial');
       if (metadataPartialPath)
@@ -1428,16 +1473,20 @@ export function createBackupProcessor(
         if (error.state.status === 'cancelled') return cancelledResult;
         if (error.state.status === 'completed') return error.state.result;
         if (
-          error.state.cancelRequestedAt ||
-          error.state.status === 'cancelling'
+          (error.state.cancelRequestedAt ||
+            error.state.status === 'cancelling') &&
+          !cleanupFailed
         ) {
           await mutate({ kind: 'cancelled', message: cancelledResult.message });
           return cancelledResult;
         }
-        throw new UnrecoverableError('备份任务已停止');
+        if (!cleanupFailed) throw new UnrecoverableError('备份任务已停止');
       }
       let message = publishedStagingDatabase
         ? `隔离数据库 ${publishedStagingDatabase} 已恢复，但任务状态未确认；请人工核对，在线目标库未切换`
+        : error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_TASK_EXPIRED'
+        ? '备份任务超过六天执行期限，请核对状态后重新提交'
         : error instanceof BackupCommandError &&
           error.reason === 'BACKUP_SOURCE_TARGET_MISMATCH'
         ? '备份文件来源数据库类型与恢复目标不一致'
@@ -1474,22 +1523,38 @@ export function createBackupProcessor(
       let cancelled = false;
       const retryCreation =
         data.operation === 'create' &&
+        !(cleanupFailed && error instanceof TaskStopped) &&
+        !(
+          error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_TASK_EXPIRED'
+        ) &&
         job.attemptsMade + 1 < (job.opts?.attempts ?? 2);
+      const uncertain = Boolean(
+        cleanupFailed ||
+          publishedStagingDatabase ||
+          publishedCreationObserved ||
+          (error instanceof BackupCommandError &&
+            [
+              'BACKUP_RESTORE_CLEANUP_FAILED',
+              'BACKUP_RESTORE_CREATE_UNCONFIRMED',
+            ].includes(error.reason)),
+      );
       try {
         await options.assertJobLock(job, token);
         const state = verify(await store.read(data.taskId));
         if (
           (state.cancelRequestedAt || state.status === 'cancelling') &&
-          !(
-            error instanceof BackupCommandError &&
-            error.reason === 'BACKUP_RESTORE_CLEANUP_FAILED'
-          ) &&
-          !publishedStagingDatabase &&
-          !publishedCreationObserved
+          !uncertain
         ) {
           await mutate({ kind: 'cancelled', message: cancelledResult.message });
           cancelled = true;
-        } else if (!retryCreation) await mutate({ kind: 'failed', message });
+        } else if (!retryCreation) {
+          const failed = await mutate({
+            kind: uncertain ? 'failed' : 'backup-uncommitted-failed',
+            message,
+          });
+          cancelled = failed.status === 'cancelled';
+        }
       } catch {
         log.warn('备份任务状态写入未确认', {
           reason: 'backup_status_unconfirmed',
@@ -1509,6 +1574,7 @@ export function createBackupProcessor(
       });
       throw new UnrecoverableError(message);
     } finally {
+      if (lifecycleTimer) clearTimeout(lifecycleTimer);
       try {
         await targetLock?.release();
       } catch {

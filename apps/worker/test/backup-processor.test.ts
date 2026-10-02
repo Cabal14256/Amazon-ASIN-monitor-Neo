@@ -75,6 +75,7 @@ describe('backup processor', () => {
         PG_RESTORE_PATH: 'pg_restore',
         BACKUP_COMMAND_TIMEOUT_MS: 1000,
         BACKUP_MAX_BYTES: 1024,
+        TASK_META_TTL_SECONDS: 604800,
       } as never,
       shutdownSignal: new AbortController().signal,
       isClosing: () => false,
@@ -93,7 +94,7 @@ describe('backup processor', () => {
   it('rejects a non-backup job payload before any task mutation', async () => {
     const store = { read: vi.fn(), mutate: vi.fn() };
     const processor = createBackupProcessor(store, {
-      env: {} as never,
+      env: { TASK_META_TTL_SECONDS: 604800 } as never,
       shutdownSignal: new AbortController().signal,
       isClosing: () => false,
       assertJobLock: vi.fn(async () => undefined),

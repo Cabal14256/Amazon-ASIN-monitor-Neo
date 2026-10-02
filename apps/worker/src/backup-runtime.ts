@@ -1,4 +1,8 @@
-import { getPhysicalQueueName, type Env } from '@asin-monitor/config';
+import {
+  assertBackupTaskRetention,
+  getPhysicalQueueName,
+  type Env,
+} from '@asin-monitor/config';
 import {
   BACKUP_SCHEDULER_USER_ID,
   backupJobDataSchema,
@@ -83,6 +87,7 @@ export async function enqueueScheduledBackups(
 export async function startBackupRuntime(env: Env, onFatal: () => void) {
   if (env.AUTH_DATA_AUTHORITY !== 'postgresql')
     throw new Error('Backup worker requires PostgreSQL authority');
+  assertBackupTaskRetention(env);
   const connection = parseRedisUrl(env.REDIS_URL);
   const control = new Redis({
     ...connection,

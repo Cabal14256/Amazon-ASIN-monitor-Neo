@@ -5,6 +5,7 @@ import { config as loadDotenv } from 'dotenv';
 import { parse as parsePostgresConnectionString } from 'pg-connection-string';
 import { z } from 'zod';
 
+export * from './backup-lifecycle';
 export * from './queue-policy';
 export * from './queues';
 export { parsePostgresConnectionString };

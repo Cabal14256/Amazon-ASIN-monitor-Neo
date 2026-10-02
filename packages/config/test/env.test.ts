@@ -2,6 +2,9 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertBackupTaskRetention,
+  BACKUP_TASK_MAX_AGE_MS,
+  BACKUP_TASK_MIN_META_TTL_SECONDS,
   EnvValidationError,
   getBackupStorageDirectory,
   getDefaultEnvironmentFiles,
@@ -22,6 +25,21 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('requires seven-day metadata for a six-day total backup lifecycle without changing other queues', () => {
+    expect(BACKUP_TASK_MAX_AGE_MS).toBe(6 * 86400000);
+    expect(BACKUP_TASK_MIN_META_TTL_SECONDS).toBe(604800);
+    expect(() => assertBackupTaskRetention(loadEnv(validEnv))).not.toThrow();
+    for (const ttl of [1, 518400, 604799]) {
+      const env = loadEnv({ ...validEnv, TASK_META_TTL_SECONDS: String(ttl) });
+      expect(env.TASK_META_TTL_SECONDS).toBe(ttl);
+      expect(() => assertBackupTaskRetention(env)).toThrow(
+        'BACKUP_TASK_RETENTION_TOO_SHORT',
+      );
+    }
+    expect(() =>
+      assertBackupTaskRetention({ TASK_META_TTL_SECONDS: 604800 }),
+    ).not.toThrow();
+  });
   it('preserves public announcement text and Legacy empty-type fallback', () => {
     expect(loadEnv(validEnv)).toMatchObject({
       GLOBAL_ALERT_MESSAGE: '',

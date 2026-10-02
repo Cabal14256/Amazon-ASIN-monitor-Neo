@@ -4,10 +4,22 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   enqueueScheduledBackups,
   scheduledBackupTaskId,
+  startBackupRuntime,
 } from '../src/backup-runtime';
 import { backupScheduleKey } from '../src/backup-schedules';
 
 describe('backup scheduler', () => {
+  it('rejects a short retention before opening worker or scheduler connections', async () => {
+    await expect(
+      startBackupRuntime(
+        {
+          AUTH_DATA_AUTHORITY: 'postgresql',
+          TASK_META_TTL_SECONDS: 1,
+        } as never,
+        vi.fn(),
+      ),
+    ).rejects.toThrow('BACKUP_TASK_RETENTION_TOO_SHORT');
+  });
   const at = (value: string) => new Date(value);
 
   it('matches daily schedules in Shanghai time', () => {

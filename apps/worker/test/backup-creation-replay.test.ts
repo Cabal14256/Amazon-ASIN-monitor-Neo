@@ -19,6 +19,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { addAbortSignal, PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createBackupProcessor } from '../src/backup-processor';
 
@@ -27,7 +28,23 @@ const filesystemFailure = vi.hoisted(() => ({
   unlinkSuffix: null as string | null,
   renameSuffix: null as string | null,
   code: 'EACCES',
+  stallHash: false,
+  hashStream: null as import('node:stream').PassThrough | null,
 }));
+vi.mock('node:fs', async (original) => {
+  const fs = await original<typeof import('node:fs')>();
+  return {
+    ...fs,
+    createReadStream: (path: string, options?: { signal?: AbortSignal }) => {
+      if (!filesystemFailure.stallHash)
+        return fs.createReadStream(path, options);
+      const stream = new PassThrough();
+      filesystemFailure.hashStream = stream;
+      if (options?.signal) addAbortSignal(options.signal, stream);
+      return stream;
+    },
+  };
+});
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return {
@@ -63,6 +80,10 @@ vi.mock('@asin-monitor/db', async (original) => ({
 vi.mock('node:child_process', () => ({ spawn: dependencies.spawn }));
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
+  filesystemFailure.stallHash = false;
+  filesystemFailure.hashStream?.destroy();
+  filesystemFailure.hashStream = null;
   filesystemFailure.unlinkSuffix = null;
   filesystemFailure.renameSuffix = null;
   await Promise.all(
@@ -73,7 +94,7 @@ afterEach(async () => {
   vi.resetAllMocks();
 });
 
-async function fixture(createdAt = new Date().toISOString()) {
+async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
   const directory = await mkdtemp(join(tmpdir(), 'neo-backup-replay-'));
   directories.push(directory);
   const data: BackupJobData = {
@@ -162,6 +183,7 @@ async function fixture(createdAt = new Date().toISOString()) {
         DATABASE_POOL_CONNECTION_TIMEOUT_MS: 2000,
         BACKUP_COMMAND_TIMEOUT_MS: 2000,
         BACKUP_MAX_BYTES: 1024,
+        TASK_META_TTL_SECONDS: ttl,
       } as never,
       shutdownSignal: new AbortController().signal,
       ...execution,
@@ -195,6 +217,166 @@ async function fixture(createdAt = new Date().toISOString()) {
 }
 
 describe('creation attempts and durable publication', () => {
+  it('rejects metadata retention shorter than the bounded backup lifecycle', async () => {
+    await expect(fixture(undefined, 1)).rejects.toThrow(
+      'BACKUP_TASK_RETENTION_TOO_SHORT',
+    );
+  });
+  it('fails an expired queued creation without a dump or a new retry window', async () => {
+    const f = await fixture(
+      new Date(Date.now() - 6 * 86400000 - 1).toISOString(),
+    );
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+      '备份任务超过六天执行期限',
+    );
+    expect(f.state().status).toBe('failed');
+    expect(dependencies.spawn).not.toHaveBeenCalled();
+    expect(dependencies.pool).not.toHaveBeenCalled();
+  });
+  it('passes every selected table identifier as a literal pg_dump pattern', async () => {
+    const f = await fixture();
+    f.job.data = {
+      ...f.data,
+      params: {
+        tables: ['public.OrderItems', 'MixedSchema.MixedTable', 'Simple'],
+      },
+    };
+    await f.processor(f.job, 'lock');
+    expect(dependencies.spawn.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
+        '--table-and-children="public"."OrderItems"',
+        '--table-and-children="MixedSchema"."MixedTable"',
+        '--table-and-children="Simple"',
+      ]),
+    );
+  });
+  it('preserves a cancel accepted between the final failure read and its CAS', async () => {
+    const f = await fixture();
+    f.failDumps(1);
+    f.job.attemptsMade = 1;
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (['failed', 'backup-uncommitted-failed'].includes(change.kind))
+        f.setState(
+          transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+        );
+      return mutate(id, change);
+    });
+    await expect(f.processor(f.job, 'lock')).resolves.toMatchObject({
+      cancelled: true,
+    });
+    expect(f.state()).toMatchObject({ status: 'cancelled', error: null });
+    expect(await readdir(f.directory)).toEqual([]);
+  });
+  it('preserves failure when partial cleanup is uncertain while cancellation races', async () => {
+    const f = await fixture();
+    f.failDumps(1);
+    f.job.attemptsMade = 1;
+    filesystemFailure.unlinkSuffix = '.dump.partial';
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'failed')
+        f.setState(
+          transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+        );
+      return mutate(id, change);
+    });
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state().status).toBe('failed');
+    expect(f.state().message).toContain('清理未确认');
+    expect(await readdir(f.directory)).toHaveLength(1);
+  });
+  it('does not retry or confirm cancellation after an interrupted creation cannot clean its partial', async () => {
+    const f = await fixture();
+    filesystemFailure.unlinkSuffix = '.dump.partial';
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      const next = await mutate(id, change);
+      if (change.kind === 'progress' && change.progress === 96)
+        f.setState(
+          transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+        );
+      return next;
+    });
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state().status).toBe('failed');
+    expect(f.state().message).toContain('清理未确认');
+    expect(await readdir(f.directory)).toHaveLength(1);
+  });
+  it('aborts a stalled hash at the original queue deadline and never publishes on a late read', async () => {
+    const f = await fixture();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.parse(f.data.createdAt) + 6 * 86400000 - 200),
+    );
+    filesystemFailure.stallHash = true;
+    const outcome = f.processor(f.job, 'lock').then(
+      () => 'completed',
+      (error: Error) => error.message,
+    );
+    await vi.waitFor(
+      () => expect(filesystemFailure.hashStream).not.toBeNull(),
+      { interval: 10 },
+    );
+    // The timer was set from the remaining immutable age, not a fresh six days.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const aborted = filesystemFailure.hashStream?.destroyed;
+    filesystemFailure.hashStream?.end('late hash bytes');
+    const result = await outcome;
+    expect(aborted).toBe(true);
+    expect(result).toContain('备份任务超过六天执行期限');
+    expect(f.state().status).toBe('failed');
+    expect(await readdir(f.directory)).toEqual([]);
+  });
+  it('terminates a silent restore at the queue deadline and ignores a late callback', async () => {
+    const f = await fixture();
+    f.job.data = { ...f.data, params: { tables: ['public.OrderItems'] } };
+    const artifact = (await f.processor(f.job, 'lock')) as { filename: string };
+    const createdAt = new Date(Date.now() - 6 * 86400000 + 200).toISOString();
+    const restoreData = {
+      ...f.data,
+      operation: 'restore',
+      taskSubType: 'restore',
+      createdAt,
+      params: { filename: artifact.filename },
+    };
+    f.job.name = 'restore';
+    f.job.data = restoreData;
+    f.setState({
+      ...f.state(),
+      taskSubType: 'restore',
+      createdAt,
+      status: 'pending',
+      startedAt: null,
+      result: null,
+    });
+    const child = Object.assign(new EventEmitter(), {
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      stderr: { resume: vi.fn() },
+      kill: vi.fn(() => {
+        child.signalCode = 'SIGTERM';
+        child.emit('close', null, 'SIGTERM');
+        return true;
+      }),
+    });
+    dependencies.spawn.mockReturnValue(child);
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+      '备份任务超过六天执行期限',
+    );
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    child.emit('close', 0, null);
+    expect(f.state()).toMatchObject({ status: 'failed', result: null });
+    expect(
+      f.store.mutate.mock.calls.some(
+        ([, change]) => change.kind === 'restore-committed',
+      ),
+    ).toBe(false);
+  });
   it.each(['cancelling', 'cancelled', 'failed'] as const)(
     'recovers a durable publication before respecting later %s metadata',
     async (status) => {
@@ -386,11 +568,14 @@ describe('creation attempts and durable publication', () => {
     expect(f.state().status).toBe('completed');
   });
   it('accepts cancellation while hashing an already published file and keeps its original recovery point', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-01T16:00:00.123Z'));
     const f = await fixture('2026-09-01T16:00:00.123Z');
     const result = (await f.processor(f.job, 'lock')) as {
       filename: string;
       createdAt: string;
     };
+    vi.setSystemTime(new Date('2026-09-09T16:00:00.123Z'));
     f.setState({ ...f.state(), status: 'processing', result: null });
     const read = f.store.read.getMockImplementation()!;
     let reads = 0;

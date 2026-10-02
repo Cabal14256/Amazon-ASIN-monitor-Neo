@@ -72,6 +72,12 @@ const mutationSchema = z.discriminatedUnion('kind', [
     message,
   }),
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
+  // Only a backup worker that confirmed nothing was published and cleanup is
+  // certain may use this failure. Durable commit mutations stay separate.
+  z.object({
+    kind: z.literal('backup-uncommitted-failed'),
+    message: z.string().min(1).max(2000),
+  }),
   z.object({
     kind: z.literal('restore-committed'),
     result: backupRestoreReceiptSchema.refine(
@@ -104,6 +110,12 @@ export function transitionTask(
   now: Date,
 ): TaskState {
   const change = mutationSchema.parse(mutation);
+  if (
+    change.kind === 'backup-uncommitted-failed' &&
+    (task.taskType !== 'backup' ||
+      !['create', 'restore'].includes(task.taskSubType ?? ''))
+  )
+    throw new Error('BACKUP_TASK_IDENTITY_INVALID');
   if (change.kind === 'backup-create-committed') {
     const proof = change.result.backupCreationCommit;
     if (
@@ -220,8 +232,12 @@ export function transitionTask(
           : change.message ?? '任务已完成';
       break;
     case 'failed':
+    case 'backup-uncommitted-failed':
       if (
-        ['variant-check', 'batch-check', 'monitor'].includes(task.taskType) &&
+        (change.kind === 'backup-uncommitted-failed' ||
+          ['variant-check', 'batch-check', 'monitor'].includes(
+            task.taskType,
+          )) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';
@@ -229,7 +245,9 @@ export function transitionTask(
         next.completedAt = timestamp;
         next.error = null;
         next.message =
-          task.taskType === 'monitor'
+          change.kind === 'backup-uncommitted-failed'
+            ? '备份任务已取消'
+            : task.taskType === 'monitor'
             ? '监控任务已取消，已提交的结果保留'
             : '检查任务已取消，已提交的检查结果保留';
         break;

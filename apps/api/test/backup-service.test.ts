@@ -185,12 +185,14 @@ async function fixture(maxBytes = 1024 * 1024) {
     },
   };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const env = {
+    AUTH_DATA_AUTHORITY: 'postgresql',
+    BACKUP_STORAGE_DIRECTORY: directory,
+    BACKUP_MAX_BYTES: maxBytes,
+    TASK_META_TTL_SECONDS: 604800,
+  };
   const service = new BackupService(
-    {
-      AUTH_DATA_AUTHORITY: 'postgresql',
-      BACKUP_STORAGE_DIRECTORY: directory,
-      BACKUP_MAX_BYTES: maxBytes,
-    } as never,
+    env as never,
     repository as never,
     tasks as never,
     pools as never,
@@ -206,6 +208,7 @@ async function fixture(maxBytes = 1024 * 1024) {
     pools,
     logger,
     service,
+    env,
   };
 }
 
@@ -235,6 +238,44 @@ describe('backup submission HTTP / global exception boundary', () => {
     await app.getHttpAdapter().getInstance().ready();
     return app;
   }
+  it.each(['create', 'restore'] as const)(
+    'rejects short retention with HTTP 503 before %s creates metadata or enqueues',
+    async (operation) => {
+      const f = await fixture();
+      f.env.TASK_META_TTL_SECONDS = 1;
+      if (operation === 'restore') {
+        await writeFile(join(f.directory, filename), 'PGDMPfixture');
+        await writeMetadata(f.directory, 'postgresql');
+      }
+      const app = await http(f.service);
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url:
+            operation === 'create'
+              ? '/api/v1/backup'
+              : '/api/v1/backup/restore',
+          payload: operation === 'create' ? {} : { filename },
+        });
+        expect(response.statusCode).toBe(503);
+        expect(response.json()).toMatchObject({
+          success: false,
+          errorCode: 503,
+          errorMessage: '服务器内部错误',
+        });
+        expect(f.logger.warn).toHaveBeenCalledWith(
+          '备份任务元数据保留配置不满足执行窗口',
+          'BackupService',
+          { reason: 'backup_task_retention_too_short' },
+        );
+        expect(f.tasks.openBackup).not.toHaveBeenCalled();
+        expect(f.port.store.create).not.toHaveBeenCalled();
+        expect(f.port.enqueue).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
   it.each(['list', 'restore', 'download'] as const)(
     'reports native archive I/O failures in actual %s HTTP responses',
     async (operation) => {
