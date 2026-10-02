@@ -9,6 +9,7 @@ import { ENV } from '../config/config.module';
 import { DatabaseModule } from '../database/database.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
+import { MetricsModule } from '../metrics/metrics.module';
 import { MonitorAnalyticsCache } from './monitor-analytics-cache';
 import { MonitorAnalyticsController } from './monitor-analytics.controller';
 import { MonitorAnalyticsGuard } from './monitor-analytics.guard';
@@ -23,7 +24,7 @@ import {
 } from './monitor-history.service';
 
 @Module({
-  imports: [AuthModule, DatabaseModule],
+  imports: [AuthModule, DatabaseModule, MetricsModule],
   controllers: [MonitorHistoryController, MonitorAnalyticsController],
   providers: [
     MonitorHistoryService,
