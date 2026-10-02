@@ -145,23 +145,26 @@ export class MonitorAnalyticsCache {
       const cached: unknown = JSON.parse(raw);
       assertMonitorJsonBounds(cached, MONITOR_ANALYTICS_CACHE_BYTES);
       if (!cached || typeof cached !== 'object' || Array.isArray(cached))
-        return null;
+        throw new Error('CACHE_INVALID_ENVELOPE');
       const row = cached as Record<string, unknown>;
       const now = Date.now();
       if (
         row.version !== 1 ||
         row.key !== key ||
-        !['raw', 'agg', 'agg:day-fallback'].includes(String(row.source)) ||
+        typeof row.source !== 'string' ||
+        !['raw', 'agg', 'agg:day-fallback'].includes(row.source) ||
         typeof row.generatedAt !== 'number' ||
         !Number.isSafeInteger(row.generatedAt) ||
         row.generatedAt > now ||
         typeof row.expiresAt !== 'number' ||
         !Number.isSafeInteger(row.expiresAt) ||
-        row.expiresAt <= now ||
+        row.expiresAt < row.generatedAt ||
         row.expiresAt > row.generatedAt + ttl ||
-        row.generatedAt + ttl <= now
+        !Number.isSafeInteger(row.generatedAt + ttl)
       )
-        return null;
+        throw new Error('CACHE_INVALID_METADATA');
+      // Ordinary expiration is a cold miss only after envelope validation.
+      if (row.expiresAt <= now || row.generatedAt + ttl <= now) return null;
       validateMonitorAnalyticsData(query.operation, row.data);
       return {
         data: row.data,

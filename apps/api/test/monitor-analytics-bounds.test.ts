@@ -225,6 +225,80 @@ describe('monitor analytics response/cache resource bounds', () => {
     expect(vi.mocked(logger.warn).mock.calls.length).toBe(warningsBefore);
     expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
   });
+  it.each([
+    { version: 0 },
+    { key: 'private-cache-key-197' },
+    { key: null },
+    { source: 'private-source-197' },
+    { source: { secret: 'private-envelope-197' } },
+    { generatedAt: null },
+    { generatedAt: 'private-time-197' },
+    { generatedAt: Number.MAX_SAFE_INTEGER },
+    { expiresAt: null },
+    { expiresAt: Number.MAX_SAFE_INTEGER },
+  ])('logs a fixed reason once for invalid metadata %j', async (change) => {
+    const f = fixture();
+    await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
+    const key = f.cache.key(query);
+    const payload = JSON.parse(f.values.get(key)!) as Record<string, unknown>;
+    f.values.set(key, JSON.stringify({ ...payload, ...change }));
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual([
+      [
+        '统计缓存内容无效',
+        'MonitorAnalyticsCache',
+        { reason: 'analytics_cache_invalid' },
+      ],
+    ]);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
+    expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
+  });
+  it.each(['[]', 'null', '42', '"private-envelope-197"'])(
+    'logs a fixed reason for a non-object envelope %s',
+    async (raw) => {
+      const f = fixture();
+      f.values.set(f.cache.key(query), raw);
+      const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+      expect(await f.cache.get(query)).toBeNull();
+      expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual([
+        [
+          '统计缓存内容无效',
+          'MonitorAnalyticsCache',
+          { reason: 'analytics_cache_invalid' },
+        ],
+      ]);
+      expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
+    },
+  );
+  it('keeps valid expired envelopes silent while invalid expired metadata still warns', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const born = Date.now() - f.cache.ttl(query.operation) - 1;
+    const key = f.cache.key(query);
+    const payload = {
+      version: 1,
+      key,
+      source: 'raw',
+      data: [],
+      generatedAt: born,
+      expiresAt: born + f.cache.ttl(query.operation),
+    };
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    f.values.set(key, JSON.stringify(payload));
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.length).toBe(warningsBefore);
+    f.values.set(key, JSON.stringify({ ...payload, version: 0 }));
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual([
+      [
+        '统计缓存内容无效',
+        'MonitorAnalyticsCache',
+        { reason: 'analytics_cache_invalid' },
+      ],
+    ]);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(2);
+  });
   it('skips oversized writes and rejects a cache value copied from a different query', async () => {
     const f = fixture();
     await f.cache.set(
