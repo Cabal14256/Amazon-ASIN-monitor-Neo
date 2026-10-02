@@ -15,6 +15,7 @@ import {
   periodSummaryDetailsQuerySchema,
   periodSummaryQuerySchema,
   periodSummaryResultSchema,
+  primaryMonitorJobSchema,
   statisticsByCountryResultSchema,
   statisticsByTimeQuerySchema,
   statisticsByTimeResultSchema,
@@ -350,5 +351,33 @@ describe('monitor 域', () => {
       triggerMonitorRequestSchema.parse({ countries: ['US', 'ZZ'] }),
     ).toThrow();
     expect(triggerMonitorRequestSchema.parse({})).toEqual({});
+  });
+  it('监控队列任务绑定身份、期限与唯一国家集合', () => {
+    const valid = {
+      taskId: '3b35d6ec-7e76-4d58-9e36-ff9f14c3a9e1',
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      userId: 'owner',
+      createdAt: '2026-09-27T00:00:00.000Z',
+      expiresAt: '2026-10-04T00:00:00.000Z',
+      countries: ['US', 'DE'],
+    };
+    expect(primaryMonitorJobSchema.parse(valid).countries).toEqual([
+      'US',
+      'DE',
+    ]);
+    expect(
+      primaryMonitorJobSchema.safeParse({ ...valid, countries: ['US', 'US'] })
+        .success,
+    ).toBe(false);
+    expect(
+      primaryMonitorJobSchema.safeParse({ ...valid, userId: '' }).success,
+    ).toBe(false);
+    expect(
+      primaryMonitorJobSchema.safeParse({
+        ...valid,
+        expiresAt: valid.createdAt,
+      }).success,
+    ).toBe(false);
   });
 });

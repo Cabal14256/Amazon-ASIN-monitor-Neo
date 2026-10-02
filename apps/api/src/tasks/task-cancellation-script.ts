@@ -8,6 +8,7 @@ import { QueueKeys } from 'bullmq';
 import type { Redis } from 'ioredis';
 
 export const CANCELLABLE_TASK_TYPES = [
+  'monitor',
   'export',
   'import',
   'variant-check',

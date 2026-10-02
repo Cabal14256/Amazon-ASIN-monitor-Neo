@@ -76,6 +76,38 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it('preserves an accepted monitor cancellation against a racing final completion', async () => {
+    const { repository } = fixture();
+    const task = await repository.create({
+      taskId: 'monitor-task',
+      userId: 'owner-a',
+      taskType: 'monitor',
+      taskSubType: 'primary',
+    });
+    const cancelling = await repository.mutate(
+      task.taskId,
+      { kind: 'cancel-request' },
+      task,
+    );
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'completed', result: { totalChecked: 2 } },
+        task,
+      ),
+    ).toEqual(cancelling);
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'failed', message: 'Queue failed' },
+        task,
+      ),
+    ).toMatchObject({
+      status: 'cancelled',
+      error: null,
+      message: '监控任务已取消，已提交的结果保留',
+    });
+  });
   it('preserves a check cancellation when an exhausted queue failure is reconciled', async () => {
     const { repository } = fixture();
     const task = await repository.create(checkInput);

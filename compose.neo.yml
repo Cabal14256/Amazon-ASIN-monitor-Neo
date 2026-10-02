@@ -50,6 +50,10 @@ services:
       - ./packages/db/docker/apply-competitor-write-policy.sh:/opt/asin-monitor/apply-competitor-write-policy.sh:ro
       - ./packages/db/migrations/0011_competitor_write_policy.sql:/opt/asin-monitor/0011_competitor_write_policy.sql:ro
       - ./packages/db/migrations/0011_competitor_write_policy.rollback.sql:/opt/asin-monitor/0011_competitor_write_policy.rollback.sql:ro
+      # Manual primary monitor has its own immutable run snapshot and notification claim.
+      - ./packages/db/docker/apply-primary-monitor.sh:/opt/asin-monitor/apply-primary-monitor.sh:ro
+      - ./packages/db/migrations/0012_primary_monitor.sql:/opt/asin-monitor/0012_primary_monitor.sql:ro
+      - ./packages/db/migrations/0012_primary_monitor.rollback.sql:/opt/asin-monitor/0012_primary_monitor.rollback.sql:ro
       # Feishu CAS is an explicit primary-only upgrade after the final import.
       - ./packages/db/docker/apply-feishu-revision.sh:/opt/asin-monitor/apply-feishu-revision.sh:ro
       - ./packages/db/migrations/0013_feishu_revision.sql:/opt/asin-monitor/0013_feishu_revision.sql:ro

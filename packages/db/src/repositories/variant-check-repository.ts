@@ -1,3 +1,4 @@
+import type { VariantGroupCheckData } from '@asin-monitor/contracts';
 import {
   decodeCatalogVariantResult,
   decodeGroupCatalogResult,
@@ -318,6 +319,80 @@ export class DrizzleVariantCheckUnit
     await guard();
     this.ensureOpen();
     return { group: updatedGroup, asins: updatedRows, observations: checked };
+  }
+  async recordMonitorHistory(
+    taskId: string,
+    committed: CommittedGroupCheck,
+    result: VariantGroupCheckData,
+  ): Promise<void> {
+    if (!/^[a-f0-9-]{36}$/i.test(taskId))
+      throw new VariantCheckError('invalid-input');
+    const { group, asins, observations } = committed;
+    if (group.isCompetitor) throw new VariantCheckError('snapshot-changed');
+    const checkedAt =
+      observations.length && group.lastCheckTime
+        ? group.lastCheckTime
+        : await this.timestamp();
+    const byId = new Map(observations.map((item) => [item.asinId, item]));
+    const rows = [
+      {
+        monitorTaskId: taskId,
+        variantGroupId: group.id,
+        variantGroupName: group.name,
+        checkType: 'GROUP',
+        country: normalizeCountry(group.country),
+        isBroken: result.isBroken,
+        checkTime: checkedAt,
+        checkResult: result,
+      },
+      ...asins.map((asin) => {
+        const observation = byId.get(asin.id);
+        if (!observation) throw new VariantCheckError('invalid-result');
+        const effective = resolveAsinVariantStatus(asin, group);
+        const errorType =
+          observation.kind === 'failed'
+            ? 'SP_API_ERROR'
+            : observation.kind === 'checked' && !observation.result.hasVariants
+            ? observation.result.errorType || 'NO_VARIANTS'
+            : effective.statusSource === 'MANUAL' ||
+              effective.statusSource === 'AUTO+MANUAL'
+            ? 'MANUAL_MARKED'
+            : undefined;
+        return {
+          monitorTaskId: taskId,
+          variantGroupId: group.id,
+          variantGroupName: group.name,
+          asinId: asin.id,
+          asinCode: asin.asin,
+          asinName: asin.name,
+          siteSnapshot: asin.site,
+          brandSnapshot: asin.brand,
+          checkType: 'ASIN',
+          country: normalizeCountry(group.country),
+          isBroken: effective.isBroken === 1,
+          checkTime: checkedAt,
+          checkResult: {
+            asin: asin.asin,
+            isBroken: effective.isBroken === 1,
+            ...(errorType ? { errorType } : {}),
+            isDeferred: observation.kind === 'deferred',
+            currentResult: observation,
+            statusSource: effective.statusSource,
+            manualBrokenReason: effective.manualBrokenReason || '',
+          },
+        };
+      }),
+    ];
+    this.ensureOpen();
+    const inserted = await this.db
+      .insert(monitorHistory)
+      .values(rows)
+      .returning({
+        id: monitorHistory.id,
+      });
+    this.ensureOpen();
+    if (inserted.length !== rows.length)
+      throw new VariantCheckError('invalid-result');
   }
 }
 

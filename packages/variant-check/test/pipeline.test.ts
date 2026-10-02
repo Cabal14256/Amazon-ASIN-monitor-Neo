@@ -6,6 +6,7 @@ import {
   type CatalogVariantChecker,
 } from '@asin-monitor/sp-api';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { CatalogHybridOptions } from '../src/hybrid';
 import {
   VariantCheckCommitUncertainError,
   VariantCheckPipeline,
@@ -93,6 +94,7 @@ function fixture(
         return value;
       },
     ),
+    recordMonitorHistory: vi.fn(async () => undefined),
   };
   let transactionNumber = 0;
   const hooks: {
@@ -196,6 +198,20 @@ describe('Primary variant business pipeline', () => {
         expiresAt: '2026-09-20T00:00:00.000Z',
       },
       { asinId: 'a1', forceRefresh: false },
+    );
+  const monitorOperation = () =>
+    createVariantCheckOperation(
+      {
+        taskId: '10000000-0000-4000-8000-000000000002',
+        userId: 'fixture-owner',
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        resultKind: 'group',
+        step: 'monitor-aaaaaaaaaaaaaaaaaaaaaaaa',
+        taskCreatedAt: '2026-09-13T00:00:00.000Z',
+        expiresAt: '2026-09-20T00:00:00.000Z',
+      },
+      { groupId: 'g1', forceRefresh: false },
     );
 
   it('restores an immutable completed result before reading changed/deleted business records or calling Amazon', async () => {
@@ -327,6 +343,73 @@ describe('Primary variant business pipeline', () => {
     });
     expect(f.check).not.toHaveBeenCalled();
     expect(f.unit.commitGroup).not.toHaveBeenCalled();
+  });
+
+  it('keeps unrelated deferred cache entries during a normal monitor group check', async () => {
+    const f = setup(2);
+    await f.pipeline.checkGroup('g1', {
+      ...f.context,
+      operation: monitorOperation(),
+    });
+    expect(f.cache.invalidate).toHaveBeenCalledTimes(2);
+    expect(f.cache.clearDeferred).not.toHaveBeenCalled();
+    expect(f.unit.recordMonitorHistory).toHaveBeenCalledOnce();
+  });
+
+  it('retries only hybrid detail deferrals and clears only successfully resolved entries', async () => {
+    const check = vi.fn(
+      async (
+        _asins: string[],
+        _country: string,
+        options: CatalogHybridOptions,
+      ) => {
+        options.onDeferred?.(1);
+        return [product(1), product(2), product(3)];
+      },
+    );
+    const f = setup(3, { hybrid: { check }, batchThreshold: 2 });
+    const pending = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      operation: monitorOperation(),
+    });
+    await flush();
+    await pending;
+    expect(f.check).toHaveBeenCalledOnce();
+    expect(f.check).toHaveBeenCalledWith(
+      'B000000002',
+      'US',
+      expect.objectContaining({ forceRefresh: true }),
+    );
+    expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
+      { kind: 'checked' },
+      { kind: 'checked' },
+      { kind: 'checked' },
+    ]);
+    expect(f.cache.clearDeferred).toHaveBeenCalledOnce();
+    expect(f.cache.clearDeferred).toHaveBeenCalledWith(
+      { asin: 'B000000002', country: 'US', owner: 'primary' },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('retains a deferred entry when the monitor retry still returns an API error', async () => {
+    const f = setup(2);
+    f.check.mockImplementation(async (code) => {
+      if (code === 'B000000001')
+        throw new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
+      return product(2);
+    });
+    const pending = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      operation: monitorOperation(),
+    });
+    await flush();
+    await pending;
+    expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
+      { kind: 'failed' },
+      { kind: 'checked' },
+    ]);
+    expect(f.cache.clearDeferred).not.toHaveBeenCalled();
   });
 
   it('checks outside transactions, reauthorizes locked writes, and returns the complete result only after commit', async () => {

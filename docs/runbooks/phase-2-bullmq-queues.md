@@ -1,6 +1,6 @@
 # P2-T2a：Neo 队列策略与接入边界
 
-八类 Queue 策略已完成；PostgreSQL 权威源下，入口现已注册认证维护及[主营批量删除](./phase-2-asin-batch-delete.md)的真实 Processor。其余七类业务队列仍只创建 Queue 资源，不消费任务，不能将看门狗健康等同于业务迁移完成。已注册业务入口显示 `mode=business-worker` 和实际处理器数；纯骨架选择仍显示 queue-scaffold。后续域需验证 payload 后接入实际 Processor，不允许用空回调完成任务。
+八类 Queue 策略已完成；PostgreSQL 权威源下，认证维护、主营批量删除、导入、变体检查及[主营手动监控](./phase-2-primary-monitor.md)已有真实 Processor。其他业务队列仍可能只有 Queue 资源，不能将看门狗健康等同于业务迁移完成。已注册业务入口显示 `mode=business-worker` 和实际处理器数；纯骨架选择仍显示 queue-scaffold。后续域需验证 payload 后接入实际 Processor，不允许用空回调完成任务。
 
 ## 八类队列基线
 
@@ -8,7 +8,7 @@
 
 | 选择器 | 物理名称 | 尝试次数 | 成功/失败保留 | 限速 | 并发变量（默认 1） |
 | --- | --- | --: | --- | --- | --- |
-| monitor | monitor-task-queue | 3 | 3600 / 86400 | 1 / 200ms | MONITOR_QUEUE_WORKER_CONCURRENCY |
+| monitor | monitor-task-queue | 3 | max(604800, TASK_META_TTL_SECONDS) / max(604800, TASK_META_TTL_SECONDS) | 1 / 200ms | MONITOR_QUEUE_WORKER_CONCURRENCY |
 | competitor-monitor | competitor-monitor-task-queue | 3 | 3600 / 86400 | 1 / 200ms | COMPETITOR_QUEUE_WORKER_CONCURRENCY |
 | export | export-task-queue | 2 | 86400 / 604800 | 1 / 500ms | EXPORT_QUEUE_WORKER_CONCURRENCY |
 | import | import-task-queue | 2 | 3600 / 86400 | 1 / 1000ms | 固定 1，Legacy 无覆盖变量 |
