@@ -47,7 +47,10 @@ async function publicTableNames(
     WHERE table_schema = 'public'
       AND table_type = 'BASE TABLE'
       -- Neo-only upgrades are verified by their own integration fixtures.
-      AND table_name NOT IN ('audit_logs_archive', 'variant_check_receipts')
+      AND table_name NOT IN (
+        'audit_logs_archive', 'variant_check_receipts',
+        'primary_monitor_runs', 'primary_monitor_notifications'
+      )
       AND NOT EXISTS (
         SELECT 1 FROM pg_inherits inheritance
         WHERE inheritance.inhrelid = format('%I.%I', table_schema, table_name)::regclass
@@ -134,14 +137,19 @@ describe('P1-T2 PostgreSQL schema integration', () => {
       ...competitorTableNames,
     ]);
 
+    // 0012 is applied after this baseline snapshot test in Integration CI.
     expect(await publicColumnKeys(primaryPool, primaryTableNames)).toEqual(
-      drizzleColumnKeys(primaryDrizzleTables),
+      drizzleColumnKeys(primaryDrizzleTables).filter(
+        (key) => key !== 'monitor_history.monitor_task_id',
+      ),
     );
     expect(
       await publicColumnKeys(competitorPool, competitorTableNames),
     ).toEqual(drizzleColumnKeys(competitorDrizzleTables));
 
-    const primaryIndexes = drizzleIndexNames(primaryDrizzleTables);
+    const primaryIndexes = drizzleIndexNames(primaryDrizzleTables).filter(
+      (name) => name !== 'idx_monitor_history_monitor_task_country',
+    );
     const competitorIndexes = drizzleIndexNames(competitorDrizzleTables);
     expect(await existingIndexNames(primaryPool, primaryIndexes)).toEqual(
       primaryIndexes,

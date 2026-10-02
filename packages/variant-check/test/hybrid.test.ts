@@ -346,7 +346,11 @@ describe('Catalog hybrid batch / real Legacy business parity and supported Amazo
     const failure = new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
     failure.message = 'token=private';
     f.check.mockRejectedValue(failure);
-    const output = await f.hybrid.check([asin().asin], 'US', f.options);
+    const onDeferred = vi.fn();
+    const output = await f.hybrid.check([asin().asin], 'US', {
+      ...f.options,
+      onDeferred,
+    });
     expect(output).toMatchObject([
       {
         hasVariants: true,
@@ -358,6 +362,7 @@ describe('Catalog hybrid batch / real Legacy business parity and supported Amazo
       },
     ]);
     expect(JSON.stringify(output)).not.toContain('private');
+    expect(onDeferred).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it('retains actual admission after cancellation and never schedules late details or progress', async () => {

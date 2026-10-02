@@ -1,3 +1,4 @@
+import type { VariantGroupCheckData } from '@asin-monitor/contracts';
 import type {
   CatalogVariantResult,
   GroupCatalogResult,
@@ -45,6 +46,12 @@ export interface VariantCheckUnit extends AsinQueryUnit {
     result: CatalogVariantResult,
     guard: CheckCommitGuard,
   ): Promise<CommittedSingleCheck>;
+  /** Monitor-only write, in the same transaction as group status and receipt. */
+  recordMonitorHistory?(
+    taskId: string,
+    committed: CommittedGroupCheck,
+    result: VariantGroupCheckData,
+  ): Promise<void>;
 }
 export interface VariantCheckRepositoryPort {
   transaction<T>(action: (unit: VariantCheckUnit) => Promise<T>): Promise<T>;

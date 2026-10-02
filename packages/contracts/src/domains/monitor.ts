@@ -261,14 +261,44 @@ const monitorCountryCodeSchema = z
   .transform((country) => country.trim().toUpperCase())
   .pipe(z.enum(['US', 'UK', 'DE', 'FR', 'IT', 'ES']));
 
-export const triggerMonitorRequestSchema = z.object({
-  countries: z
-    .array(monitorCountryCodeSchema)
-    .nonempty('countries 不能为空')
-    .transform((countries) => [...new Set(countries)])
-    .optional(),
-});
+export const triggerMonitorRequestSchema = z
+  .object({
+    countries: z
+      .array(monitorCountryCodeSchema)
+      .nonempty('countries 不能为空')
+      .transform((countries) => [...new Set(countries)])
+      .optional(),
+  })
+  .strict();
 export type TriggerMonitorRequest = z.infer<typeof triggerMonitorRequestSchema>;
+
+/** Internal BullMQ payload. A task incarnation cannot be replaced by an old job. */
+export const primaryMonitorJobSchema = z
+  .object({
+    taskId: z.string().uuid(),
+    taskType: z.literal('monitor'),
+    taskSubType: z.literal('primary'),
+    userId: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[^\x00-\x1f\x7f]+$/u),
+    createdAt: z.string().datetime(),
+    expiresAt: z.string().datetime(),
+    countries: z.array(monitorCountryCodeSchema).min(1).max(6),
+  })
+  .strict()
+  .superRefine((job, context) => {
+    if (
+      new Set(job.countries).size !== job.countries.length ||
+      Date.parse(job.expiresAt) <= Date.parse(job.createdAt)
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '监控任务身份无效',
+      });
+  });
+export type PrimaryMonitorJob = z.infer<typeof primaryMonitorJobSchema>;
 
 /** 异常时长统计 query（asinIds/asinCodes 支持逗号分隔） */
 export const abnormalDurationQuerySchema = z.object({

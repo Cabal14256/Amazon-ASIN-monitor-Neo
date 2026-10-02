@@ -74,8 +74,19 @@ export function getQueuePolicy(name: QueueName, env: Env) {
     ...(policy.attempts > 1
       ? { backoff: { type: 'exponential' as const, delay: 5000 } }
       : {}),
-    removeOnComplete: { age: Math.max(policy.completeAge, checkRetention) },
-    removeOnFail: { age: Math.max(policy.failureAge, checkRetention) },
+    // Terminal monitor jobs serve as recovery receipts after lost acknowledgements.
+    removeOnComplete: {
+      age:
+        name === 'monitor'
+          ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
+          : Math.max(policy.completeAge, checkRetention),
+    },
+    removeOnFail: {
+      age:
+        name === 'monitor'
+          ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
+          : Math.max(policy.failureAge, checkRetention),
+    },
   };
   const limiter =
     name === 'monitor'

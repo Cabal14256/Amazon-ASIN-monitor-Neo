@@ -26,6 +26,9 @@ export interface CatalogHybridOptions {
   signal?: AbortSignal;
   checkpoint(): Promise<void>;
   onProgress?(completed: number, total: number): void | Promise<void>;
+  /** Preserve a deferred detail result for monitor retry without changing the
+   * Legacy-compatible fallback result returned to other hybrid callers. */
+  onDeferred?(index: number): void;
 }
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -140,7 +143,7 @@ export class CatalogHybridChecker {
         }
         const results: GroupCatalogResult[] = [];
         let bytes = 2;
-        for (const asin of inputs) {
+        for (const [index, asin] of inputs.entries()) {
           await guard();
           const summary = summaries.get(asin)!;
           let result: GroupCatalogResult;
@@ -155,6 +158,8 @@ export class CatalogHybridChecker {
             } catch (error) {
               ensure();
               if (fatal(error)) throw error;
+              if (error instanceof CatalogDeferredError)
+                options.onDeferred?.(index);
               result = {
                 asin,
                 hasVariants: summary.hasVariants,

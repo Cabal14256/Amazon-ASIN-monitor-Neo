@@ -40,7 +40,7 @@ const operationSchema = z
       .max(200)
       .regex(/^[^\x00-\x1f\x7f]+$/u),
     taskCreatedAt: z.string().datetime(),
-    taskType: z.enum(['variant-check', 'batch-check']),
+    taskType: z.enum(['variant-check', 'batch-check', 'monitor']),
     taskSubType: z.enum([
       'asin-check',
       'variant-group-check',
@@ -48,8 +48,11 @@ const operationSchema = z
       'competitor-variant-group-check',
       'parent-asin-query',
       'variant-group',
+      'primary',
     ]),
-    step: z.string().regex(/^(result|group-(?:0|[1-9]\d{0,2}))$/),
+    step: z
+      .string()
+      .regex(/^(result|group-(?:0|[1-9]\d{0,2})|monitor-[a-f0-9]{24})$/),
     resultKind: z.enum([
       'asin',
       'group',
@@ -142,8 +145,11 @@ export function parseVariantCheckOperation(
       'variant-check/parent-asin-query/parent',
       'batch-check/variant-group/group',
       'batch-check/variant-group/batch',
+      'monitor/primary/group',
     ].includes(pair) ||
-    (result.resultKind === 'group' && result.taskType === 'batch-check'
+    (result.taskType === 'monitor'
+      ? !/^monitor-[a-f0-9]{24}$/.test(result.step)
+      : result.resultKind === 'group' && result.taskType === 'batch-check'
       ? result.step === 'result'
       : result.step !== 'result')
   )
