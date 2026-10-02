@@ -21,7 +21,7 @@ export const ASIN_CATALOG: CatalogConfig = {
   label: 'ASIN',
   heading: '变体组与 ASIN',
   description:
-    '查找变体组和组内 ASIN，管理单项资料与归属。批量操作、导入与导出功能仍在迁移。',
+    '查找变体组和组内 ASIN，管理单项资料与归属。CSV/XLSX 导入已接入异步任务；批量操作与导出仍在迁移。',
   showSite: true,
   showSource: true,
   showManual: true,
