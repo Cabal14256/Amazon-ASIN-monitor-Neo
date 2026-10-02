@@ -99,7 +99,11 @@ const deleteAsinSchema = competitorDeleteAsinRequestSchema.extend({
   expectedSource: updateSchema.shape.expectedSource,
 });
 const moveSchema = competitorMoveAsinRequestSchema
-  .extend({ targetGroupId: id, expectedSourceGroup: id.optional() })
+  .extend({
+    targetGroupId: id,
+    expectedSourceGroup: id.optional(),
+    expectedTargetSnapshot: groupSource.extend({ id }).strict().optional(),
+  })
   .strict();
 const deleteGroupSchema = competitorDeleteGroupRequestSchema
   .extend({

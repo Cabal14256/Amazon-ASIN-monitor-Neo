@@ -46,6 +46,49 @@ function client(baseURL: string, fetcher: typeof fetch) {
 }
 
 describe('competitor catalog transport', () => {
+  it.each(['/api/', 'https://app.test/api/'])(
+    'preserves the confirmed target snapshot at the actual %s boundary and reports lock-time conflicts',
+    async (baseURL) => {
+      const expectedTargetSnapshot = {
+        id: ' Gróup cible ',
+        name: ' Target group \n ',
+        country: 'DE',
+        brand: ' Rival \n ',
+        updateTime: '2020-02-02T00:00:00.000Z',
+      };
+      const input = {
+        targetGroupId: expectedTargetSnapshot.id,
+        expectedSourceGroup: ' Source Şöurce ',
+        expectedTargetSnapshot,
+      };
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        jsonResponse({
+          success: true,
+          data: {
+            id: ' Child α ',
+            asin: 'B00RIVAL00',
+            country: 'DE',
+            variantGroupId: expectedTargetSnapshot.id,
+          },
+        }),
+      );
+      const http = client(baseURL, fetcher);
+      await moveCompetitorAsin(http, ' Child α ', input);
+      expect(fetcher.mock.calls[0][0]).toBe(
+        `https://app.test/api/v1/competitor/asins/${encodeURIComponent(
+          ' Child α ',
+        )}/move`,
+      );
+      expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual(input);
+      fetcher.mockResolvedValueOnce(
+        jsonResponse({ success: false, errorMessage: '竞品目标组已变化' }, 409),
+      );
+      await expect(
+        moveCompetitorAsin(http, ' Child α ', input),
+      ).rejects.toMatchObject({ kind: 'HTTP', status: 409 });
+      expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual(input);
+    },
+  );
   it.each(['/api', 'https://app.test/api/'])(
     'preserves the full parent snapshot on the actual %s create request',
     async (baseURL) => {

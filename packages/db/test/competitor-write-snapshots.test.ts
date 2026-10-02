@@ -77,6 +77,113 @@ function repository(f: ReturnType<typeof database>) {
 
 describe('competitor confirmed mutation snapshots', () => {
   it.each([
+    { name: 'Concurrent target rename' },
+    { country: 'DE' },
+    { brand: 'Concurrent target brand' },
+    { updateTime: new Date('2020-01-01T00:00:01.000Z') },
+  ])(
+    'rejects a changed target through the actual public move adapter after locks: %j',
+    async (patch) => {
+      const expectedTargetSnapshot = {
+        id: 'g2',
+        name: 'Confirmed target',
+        country: 'US',
+        brand: 'Confirmed brand',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const current = { id: 'a1', variantGroupId: 'g1', country: 'US' };
+      const originalTarget = {
+        ...expectedTargetSnapshot,
+        updateTime: new Date(expectedTargetSnapshot.updateTime),
+      };
+      const f = database(
+        [
+          [current],
+          [originalTarget],
+          [
+            { id: 'g1', country: 'US' },
+            { ...originalTarget, ...patch },
+          ],
+          [current],
+          [current],
+        ],
+        true,
+      );
+      const writer = repository(f);
+      try {
+        await expect(
+          writer.transaction((unit) =>
+            unit.moveAsin('a1', 'g2', 'g1', expectedTargetSnapshot),
+          ),
+        ).rejects.toMatchObject({ code: 'source-changed' });
+        expect(f.locks).toEqual(['update', 'update']);
+        expect(f.update).not.toHaveBeenCalled();
+      } finally {
+        writer.close();
+      }
+    },
+  );
+  it('rejects a different canonical target identity under its lock', async () => {
+    const current = { id: 'a1', variantGroupId: 'g1', country: 'US' };
+    const target = {
+      id: 'Gróup ',
+      name: 'Target',
+      country: 'US',
+      brand: 'Brand',
+      updateTime: null,
+    };
+    const f = database(
+      [
+        [current],
+        [target],
+        [{ id: 'g1', country: 'US' }, target],
+        [current],
+        [current],
+      ],
+      true,
+    );
+    await expect(
+      f.unit.moveAsin('a1', target.id, 'g1', { ...target, id: 'Gróup' }),
+    ).rejects.toMatchObject({ code: 'source-changed' });
+    expect(f.update).not.toHaveBeenCalled();
+  });
+  it.each([false, true])(
+    'preserves successful Legacy/guarded moves with snapshot=%s',
+    async (guarded) => {
+      const current = { id: 'a1', variantGroupId: 'g1', country: 'US' };
+      const target = {
+        id: 'Gróup ',
+        name: '\n',
+        country: 'US',
+        brand: '',
+        updateTime: null,
+      };
+      const moved = { ...current, variantGroupId: target.id };
+      const f = database(
+        [
+          [current],
+          [target],
+          [{ id: 'g1', country: 'US' }, target],
+          [current],
+          [moved],
+        ],
+        true,
+      );
+      const writer = repository(f);
+      try {
+        await expect(
+          writer.transaction((unit) =>
+            unit.moveAsin('a1', target.id, 'g1', guarded ? target : undefined),
+          ),
+        ).resolves.toEqual(moved);
+        expect(f.update).toHaveBeenCalledTimes(2);
+        expect(f.locks).toEqual(['update', 'update']);
+      } finally {
+        writer.close();
+      }
+    },
+  );
+  it.each([
     { name: 'Concurrent rename' },
     { country: 'DE' },
     { brand: 'Concurrent brand' },

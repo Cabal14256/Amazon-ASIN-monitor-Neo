@@ -49,8 +49,18 @@ export class PgCompetitorWriteRepository
               (await business()).batchCreateAsins(items),
             updateAsin: async (id, fields, expectedSource) =>
               (await business()).updateAsin(id, fields, expectedSource),
-            moveAsin: async (id, target, expectedSourceGroup) =>
-              (await business()).moveAsin(id, target, expectedSourceGroup),
+            moveAsin: async (
+              id,
+              target,
+              expectedSourceGroup,
+              expectedTargetSnapshot,
+            ) =>
+              (await business()).moveAsin(
+                id,
+                target,
+                expectedSourceGroup,
+                expectedTargetSnapshot,
+              ),
             deleteGroup: async (id, expectedChildIds, expectedSource) =>
               (await business()).deleteGroup(
                 id,

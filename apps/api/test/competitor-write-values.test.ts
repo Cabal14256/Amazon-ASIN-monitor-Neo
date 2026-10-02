@@ -21,6 +21,44 @@ const fields = {
   parentId: 'Group-121',
 };
 describe('competitor write input boundaries', () => {
+  it('retains canonical target identities and persisted whitespace without new-input normalization', () => {
+    const expectedTargetSnapshot = {
+      id: ' Gróup ',
+      name: '\n\t',
+      country: '',
+      brand: '',
+      updateTime: null,
+    };
+    expect(
+      parseCompetitorAsinMove({
+        targetGroupId: ' Gróup ',
+        expectedSourceGroup: 'g1',
+        expectedTargetSnapshot,
+      }),
+    ).toEqual({
+      targetGroupId: ' Gróup ',
+      expectedSourceGroup: 'g1',
+      expectedTargetSnapshot,
+    });
+    expect(
+      parseCompetitorAsinMove({ targetGroupId: ' Gróup ' }),
+    ).not.toHaveProperty('expectedTargetSnapshot');
+    for (const changed of [
+      null,
+      {},
+      { ...expectedTargetSnapshot, id: '' },
+      { ...expectedTargetSnapshot, id: 'g'.repeat(51) },
+      { ...expectedTargetSnapshot, name: '\u0000' },
+      { ...expectedTargetSnapshot, name: '🔎'.repeat(256) },
+      { ...expectedTargetSnapshot, extra: true },
+    ])
+      expect(() =>
+        parseCompetitorAsinMove({
+          targetGroupId: ' Gróup ',
+          expectedTargetSnapshot: changed,
+        }),
+      ).toThrow(CompetitorWriteInputError);
+  });
   it.each(['', ' ', '\n\t\r'])(
     'preserves persisted group snapshot text %j while requiring valid new fields',
     (oldText) => {

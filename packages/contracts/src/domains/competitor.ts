@@ -118,6 +118,12 @@ export const competitorGroupSourceSchema = z
   })
   .strict();
 export type CompetitorGroupSource = z.infer<typeof competitorGroupSourceSchema>;
+export const competitorMoveTargetSnapshotSchema = competitorGroupSourceSchema
+  .extend({ id: z.string().min(1) })
+  .strict();
+export type CompetitorMoveTargetSnapshot = z.infer<
+  typeof competitorMoveTargetSnapshotSchema
+>;
 export const competitorUpdateGroupRequestSchema =
   competitorGroupUpsertRequestSchema.extend({
     expectedSource: competitorGroupSourceSchema.optional(),
@@ -201,6 +207,7 @@ export const competitorDeleteAsinRequestSchema = z
 export const competitorMoveAsinRequestSchema = z.object({
   targetGroupId: z.string().min(1, '目标变体组ID为必填项'),
   expectedSourceGroup: z.string().min(1).optional(),
+  expectedTargetSnapshot: competitorMoveTargetSnapshotSchema.optional(),
 });
 export type CompetitorMoveAsinRequest = z.infer<
   typeof competitorMoveAsinRequestSchema

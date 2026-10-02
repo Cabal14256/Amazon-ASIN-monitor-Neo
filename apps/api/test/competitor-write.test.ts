@@ -344,6 +344,7 @@ describe('competitor writes HTTP / current primary authorization', () => {
       'asin-119',
       'group-target',
       undefined,
+      undefined,
     );
   });
   it('forwards the original move parent and reports a locked source conflict', async () => {
@@ -356,6 +357,7 @@ describe('competitor writes HTTP / current primary authorization', () => {
       'asin-119',
       'group-target',
       'group-119',
+      undefined,
     );
     vi.mocked(f.unit.moveAsin).mockRejectedValueOnce(
       new CompetitorWriteError('source-changed'),
@@ -399,6 +401,37 @@ describe('competitor writes HTTP / current primary authorization', () => {
     f.permissions.splice(0);
     expect((await request(cases[2], headers, body)).statusCode).toBe(403);
     expect(f.unit.createAsin).toHaveBeenCalledTimes(2);
+  });
+  it('passes the complete target snapshot to the locked move and sanitizes stale target conflicts', async () => {
+    const expectedTargetSnapshot = {
+      id: 'group-target',
+      name: 'Original target',
+      country: 'US',
+      brand: 'Original brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const body = {
+      targetGroupId: 'group-target',
+      expectedSourceGroup: 'group-119',
+      expectedTargetSnapshot,
+    };
+    expect((await request(cases[4], headers, body)).statusCode).toBe(200);
+    expect(f.unit.moveAsin).toHaveBeenCalledWith(
+      'asin-119',
+      'group-target',
+      'group-119',
+      expectedTargetSnapshot,
+    );
+    vi.mocked(f.unit.moveAsin).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[4], headers, body);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toBe('竞品记录已变化，请刷新后重试');
+    expect(conflict.body).not.toContain(expectedTargetSnapshot.name);
+    f.permissions.splice(0);
+    expect((await request(cases[4], headers, body)).statusCode).toBe(403);
+    expect(f.unit.moveAsin).toHaveBeenCalledTimes(2);
   });
   it.each(['', ' ', '\n\t\r'])(
     'allows repairing and deleting Legacy persisted group text %j',

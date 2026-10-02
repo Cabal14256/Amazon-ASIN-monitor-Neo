@@ -66,6 +66,33 @@ describe('competitor 域', () => {
       }).success,
     ).toBe(false);
   });
+  it('retains the optional full target snapshot and exact persisted identity on move', () => {
+    const expectedTargetSnapshot = {
+      id: ' Gróup ',
+      name: '\n',
+      country: 'US',
+      brand: '',
+      updateTime: null,
+    };
+    const body = {
+      targetGroupId: ' Gróup ',
+      expectedSourceGroup: 'g1',
+      expectedTargetSnapshot,
+    };
+    expect(competitorMoveAsinRequestSchema.parse(body)).toEqual(body);
+    for (const target of [
+      null,
+      {},
+      { ...expectedTargetSnapshot, id: '' },
+      { ...expectedTargetSnapshot, extra: true },
+    ])
+      expect(
+        competitorMoveAsinRequestSchema.safeParse({
+          ...body,
+          expectedTargetSnapshot: target,
+        }).success,
+      ).toBe(false);
+  });
   it('竞对变体组列表：无 site，children 无人工异常装饰', () => {
     const parsed = competitorGroupListResultSchema.parse({
       success: true,

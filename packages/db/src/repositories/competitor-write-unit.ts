@@ -1,6 +1,7 @@
 import type {
   CompetitorAsinSource,
   CompetitorGroupSource,
+  CompetitorMoveTargetSnapshot,
 } from '@asin-monitor/contracts';
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
@@ -387,6 +388,7 @@ export class DrizzleCompetitorWriteUnit {
     id: string,
     targetGroupId: string,
     expectedSourceGroup?: string,
+    expectedTargetSnapshot?: CompetitorMoveTargetSnapshot,
   ): Promise<CompetitorAsin> {
     if (expectedSourceGroup !== undefined) text(expectedSourceGroup, 50);
     const { asin, target } = await this.lockAsin(id, targetGroupId);
@@ -396,6 +398,9 @@ export class DrizzleCompetitorWriteUnit {
     )
       throw new CompetitorWriteError('source-changed');
     if (!target) invalid('目标竞品变体组不存在');
+    if (expectedTargetSnapshot && target!.id !== expectedTargetSnapshot.id)
+      throw new CompetitorWriteError('source-changed');
+    assertGroupSource(target!, expectedTargetSnapshot);
     if (target!.id === asin.variantGroupId) return asin;
     if (target!.country !== asin.country)
       invalid(

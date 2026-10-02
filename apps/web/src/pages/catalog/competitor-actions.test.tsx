@@ -10,7 +10,8 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
-import { ApiError, type HttpClient } from '../../lib/http';
+import { ApiError, HttpClient } from '../../lib/http';
+import { jsonResponse, sessionFixture } from '../../lib/transport-fixtures';
 import type { createTransportRuntime } from '../../services/runtime';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { CatalogActionPanel } from './catalog-actions';
@@ -38,6 +39,7 @@ const target = {
   name: 'Target group',
   country: 'DE',
   brand: 'Other',
+  updateTime: '2020-02-02T00:00:00.000Z',
   children: [],
 };
 
@@ -99,6 +101,134 @@ function actionFixture(action: CatalogAction) {
 }
 
 describe('competitor catalog single-item controls', () => {
+  it('sends the preflight target version and reports a later server lock conflict without success or uncertainty', async () => {
+    const f = actionFixture({ type: 'move-asin', group, child });
+    f.request.mockRejectedValue(
+      new ApiError('HTTP', '竞品目标记录已变化，请刷新后重试', 409),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '查找目标组' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /Target group/ }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '确认移动' }));
+    await screen.findByRole('alert');
+    expect(f.request.mock.calls[0][1]?.json).toMatchObject({
+      expectedTargetSnapshot: {
+        id: target.id,
+        name: target.name,
+        country: target.country,
+        brand: target.brand,
+        updateTime: target.updateTime,
+      },
+    });
+    expect(screen.getByRole('alert').textContent).toContain('目标状态已变化');
+    expect(f.saved).not.toHaveBeenCalled();
+    expect(f.close).not.toHaveBeenCalled();
+    expect(f.uncertain).not.toHaveBeenCalled();
+  });
+  it.each(['/api/', 'https://app.test/api/'])(
+    'preserves canonical whitespace and non-ASCII IDs across the mounted move and actual %s HttpClient',
+    async (baseURL) => {
+      const original = { ...group, id: ' Source Şöurce ' };
+      const originalChild = { ...child, id: ' Child α ' };
+      original.children = [originalChild];
+      const destination = { ...target, id: ' Gróup cible ' };
+      const fetcher = vi.fn<typeof fetch>(async (url, options) => {
+        const path = new URL(String(url)).pathname;
+        if (options?.method === 'POST')
+          return jsonResponse({
+            success: true,
+            data: { ...originalChild, variantGroupId: destination.id },
+          });
+        if (path.endsWith(`/${encodeURIComponent(original.id)}`))
+          return jsonResponse({ success: true, data: original });
+        if (path.endsWith(`/${encodeURIComponent(destination.id)}`))
+          return jsonResponse({ success: true, data: destination });
+        return jsonResponse({
+          success: true,
+          data: {
+            list: [original, destination],
+            total: 2,
+            current: 1,
+            pageSize: 20,
+          },
+        });
+      });
+      const http = new HttpClient({
+        baseURL,
+        pageOrigin: 'https://app.test',
+        session: sessionFixture().store,
+        fetch: fetcher,
+      });
+      const saved = vi.fn(async () => undefined);
+      try {
+        render(
+          <CatalogActionPanel
+            action={{
+              type: 'move-asin',
+              group: original,
+              child: originalChild,
+            }}
+            config={COMPETITOR_CATALOG}
+            http={http}
+            saved={saved}
+            close={vi.fn()}
+            denied={vi.fn()}
+            uncertain={vi.fn()}
+            writingChange={vi.fn()}
+            runExclusive={async (work) => work()}
+            beginWrite={() => ({
+              phase: 'refresh',
+              message: null,
+              detailId: null,
+              createUncertain: false,
+            })}
+            releaseWrite={vi.fn()}
+          />,
+        );
+        fireEvent.click(screen.getByRole('button', { name: '查找目标组' }));
+        fireEvent.click(
+          await screen.findByRole('button', { name: /Target group/ }),
+        );
+        fireEvent.click(screen.getByRole('button', { name: '确认移动' }));
+        await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+        const urls = fetcher.mock.calls.map((call) => String(call[0]));
+        expect(urls).toContain(
+          `https://app.test/api/v1/competitor/variant-groups/${encodeURIComponent(
+            original.id,
+          )}`,
+        );
+        expect(urls).toContain(
+          `https://app.test/api/v1/competitor/variant-groups/${encodeURIComponent(
+            destination.id,
+          )}`,
+        );
+        expect(urls.some((url) => url.includes('/api/api/'))).toBe(false);
+        const mutation = fetcher.mock.calls.find(
+          (call) => call[1]?.method === 'POST',
+        )!;
+        expect(String(mutation[0])).toBe(
+          `https://app.test/api/v1/competitor/asins/${encodeURIComponent(
+            originalChild.id,
+          )}/move`,
+        );
+        expect(JSON.parse(String(mutation[1]?.body))).toMatchObject({
+          targetGroupId: destination.id,
+          expectedSourceGroup: original.id,
+          expectedTargetSnapshot: {
+            id: destination.id,
+            name: destination.name,
+            country: destination.country,
+            brand: destination.brand,
+            updateTime: destination.updateTime,
+          },
+        });
+      } finally {
+        cleanup();
+        http.close();
+      }
+    },
+  );
   it('sends the confirmed parent after a matching preflight and reports a server lock conflict without claiming success', async () => {
     const original = { ...group, name: '\n ', brand: '' };
     const f = actionFixture({ type: 'create-asin', group: original });
@@ -361,6 +491,13 @@ describe('competitor catalog single-item controls', () => {
         expect(options.json).toEqual({
           targetGroupId: target.id,
           expectedSourceGroup: group.id,
+          expectedTargetSnapshot: {
+            id: target.id,
+            name: target.name,
+            country: target.country,
+            brand: target.brand,
+            updateTime: target.updateTime,
+          },
         });
         expect(f.detail).toHaveBeenCalledWith(expect.anything(), target.id);
       }

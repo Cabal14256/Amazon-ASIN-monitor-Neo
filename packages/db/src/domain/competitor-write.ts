@@ -2,6 +2,7 @@ import type {
   BatchCreateAsinsData,
   CompetitorAsinSource,
   CompetitorGroupSource,
+  CompetitorMoveTargetSnapshot,
 } from '@asin-monitor/contracts';
 import type { CompetitorAsin } from '../schema-competitor';
 import type {
@@ -47,6 +48,7 @@ export interface CompetitorWriteUnit
     id: string,
     targetGroupId: string,
     expectedSourceGroup?: string,
+    expectedTargetSnapshot?: CompetitorMoveTargetSnapshot,
   ): Promise<CompetitorAsin>;
   batchCreateAsins(items: unknown[]): Promise<BatchCreateAsinsData>;
   deleteGroup(

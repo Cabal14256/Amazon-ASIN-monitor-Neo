@@ -1194,6 +1194,114 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await pending?.catch(() => {});
       }
     });
+    it.each([
+      "name='Concurrent target rename'",
+      "country='DE'",
+      "brand='Concurrent target brand'",
+      "update_time='2020-01-01 08:00:01'",
+    ])(
+      'rejects a move when the confirmed target changes while waiting for its group lock: %s',
+      async (change) => {
+        await group('g1');
+        await group('g2');
+        await asin('a1');
+        const old = competitorGroupResultSchema.parse(
+          (
+            await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/competitor/variant-groups/g2',
+              headers,
+            })
+          ).json(),
+        ).data!;
+        const expectedTargetSnapshot = {
+          id: old.id,
+          name: old.name,
+          country: old.country,
+          brand: old.brand,
+          updateTime: old.updateTime,
+        };
+        const blocker = await f.pools.competitorPool.connect();
+        let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            "SELECT id FROM competitor_variant_groups WHERE id='g2' FOR UPDATE",
+          );
+          pending = Promise.resolve(
+            request('POST', 'asins/a1/move', {
+              targetGroupId: 'g2',
+              expectedSourceGroup: 'g1',
+              expectedTargetSnapshot,
+            }),
+          );
+          await blocked(blocker);
+          await blocker.query(
+            `UPDATE competitor_variant_groups SET ${change} WHERE id='g2'`,
+          );
+          await blocker.query('COMMIT');
+          const concurrentState = await snapshot();
+          const response = await pending;
+          expect(response.statusCode).toBe(409);
+          expect(response.json().errorMessage).toBe(
+            '竞品记录已变化，请刷新后重试',
+          );
+          expect(await snapshot()).toEqual(concurrentState);
+          expect(concurrentState.asins[0].variant_group_id).toBe('g1');
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await pending?.catch(() => {});
+        }
+      },
+    );
+    it('checks a guarded same-group target before its otherwise successful no-op', async () => {
+      await group('g1');
+      await asin('a1');
+      const old = competitorGroupResultSchema.parse(
+        (
+          await f.http.inject({
+            method: 'GET',
+            url: '/api/v1/competitor/variant-groups/g1',
+            headers,
+          })
+        ).json(),
+      ).data!;
+      const before = await snapshot();
+      const expectedTargetSnapshot = {
+        id: old.id,
+        name: old.name,
+        country: old.country,
+        brand: old.brand,
+        updateTime: old.updateTime,
+      };
+      const body = {
+        targetGroupId: 'g1',
+        expectedSourceGroup: 'g1',
+        expectedTargetSnapshot,
+      };
+      expect((await request('POST', 'asins/a1/move', body)).statusCode).toBe(
+        200,
+      );
+      expect(await snapshot()).toEqual(before);
+      for (const patch of [
+        { id: 'other-id' },
+        { name: 'Changed target' },
+        { country: 'DE' },
+        { brand: 'Changed brand' },
+        { updateTime: '2020-01-01T00:00:01.000Z' },
+      ]) {
+        expect(
+          (
+            await request('POST', 'asins/a1/move', {
+              ...body,
+              expectedTargetSnapshot: { ...expectedTargetSnapshot, ...patch },
+            })
+          ).statusCode,
+        ).toBe(409);
+        expect(await snapshot()).toEqual(before);
+      }
+    });
     it('keeps same-group moves as true no-ops', async () => {
       await group('g1');
       await asin('a1');

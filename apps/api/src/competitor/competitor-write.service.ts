@@ -213,13 +213,14 @@ export class CompetitorWriteService implements OnModuleDestroy {
   }
   moveAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'move-asin', async (unit) => {
-      const { targetGroupId, expectedSourceGroup } =
+      const { targetGroupId, expectedSourceGroup, expectedTargetSnapshot } =
         parseCompetitorAsinMove(body);
       return mapCompetitorAsinWrite(
         await unit.moveAsin(
           parseCompetitorWriteId(id),
           targetGroupId,
           expectedSourceGroup,
+          expectedTargetSnapshot,
         ),
       );
     });

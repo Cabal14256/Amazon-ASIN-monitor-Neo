@@ -214,10 +214,7 @@ export function CatalogActionPanel({
     event.preventDefault();
     if (!writes || pending) return;
     setError(null);
-    if (
-      moving &&
-      (!targetGroupId.trim() || targetGroupId.trim() === group?.id)
-    ) {
+    if (moving && (!targetGroupId.trim() || targetGroupId === group?.id)) {
       setError('请选择不同的目标变体组。');
       return;
     }
@@ -255,8 +252,9 @@ export function CatalogActionPanel({
             if (!catalogActionSourceCurrent(action, latest))
               throw new ApiError('HTTP', '记录已变化', 409);
           }
+          let confirmedTarget: CatalogGroup | undefined;
           if (moving) {
-            const target = await config.detail(http, targetGroupId.trim());
+            const target = await config.detail(http, targetGroupId);
             if (
               !targets?.some(
                 (item) =>
@@ -267,6 +265,7 @@ export function CatalogActionPanel({
               )
             )
               throw new ApiError('HTTP', '记录已变化', 409);
+            confirmedTarget = target;
           }
           claim = beginWrite(action);
           mutationAttempted = true;
@@ -358,12 +357,19 @@ export function CatalogActionPanel({
                 });
               break;
             case 'move-asin':
-              await writes.moveAsin(http, action.child.id, {
-                targetGroupId: targetGroupId.trim(),
-                ...(config.id === 'competitor'
-                  ? { expectedSourceGroup: action.group.id }
-                  : {}),
-              });
+              if (config.id === 'competitor') {
+                if (!confirmedTarget)
+                  throw new ApiError('INVALID_INPUT', '请重新确认目标组');
+                await config.writes!.moveAsin(http, action.child.id, {
+                  targetGroupId,
+                  expectedSourceGroup: action.group.id,
+                  expectedTargetSnapshot: {
+                    id: confirmedTarget.id,
+                    ...competitorExpectedGroup(confirmedTarget),
+                  },
+                });
+              } else
+                await writes.moveAsin(http, action.child.id, { targetGroupId });
               break;
             case 'delete-asin':
               if (config.id === 'competitor')
