@@ -88,11 +88,10 @@ export class TaskQueryService {
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
-    if (!queued) {
-      // Removal/retention and a lost completion acknowledgement can also leave
-      // no queue record. Absence and age cannot prove that work never started.
-      return task;
-    }
+    // Cleanup, retention limits, or a lost completion acknowledgement can erase
+    // the job after a business commit. Without its immutable request digest,
+    // absence proves neither non-execution nor a result that we can recover.
+    if (!queued) return task;
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');

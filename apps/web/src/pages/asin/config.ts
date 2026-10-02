@@ -1,4 +1,6 @@
 import {
+  checkAsin,
+  checkVariantGroup,
   createAsin,
   createVariantGroup,
   deleteAsin,
@@ -27,6 +29,7 @@ export const ASIN_CATALOG: CatalogConfig = {
   showManual: true,
   list: getVariantGroups,
   detail: getVariantGroup,
+  checks: { group: checkVariantGroup, asin: checkAsin },
   writes: {
     createGroup: createVariantGroup,
     updateGroup: updateVariantGroup,

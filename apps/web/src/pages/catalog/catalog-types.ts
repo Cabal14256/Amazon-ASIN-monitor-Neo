@@ -111,8 +111,26 @@ export interface CatalogConfig {
     id: string,
     signal?: AbortSignal,
   ) => Promise<CatalogGroup>;
+  checks?: {
+    group: (
+      http: Pick<HttpClient, 'request'>,
+      id: string,
+      options: { forceRefresh: boolean },
+      signal?: AbortSignal,
+    ) => Promise<CatalogCheckResult>;
+    asin: (
+      http: Pick<HttpClient, 'request'>,
+      id: string,
+      options: { forceRefresh: boolean },
+      signal?: AbortSignal,
+    ) => Promise<CatalogCheckResult>;
+  };
   writes?: CatalogWrites;
 }
+
+export type CatalogCheckResult =
+  | { kind: 'task'; taskId: string; status: 'pending' | 'unknown' }
+  | { kind: 'result'; result: unknown };
 
 export interface CatalogWrites {
   createGroup: (
