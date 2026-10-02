@@ -2,8 +2,8 @@ import type { MonitorHistoryRecord } from '@asin-monitor/contracts';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import type { Pool } from 'pg';
 import {
-  type MonitorHistoryReadQuery,
   validateMonitorHistoryReadQuery,
+  type MonitorHistoryReadQuery,
 } from '../domain/monitor-history-filters';
 import {
   decodeMonitorHistorySelectedRow,
@@ -11,6 +11,7 @@ import {
   MonitorHistoryQueryError,
   monitorHistorySafeCount,
 } from '../domain/monitor-history-query';
+import type { MonitorStatusIntervalReadQuery } from '../domain/monitor-status-interval-query';
 import {
   asins,
   monitorHistory,
@@ -19,6 +20,10 @@ import {
   variantGroups,
 } from '../schema';
 import { withAsinDatabaseTransaction } from './asin-query-repository';
+import {
+  readMonitorStatusIntervals,
+  type MonitorStatusIntervalQueryUnit,
+} from './monitor-status-interval-query-repository';
 import { DrizzleRoleUnit, type RoleWriteUnit } from './role-repository';
 
 export const MAX_MONITOR_HISTORY_RESPONSE_BYTES = 64 * 1024 * 1024;
@@ -31,6 +36,7 @@ export interface MonitorHistoryQueryUnit extends RoleWriteUnit {
     query: MonitorHistoryReadQuery,
   ): Promise<MonitorHistoryReadResult>;
   historyById(id: number): Promise<MonitorHistoryRecord | null>;
+  listStatusIntervals: MonitorStatusIntervalQueryUnit['listStatusIntervals'];
 }
 export interface MonitorHistoryQueryRepositoryPort {
   read<T>(action: (unit: MonitorHistoryQueryUnit) => Promise<T>): Promise<T>;
@@ -124,6 +130,9 @@ export class DrizzleMonitorHistoryQueryUnit
     // Timescale composite key must not make this ID-only endpoint pick arbitrarily.
     if (result.total > 1) throw new MonitorHistoryQueryError('invalid-result');
     return result.list[0] ?? null;
+  }
+  listStatusIntervals(query: MonitorStatusIntervalReadQuery) {
+    return readMonitorStatusIntervals(this.db, query, this.ensureOpen);
   }
   private async select(
     where: SQL,

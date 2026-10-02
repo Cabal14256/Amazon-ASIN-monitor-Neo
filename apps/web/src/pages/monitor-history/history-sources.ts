@@ -1,4 +1,8 @@
-import type { MonitorHistoryRecord } from '@asin-monitor/contracts';
+import type {
+  MonitorHistoryRecord,
+  MonitorStatusIntervalData,
+  MonitorStatusIntervalQuery,
+} from '@asin-monitor/contracts';
 import {
   getCompetitorHistory,
   getCompetitorHistoryDetail,
@@ -6,6 +10,7 @@ import {
 import {
   getMonitorHistory,
   getMonitorHistoryDetail,
+  getMonitorStatusIntervals,
 } from '../../services/monitor-history';
 
 const PRIMARY_TEXT_FILTERS = [
@@ -41,6 +46,11 @@ export type HistorySource = {
     id: number,
     signal?: AbortSignal,
   ) => Promise<MonitorHistoryRecord>;
+  getIntervals?: (
+    http: Parameters<typeof getMonitorHistoryDetail>[0],
+    query: MonitorStatusIntervalQuery,
+    signal?: AbortSignal,
+  ) => Promise<MonitorStatusIntervalData>;
 };
 export const HISTORY_SOURCES: Record<'primary' | 'competitor', HistorySource> =
   {
@@ -59,6 +69,7 @@ export const HISTORY_SOURCES: Record<'primary' | 'competitor', HistorySource> =
       competitor: false,
       getList: getMonitorHistory,
       getDetail: getMonitorHistoryDetail,
+      getIntervals: getMonitorStatusIntervals,
     },
     competitor: {
       key: 'competitor-monitor-history',

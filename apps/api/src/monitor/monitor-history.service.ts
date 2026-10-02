@@ -1,8 +1,11 @@
 import type { Env } from '@asin-monitor/config';
+import type { MonitorStatusIntervalData } from '@asin-monitor/contracts';
 import {
   MonitorHistoryQueryError,
+  MonitorStatusIntervalQueryError,
   parseMonitorHistoryId,
   parseMonitorHistoryQuery,
+  parseMonitorStatusIntervalQuery,
   type MonitorHistoryQueryRepositoryPort,
   type MonitorHistoryQueryUnit,
 } from '@asin-monitor/db';
@@ -10,6 +13,7 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import { RecoverableQueryException } from '../common/recoverable-query.exception';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 
@@ -20,6 +24,23 @@ const fail = (status: number, message: string): never => {
     status,
   );
 };
+function timedOut(error: unknown): boolean {
+  for (
+    let depth = 0;
+    error && typeof error === 'object' && depth < 4;
+    depth++
+  ) {
+    const row = error as { code?: unknown; cause?: unknown };
+    if (
+      ['57014', '55P03', 'timeout', 'AUTH_QUERY_TIMEOUT'].includes(
+        String(row.code),
+      )
+    )
+      return true;
+    error = row.cause;
+  }
+  return false;
+}
 @Injectable()
 export class MonitorHistoryService {
   private active = 0;
@@ -32,7 +53,7 @@ export class MonitorHistoryService {
   private async read<T>(
     principal: AuthPrincipal,
     reply: FastifyReply,
-    operation: 'list' | 'detail',
+    operation: 'list' | 'detail' | 'status-intervals',
     action: (unit: MonitorHistoryQueryUnit) => Promise<T>,
   ): Promise<T> {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -78,6 +99,16 @@ export class MonitorHistoryService {
         if (error.code === 'too-large')
           fail(413, '监控历史结果过大，请缩小查询范围或使用导出');
       }
+      if (error instanceof MonitorStatusIntervalQueryError) {
+        if (error.code === 'input') fail(400, '状态区间查询参数无效');
+        if (error.code === 'capacity')
+          fail(429, '状态区间查询繁忙，请稍后再试');
+        if (error.code === 'too-large')
+          fail(413, '状态区间结果过大，请缩小查询范围');
+      }
+      if (timedOut(error)) {
+        throw new RecoverableQueryException('monitor-history-timeout');
+      }
       this.logger.error('监控历史查询失败', 'MonitorHistoryService', {
         operation,
         reason: 'monitor_history_query_failed',
@@ -100,6 +131,18 @@ export class MonitorHistoryService {
       const result = await unit.historyById(parseMonitorHistoryId(raw));
       if (!result) fail(404, '监控历史不存在');
       return result;
+    });
+  }
+  statusIntervals(
+    principal: AuthPrincipal,
+    reply: FastifyReply,
+    raw: unknown,
+  ): Promise<MonitorStatusIntervalData> {
+    if (!this.env.ANALYTICS_STATUS_INTERVAL_ENABLED)
+      throw new RecoverableQueryException('status-intervals-disabled');
+    return this.read(principal, reply, 'status-intervals', async (unit) => {
+      const query = parseMonitorStatusIntervalQuery(raw);
+      return unit.listStatusIntervals(query);
     });
   }
 }
