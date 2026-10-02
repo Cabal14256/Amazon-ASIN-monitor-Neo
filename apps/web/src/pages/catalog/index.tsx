@@ -11,6 +11,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -834,6 +835,10 @@ export function CatalogPage({
     () => ['catalog-write-safety', ownerId, config.id] as const,
     [config.id, ownerId],
   );
+  const [hydratedSafetyKey, setHydratedSafetyKey] = useState<
+    typeof safetyKey | null
+  >(null);
+  const safetyHydrated = !config.writes || hydratedSafetyKey === safetyKey;
   const [storageUnavailable, setStorageUnavailable] = useState(() =>
     Boolean(ownerId && config.writes && !catalogSafetyStorage()),
   );
@@ -930,10 +935,15 @@ export function CatalogPage({
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
   const canWrite = Boolean(
-    config.writes && access.canWriteASIN && !safety && !storageUnavailable,
+    config.writes &&
+      safetyHydrated &&
+      access.canWriteASIN &&
+      !safety &&
+      !storageUnavailable,
   );
   const canDelete = Boolean(
     config.writes &&
+      safetyHydrated &&
       (config.id === 'competitor'
         ? access.canWriteASIN
         : access.canDeleteASIN) &&
@@ -967,20 +977,25 @@ export function CatalogPage({
     queryKey: [config.id, 'groups', query],
     queryFn: ({ signal }) => config.list(runtime.http, query, signal),
     enabled: () =>
+      safetyHydrated &&
       runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey)
         ?.phase !== 'refresh',
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!ownerId || !config.writes) return;
     let active = true;
-    const syncSafety = (event: StorageEvent) => {
+    const syncSafety = (event?: StorageEvent) => {
       const stored = catalogSafetyStorage();
+      if (!stored) {
+        setStorageUnavailable(true);
+        return;
+      }
       if (
-        !stored ||
-        event.storageArea !== stored ||
-        event.key !== catalogSafetyKey(ownerId, config.id)
+        event &&
+        (event.storageArea !== stored ||
+          event.key !== catalogSafetyKey(ownerId, config.id))
       )
         return;
       const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
@@ -1037,6 +1052,9 @@ export function CatalogPage({
         }
       })();
     };
+    // The disabled query may cache null while the page misses storage events.
+    syncSafety();
+    setHydratedSafetyKey(safetyKey);
     window.addEventListener('storage', syncSafety);
     return () => {
       active = false;

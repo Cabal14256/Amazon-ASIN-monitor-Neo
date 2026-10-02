@@ -298,6 +298,89 @@ describe('competitor catalog refresh and authority transitions', () => {
     expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
     f.queryClient.clear();
   });
+  it.each(['refresh', 'inspection'] as const)(
+    'restores an off-page %s gate despite a cached null and requires reconciliation before writing',
+    async (phase) => {
+      const list = vi.fn().mockResolvedValue(listData(original));
+      const createGroup = vi.fn().mockResolvedValue(updated);
+      const f = fixture(list, createGroup);
+      await screen.findAllByText('Original rival');
+      await screen.findByRole('button', { name: '新建变体组' });
+      expect(
+        f.queryClient.getQueryData([
+          'catalog-write-safety',
+          'operator',
+          'competitor',
+        ]),
+      ).toBeNull();
+      f.unmount();
+      const key = catalogSafetyKey('operator', 'competitor');
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          phase,
+          message: null,
+          detailId: null,
+          createUncertain: true,
+          operationId: 'off-page-create',
+        }),
+      );
+      // No storage listener is mounted while the other tab saves this record.
+      f.remount();
+      expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+      expect(createGroup).not.toHaveBeenCalled();
+      if (phase === 'refresh') {
+        expect(screen.getByRole('alert').textContent).toContain(
+          '写入结果未确认',
+        );
+        fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+      }
+      await screen.findByText(/新建操作的结果仍未确认/);
+      expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: '已核实原操作，重读目录并恢复写入',
+        }),
+      );
+      await screen.findByRole('button', { name: '新建变体组' });
+      expect(window.localStorage.getItem(key)).toBeNull();
+      expect(createGroup).not.toHaveBeenCalled();
+      await create();
+      await waitFor(() => expect(createGroup).toHaveBeenCalledOnce());
+      f.queryClient.clear();
+    },
+  );
+  it('rereads the catalog before unlocking a cached gate cleared while the page was unmounted', async () => {
+    const key = catalogSafetyKey('operator', 'competitor');
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        phase: 'refresh',
+        message: null,
+        detailId: null,
+        createUncertain: true,
+        operationId: 'off-page-create',
+      }),
+    );
+    let finishRead!: (value: ReturnType<typeof listData>) => void;
+    const list = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof listData>>((resolve) => {
+          finishRead = resolve;
+        }),
+    );
+    const f = fixture(list, vi.fn());
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    f.unmount();
+    window.localStorage.removeItem(key);
+    f.remount();
+    await waitFor(() => expect(list).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    finishRead(listData(updated));
+    await screen.findAllByText('Current rival');
+    await screen.findByRole('button', { name: '新建变体组' });
+    f.queryClient.clear();
+  });
   it('clears stale state on a cross-tab gate and only unlocks after a successful reread', async () => {
     const list = vi
       .fn()
