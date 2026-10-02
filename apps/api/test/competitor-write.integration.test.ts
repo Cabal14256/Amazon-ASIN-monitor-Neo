@@ -69,6 +69,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     };
     beforeAll(async () => {
       f = await competitorWriteApp();
+      await f.pools.primaryPool.query(
+        "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id IN (SELECT id FROM permissions WHERE code='asin:delete')",
+      );
       legacy = await legacyCompetitorQueryFixture();
     });
     afterAll(async () => {
@@ -322,6 +325,32 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).rows,
       ).toEqual([{ id: 'g1', name: 'wrong-primary-data' }]);
     });
+    it.each(actionCases.filter((value) => value.method === 'DELETE'))(
+      'rejects a delete-only grant after the Legacy write grant is revoked for $path',
+      async (value) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot();
+        expect((await read()).statusCode).toBe(200);
+        await f.pools.primaryPool.query(
+          "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id IN (SELECT id FROM permissions WHERE code='asin:write')",
+        );
+        await f.pools.primaryPool.query(
+          "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code='asin:delete' ON CONFLICT DO NOTHING",
+        );
+        try {
+          expect((await request('DELETE', value.path)).statusCode).toBe(403);
+          expect(await snapshot()).toEqual(before);
+        } finally {
+          await f.pools.primaryPool.query(
+            "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id IN (SELECT id FROM permissions WHERE code='asin:delete')",
+          );
+          await f.pools.primaryPool.query(
+            "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code='asin:write' ON CONFLICT DO NOTHING",
+          );
+        }
+      },
+    );
     it('deletes only the target ASIN, touches its parent and preserves historical records', async () => {
       await group('g1');
       await asin('a1');
@@ -534,6 +563,94 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await pending?.catch(() => {});
       }
     });
+    it.each([
+      ["name='Concurrent rename'", 'name', 'Concurrent rename'],
+      ["country='DE'", 'country', 'DE'],
+      ["brand='Concurrent brand'", 'brand', 'Concurrent brand'],
+      [
+        "update_time='2020-01-01 08:00:01'",
+        'update_time',
+        new Date('2020-01-01T00:00:01.000Z'),
+      ],
+    ] as const)(
+      'rejects stale group deletion after a locked %s change with unchanged children',
+      async (assignment, field, value) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot();
+        const detail = competitorGroupResultSchema.parse(
+          (
+            await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/competitor/variant-groups/g1',
+              headers,
+            })
+          ).json(),
+        ).data!;
+        const expectedSource = {
+          name: detail.name,
+          country: detail.country,
+          brand: detail.brand,
+          updateTime: detail.updateTime,
+        };
+        const blocker = await f.pools.competitorPool.connect();
+        let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+          );
+          pending = Promise.resolve(
+            request('DELETE', 'variant-groups/g1', {
+              expectedChildIds: ['a1'],
+              expectedSource,
+            }),
+          );
+          await blocked(blocker);
+          await blocker.query(
+            `UPDATE competitor_variant_groups SET ${assignment} WHERE id='g1'`,
+          );
+          await blocker.query('COMMIT');
+          const response = await pending;
+          expect(response.statusCode).toBe(409);
+          expect(response.json().errorMessage).toBe(
+            '竞品记录已变化，请刷新后重试',
+          );
+          const after = await snapshot();
+          expect(after.groups).toHaveLength(1);
+          expect(after.groups[0][field]).toEqual(value);
+          expect(after.asins).toEqual(before.asins);
+          const current = competitorGroupResultSchema.parse(
+            (
+              await f.http.inject({
+                method: 'GET',
+                url: '/api/v1/competitor/variant-groups/g1',
+                headers,
+              })
+            ).json(),
+          ).data!;
+          expect(
+            (
+              await request('DELETE', 'variant-groups/g1', {
+                expectedChildIds: ['a1'],
+                expectedSource: {
+                  name: current.name,
+                  country: current.country,
+                  brand: current.brand,
+                  updateTime: current.updateTime,
+                },
+              })
+            ).statusCode,
+          ).toBe(200);
+          expect((await snapshot()).groups).toEqual([]);
+          expect((await snapshot()).asins).toEqual([]);
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await pending?.catch(() => {});
+        }
+      },
+    );
     it('does not delete a child moved while waiting for the original parent lock', async () => {
       await group('g1');
       await group('g2');

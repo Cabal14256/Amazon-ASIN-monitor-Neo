@@ -191,7 +191,11 @@ export class DrizzleCompetitorWriteUnit {
         .where(inArray(g.id, [...new Set(ids)])),
     );
   }
-  async deleteGroup(id: string, expectedChildIds?: string[]) {
+  async deleteGroup(
+    id: string,
+    expectedChildIds?: string[],
+    expectedSource?: CompetitorGroupSource,
+  ) {
     if (expectedChildIds !== undefined) {
       if (!Array.isArray(expectedChildIds) || expectedChildIds.length > 5000)
         throw new CompetitorWriteError('input');
@@ -201,6 +205,7 @@ export class DrizzleCompetitorWriteUnit {
     }
     const group = await this.group(id);
     if (!group) throw new CompetitorWriteError('group-not-found');
+    assertGroupSource(group, expectedSource);
     if (expectedChildIds !== undefined) {
       const children = await this.query(() =>
         this.db

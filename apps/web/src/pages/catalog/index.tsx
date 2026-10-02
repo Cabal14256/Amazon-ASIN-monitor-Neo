@@ -926,7 +926,12 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
     config.writes && access.canWriteASIN && !safety && !storageUnavailable,
   );
   const canDelete = Boolean(
-    config.writes && access.canDeleteASIN && !safety && !storageUnavailable,
+    config.writes &&
+      (config.id === 'competitor'
+        ? access.canWriteASIN
+        : access.canDeleteASIN) &&
+      !safety &&
+      !storageUnavailable,
   );
   const [action, setAction] = useState<CatalogAction | null>(null);
   const [actionSerial, setActionSerial] = useState(0);

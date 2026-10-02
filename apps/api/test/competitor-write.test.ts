@@ -121,7 +121,7 @@ function fixture() {
     lastActiveAt: new Date(),
     expiresAt: new Date('2099-01-01T00:00:00Z'),
   };
-  const permissions = ['asin:write', 'asin:delete'];
+  const permissions = ['asin:write'];
   const result = {
     groups: [competitorQueryGroup()],
     asins: [competitorQueryAsin()],
@@ -178,7 +178,7 @@ function fixture() {
         expiresAt: new Date('2099-01-01T00:00:00Z'),
       }),
     ),
-    getPermissionCodes: vi.fn(async () => ['asin:write', 'asin:delete']),
+    getPermissionCodes: vi.fn(async () => ['asin:write']),
     getRoles: vi.fn(async () => [
       { id: 'writer-121', code: 'ADMIN', name: 'Fixture' },
     ]),
@@ -270,26 +270,26 @@ describe('competitor writes HTTP / current primary authorization', () => {
     },
   );
   it.each([cases[5], cases[6]])(
-    'allows asin:delete without asin:write for $action',
+    'retains Legacy asin:write without asin:delete for $action',
     async (value) => {
-      f.auth.getPermissionCodes.mockResolvedValue(['asin:delete']);
-      f.permissions.splice(0, f.permissions.length, 'asin:delete');
+      f.auth.getPermissionCodes.mockResolvedValue(['asin:write']);
+      f.permissions.splice(0, f.permissions.length, 'asin:write');
       expect((await request(value)).statusCode).toBe(200);
       expect(f.unit[value.action]).toHaveBeenCalledOnce();
     },
   );
   it.each([cases[5], cases[6]])(
-    'rejects asin:write without asin:delete before $action starts',
+    'rejects asin:delete without Legacy asin:write before $action starts',
     async (value) => {
-      f.auth.getPermissionCodes.mockResolvedValue(['asin:write']);
+      f.auth.getPermissionCodes.mockResolvedValue(['asin:delete']);
       expect((await request(value)).statusCode).toBe(403);
       expect(f.repository.transaction).not.toHaveBeenCalled();
     },
   );
   it.each([cases[5], cases[6]])(
-    'rechecks asin:delete inside the transaction for $action',
+    'rechecks Legacy asin:write inside the transaction for $action',
     async (value) => {
-      f.permissions.splice(0, f.permissions.length, 'asin:write');
+      f.permissions.splice(0, f.permissions.length, 'asin:delete');
       expect((await request(value)).statusCode).toBe(403);
       expect(f.unit[value.action]).not.toHaveBeenCalled();
     },
@@ -432,7 +432,11 @@ describe('competitor writes HTTP / current primary authorization', () => {
         })
       ).statusCode,
     ).toBe(200);
-    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', undefined);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+      'group-119',
+      undefined,
+      undefined,
+    );
     expect((await request(cases[5], headers, {})).statusCode).toBe(200);
     vi.mocked(f.unit.deleteGroup).mockClear();
     for (const body of [
@@ -445,11 +449,49 @@ describe('competitor writes HTTP / current primary authorization', () => {
     }
     expect(f.unit.deleteGroup).not.toHaveBeenCalled();
     expect((await request(cases[5])).statusCode).toBe(200);
-    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', ['asin-119']);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+      'group-119',
+      ['asin-119'],
+      undefined,
+    );
     expect(
       (await request(cases[5], headers, { expectedChildIds: [] })).statusCode,
     ).toBe(200);
-    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', []);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith('group-119', [], undefined);
+  });
+  it('forwards the confirmed group source and members to locked deletion and reports source conflicts', async () => {
+    const expectedSource = {
+      name: 'Confirmed group',
+      country: 'US',
+      brand: 'Confirmed brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const body = { expectedChildIds: ['asin-119'], expectedSource };
+    expect((await request(cases[5], headers, body)).statusCode).toBe(200);
+    expect(f.unit.deleteGroup).toHaveBeenCalledWith(
+      'group-119',
+      ['asin-119'],
+      expectedSource,
+    );
+    vi.mocked(f.unit.deleteGroup).mockRejectedValueOnce(
+      new CompetitorWriteError('source-changed'),
+    );
+    const conflict = await request(cases[5], headers, body);
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().errorMessage).toBe('竞品记录已变化，请刷新后重试');
+    expect(conflict.body).not.toContain(expectedSource.name);
+    for (const invalid of [
+      null,
+      {},
+      { ...expectedSource, name: '' },
+      { ...expectedSource, country: 'x'.repeat(11) },
+    ]) {
+      expect(
+        (await request(cases[5], headers, { ...body, expectedSource: invalid }))
+          .statusCode,
+      ).toBe(400);
+    }
+    expect(f.unit.deleteGroup).toHaveBeenCalledTimes(2);
   });
   it('reports changed group membership as a conflict without exposing child IDs', async () => {
     vi.mocked(f.unit.deleteGroup).mockRejectedValue(

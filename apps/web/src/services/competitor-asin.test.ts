@@ -148,7 +148,12 @@ describe('competitor catalog transport', () => {
       };
       await createCompetitorGroup(http, groupInput);
       await updateCompetitorGroup(http, group.id, groupInput);
-      await deleteCompetitorGroup(http, group.id, ['competitor-child-1']);
+      await deleteCompetitorGroup(
+        http,
+        group.id,
+        ['competitor-child-1'],
+        groupInput,
+      );
       await createCompetitorAsin(http, { ...childInput, parentId: group.id });
       await updateCompetitorAsin(http, 'competitor-child-1', childInput);
       await moveCompetitorAsin(http, 'competitor-child-1', {
@@ -175,6 +180,7 @@ describe('competitor catalog transport', () => {
       ).toBe(true);
       expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body))).toEqual({
         expectedChildIds: ['competitor-child-1'],
+        expectedSource: groupInput,
       });
       expect(JSON.parse(String(fetcher.mock.calls[5][1]?.body))).toEqual({
         targetGroupId: 'competitor-group-2',
@@ -282,7 +288,7 @@ describe('competitor catalog transport', () => {
         asinType: null,
       };
       await updateCompetitorGroup(http, detail.id, groupInput);
-      await deleteCompetitorGroup(http, detail.id, [childId]);
+      await deleteCompetitorGroup(http, detail.id, [childId], groupInput);
       await createCompetitorAsin(http, { ...childInput, parentId: detail.id });
       await updateCompetitorAsin(http, childId, {
         ...childInput,
@@ -312,6 +318,7 @@ describe('competitor catalog transport', () => {
       ]);
       expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body))).toEqual({
         expectedChildIds: [childId],
+        expectedSource: groupInput,
       });
       expect(JSON.parse(String(fetcher.mock.calls[4][1]?.body))).toMatchObject({
         parentId: groupId,

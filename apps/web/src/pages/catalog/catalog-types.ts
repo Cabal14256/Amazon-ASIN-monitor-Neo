@@ -1,6 +1,7 @@
 import type {
   CompetitorAsinSource,
   CompetitorCreateAsinRequest,
+  CompetitorGroupSource,
   CompetitorGroupUpsertRequest,
   CompetitorGuardedUpdateAsinRequest,
   CompetitorMoveAsinRequest,
@@ -216,6 +217,7 @@ export interface CompetitorCatalogWrites {
     http: Pick<HttpClient, 'request'>,
     id: string,
     expectedChildIds: string[],
+    expectedSource?: CompetitorGroupSource,
   ) => Promise<unknown>;
   createAsin: (
     http: Pick<HttpClient, 'request'>,

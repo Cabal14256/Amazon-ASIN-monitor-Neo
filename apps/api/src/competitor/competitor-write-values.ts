@@ -90,7 +90,10 @@ const moveSchema = competitorMoveAsinRequestSchema
   .extend({ targetGroupId: id, expectedSourceGroup: id.optional() })
   .strict();
 const deleteGroupSchema = competitorDeleteGroupRequestSchema
-  .extend({ expectedChildIds: z.array(id).max(5000).optional() })
+  .extend({
+    expectedChildIds: z.array(id).max(5000).optional(),
+    expectedSource: updateGroupSchema.shape.expectedSource,
+  })
   .strict();
 function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
   if (
@@ -119,16 +122,15 @@ export const parseCompetitorAsinDelete = (value: unknown) =>
   parse(deleteAsinSchema, value ?? {});
 export const parseCompetitorAsinMove = (value: unknown) =>
   parse(moveSchema, value);
-export function parseCompetitorGroupDelete(
-  value: unknown,
-): string[] | undefined {
-  const { expectedChildIds } = parse(deleteGroupSchema, value ?? {});
+export function parseCompetitorGroupDelete(value: unknown) {
+  const result = parse(deleteGroupSchema, value ?? {});
+  const { expectedChildIds } = result;
   if (
     expectedChildIds &&
     new Set(expectedChildIds).size !== expectedChildIds.length
   )
     throw new CompetitorWriteInputError();
-  return expectedChildIds;
+  return result;
 }
 export function parseCompetitorBatchCreate(value: unknown): unknown[] {
   const items = (value as { items?: unknown } | null)?.items;

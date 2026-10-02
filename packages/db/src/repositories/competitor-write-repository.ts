@@ -50,8 +50,12 @@ export class PgCompetitorWriteRepository
               (await business()).updateAsin(id, fields, expectedSource),
             moveAsin: async (id, target, expectedSourceGroup) =>
               (await business()).moveAsin(id, target, expectedSourceGroup),
-            deleteGroup: async (id, expectedChildIds) =>
-              (await business()).deleteGroup(id, expectedChildIds),
+            deleteGroup: async (id, expectedChildIds, expectedSource) =>
+              (await business()).deleteGroup(
+                id,
+                expectedChildIds,
+                expectedSource,
+              ),
             deleteAsin: async (id, expectedSource) =>
               (await business()).deleteAsin(id, expectedSource),
             updateGroupNotify: async (id, enabled) =>

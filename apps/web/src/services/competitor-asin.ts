@@ -15,6 +15,7 @@ import {
   type CompetitorCreateAsinRequest,
   type CompetitorGroupListData,
   type CompetitorGroupListQuery,
+  type CompetitorGroupSource,
   type CompetitorGroupUpsertRequest,
   type CompetitorGuardedUpdateAsinRequest,
   type CompetitorMoveAsinRequest,
@@ -131,13 +132,17 @@ export async function deleteCompetitorGroup(
   http: Pick<HttpClient, 'request'>,
   id: string,
   expectedChildIds: string[],
+  expectedSource?: CompetitorGroupSource,
 ) {
   return data(
     await http.request(
       `${GROUPS}/${segment(id)}`,
       {
         method: 'DELETE',
-        json: body(competitorDeleteGroupRequestSchema, { expectedChildIds }),
+        json: body(competitorDeleteGroupRequestSchema, {
+          expectedChildIds,
+          expectedSource,
+        }),
       },
       competitorDeleteGroupResultSchema,
     ),

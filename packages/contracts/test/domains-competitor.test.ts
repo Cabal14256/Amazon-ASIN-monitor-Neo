@@ -174,6 +174,22 @@ describe('competitor 域', () => {
       }),
     ).toEqual({ expectedChildIds: ['ca1', 'ca2'] });
     expect(competitorDeleteGroupRequestSchema.safeParse({}).success).toBe(true);
+    const expectedSource = {
+      name: 'Confirmed group',
+      country: 'DE',
+      brand: 'Rival',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    expect(
+      competitorDeleteGroupRequestSchema.parse({
+        expectedChildIds: ['ca1'],
+        expectedSource,
+      }),
+    ).toEqual({ expectedChildIds: ['ca1'], expectedSource });
+    expect(
+      competitorDeleteGroupRequestSchema.safeParse({ expectedSource: null })
+        .success,
+    ).toBe(false);
     expect(
       competitorDeleteGroupRequestSchema.safeParse({
         expectedChildIds: [],

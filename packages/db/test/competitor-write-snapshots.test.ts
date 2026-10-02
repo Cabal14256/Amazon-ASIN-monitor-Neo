@@ -59,6 +59,60 @@ describe('competitor confirmed mutation snapshots', () => {
     expect(f.remove).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { name: 'Concurrent rename' },
+    { country: 'DE' },
+    { brand: 'Concurrent brand' },
+    { updateTime: new Date('2020-01-01T00:00:01.000Z') },
+  ])(
+    'rejects stale group deletion after locking even when children are unchanged: %j',
+    async (changed) => {
+      const expectedSource = {
+        name: 'Confirmed group',
+        country: 'US',
+        brand: 'Confirmed brand',
+        updateTime: '2020-01-01T00:00:00.000Z',
+      };
+      const f = database([
+        [
+          {
+            id: 'g1',
+            ...expectedSource,
+            updateTime: new Date(expectedSource.updateTime),
+            ...changed,
+          },
+        ],
+      ]);
+      await expect(
+        f.unit.deleteGroup('g1', ['a1'], expectedSource),
+      ).rejects.toMatchObject({ code: 'source-changed' });
+      expect(f.locks).toEqual(['update']);
+      expect(f.remove).not.toHaveBeenCalled();
+    },
+  );
+
+  it('deletes only when both locked group source and children still match', async () => {
+    const expectedSource = {
+      name: 'Confirmed group',
+      country: 'US',
+      brand: 'Confirmed brand',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    const f = database([
+      [
+        {
+          id: 'g1',
+          ...expectedSource,
+          updateTime: new Date(expectedSource.updateTime),
+        },
+      ],
+      [{ id: 'a1' }],
+    ]);
+    await f.unit.deleteGroup('g1', ['a1'], expectedSource);
+    expect(f.locks).toEqual(['update', 'update']);
+    expect(f.remove).toHaveBeenCalledOnce();
+  });
+
   it.each(['g2', 'g3'])(
     'rejects stale confirmed moves before writing even when target is %s',
     async (target) => {

@@ -48,7 +48,11 @@ export interface CompetitorWriteUnit
     expectedSourceGroup?: string,
   ): Promise<CompetitorAsin>;
   batchCreateAsins(items: unknown[]): Promise<BatchCreateAsinsData>;
-  deleteGroup(id: string, expectedChildIds?: string[]): Promise<void>;
+  deleteGroup(
+    id: string,
+    expectedChildIds?: string[],
+    expectedSource?: CompetitorGroupSource,
+  ): Promise<void>;
   deleteAsin(id: string, expectedSource?: CompetitorAsinSource): Promise<void>;
   updateGroupNotify(
     id: string,

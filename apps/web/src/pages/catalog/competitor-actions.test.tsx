@@ -266,7 +266,7 @@ describe('competitor catalog single-item controls', () => {
           country: 'DE',
           parentId: group.id,
         });
-      if (action.type === 'edit-group')
+      if (action.type === 'edit-group' || action.type === 'delete-group')
         expect(options.json).toMatchObject({
           expectedSource: {
             name: group.name,
@@ -274,6 +274,8 @@ describe('competitor catalog single-item controls', () => {
             brand: group.brand,
           },
         });
+      if (action.type === 'delete-group')
+        expect(options.json).toMatchObject({ expectedChildIds: [child.id] });
       if (action.type === 'edit-asin' || action.type === 'delete-asin')
         expect(options.json).toMatchObject({
           expectedSource: {

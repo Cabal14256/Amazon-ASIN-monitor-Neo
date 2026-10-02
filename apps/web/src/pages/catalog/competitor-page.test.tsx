@@ -51,6 +51,7 @@ function fixture(
   createGroup: ReturnType<typeof vi.fn>,
   deleteGroup?: ReturnType<typeof vi.fn>,
   createAsin?: ReturnType<typeof vi.fn>,
+  permissions = ['asin:read', 'asin:write', 'asin:delete'],
 ) {
   let prior = Promise.resolve();
   Object.defineProperty(window.navigator, 'locks', {
@@ -86,7 +87,7 @@ function fixture(
         status: 'ACTIVE' as const,
       },
       roles: [],
-      permissions: ['asin:read', 'asin:write', 'asin:delete'],
+      permissions,
     },
   };
   const listeners = new Set<() => void>();
@@ -165,6 +166,26 @@ async function create() {
 }
 
 describe('competitor catalog refresh and authority transitions', () => {
+  it.each([
+    { permissions: ['asin:read', 'asin:write'], deletes: true },
+    { permissions: ['asin:read', 'asin:delete'], deletes: false },
+    { permissions: ['asin:read'], deletes: false },
+  ])(
+    'retains Legacy single-delete permissions for $permissions',
+    async ({ permissions, deletes }) => {
+      const list = vi.fn(async () => listData(original));
+      const f = fixture(list, vi.fn(), undefined, undefined, permissions);
+      await screen.findAllByText('Original rival');
+      fireEvent.click(screen.getAllByRole('button', { name: '查看' })[0]);
+      await screen.findAllByText('上次检查');
+      await waitFor(() =>
+        expect(
+          screen.queryAllByRole('button', { name: '删除变体组' }).length > 0,
+        ).toBe(deletes),
+      );
+      f.queryClient.clear();
+    },
+  );
   it('shows storage failure independently and recovers without claiming any prior mutation', async () => {
     const storageFailure = vi
       .spyOn(Storage.prototype, 'setItem')

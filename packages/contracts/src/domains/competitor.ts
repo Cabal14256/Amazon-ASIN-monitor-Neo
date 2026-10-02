@@ -126,9 +126,12 @@ export type CompetitorUpdateGroupRequest = z.infer<
   typeof competitorUpdateGroupRequestSchema
 >;
 
-/** Legacy callers may omit a snapshot; Neo confirms children under the delete lock. */
+/** Legacy callers may omit snapshots; Neo confirms source and children under the delete lock. */
 export const competitorDeleteGroupRequestSchema = z
-  .object({ expectedChildIds: z.array(z.string()).max(5000).optional() })
+  .object({
+    expectedChildIds: z.array(z.string()).max(5000).optional(),
+    expectedSource: competitorGroupSourceSchema.optional(),
+  })
   .strict();
 export type CompetitorDeleteGroupRequest = z.infer<
   typeof competitorDeleteGroupRequestSchema

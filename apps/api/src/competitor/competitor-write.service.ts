@@ -88,13 +88,7 @@ export class CompetitorWriteService implements OnModuleDestroy {
       fail(503, '鉴权权威源尚未切换，请使用现有竞品入口');
     try {
       const result = await this.repository.transaction(async (unit) => {
-        await authorizeAdministration(
-          unit,
-          principal,
-          operation === 'delete-group' || operation === 'delete-asin'
-            ? 'asin:delete'
-            : 'asin:write',
-        );
+        await authorizeAdministration(unit, principal, 'asin:write');
         return action(unit);
       });
       this.logger.info('竞品写入完成', 'CompetitorWriteService', { operation });
@@ -231,9 +225,12 @@ export class CompetitorWriteService implements OnModuleDestroy {
   }
   deleteGroup(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'delete-group', async (unit) => {
+      const { expectedChildIds, expectedSource } =
+        parseCompetitorGroupDelete(body);
       await unit.deleteGroup(
         parseCompetitorWriteId(id),
-        parseCompetitorGroupDelete(body),
+        expectedChildIds,
+        expectedSource,
       );
       return '删除成功';
     });

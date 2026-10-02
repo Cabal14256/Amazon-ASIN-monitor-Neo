@@ -308,6 +308,7 @@ export function CatalogActionPanel({
                   http,
                   action.group.id,
                   (action.group.children ?? []).map((item) => item.id),
+                  competitorExpectedGroup(action.group),
                 );
               else await config.writes!.deleteGroup(http, action.group.id);
               break;
