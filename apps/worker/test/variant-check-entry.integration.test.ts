@@ -1,5 +1,8 @@
 import { getNeoQueuePrefix, getPhysicalQueueName } from '@asin-monitor/config';
-import type { VariantCheckJobData } from '@asin-monitor/contracts';
+import type {
+  PrimaryMonitorJob,
+  VariantCheckJobData,
+} from '@asin-monitor/contracts';
 import {
   createPgPool,
   PgCompetitorCheckRepository,
@@ -23,7 +26,7 @@ import {
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
 
-/** Real compiled entry, two BullMQ consumers and isolated PG completion storage.
+/** Real compiled entry, combined BullMQ consumers and isolated PG completion storage.
  * Empty groups and pre-existing receipts avoid contacting live Amazon in CI.
  * This suite does not prove HTTP submission or live Amazon integration. */
 describe.skipIf(
@@ -37,8 +40,9 @@ describe.skipIf(
   let competitorSchema = '';
   let competitorDatabaseUrl = '';
   let competitorInstalled = false;
-  const queues = new Map<'variant-check' | 'batch-check', Queue>();
-  const events = new Map<'variant-check' | 'batch-check', QueueEvents>();
+  type FixtureQueue = 'variant-check' | 'batch-check' | 'monitor';
+  const queues = new Map<FixtureQueue, Queue>();
+  const events = new Map<FixtureQueue, QueueEvents>();
   let child: ChildProcess | undefined,
     exited = false,
     output = '';
@@ -69,6 +73,17 @@ describe.skipIf(
             'utf8',
           ).replaceAll('public', schema),
         );
+      // 0004 changes the session search_path to pg_catalog first. Restore the
+      // owned schema before returning this connection to the fixture pool.
+      await connection.query(`SET search_path TO ${schema}`);
+      if (
+        (await connection.query('SELECT current_schema() AS schema')).rows[0]
+          ?.schema !== schema
+      )
+        throw new Error('Fixture migration changed primary schema ownership');
+    } catch (error) {
+      await connection.query('ROLLBACK');
+      throw error;
     } finally {
       connection.release();
     }
@@ -219,6 +234,8 @@ describe.skipIf(
         if (keys.length) await f.redis.del(...keys);
         cursor = next;
       } while (cursor !== '0');
+      const readyKey = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
+      await f.redis.del(readyKey, `${readyKey}:owners`);
     } finally {
       child = undefined;
       queues.clear();
@@ -242,7 +259,7 @@ describe.skipIf(
       }
     }
   });
-  async function start() {
+  async function start(selected = 'variant-check,batch-check') {
     child = spawn(process.execPath, [resolve(__dirname, '../dist/main.js')], {
       cwd: resolve(__dirname, '..'),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -254,7 +271,7 @@ describe.skipIf(
         COMPETITOR_DATABASE_URL: competitorDatabaseUrl,
         REDIS_URL: f.env.REDIS_URL,
         BULL_PREFIX: f.env.BULL_PREFIX,
-        WORKER_ENABLED_QUEUES: 'variant-check,batch-check',
+        WORKER_ENABLED_QUEUES: selected,
         SCHEDULER_ENABLED: 'false',
         LOG_LEVEL: 'INFO',
       },
@@ -273,7 +290,9 @@ describe.skipIf(
     await eventually(async () => {
       if (exited)
         throw new Error(`Fixture worker exited before ready: ${output}`);
-      return /registeredProcessors:\s*2/.test(output);
+      return new RegExp(
+        `registeredProcessors:\\s*${selected.split(',').length}`,
+      ).test(output);
     }, 15_000);
   }
   async function data(
@@ -460,5 +479,135 @@ describe.skipIf(
     expect(await f.redis.lrange(f.legacyKey, 0, -1)).toEqual([
       'legacy-fixture',
     ]);
+  }, 30_000);
+  it('starts monitor and both check queues together, routes each database receipt and removes readiness on shutdown', async () => {
+    const schema = (await f.pool.query('SELECT current_schema() AS schema'))
+      .rows[0].schema as string;
+    if (!/^auth_worker_67_[a-f0-9]{32}$/.test(schema))
+      throw new Error('Unexpected combined worker fixture schema');
+    await f.pool.query(
+      'CREATE TABLE feishu_config (LIKE public.feishu_config INCLUDING ALL)',
+    );
+    await f.pool.query(
+      readFileSync(
+        resolve(
+          __dirname,
+          '../../../packages/db/migrations/0012_primary_monitor.sql',
+        ),
+        'utf8',
+      ).replaceAll('public', schema),
+    );
+    await competitorPool!.query(
+      "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES('cg1','Combined competitor group','US','Fixture')",
+    );
+    const queue = new Queue(
+      getPhysicalQueueName('monitor'),
+      getQueueOptions(
+        'monitor',
+        f.env,
+        f.redis as unknown as ConnectionOptions,
+      ),
+    );
+    const event = new QueueEvents(getPhysicalQueueName('monitor'), {
+      connection: parseRedisUrl(f.env.REDIS_URL),
+      prefix: getNeoQueuePrefix(f.env),
+    });
+    queue.on('error', () => undefined);
+    event.on('error', () => undefined);
+    queues.set('monitor', queue);
+    events.set('monitor', event);
+    await Promise.all([queue.waitUntilReady(), event.waitUntilReady()]);
+    await start('variant-check,batch-check,monitor');
+    const readyKey = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
+    expect(await f.redis.get(readyKey)).toBe('1');
+    expect(await f.redis.zcard(`${readyKey}:owners`)).toBe(1);
+    const task = await store.create({
+      taskId: randomUUID(),
+      userId: 'fixture-owner',
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      title: 'Combined fixture monitor',
+    });
+    const monitor: PrimaryMonitorJob = {
+      taskId: task.taskId,
+      userId: task.userId,
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      createdAt: task.createdAt,
+      expiresAt: new Date(Date.parse(task.createdAt) + 3600_000).toISOString(),
+      countries: ['US'],
+    };
+    const jobs = [
+      await data('variant-check', 'variant-group-check', {
+        groupId: 'g1',
+        forceRefresh: true,
+      }),
+      await data('variant-check', 'competitor-variant-group-check', {
+        groupId: 'cg1',
+        forceRefresh: true,
+      }),
+      await data('batch-check', 'variant-group', {
+        groupIds: ['g1', 'g2'],
+        forceRefresh: true,
+      }),
+    ];
+    const queuedMonitor = await queue.add('primary-monitor', monitor, {
+      jobId: monitor.taskId,
+    });
+    const [monitorResult, ...references] = await Promise.all([
+      queuedMonitor.waitUntilFinished(event, 15_000),
+      ...jobs.map(enqueue),
+    ]);
+    expect(monitorResult).toMatchObject({ success: true, totalChecked: 2 });
+    expect(references.map((value) => value.resultKind)).toEqual([
+      'group',
+      'competitor-group',
+      'batch',
+    ]);
+    for (const job of [monitor, ...jobs])
+      expect((await store.read(job.taskId))?.status).toBe('completed');
+    expect(
+      (
+        await f.pool.query(
+          'SELECT count(*)::int AS count FROM monitor_history WHERE monitor_task_id=$1 AND country=$2',
+          [monitor.taskId, 'US'],
+        )
+      ).rows[0].count,
+    ).toBe(2);
+    expect(
+      (
+        await f.pool.query(
+          'SELECT count(*)::int AS count FROM variant_check_receipts WHERE task_id=$1 AND task_type=$2',
+          [monitor.taskId, 'monitor'],
+        )
+      ).rows[0].count,
+    ).toBe(2);
+    expect(
+      (
+        await f.pool.query(
+          "SELECT count(*)::int AS count FROM variant_check_receipts WHERE task_sub_type LIKE 'competitor-%'",
+        )
+      ).rows[0].count,
+    ).toBe(0);
+    expect(
+      (
+        await competitorPool!.query(
+          'SELECT task_id,result_kind FROM competitor_variant_check_receipts',
+        )
+      ).rows,
+    ).toEqual([{ task_id: jobs[1].taskId, result_kind: 'competitor-group' }]);
+    expect(
+      (
+        await competitorPool!.query(
+          'SELECT count(*)::int AS count FROM competitor_monitor_history',
+        )
+      ).rows[0].count,
+    ).toBe(0);
+    expect(await f.redis.lrange(f.legacyKey, 0, -1)).toEqual([
+      'legacy-fixture',
+    ]);
+    child!.kill('SIGTERM');
+    await eventually(async () => exited, 12_000);
+    expect(await f.redis.exists(readyKey, `${readyKey}:owners`)).toBe(0);
   }, 30_000);
 });

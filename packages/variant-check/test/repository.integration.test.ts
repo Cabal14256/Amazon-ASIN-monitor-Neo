@@ -1,4 +1,8 @@
-import { createPgPool, createVariantCheckOperation } from '@asin-monitor/db';
+import {
+  createPgPool,
+  createVariantCheckOperation,
+  PgPrimaryMonitorRepository,
+} from '@asin-monitor/db';
 import {
   catalogNotFoundResult,
   parseCatalogVariantResult,
@@ -94,6 +98,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).replaceAll('public', schema);
         await connection.query(receiptUpgrade);
         await connection.query(receiptUpgrade);
+        const monitorUpgrade = readFileSync(
+          resolve(__dirname, '../../db/migrations/0012_primary_monitor.sql'),
+          'utf8',
+        ).replaceAll('public', schema);
+        await connection.query(monitorUpgrade);
       } finally {
         await connection.query(`SET search_path TO ${schema}`);
         connection.release();
@@ -114,7 +123,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         'ALTER TABLE asins ENABLE TRIGGER trg_asins_update_time',
       );
       await pool.query(
-        'TRUNCATE variant_check_receipts, monitor_history, asins, variant_groups CASCADE',
+        'TRUNCATE primary_monitor_notifications, primary_monitor_runs, variant_check_receipts, monitor_history, asins, variant_groups CASCADE',
       );
       await pool.query(
         "INSERT INTO variant_groups(id,name,country,site,brand,create_time,update_time) VALUES ('g1','Group','US','amazon.com','Fixture','2026-01-01','2026-01-01'),('g2','Other','US','amazon.com','Fixture','2026-01-01','2026-01-01')",
@@ -144,7 +153,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
     };
     const pipeline = (repo: VariantCheckRepositoryPort = repository) => {
-      const check = vi.fn(async () => product());
+      const check = vi.fn(async (asin: string) =>
+        product(Number(asin.slice(-1))),
+      );
       return {
         check,
         service: new VariantCheckPipeline(
@@ -158,6 +169,111 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ),
       };
     };
+    it('keeps the primary monitor snapshot and GROUP/ASIN history once across a retried group operation', async () => {
+      const monitor = new PgPrimaryMonitorRepository(pool);
+      const now = new Date();
+      const taskId = randomUUID();
+      const job = {
+        taskId,
+        taskType: 'monitor' as const,
+        taskSubType: 'primary' as const,
+        userId: 'fixture-owner',
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 3600000).toISOString(),
+        countries: ['US' as const],
+      };
+      const groups = await monitor.groups(job);
+      expect(groups).toEqual([
+        { country: 'US', groupId: 'g1' },
+        { country: 'US', groupId: 'g2' },
+      ]);
+      await pool.query(
+        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g3','Later','US','amazon.com','Fixture')",
+      );
+      expect(await monitor.groups(job)).toEqual(groups);
+      const operation = createVariantCheckOperation(
+        {
+          taskId,
+          userId: job.userId,
+          taskCreatedAt: job.createdAt,
+          expiresAt: job.expiresAt,
+          taskType: 'monitor',
+          taskSubType: 'primary',
+          resultKind: 'group',
+          step: 'monitor-aaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        { groupId: 'g1', forceRefresh: false },
+      );
+      const { service, check } = pipeline();
+      try {
+        const context = { authorize: guard, checkpoint: guard, operation };
+        const first = await service.checkGroup('g1', context);
+        expect(first.groupSnapshot).toMatchObject({ id: 'g1' });
+        const records = (await history()).map((row) => ({
+          checkType: row.check_type,
+          variantGroupId: row.variant_group_id,
+          asinId: row.asin_id,
+          asinCode: row.asin_code,
+          country: row.country,
+          isBroken: row.is_broken,
+          taskId: row.monitor_task_id,
+        }));
+        // The same fixed Catalog fixture yields Legacy's one GROUP row followed
+        // by one ASIN row per child, with effective status and immutable identity.
+        expect(records).toEqual([
+          {
+            checkType: 'GROUP',
+            variantGroupId: 'g1',
+            asinId: null,
+            asinCode: null,
+            country: 'US',
+            isBroken: false,
+            taskId,
+          },
+          {
+            checkType: 'ASIN',
+            variantGroupId: 'g1',
+            asinId: 'a1',
+            asinCode: 'B000000001',
+            country: 'US',
+            isBroken: false,
+            taskId,
+          },
+          {
+            checkType: 'ASIN',
+            variantGroupId: 'g1',
+            asinId: 'a2',
+            asinCode: 'B000000002',
+            country: 'US',
+            isBroken: false,
+            taskId,
+          },
+        ]);
+        await pool.query("DELETE FROM variant_groups WHERE id='g1'");
+        expect(await service.checkGroup('g1', context)).toEqual(first);
+        expect(check).toHaveBeenCalledTimes(2);
+        expect(await history()).toHaveLength(3);
+        expect(await monitor.claimNotification(taskId, 'US')).toBe('new');
+        expect(await monitor.claimNotification(taskId, 'US')).toBe('claimed');
+        await monitor.completeNotification(taskId, 'US', true);
+        expect(await monitor.claimNotification(taskId, 'US')).toBe('sent');
+        await pool.query(
+          "UPDATE primary_monitor_runs SET expires_at=now()-interval '1 minute' WHERE task_id=$1",
+          [taskId],
+        );
+        expect(await monitor.purgeExpiredRuns()).toBe(1);
+        expect(
+          (
+            await pool.query(
+              'SELECT count(*)::int AS count FROM primary_monitor_notifications WHERE task_id=$1',
+              [taskId],
+            )
+          ).rows[0].count,
+        ).toBe(0);
+      } finally {
+        service.close();
+      }
+    });
     it('restores a committed single check after the actual PostgreSQL COMMIT acknowledgement is lost without duplicate history', async () => {
       let transactions = 0;
       const { service, check } = pipeline({

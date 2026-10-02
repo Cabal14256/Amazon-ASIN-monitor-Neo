@@ -20,6 +20,7 @@ import { useAuth, useIdentity } from '../auth/context';
 import { cn } from '../lib/utils';
 import { workspaceNavigation } from './app-shell-navigation';
 import { CommandNavigation } from './command-navigation';
+import { SystemAnnouncement } from './system-announcement';
 import { Button } from './ui/button';
 
 const COLLAPSE_KEY = 'asin-monitor-neo-sidebar-collapsed';
@@ -41,7 +42,7 @@ export function AppShell({
   title: string;
   children: ReactNode;
 }) {
-  const { identity, announce } = useAuth();
+  const { identity, announce, runtime } = useAuth();
   const auth = useIdentity();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -400,6 +401,7 @@ export function AppShell({
             tabIndex={-1}
             className="mx-auto w-full max-w-[1760px] px-5 py-7 sm:px-8 sm:py-9 lg:px-10"
           >
+            <SystemAnnouncement runtime={runtime} />
             {children}
           </main>
         </div>

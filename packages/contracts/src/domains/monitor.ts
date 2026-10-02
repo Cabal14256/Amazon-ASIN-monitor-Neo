@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { resultSchema } from '../envelope';
 
 /**
- * monitor 域契约（17 端点：2 个监控历史查询 + 14 个统计 + 手动触发）。
+ * monitor 域契约（18 端点：状态区间时间轴在 Neo 中提供，Legacy 端点仍保留）。
  * 来源：server/src/controllers/monitorController.js、models/MonitorHistory.js
  * 实读（2026-08-24）。
  * 注意：
@@ -261,14 +261,44 @@ const monitorCountryCodeSchema = z
   .transform((country) => country.trim().toUpperCase())
   .pipe(z.enum(['US', 'UK', 'DE', 'FR', 'IT', 'ES']));
 
-export const triggerMonitorRequestSchema = z.object({
-  countries: z
-    .array(monitorCountryCodeSchema)
-    .nonempty('countries 不能为空')
-    .transform((countries) => [...new Set(countries)])
-    .optional(),
-});
+export const triggerMonitorRequestSchema = z
+  .object({
+    countries: z
+      .array(monitorCountryCodeSchema)
+      .nonempty('countries 不能为空')
+      .transform((countries) => [...new Set(countries)])
+      .optional(),
+  })
+  .strict();
 export type TriggerMonitorRequest = z.infer<typeof triggerMonitorRequestSchema>;
+
+/** Internal BullMQ payload. A task incarnation cannot be replaced by an old job. */
+export const primaryMonitorJobSchema = z
+  .object({
+    taskId: z.string().uuid(),
+    taskType: z.literal('monitor'),
+    taskSubType: z.literal('primary'),
+    userId: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[^\x00-\x1f\x7f]+$/u),
+    createdAt: z.string().datetime(),
+    expiresAt: z.string().datetime(),
+    countries: z.array(monitorCountryCodeSchema).min(1).max(6),
+  })
+  .strict()
+  .superRefine((job, context) => {
+    if (
+      new Set(job.countries).size !== job.countries.length ||
+      Date.parse(job.expiresAt) <= Date.parse(job.createdAt)
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '监控任务身份无效',
+      });
+  });
+export type PrimaryMonitorJob = z.infer<typeof primaryMonitorJobSchema>;
 
 /** 异常时长统计 query（asinIds/asinCodes 支持逗号分隔） */
 export const abnormalDurationQuerySchema = z.object({
@@ -304,6 +334,50 @@ export const monitorHistoryListResultSchema = resultSchema(
 /** GET /monitor-history/:id data */
 export const monitorHistoryDetailResultSchema = resultSchema(
   monitorHistoryRecordSchema,
+);
+
+/** GET /monitor-history/status-intervals query. */
+export const monitorStatusIntervalQuerySchema = z.object({
+  country: z.string().optional(),
+  variantGroupId: z.string().optional(),
+  asinId: z.string().optional(),
+  startTime: z.string(),
+  endTime: z.string(),
+  current: z.coerce.number().int().positive().optional(),
+  pageSize: z.coerce.number().int().positive().optional(),
+});
+export type MonitorStatusIntervalQuery = z.infer<
+  typeof monitorStatusIntervalQuerySchema
+>;
+
+export const monitorStatusIntervalRecordSchema = z.object({
+  asinKey: z.string().min(1),
+  asinId: z.string().nullable(),
+  asinCode: z.string().nullable(),
+  asinName: z.string().nullable(),
+  country: z.string().min(1),
+  variantGroupId: z.string().nullable(),
+  variantGroupName: z.string().nullable(),
+  intervalStart: dateTimeString,
+  intervalEnd: dateTimeString.nullable(),
+  isBroken: z.boolean(),
+});
+export type MonitorStatusIntervalRecord = z.infer<
+  typeof monitorStatusIntervalRecordSchema
+>;
+
+export const monitorStatusIntervalDataSchema = z.object({
+  list: z.array(monitorStatusIntervalRecordSchema),
+  total: z.number().int().nonnegative(),
+  current: z.number().int().positive(),
+  pageSize: z.number().int().positive(),
+  coverage: z.enum(['complete', 'stale']),
+});
+export type MonitorStatusIntervalData = z.infer<
+  typeof monitorStatusIntervalDataSchema
+>;
+export const monitorStatusIntervalResultSchema = resultSchema(
+  monitorStatusIntervalDataSchema,
 );
 
 /** GET /monitor-history/statistics data */

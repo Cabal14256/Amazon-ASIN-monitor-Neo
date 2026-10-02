@@ -33,6 +33,8 @@ const backupRestoreTask = (task: {
   taskSubType?: string | null;
 }) => task.taskType === 'backup' && task.taskSubType === 'restore';
 const backupTask = (task: { taskType: string }) => task.taskType === 'backup';
+const cancellationSensitiveTask = (task: { taskType: string }) =>
+  checkTask(task) || task.taskType === 'monitor';
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed') ||
@@ -95,7 +97,7 @@ export class TaskQueryService {
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (checkTask(task) || backupTask(task)) {
+    if (cancellationSensitiveTask(task) || backupTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -107,7 +109,7 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(checkTask(task) || backupTask(task)
+      ...(cancellationSensitiveTask(task) || backupTask(task)
         ? { taskSubType: task.taskSubType }
         : {}),
     };
@@ -164,14 +166,20 @@ export class TaskQueryService {
       }
     }
     if (
-      checkTask(task) &&
+      cancellationSensitiveTask(task) &&
       (queued.status === 'cancelled' ||
         ((task.cancelRequestedAt || task.status === 'cancelling') &&
           isTerminalTaskStatus(queued.status)))
     ) {
       current = await port.store.mutate(
         task.taskId,
-        { kind: 'cancelled', message: '检查任务已取消，已提交的检查结果保留' },
+        {
+          kind: 'cancelled',
+          message:
+            task.taskType === 'monitor'
+              ? '监控任务已取消，已提交的结果保留'
+              : '检查任务已取消，已提交的检查结果保留',
+        },
         identity,
       );
       if (!current) fail(404, '任务不存在');
@@ -214,6 +222,18 @@ export class TaskQueryService {
           result: queued.result ?? task.result,
           message: queued.message || task.message || '任务已完成',
         },
+        identity,
+      );
+    // Cancellation may win the CAS between the initial task read and the
+    // completion mutation; monitor completion deliberately leaves it pending.
+    if (
+      task.taskType === 'monitor' &&
+      current?.cancelRequestedAt &&
+      queued.status === 'completed'
+    )
+      current = await port.store.mutate(
+        task.taskId,
+        { kind: 'cancelled', message: '监控任务已取消，已提交的结果保留' },
         identity,
       );
     if (queued.status === 'failed')

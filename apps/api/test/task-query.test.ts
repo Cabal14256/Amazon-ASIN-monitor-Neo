@@ -284,6 +284,99 @@ describe('own task query HTTP and bounded reconciliation', () => {
       },
     );
   });
+  it('reconciles a completed monitor queue result after its final registry write failed', async () => {
+    const sixDaysAgo = new Date(Date.now() - 6 * 86_400_000).toISOString();
+    task = taskFixture({
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      createdAt: sixDaysAgo,
+      updatedAt: sixDaysAgo,
+    });
+    queue = {
+      ...task,
+      status: 'completed',
+      result: { totalChecked: 2 },
+    };
+    const response = await get();
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      status: 'completed',
+      result: { totalChecked: 2 },
+    });
+    expect(port.store.mutate).toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ kind: 'completed' }),
+      expect.objectContaining({
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        createdAt: task.createdAt,
+      }),
+    );
+  });
+  it('keeps monitor metadata unchanged when the completion lookup fails', async () => {
+    task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });
+    const before = structuredClone(task);
+    vi.mocked(port.findJob).mockRejectedValueOnce(
+      new Error('Queue unavailable'),
+    );
+    expect((await get()).statusCode).toBe(500);
+    expect(task).toEqual(before);
+    expect(port.store.mutate).not.toHaveBeenCalled();
+  });
+  it('reconciles a six-day-old failed monitor receipt after its final registry write failed', async () => {
+    const sixDaysAgo = new Date(Date.now() - 6 * 86_400_000).toISOString();
+    task = taskFixture({
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      status: 'processing',
+      createdAt: sixDaysAgo,
+      updatedAt: sixDaysAgo,
+    });
+    queue = { ...task, status: 'failed', error: 'private-driver-error' };
+    const response = await get();
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      status: 'failed',
+      error: '任务执行失败',
+    });
+    expect(response.body).not.toContain('private-driver-error');
+    expect(port.store.mutate).toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ kind: 'failed' }),
+      expect.objectContaining({
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        createdAt: task.createdAt,
+      }),
+    );
+  });
+  it('finishes a monitor cancellation when it races with queue completion', async () => {
+    task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });
+    queue = { ...task, status: 'completed', result: { totalChecked: 2 } };
+    vi.mocked(port.store.mutate).mockImplementationOnce(async (_id, change) => {
+      task = transitionTask(task!, { kind: 'cancel-request' }, new Date());
+      task = transitionTask(task, change, new Date());
+      return task;
+    });
+    const response = await get();
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      status: 'cancelled',
+      result: null,
+    });
+    expect(port.store.mutate).toHaveBeenCalledTimes(2);
+  });
+  it('rejects a monitor queue record with a different immutable creation time', async () => {
+    task = taskFixture({ taskType: 'monitor', taskSubType: 'primary' });
+    queue = {
+      ...task,
+      status: 'completed',
+      createdAt: '2026-09-27T01:00:00.000Z',
+      result: { totalChecked: 2 },
+    };
+    expect((await get()).statusCode).toBe(500);
+    expect(port.store.mutate).not.toHaveBeenCalled();
+  });
   it('does not copy an untrusted queue failedReason into public task error', async () => {
     queue = { ...task!, status: 'failed', error: 'private-driver-payload' };
     const response = await get();

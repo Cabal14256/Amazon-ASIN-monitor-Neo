@@ -361,7 +361,7 @@ export const ENDPOINTS: EndpointSpec[] = [
     special: ['timeout-300'],
   },
 
-  // ── monitor（17，全部路由层未挂认证）──
+  // ── monitor（18，Legacy 17 + Neo 状态区间查询）──
   {
     method: 'GET',
     path: '/monitor-history/statistics/by-time',
@@ -472,6 +472,14 @@ export const ENDPOINTS: EndpointSpec[] = [
     domain: 'monitor',
     auth: false,
     controller: 'monitorController.getAbnormalDurationStatistics',
+  },
+  {
+    method: 'GET',
+    path: '/monitor-history/status-intervals',
+    domain: 'monitor',
+    auth: true,
+    permission: 'monitor:read',
+    controller: 'MonitorHistoryController.statusIntervals',
   },
   {
     method: 'GET',

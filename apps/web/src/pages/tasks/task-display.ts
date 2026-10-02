@@ -18,6 +18,7 @@ const STATUSES: Record<string, { label: string; badge: Badge }> = {
   cancelled: { label: '已取消', badge: 'warning' },
 };
 const CANCELLABLE_TYPES = new Set([
+  'monitor',
   'export',
   'import',
   'variant-check',
