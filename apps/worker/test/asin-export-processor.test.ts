@@ -11,6 +11,7 @@ import { ExportArtifactError, ExportArtifactStore } from '@asin-monitor/export';
 import type { Job } from 'bullmq';
 import ExcelJS from 'exceljs';
 import { randomUUID } from 'node:crypto';
+import type { WriteStream } from 'node:fs';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +33,8 @@ const data: AsinExportJobData = {
 };
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   await Promise.all(
     directories
       .splice(0)
@@ -118,7 +121,7 @@ async function harness(pages: AsinGroupReadResult[], maxBytes?: number) {
       _query: { current: number },
       _cursor?: AsinExportCursor,
       _includeTotal?: boolean,
-    ) => {
+    ): Promise<AsinGroupReadResult> => {
       const selected = pages[nextPage++];
       return selected
         ? { ...selected, asins: [] }
@@ -200,6 +203,175 @@ async function harness(pages: AsinGroupReadResult[], maxBytes?: number) {
 }
 
 describe('ASIN streaming export', () => {
+  it.each(['deadline', 'cancellation', 'shutdown'] as const)(
+    'interrupts stalled XLSX finalization on %s, closes the real stream and prevents late publication',
+    async (reason) => {
+      const h = await harness([]);
+      h.job.opts.attempts = 1;
+      const shutdown = new AbortController();
+      h.options.shutdownSignal = shutdown.signal;
+      let stream!: WriteStream;
+      const temporary = h.artifacts.temporary.bind(h.artifacts);
+      vi.spyOn(h.artifacts, 'temporary').mockImplementation(async (id) => {
+        const result = await temporary(id);
+        stream = result.stream;
+        return result;
+      });
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let finish!: () => void;
+      vi.spyOn(
+        ExcelJS.stream.xlsx.WorkbookWriter.prototype,
+        'commit',
+      ).mockImplementation(async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      });
+      const publish = vi.spyOn(h.artifacts, 'publish');
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      });
+      const attempt = h.processor(h.job, 'token');
+      const settled =
+        reason === 'cancellation'
+          ? expect(attempt).resolves.toMatchObject({ cancelled: true })
+          : expect(attempt).rejects.toThrow('ASIN_EXPORT_ATTEMPT_FAILED');
+      await started;
+      if (reason === 'deadline') await vi.advanceTimersByTimeAsync(30 * 60_000);
+      else if (reason === 'cancellation') {
+        h.setState({
+          ...h.state,
+          status: 'cancelling',
+          cancelRequestedAt: createdAt,
+        });
+        await vi.advanceTimersByTimeAsync(1000);
+      } else shutdown.abort();
+      await settled;
+      expect(stream.destroyed).toBe(true);
+      expect(stream.closed).toBe(true);
+      expect(h.state.status).toBe(
+        reason === 'cancellation' ? 'cancelled' : 'failed',
+      );
+      expect(await readdir(h.directory)).toEqual([]);
+      finish();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(publish).not.toHaveBeenCalled();
+      expect(await h.artifacts.read(taskId)).toBeNull();
+    },
+  );
+
+  it('releases a timed-out attempt when filesystem close stalls and cleans only after actual close', async () => {
+    const h = await harness([]);
+    h.job.opts.attempts = 1;
+    const shutdown = new AbortController();
+    h.options.shutdownSignal = shutdown.signal;
+    let stream!: WriteStream;
+    let releaseClose!: () => void;
+    const temporary = h.artifacts.temporary.bind(h.artifacts);
+    vi.spyOn(h.artifacts, 'temporary').mockImplementation(async (id) => {
+      const result = await temporary(id);
+      stream = result.stream;
+      const destroy = stream._destroy.bind(stream);
+      vi.spyOn(stream, '_destroy').mockImplementation((error, callback) => {
+        releaseClose = () => destroy(error, callback);
+      });
+      // This fixture stalls close, not the asynchronous open before _destroy.
+      // Wait for the real descriptor so load cannot defer the injected boundary.
+      if (stream.pending)
+        await new Promise<void>((resolve, reject) => {
+          stream.once('open', () => resolve());
+          stream.once('error', reject);
+        });
+      return result;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: () => void;
+    vi.spyOn(
+      ExcelJS.stream.xlsx.WorkbookWriter.prototype,
+      'commit',
+    ).mockImplementation(async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const publish = vi.spyOn(h.artifacts, 'publish');
+    const discard = vi.spyOn(h.artifacts, 'discard');
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const attempt = h.processor(h.job, 'token');
+    const rejected = expect(attempt).rejects.toThrow(
+      'ASIN_EXPORT_ATTEMPT_FAILED',
+    );
+    await started;
+    shutdown.abort();
+    await vi.advanceTimersByTimeAsync(5000);
+    await rejected;
+    expect(stream.closed).toBe(false);
+    expect(discard).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    const closed = new Promise<void>((resolve) =>
+      stream.once('close', resolve),
+    );
+    releaseClose();
+    await closed;
+    vi.useRealTimers();
+    await vi.waitFor(async () =>
+      expect(await readdir(h.directory)).toEqual([]),
+    );
+    expect(discard).toHaveBeenCalledOnce();
+    finish();
+    await Promise.resolve();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('interrupts finished() after commit has returned without publishing the unfinished stream', async () => {
+    const h = await harness([]);
+    h.job.opts.attempts = 1;
+    const shutdown = new AbortController();
+    h.options.shutdownSignal = shutdown.signal;
+    let stream!: WriteStream;
+    const temporary = h.artifacts.temporary.bind(h.artifacts);
+    vi.spyOn(h.artifacts, 'temporary').mockImplementation(async (id) => {
+      const output = await temporary(id);
+      stream = output.stream;
+      return output;
+    });
+    const commit = vi
+      .spyOn(ExcelJS.stream.xlsx.WorkbookWriter.prototype, 'commit')
+      .mockResolvedValue(undefined);
+    const publish = vi.spyOn(h.artifacts, 'publish');
+    const attempt = h.processor(h.job, 'token');
+    const rejected = expect(attempt).rejects.toThrow(
+      'ASIN_EXPORT_ATTEMPT_FAILED',
+    );
+    await vi.waitFor(() => {
+      expect(commit).toHaveBeenCalledOnce();
+      expect(stream.listenerCount('finish')).toBeGreaterThan(0);
+    });
+    expect(stream.writableFinished).toBe(false);
+    shutdown.abort();
+    try {
+      expect(stream.destroyed).toBe(true);
+    } finally {
+      // Even a deliberately regressed processor must release this real fd.
+      if (!stream.destroyed) stream.destroy(new Error('fixture shutdown'));
+      await rejected;
+    }
+    expect(stream.closed).toBe(true);
+    expect(publish).not.toHaveBeenCalled();
+    expect(await readdir(h.directory)).toEqual([]);
+  });
+
   it('fails and cleans the actual temporary file when streaming crosses the byte limit', async () => {
     const h = await harness(
       [

@@ -30,6 +30,7 @@ const GROUP_PAGE_SIZE = 50;
 const MAX_GROUPS = 10_000;
 const MAX_ROWS = 100_000;
 const TASK_TIMEOUT_MS = 30 * 60_000;
+const WRITER_CLOSE_TIMEOUT_MS = 5000;
 const cancelledResult = { cancelled: true, message: '导出任务已取消' };
 const identity = (data: AsinExportJobData) => ({
   userId: data.userId,
@@ -51,6 +52,32 @@ class TaskStopped extends Error {
   }
 }
 class ExportCapacityError extends Error {}
+
+function abortable<T>(signal: AbortSignal, operation: () => Promise<T>) {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) return abort();
+    void Promise.resolve()
+      .then(() => {
+        signal.throwIfAborted();
+        return operation();
+      })
+      .then(
+        (value) => {
+          signal.removeEventListener('abort', abort);
+          resolve(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', abort);
+          reject(error);
+        },
+      );
+  });
+}
 
 export function createAsinExportProcessor(
   repository: AsinExportQueryRepositoryPort,
@@ -78,6 +105,14 @@ export function createAsinExportProcessor(
     let checking = false;
     let partial: string | undefined;
     let outputStream: WriteStream | undefined;
+    const abortWriter = () => {
+      if (outputStream && !outputStream.destroyed)
+        outputStream.destroy(
+          controller.signal.reason instanceof Error
+            ? controller.signal.reason
+            : new Error('EXPORT_WRITER_ABORTED'),
+        );
+    };
     let published = false;
     const verify = (state: TaskState | null): TaskState => {
       if (
@@ -176,6 +211,11 @@ export function createAsinExportProcessor(
       // Errors can occur while rows are being streamed, before commit() installs
       // its listener. Stop the live database read and retain the capacity reason.
       output.stream.once('error', (error) => controller.abort(error));
+      controller.signal.addEventListener('abort', abortWriter, { once: true });
+      if (controller.signal.aborted) {
+        abortWriter();
+        controller.signal.throwIfAborted();
+      }
       const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
         stream: output.stream,
         useSharedStrings: false,
@@ -298,8 +338,10 @@ export function createAsinExportProcessor(
       // Never commit the writer or publish a file from a timed-out/aborted
       // snapshot callback that may finish after its connection was destroyed.
       await check();
-      await workbook.commit();
-      await finished(output.stream);
+      await abortable(controller.signal, async () => {
+        await workbook.commit();
+        await finished(output.stream);
+      });
       await check();
       const artifact = await artifacts.publish(
         data.taskId,
@@ -372,14 +414,42 @@ export function createAsinExportProcessor(
       if (heartbeat) clearInterval(heartbeat);
       clearTimeout(deadline);
       options.shutdownSignal.removeEventListener('abort', shutdown);
+      controller.signal.removeEventListener('abort', abortWriter);
+      let canDiscard = true;
       if (outputStream && !outputStream.closed) {
-        const closed = new Promise<void>((resolve) =>
-          outputStream!.once('close', resolve),
-        );
+        let onClose!: () => void;
+        const closed = new Promise<boolean>((resolve) => {
+          onClose = () => resolve(true);
+          outputStream!.once('close', onClose);
+        });
+        let closeTimeout!: ReturnType<typeof setTimeout>;
+        const closeDeadline = new Promise<boolean>((resolve) => {
+          closeTimeout = setTimeout(
+            () => resolve(false),
+            WRITER_CLOSE_TIMEOUT_MS,
+          );
+        });
         if (!outputStream.destroyed) outputStream.destroy();
-        await closed;
+        canDiscard = await Promise.race([closed, closeDeadline]);
+        clearTimeout(closeTimeout);
+        outputStream.removeListener('close', onClose);
+        if (!canDiscard && partial) {
+          const deferredPath = partial;
+          const discard = () => {
+            void artifacts.discard(deferredPath).catch(() =>
+              log.warn('ASIN 导出临时文件清理失败', {
+                reason: 'export_partial_cleanup_failed',
+              }),
+            );
+          };
+          log.warn('ASIN 导出写入关闭超时，临时文件将在关闭后清理', {
+            reason: 'export_writer_cleanup_deferred',
+          });
+          if (outputStream.closed) discard();
+          else outputStream.once('close', discard);
+        }
       }
-      if (partial)
+      if (partial && canDiscard)
         await artifacts.discard(partial).catch(() =>
           log.warn('ASIN 导出临时文件清理失败', {
             reason: 'export_partial_cleanup_failed',
