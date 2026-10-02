@@ -92,12 +92,12 @@ const asin = (id: string, parent: string, broken = false) => ({
   lastCheckTime: new Date('2026-09-27T01:02:03.000Z'),
 });
 
-async function harness(pages: AsinGroupReadResult[]) {
+async function harness(pages: AsinGroupReadResult[], maxBytes?: number) {
   const directory = await mkdtemp(
     join(tmpdir(), `neo-export-${randomUUID()}-`),
   );
   directories.push(directory);
-  const artifacts = new ExportArtifactStore(directory);
+  const artifacts = new ExportArtifactStore(directory, maxBytes);
   let current = state();
   let beforeMutation:
     | ((change: Parameters<typeof transitionTask>[1]) => void)
@@ -200,6 +200,26 @@ async function harness(pages: AsinGroupReadResult[]) {
 }
 
 describe('ASIN streaming export', () => {
+  it('fails and cleans the actual temporary file when streaming crosses the byte limit', async () => {
+    const h = await harness(
+      [
+        {
+          groups: [group('g1', 'Bounded')],
+          asins: [asin('B000000001', 'g1')],
+          total: 1,
+          totalASINs: 1,
+        },
+      ] as unknown as AsinGroupReadResult[],
+      64,
+    );
+    const publish = vi.spyOn(h.artifacts, 'publish');
+    await expect(h.processor(h.job, 'token')).rejects.toThrow('超过上限');
+    expect(h.state.status).toBe('failed');
+    expect(publish).not.toHaveBeenCalled();
+    expect(await readdir(h.directory)).toEqual([]);
+    expect(await h.artifacts.read(taskId)).toBeNull();
+  });
+
   it('rejects metadata TTL below the bounded queue and worker lifetime', async () => {
     await expect(
       startAsinExportRuntime(

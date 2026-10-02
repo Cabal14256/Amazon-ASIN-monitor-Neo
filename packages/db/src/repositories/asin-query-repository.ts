@@ -477,10 +477,8 @@ export async function withAsinExportDatabaseTransaction<T>(
           `SET LOCAL statement_timeout = ${ASIN_EXPORT_QUERY_TIMEOUT_MS}`,
         );
         ensureOpen();
-        await client.query(
-          'SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)',
-        );
-        ensureOpen();
+        // Authorization was checked at acceptance and is checked again at
+        // download. This business snapshot must leave role administration free.
         const result = await operation(createDb(client), ensureOpen);
         ensureOpen();
         await client.query('COMMIT');

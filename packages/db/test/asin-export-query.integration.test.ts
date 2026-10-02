@@ -26,6 +26,48 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     }, 10_000);
 
+    it('keeps role administration available while an export snapshot is open', async () => {
+      const pool = createPgPool(process.env.DATABASE_URL!, {
+        max: 2,
+        connectionTimeoutMillis: 2000,
+      });
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const snapshot = withAsinExportDatabaseTransaction(pool, async (db) => {
+        await db.execute(sql`SELECT count(*) FROM variant_groups`);
+        entered();
+        await held;
+        return 'export completed';
+      });
+      void snapshot.catch(() => undefined);
+      let administration: Awaited<ReturnType<typeof pool.connect>> | undefined;
+      try {
+        await ready;
+        administration = await pool.connect();
+        await administration.query('BEGIN');
+        await administration.query('SET LOCAL statement_timeout = 1500');
+        // This is the exclusive lock used by real role/permission writes.
+        await administration.query(
+          'SELECT pg_advisory_xact_lock(1095977294,1380073795)',
+        );
+        await administration.query('COMMIT');
+      } finally {
+        if (administration) {
+          await administration.query('ROLLBACK');
+          administration.release();
+        }
+        release();
+        await snapshot;
+        await pool.end();
+      }
+    }, 10_000);
+
     it('continues group and child pages after inserts and deletes before the cursor', async () => {
       const pool = createPgPool(process.env.DATABASE_URL!, {
         max: 2,

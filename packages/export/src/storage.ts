@@ -3,7 +3,15 @@ import {
   type AsinExportArtifact,
 } from '@asin-monitor/contracts';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream, type WriteStream } from 'node:fs';
+import {
+  close,
+  createReadStream,
+  createWriteStream,
+  open,
+  write,
+  writev,
+  type WriteStream,
+} from 'node:fs';
 import { link, lstat, mkdir, readdir, unlink } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 
@@ -24,8 +32,14 @@ export class ExportArtifactError extends Error {
 /** Only deterministic task-owned names cross the API/Worker boundary. */
 export class ExportArtifactStore {
   readonly directory: string;
-  constructor(directory: string) {
-    if (!isAbsolute(directory) || directory.includes('\0'))
+  constructor(directory: string, private readonly maxBytes = MAX_EXPORT_BYTES) {
+    if (
+      !isAbsolute(directory) ||
+      directory.includes('\0') ||
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 4 ||
+      maxBytes > MAX_EXPORT_BYTES
+    )
       throw new ExportArtifactError('invalid');
     this.directory = resolve(directory);
   }
@@ -42,9 +56,71 @@ export class ExportArtifactStore {
   ): Promise<{ path: string; stream: WriteStream }> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const path = this.partialPath(taskId);
+    let written = 0;
+    const exceedsLimit = (bytes: number) => bytes > this.maxBytes - written;
     return {
       path,
-      stream: createWriteStream(path, { flags: 'wx', mode: 0o600 }),
+      stream: createWriteStream(path, {
+        flags: 'wx',
+        mode: 0o600,
+        // Enforce the limit at the filesystem write boundary, including corked
+        // batches. Normal WriteStream backpressure/open/close semantics remain.
+        fs: {
+          open,
+          close,
+          write(
+            fd: number,
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number | null,
+            callback: (
+              error: NodeJS.ErrnoException | null,
+              bytes: number,
+              buffer: Buffer,
+            ) => void,
+          ) {
+            if (exceedsLimit(length)) {
+              callback(new ExportArtifactError('too-large'), 0, buffer);
+              return;
+            }
+            write(
+              fd,
+              buffer,
+              offset,
+              length,
+              position,
+              (error, bytes, value) => {
+                if (!error) written += bytes;
+                callback(error, bytes, value);
+              },
+            );
+          },
+          writev(
+            fd: number,
+            buffers: Buffer[],
+            position: number | null,
+            callback: (
+              error: NodeJS.ErrnoException | null,
+              bytes: number,
+              buffers: Buffer[],
+            ) => void,
+          ) {
+            if (
+              exceedsLimit(
+                buffers.reduce((sum, buffer) => sum + buffer.length, 0),
+              )
+            ) {
+              callback(new ExportArtifactError('too-large'), 0, buffers);
+              return;
+            }
+            writev(fd, buffers, position, (error, bytes, value) => {
+              if (!error) written += bytes;
+              callback(error, bytes, value);
+            });
+          },
+        },
+      }),
     };
   }
   async discard(path: string): Promise<void> {
@@ -76,7 +152,7 @@ export class ExportArtifactStore {
     if (!details) return null;
     if (!details.isFile() || details.isSymbolicLink())
       throw new ExportArtifactError('invalid');
-    if (details.size < 4 || details.size > MAX_EXPORT_BYTES)
+    if (details.size < 4 || details.size > this.maxBytes)
       throw new ExportArtifactError('too-large');
     const hash = createHash('sha256');
     let bytes = 0;
@@ -84,7 +160,7 @@ export class ExportArtifactStore {
     for await (const chunk of createReadStream(path, { signal })) {
       const buffer = chunk as Buffer;
       bytes += buffer.length;
-      if (bytes > MAX_EXPORT_BYTES) throw new ExportArtifactError('too-large');
+      if (bytes > this.maxBytes) throw new ExportArtifactError('too-large');
       if (magic.length < 4)
         magic = Buffer.concat([magic, buffer]).subarray(0, 4);
       hash.update(buffer);

@@ -47,6 +47,9 @@ describe('bounded ASIN export snapshot', () => {
       expect(client.query).toHaveBeenCalledWith(
         'SET LOCAL statement_timeout = 60000',
       );
+      expect(client.query.mock.calls.flat().join(' ')).not.toContain(
+        'pg_advisory',
+      );
       if (reason === 'deadline') await vi.advanceTimersByTimeAsync(65_000);
       else controller.abort();
       await rejected;

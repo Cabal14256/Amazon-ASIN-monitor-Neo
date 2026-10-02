@@ -173,6 +173,9 @@ export function createAsinExportProcessor(
       const output = await artifacts.temporary(data.taskId);
       partial = output.path;
       outputStream = output.stream;
+      // Errors can occur while rows are being streamed, before commit() installs
+      // its listener. Stop the live database read and retain the capacity reason.
+      output.stream.once('error', (error) => controller.abort(error));
       const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
         stream: output.stream,
         useSharedStrings: false,
