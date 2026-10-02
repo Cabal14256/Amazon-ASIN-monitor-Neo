@@ -2,18 +2,22 @@ import type { Env } from '@asin-monitor/config';
 import {
   monitorHistoryDetailResultSchema,
   monitorHistoryListResultSchema,
+  monitorStatusIntervalResultSchema,
   type MonitorHistoryRecord,
 } from '@asin-monitor/contracts';
 import {
   MonitorHistoryQueryError,
+  withAuthDatabaseDeadline,
   type AuthSessionRecord,
   type AuthUserRecord,
   type MonitorHistoryQueryRepositoryPort,
   type MonitorHistoryQueryUnit,
 } from '@asin-monitor/db';
+import { HttpException } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import jwt from 'jsonwebtoken';
 import { EventEmitter } from 'node:events';
+import type { Pool } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthPrincipal } from '../src/auth/auth.types';
 import type { AppLogger } from '../src/logger/app-logger.service';
@@ -69,6 +73,13 @@ function fixture() {
     historyById: vi.fn(
       async (): Promise<MonitorHistoryRecord | null> => record,
     ),
+    listStatusIntervals: vi.fn(async () => ({
+      list: [],
+      total: 0,
+      current: 1,
+      pageSize: 50,
+      coverage: 'complete' as const,
+    })),
   } as unknown as MonitorHistoryQueryUnit;
   const repository: MonitorHistoryQueryRepositoryPort = {
     read: vi.fn(async (action) => action(unit)),
@@ -101,11 +112,15 @@ describe('monitor history HTTP / current transaction authorization', () => {
   let f: ReturnType<typeof fixture>,
     app: Awaited<ReturnType<typeof sessionApp>>,
     headers: { authorization: string };
-  const paths = ['/monitor-history', '/monitor-history/107'];
+  const paths = [
+    '/monitor-history',
+    '/monitor-history/status-intervals?startTime=2026-09-01&endTime=2026-09-02',
+    '/monitor-history/107',
+  ];
   async function start(env: NodeJS.ProcessEnv = {}) {
     app = await sessionApp(
       f.auth,
-      env,
+      { ANALYTICS_STATUS_INTERVAL_ENABLED: 'true', ...env },
       (builder) =>
         builder
           .overrideProvider(MONITOR_HISTORY_REPOSITORY)
@@ -130,6 +145,92 @@ describe('monitor history HTTP / current transaction authorization', () => {
   });
   const get = (path = paths[0], auth = headers) =>
     app.http.inject({ method: 'GET', url: `/api/v1${path}`, headers: auth });
+  it('disables interval reads before touching projection tables while keeping history available', async () => {
+    await app.app.close();
+    await start({ ANALYTICS_STATUS_INTERVAL_ENABLED: 'false' });
+    const response = await get(paths[1]);
+    expect(response.statusCode).toBe(503);
+    expect(response.json().errorMessage).toContain('状态区间读取已关闭');
+    expect(f.repository.read).not.toHaveBeenCalled();
+    expect(f.unit.listStatusIntervals).not.toHaveBeenCalled();
+    expect(app.logger.error).not.toHaveBeenCalled();
+    expect((await get()).statusCode).toBe(200);
+    expect((await get(paths[2])).statusCode).toBe(200);
+  });
+
+  it.each(['57014', '55P03', 'timeout'])(
+    'maps nested %s interval timeouts to a safe recoverable 504',
+    async (code) => {
+      vi.mocked(f.unit.listStatusIntervals).mockRejectedValueOnce({
+        cause: { cause: { code, message: 'private-db-credentials' } },
+      });
+      const response = await get(paths[1]);
+      expect(response.statusCode).toBe(504);
+      expect(response.json().errorMessage).toContain('缩小时间范围');
+      expect(response.json().data).toBeUndefined();
+      expect(app.logger.warn).toHaveBeenCalledWith(
+        'API 查询暂不可用',
+        'ApiExceptionFilter',
+        {
+          status: 504,
+          reason: 'monitor-history-timeout',
+        },
+      );
+      expect(app.logger.error).not.toHaveBeenCalled();
+      expect(
+        response.body + JSON.stringify(app.logger.warn.mock.calls),
+      ).not.toContain('private-db');
+      expect((await get(paths[1])).statusCode).toBe(200);
+    },
+  );
+
+  it('maps the real authentication transaction deadline to a safe recoverable 504', async () => {
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async () => ({ rows: [] })),
+      release: vi.fn(),
+    });
+    const pool = { connect: async () => client } as unknown as Pool;
+    vi.mocked(f.unit.listStatusIntervals).mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    vi.mocked(f.repository.read).mockImplementationOnce((action) =>
+      withAuthDatabaseDeadline(pool, () => action(f.unit)),
+    );
+    const response = await get(paths[1]);
+    expect(response.statusCode).toBe(504);
+    expect(response.json()).toEqual({
+      success: false,
+      errorCode: 504,
+      errorMessage: '查询超时，请尝试缩小时间范围或稍后重试',
+    });
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+    expect(client.listenerCount('error')).toBe(0);
+    expect(app.logger.warn).toHaveBeenCalledWith(
+      'API 查询暂不可用',
+      'ApiExceptionFilter',
+      { status: 504, reason: 'monitor-history-timeout' },
+    );
+    expect(app.logger.error).not.toHaveBeenCalled();
+    expect(response.body).not.toContain('Authentication database');
+    expect((await get(paths[1])).statusCode).toBe(200);
+  });
+
+  it('does not expose lookalike driver errors through the recoverable-message boundary', async () => {
+    vi.mocked(f.repository.read).mockRejectedValueOnce(
+      Object.assign(
+        new HttpException({ errorMessage: 'private-db-credentials' }, 504),
+        {
+          reason: 'monitor-history-timeout',
+        },
+      ),
+    );
+    const response = await get(paths[1]);
+    expect(response.statusCode).toBe(504);
+    expect(response.json().errorMessage).toBe('服务器内部错误');
+    expect(response.body).not.toContain('private-db');
+    expect(app.logger.error).toHaveBeenCalled();
+  });
+
   it.each(paths)('requires login and monitor:read on %s', async (path) => {
     expect((await get(path, {} as never)).statusCode).toBe(401);
     f.auth.getPermissionCodes.mockResolvedValue([]);
@@ -144,6 +245,8 @@ describe('monitor history HTTP / current transaction authorization', () => {
       expect(response.headers['cache-control']).toBe('no-store');
       (path === paths[0]
         ? monitorHistoryListResultSchema
+        : path.startsWith('/monitor-history/status-intervals')
+        ? monitorStatusIntervalResultSchema
         : monitorHistoryDetailResultSchema
       ).parse(response.json());
       expect(response.body).toContain('complete');
@@ -204,7 +307,7 @@ describe('monitor history HTTP / current transaction authorization', () => {
   });
   it('returns the existing missing history 404', async () => {
     vi.mocked(f.unit.historyById).mockResolvedValueOnce(null);
-    const response = await get(paths[1]);
+    const response = await get('/monitor-history/107');
     expect(response.statusCode).toBe(404);
     expect(response.json().errorMessage).toBe('监控历史不存在');
   });

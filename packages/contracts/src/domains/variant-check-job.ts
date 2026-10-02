@@ -42,6 +42,26 @@ export const variantCheckJobSchema = z.discriminatedUnion('taskSubType', [
     .object({
       ...identity,
       taskType: z.literal('variant-check'),
+      taskSubType: z.literal('competitor-asin-check'),
+      params: z
+        .object({ asinId: identifier, forceRefresh: z.boolean() })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...identity,
+      taskType: z.literal('variant-check'),
+      taskSubType: z.literal('competitor-variant-group-check'),
+      params: z
+        .object({ groupId: identifier, forceRefresh: z.boolean() })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...identity,
+      taskType: z.literal('variant-check'),
       taskSubType: z.literal('parent-asin-query'),
       params: z
         .object({
@@ -77,7 +97,14 @@ export const variantCheckResultReferenceSchema = z
     operationKey: z.string().regex(/^[a-f0-9]{64}$/),
     requestHash: z.string().regex(/^[a-f0-9]{64}$/),
     expiresAt: z.string().datetime(),
-    resultKind: z.enum(['asin', 'group', 'parent', 'batch']),
+    resultKind: z.enum([
+      'asin',
+      'group',
+      'parent',
+      'batch',
+      'competitor-asin',
+      'competitor-group',
+    ]),
   })
   .strict();
 export type VariantCheckResultReference = z.infer<
