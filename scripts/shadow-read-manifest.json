@@ -1,0 +1,29 @@
+{
+  "targets": [
+    {
+      "name": "roles",
+      "path": "/roles",
+      "requiredDataPath": ["data"]
+    },
+    {
+      "name": "permissions",
+      "path": "/permissions",
+      "requiredDataPath": ["data"]
+    },
+    {
+      "name": "all-roles",
+      "path": "/users/roles/all",
+      "requiredDataPath": ["data"]
+    },
+    {
+      "name": "variant-groups",
+      "path": "/variant-groups",
+      "query": { "current": "1", "pageSize": "10" }
+    },
+    {
+      "name": "competitor-variant-groups",
+      "path": "/competitor/variant-groups",
+      "query": { "current": "1", "pageSize": "10" }
+    }
+  ]
+}
