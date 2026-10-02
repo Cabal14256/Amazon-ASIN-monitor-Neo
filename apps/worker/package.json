@@ -17,6 +17,7 @@
     "@asin-monitor/db": "workspace:*",
     "@asin-monitor/export": "workspace:*",
     "@asin-monitor/import": "workspace:*",
+    "@asin-monitor/notify": "workspace:*",
     "@asin-monitor/sp-api": "workspace:*",
     "@asin-monitor/variant-check": "workspace:*",
     "bullmq": "^5.58.0",

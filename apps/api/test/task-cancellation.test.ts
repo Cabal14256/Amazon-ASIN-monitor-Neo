@@ -178,14 +178,11 @@ describe('owned task cancellation HTTP', () => {
       expect(port.store.mutate).not.toHaveBeenCalled();
     },
   );
-  it.each(['monitor', 'competitor', 'unknown'])(
-    'refuses unsupported %s',
-    async (type) => {
-      task!.taskType = type;
-      expect((await cancel()).statusCode).toBe(400);
-      expect(port.cancelJob).not.toHaveBeenCalled();
-    },
-  );
+  it.each(['competitor', 'unknown'])('refuses unsupported %s', async (type) => {
+    task!.taskType = type;
+    expect((await cancel()).statusCode).toBe(400);
+    expect(port.cancelJob).not.toHaveBeenCalled();
+  });
   it.each([
     ['expired', 404],
     ['foreign', 403],

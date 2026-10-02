@@ -26,8 +26,10 @@ function fail(status: number, message: string): never {
 }
 const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
+const cancellationSensitiveTask = (task: { taskType: string }) =>
+  checkTask(task) || task.taskType === 'monitor';
 const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
-  checkTask(task) ||
+  cancellationSensitiveTask(task) ||
   (task.taskType === 'export' && task.taskSubType === 'asin');
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
@@ -87,29 +89,8 @@ export class TaskQueryService {
     if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
     if (!queued) {
-      // A request may time out after registry creation but before/while BullMQ
-      // accepts the job. Once the queue confirms absence after a grace period,
-      // an orphan ASIN task is terminal instead of pending for its whole TTL.
-      if (
-        task.taskType === 'export' &&
-        task.taskSubType === 'asin' &&
-        task.status === 'pending' &&
-        Date.now() - Date.parse(task.createdAt) >= 30_000
-      ) {
-        const failed = await port.store.mutate(
-          task.taskId,
-          { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
-          {
-            userId: task.userId,
-            taskType: task.taskType,
-            taskSubType: task.taskSubType,
-            createdAt: task.createdAt,
-          },
-        );
-        if (!failed) fail(404, '任务不存在');
-        this.owner(failed, userId);
-        return failed;
-      }
+      // Removal/retention and a lost completion acknowledgement can also leave
+      // no queue record. Absence and age cannot prove that work never started.
       return task;
     }
     this.owner(queued, userId);
@@ -130,14 +111,20 @@ export class TaskQueryService {
       ...(boundTask(task) ? { taskSubType: task.taskSubType } : {}),
     };
     if (
-      checkTask(task) &&
+      cancellationSensitiveTask(task) &&
       (queued.status === 'cancelled' ||
         ((task.cancelRequestedAt || task.status === 'cancelling') &&
           isTerminalTaskStatus(queued.status)))
     ) {
       current = await port.store.mutate(
         task.taskId,
-        { kind: 'cancelled', message: '检查任务已取消，已提交的检查结果保留' },
+        {
+          kind: 'cancelled',
+          message:
+            task.taskType === 'monitor'
+              ? '监控任务已取消，已提交的结果保留'
+              : '检查任务已取消，已提交的检查结果保留',
+        },
         identity,
       );
       if (!current) fail(404, '任务不存在');
@@ -180,6 +167,18 @@ export class TaskQueryService {
           result: queued.result ?? task.result,
           message: queued.message || task.message || '任务已完成',
         },
+        identity,
+      );
+    // Cancellation may win the CAS between the initial task read and the
+    // completion mutation; monitor completion deliberately leaves it pending.
+    if (
+      task.taskType === 'monitor' &&
+      current?.cancelRequestedAt &&
+      queued.status === 'completed'
+    )
+      current = await port.store.mutate(
+        task.taskId,
+        { kind: 'cancelled', message: '监控任务已取消，已提交的结果保留' },
         identity,
       );
     if (queued.status === 'failed')

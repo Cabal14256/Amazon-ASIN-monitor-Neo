@@ -339,6 +339,12 @@ jobs:
       - name: Run ASIN deletion, notification and history preservation transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-lifecycle.integration.test.ts
 
+      - name: Upgrade primary monitor storage twice
+        run: |
+          docker cp packages/db/migrations/0012_primary_monitor.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0012_primary_monitor.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.sql
+
       - name: Run ASIN manual actions and atomic monitor history transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-manual.integration.test.ts
 
@@ -370,6 +376,9 @@ jobs:
 
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
+
+      - name: Run compiled primary monitor consumer with owned tasks and PostgreSQL history
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/primary-monitor-entry.integration.test.ts
 
       - name: Run variant check HTTP, full results, retry recovery and two API gateways
         run: pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts
@@ -405,6 +414,12 @@ jobs:
 
       - name: Run Neo audit query PostgreSQL and HTTP integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
+
+      - name: Smoke test primary monitor storage rollback twice
+        run: |
+          docker cp packages/db/migrations/0012_primary_monitor.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0012_primary_monitor.rollback.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
 
       - name: Smoke test status interval maintenance rollback twice
         run: |

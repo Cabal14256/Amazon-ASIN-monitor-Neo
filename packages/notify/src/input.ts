@@ -1,6 +1,9 @@
 import { NotificationError } from './errors';
 import type { NotificationData, NotificationDomain } from './types';
 
+export const NOTIFICATION_MAX_ITEMS = 10_000;
+export const NOTIFICATION_MAX_TEXT_BYTES = 1024 * 1024;
+
 const fail = (): never => {
   throw new NotificationError('invalid-input');
 };
@@ -25,7 +28,7 @@ export function snapshotNotification(value: unknown): NotificationData {
     if (v === undefined || v === null) return v;
     if (typeof v !== 'string') return fail();
     bytes += Buffer.byteLength(v);
-    if (bytes > 1024 * 1024 || v.includes('\0')) return fail();
+    if (bytes > NOTIFICATION_MAX_TEXT_BYTES || v.includes('\0')) return fail();
     return v;
   };
   const count = (v: unknown) =>
@@ -51,7 +54,8 @@ export function snapshotNotification(value: unknown): NotificationData {
     convert: (item: unknown) => T,
   ): T[] | undefined => {
     if (v === undefined) return undefined;
-    if (!Array.isArray(v) || (items += v.length) > 10_000) return fail();
+    if (!Array.isArray(v) || (items += v.length) > NOTIFICATION_MAX_ITEMS)
+      return fail();
     // Read the bounded own elements directly. Array.from would execute a
     // caller's custom iterator, which can yield more than the checked length.
     const result: T[] = [];
