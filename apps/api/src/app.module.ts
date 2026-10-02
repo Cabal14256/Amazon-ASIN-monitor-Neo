@@ -4,6 +4,7 @@ import { AsinModule } from './asin/asin.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CompetitorCheckModule } from './competitor/competitor-check.module';
+import { CompetitorMonitorTriggerModule } from './competitor/competitor-monitor-trigger.module';
 import { CompetitorModule } from './competitor/competitor.module';
 import { ConfigModule } from './config/config.module';
 import { DashboardModule } from './dashboard/dashboard.module';
@@ -45,6 +46,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     VariantCheckModule,
     MonitorHistoryModule,
     MonitorTriggerModule,
+    CompetitorMonitorTriggerModule,
     OpsModule,
     SystemModule,
     TaskQueryModule,

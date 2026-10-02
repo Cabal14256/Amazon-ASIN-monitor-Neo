@@ -77,13 +77,13 @@ export function getQueuePolicy(name: QueueName, env: Env) {
     // Terminal monitor jobs serve as recovery receipts after lost acknowledgements.
     removeOnComplete: {
       age:
-        name === 'monitor'
+        name === 'monitor' || name === 'competitor-monitor'
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
           : Math.max(policy.completeAge, checkRetention),
     },
     removeOnFail: {
       age:
-        name === 'monitor'
+        name === 'monitor' || name === 'competitor-monitor'
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
           : Math.max(policy.failureAge, checkRetention),
     },

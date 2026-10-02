@@ -1,6 +1,8 @@
+import { sql } from 'drizzle-orm';
 import type { Pool, PoolClient } from 'pg';
 import { createDb, type Db } from '../client';
 import type { CompetitorQueryUnit } from '../domain/competitor-query';
+import { spApiConfig } from '../schema';
 import { DrizzleAsinQueryUnit } from './asin-query-repository';
 
 export class CompetitorTransactionError extends Error {
@@ -20,7 +22,9 @@ export class CompetitorTransactionError extends Error {
 type Authorization = Pick<
   CompetitorQueryUnit,
   'lockOperator' | 'lockSession' | 'operatorPermissionCodes'
->;
+> & {
+  competitorMonitorConfiguration(): Promise<string | null | undefined>;
+};
 interface Context {
   authorization: Authorization;
   database(): Promise<Db>;
@@ -161,6 +165,28 @@ export class PgCompetitorTransactions {
             lockOperator: (id) => auth.lockOperator(id),
             lockSession: (user, session) => auth.lockSession(user, session),
             operatorPermissionCodes: (id) => auth.operatorPermissionCodes(id),
+            competitorMonitorConfiguration: async () => {
+              ensureOpen();
+              const rows = await createDb(primary)
+                .select({
+                  value: sql<
+                    string | null
+                  >`left(${spApiConfig.configValue},4097)`,
+                })
+                .from(spApiConfig)
+                .where(
+                  sql`lower(${spApiConfig.configKey}) = 'competitor_monitor_enabled'`,
+                )
+                .limit(2);
+              ensureOpen();
+              if (
+                rows.length > 1 ||
+                (rows[0]?.value !== null &&
+                  (rows[0]?.value?.length ?? 0) > 4096)
+              )
+                throw failure('dependency');
+              return rows[0]?.value;
+            },
           },
           database: () => {
             ensureOpen();
