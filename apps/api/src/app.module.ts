@@ -13,6 +13,7 @@ import { HealthModule } from './health/health.module';
 import { LoggerModule } from './logger/logger.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { MonitorHistoryModule } from './monitor/monitor-history.module';
+import { MonitorTriggerModule } from './monitor/monitor-trigger.module';
 import { OpsModule } from './ops/ops.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { RedisModule } from './redis/redis.module';
@@ -43,6 +44,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     CompetitorCheckModule,
     VariantCheckModule,
     MonitorHistoryModule,
+    MonitorTriggerModule,
     OpsModule,
     SystemModule,
     TaskQueryModule,

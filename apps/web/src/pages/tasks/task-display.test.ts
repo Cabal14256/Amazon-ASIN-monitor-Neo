@@ -44,6 +44,24 @@ const report = {
 };
 
 describe('task center display boundaries', () => {
+  it.each(['pending', 'processing'] as const)(
+    'allows the owned %s monitor task cancellation advertised by the API',
+    (status) => {
+      const monitor = task({
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        status,
+      });
+      expect(canCancelTask(monitor)).toBe(true);
+      expect(canCancelTask({ ...monitor, canCancel: false })).toBe(false);
+    },
+  );
+  it.each(['cancelling', 'cancelled', 'completed', 'failed'] as const)(
+    'does not offer cancellation for a %s monitor task',
+    (status) => {
+      expect(canCancelTask(task({ taskType: 'monitor', status }))).toBe(false);
+    },
+  );
   it('shows cancel only for active supported jobs and downloads only from supported completed results', () => {
     expect(canCancelTask(task())).toBe(true);
     expect(canCancelTask(task({ taskType: 'unsupported' }))).toBe(false);

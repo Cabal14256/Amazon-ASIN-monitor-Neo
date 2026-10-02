@@ -5,7 +5,11 @@ import {
   type Env,
   type QueueName,
 } from '@asin-monitor/config';
-import type { VariantCheckJobData } from '@asin-monitor/contracts';
+import {
+  primaryMonitorJobSchema,
+  type PrimaryMonitorJob,
+  type VariantCheckJobData,
+} from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
@@ -23,6 +27,7 @@ import { Queue, QueueGetters, type ConnectionOptions, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { withMonitorAdmission } from './monitor-admission';
 import {
   cancelQueuedTask,
   type CancellationOutcome,
@@ -30,6 +35,7 @@ import {
 import type { QueueTaskSnapshot } from './task-query-values';
 
 export const TASK_QUERY_QUEUES = [
+  'monitor',
   'export',
   'batch-check',
   'batch-delete',
@@ -37,6 +43,7 @@ export const TASK_QUERY_QUEUES = [
   'backup',
   'variant-check',
 ] as const satisfies readonly QueueName[];
+const MONITOR_QUEUE_MAX_IN_FLIGHT = 50;
 export interface TaskQueryPort {
   store: Pick<RedisTaskRepository, 'read' | 'listUser' | 'mutate'>;
   findJob(taskId: string, taskType?: string): Promise<QueueTaskSnapshot | null>;
@@ -57,6 +64,11 @@ export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
 }
+export interface MonitorProducerPort {
+  store: Pick<RedisTaskRepository, 'create' | 'mutate'>;
+  assertConsumer(): Promise<void>;
+  enqueue(data: PrimaryMonitorJob): Promise<void>;
+}
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
 function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
@@ -67,7 +79,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       : {};
   const status =
     state === 'completed' &&
-    ['variant-check', 'batch-check'].includes(type) &&
+    ['variant-check', 'batch-check', 'monitor'].includes(type) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
@@ -83,6 +95,15 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);
+  }
+  if (type === 'monitor') {
+    const parsed = primaryMonitorJobSchema.safeParse(job.data);
+    if (
+      !parsed.success ||
+      parsed.data.taskId !== job.id ||
+      job.name !== 'primary-monitor'
+    )
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
   }
   return {
     ...(checkOperation ? { checkOperation } : {}),
@@ -123,6 +144,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private monitorQueue?: Queue;
   private readonly checkQueues = new Map<
     'variant-check' | 'batch-check',
     Queue
@@ -374,6 +396,91 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openMonitor(ensureOpen: () => void): MonitorProducerPort {
+    const command = this.command(ensureOpen);
+    const readyQueue = async () => {
+      let queue = this.monitorQueue;
+      if (!queue) {
+        queue = new Queue(getPhysicalQueueName('monitor'), {
+          connection: this.redis as unknown as ConnectionOptions,
+          prefix: getNeoQueuePrefix(this.env),
+          defaultJobOptions: getQueuePolicy('monitor', this.env)
+            .defaultJobOptions,
+        });
+        queue.on('error', () =>
+          this.logger.warn('监控队列连接异常', 'TaskQueryRuntime', {
+            reason: 'monitor_queue_error',
+          }),
+        );
+        this.monitorQueue = queue;
+      }
+      try {
+        await queue.waitUntilReady();
+      } catch (error) {
+        if (this.monitorQueue === queue) this.monitorQueue = undefined;
+        await queue.close().catch(() => undefined);
+        throw error;
+      }
+      ensureOpen();
+      return queue;
+    };
+    const assertAvailable = async (queue: Queue) => {
+      const ready = await this.redis.get(
+        `${getNeoQueuePrefix(this.env)}:monitor:consumer:ready`,
+      );
+      if (ready !== '1') throw new Error('MONITOR_CONSUMER_NOT_READY');
+      const counts = await queue.getJobCounts(
+        'waiting',
+        'delayed',
+        'active',
+        'paused',
+        'prioritized',
+      );
+      if (
+        Object.values(counts).reduce((sum, count) => sum + count, 0) >=
+        MONITOR_QUEUE_MAX_IN_FLIGHT
+      )
+        throw new Error('MONITOR_QUEUE_FULL');
+      ensureOpen();
+    };
+    const assertConsumer = async () =>
+      command(async () => assertAvailable(await readyQueue()));
+    return {
+      store: this.createStore(ensureOpen),
+      assertConsumer,
+      enqueue: async (raw) => {
+        const data = primaryMonitorJobSchema.parse(raw);
+        await command(async () => {
+          const queue = await readyQueue();
+          await withMonitorAdmission(
+            {
+              redis: this.redis,
+              key: `${getNeoQueuePrefix(this.env)}:monitor:admission-lock`,
+              ensureOpen,
+              onReleaseFailure: () =>
+                this.logger.warn(
+                  '监控队列准入锁释放未确认',
+                  'TaskQueryRuntime',
+                  {
+                    reason: 'monitor_admission_release_unconfirmed',
+                  },
+                ),
+            },
+            async (assertOwned) => {
+              await assertAvailable(queue);
+              await assertOwned();
+              await queue.add('primary-monitor', data, { jobId: data.taskId });
+              try {
+                await assertOwned();
+              } catch {
+                throw new Error('MONITOR_ADMISSION_UNCONFIRMED');
+              }
+            },
+          );
+        });
+      },
+    };
+  }
   async onModuleDestroy() {
     this.closed = true;
     await Promise.allSettled(
@@ -381,6 +488,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.monitorQueue ? [this.monitorQueue] : []),
         ...this.checkQueues.values(),
       ].map((queue) => queue.close()),
     );

@@ -17,6 +17,7 @@ import {
   type Logger,
   type RedisCatalogCheckStore,
 } from '@asin-monitor/sp-api';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { CatalogHybridChecker } from './hybrid';
 import { groupCheckResult, singleCheckResult } from './result-mapper';
 import {
@@ -362,19 +363,40 @@ export class VariantCheckPipeline {
       if ('completed' in initial) return initial.completed;
       const snapshot = initial.snapshot;
       await scope.guard();
-      const observations =
+      let observations =
         this.batchThreshold > 0 &&
         !context.forceRefresh &&
         snapshot.asins.length >= this.batchThreshold
           ? await this.observeHybrid(snapshot, context, scope)
           : await this.observeGroup(snapshot, context, scope);
+      const monitorDeferred = new Set<string>();
+      if (operation?.taskType === 'monitor') {
+        for (const observation of observations)
+          if (observation.kind === 'deferred')
+            monitorDeferred.add(observation.asinId);
+        observations = await this.retryMonitorDeferred(
+          snapshot,
+          observations,
+          scope,
+        );
+      }
       const output = await this.persist(
         scope,
         async (unit) => {
           const committed = await unit.commitGroup(snapshot, observations, () =>
             scope.guard(unit),
           );
-          return groupCheckResult(committed);
+          const result = groupCheckResult(committed);
+          if (operation?.taskType === 'monitor') {
+            if (!unit.recordMonitorHistory)
+              throw new VariantCheckError('invalid-result');
+            await unit.recordMonitorHistory(
+              operation.taskId,
+              committed,
+              result,
+            );
+          }
+          return result;
         },
         operation,
       );
@@ -385,18 +407,81 @@ export class VariantCheckPipeline {
           country: snapshot.group.country,
           notFound:
             observation.kind === 'checked' &&
-            observation.result.errorType === 'NOT_FOUND',
+            (observation.result.errorType === 'NOT_FOUND' ||
+              (monitorDeferred.has(observation.asinId) &&
+                observation.result.errorType !== 'SP_API_ERROR')),
         })),
       );
       this.logger.info('变体组检查完成', { count: observations.length });
       return output;
     });
   }
+  private async retryMonitorDeferred(
+    snapshot: GroupCheckSnapshot,
+    observations: AsinCheckObservation[],
+    scope: CheckScope,
+  ): Promise<AsinCheckObservation[]> {
+    const deferred = observations.flatMap((item, index) =>
+      item.kind === 'deferred' ? [index] : [],
+    );
+    if (!deferred.length) return observations;
+    await delay(2000, undefined, { signal: scope.signal });
+    await scope.guard();
+    const byId = new Map(snapshot.asins.map((asin) => [asin.id, asin]));
+    const updated = [...observations];
+    let next = 0;
+    let failure: unknown;
+    await Promise.all(
+      Array.from({ length: Math.min(2, deferred.length) }, async () => {
+        try {
+          while (next < deferred.length && !failure) {
+            const index = deferred[next++];
+            const asin = byId.get(updated[index].asinId);
+            if (!asin) throw new VariantCheckError('invalid-result');
+            await scope.guard();
+            try {
+              const result = await this.checker.check(
+                asin.asin,
+                snapshot.group.country,
+                { forceRefresh: true, priority: 1, signal: scope.signal },
+              );
+              updated[index] = { asinId: asin.id, kind: 'checked', result };
+            } catch (error) {
+              if (scope.signal.aborted) throw abortError(scope.signal);
+              if (
+                error instanceof SpApiError &&
+                [
+                  'CANCELLED',
+                  'CLOSED',
+                  'CAPACITY',
+                  'TIMEOUT',
+                  'DEPENDENCY_ERROR',
+                ].includes(error.code)
+              )
+                throw error;
+              updated[index] = {
+                asinId: asin.id,
+                kind: 'failed',
+                error: 'SP-API延后复核失败',
+              };
+            }
+            await scope.guard();
+          }
+        } catch (error) {
+          failure ??= error;
+          scope.stop(failure);
+        }
+      }),
+    );
+    if (failure) throw failure;
+    return updated;
+  }
   private async observeHybrid(
     snapshot: GroupCheckSnapshot,
     context: VariantCheckContext,
     scope: CheckScope,
   ): Promise<AsinCheckObservation[]> {
+    const deferredIndexes = new Set<number>();
     const results = await this.hybrid!.check(
       snapshot.asins.map((row) => row.asin),
       snapshot.group.country,
@@ -404,16 +489,25 @@ export class VariantCheckPipeline {
         signal: scope.signal,
         checkpoint: () => scope.guard(),
         onProgress: context.onProgress,
+        onDeferred:
+          context.operation?.taskType === 'monitor'
+            ? (index) => deferredIndexes.add(index)
+            : undefined,
       },
     );
     await scope.guard();
     if (results.length !== snapshot.asins.length)
       throw new VariantCheckError('invalid-result');
-    return results.map((result, index) => ({
-      asinId: snapshot.asins[index].id,
-      kind: 'checked',
-      result,
-    }));
+    return results.map(
+      (result, index): AsinCheckObservation =>
+        deferredIndexes.has(index)
+          ? {
+              asinId: snapshot.asins[index].id,
+              kind: 'deferred',
+              error: 'ASIN检查失败，已加入延后队列',
+            }
+          : { asinId: snapshot.asins[index].id, kind: 'checked', result },
+    );
   }
   private async observeGroup(
     snapshot: GroupCheckSnapshot,
