@@ -80,7 +80,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 function fixture() {
-  const auth = {
+  let auth = {
     status: 'authenticated' as const,
     identity: {
       user: { id: 'operator', username: 'operator', status: 'ACTIVE' as const },
@@ -88,9 +88,13 @@ function fixture() {
       permissions: ['asin:read'],
     },
   };
+  const listeners = new Set<() => void>();
   const identity = {
     getSnapshot: () => auth,
-    subscribe: () => () => undefined,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     refresh: vi.fn(async () => auth),
   } as unknown as IdentityStore;
   const queryClient = new QueryClient({
@@ -133,6 +137,13 @@ function fixture() {
     identity,
     runtime,
     rerender: () => view.rerender(element()),
+    setOwner: (id: string) => {
+      auth = {
+        ...auth,
+        identity: { ...auth.identity, user: { ...auth.identity.user, id } },
+      };
+      for (const listener of listeners) listener();
+    },
   };
 }
 async function openDetails() {
@@ -171,6 +182,124 @@ afterEach(() => {
 });
 
 describe('mounted immediate-check recovery', () => {
+  it('releases an old queued submission after the authenticated owner changes and actually submits for the new owner', async () => {
+    window.localStorage.removeItem(key);
+    const lock = deferred<void>();
+    const locks = vi.fn(async (_key: string, callback: () => unknown) => {
+      await lock.promise;
+      return callback();
+    });
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request: locks },
+    });
+    const f = fixture();
+    await openDetails();
+    fireEvent.click(screen.getAllByRole('button', { name: '立即检查' })[0]);
+    await waitFor(() => expect(locks).toHaveBeenCalledTimes(1));
+    act(() => f.setOwner('next-operator'));
+    await act(async () => lock.resolve());
+    await waitFor(() =>
+      expect(
+        (
+          screen.getAllByRole('button', {
+            name: '立即检查',
+          })[0] as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    expect(f.send).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(key)).toBeNull();
+    fireEvent.click(screen.getAllByRole('button', { name: '立即检查' })[0]);
+    await waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(
+          catalogCheckGateKey('asin', 'next-operator'),
+        )!,
+      ),
+    ).toMatchObject({ taskId: 'task-2' });
+  });
+
+  it('preserves the new owner guard when an old queued submission becomes stale', async () => {
+    window.localStorage.removeItem(key);
+    const lock = deferred<void>();
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: async (_key: string, callback: () => unknown) => {
+          await lock.promise;
+          return callback();
+        },
+      },
+    });
+    const f = fixture();
+    await openDetails();
+    fireEvent.click(screen.getAllByRole('button', { name: '立即检查' })[0]);
+    const nextKey = catalogCheckGateKey('asin', 'next-operator');
+    const nextGuard = {
+      ...gate,
+      requestId: 'next-request',
+      taskId: 'next-task',
+    };
+    window.localStorage.setItem(nextKey, JSON.stringify(nextGuard));
+    act(() => f.setOwner('next-operator'));
+    await act(async () => lock.resolve());
+    await screen.findByText('next-task');
+    expect(JSON.parse(window.localStorage.getItem(nextKey)!)).toEqual(
+      nextGuard,
+    );
+    expect(
+      screen
+        .getAllByRole('button', { name: '立即检查' })
+        .every((button) => (button as HTMLButtonElement).disabled),
+    ).toBe(true);
+    expect(f.send).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it('keeps a late accepted task under its original owner while releasing the new owner pending UI', async () => {
+    window.localStorage.removeItem(key);
+    const f = fixture();
+    const reply = deferred<{
+      kind: 'task';
+      taskId: string;
+      status: 'pending';
+    }>();
+    f.send.mockImplementationOnce(() => reply.promise);
+    await openDetails();
+    fireEvent.click(screen.getAllByRole('button', { name: '立即检查' })[0]);
+    await waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+    act(() => f.setOwner('next-operator'));
+    await act(async () =>
+      reply.resolve({
+        kind: 'task',
+        taskId: 'old-owner-task',
+        status: 'pending',
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        (
+          screen.getAllByRole('button', {
+            name: '立即检查',
+          })[0] as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    expect(JSON.parse(window.localStorage.getItem(key)!)).toMatchObject({
+      taskId: 'old-owner-task',
+    });
+    expect(
+      window.localStorage.getItem(catalogCheckGateKey('asin', 'next-operator')),
+    ).toBeNull();
+    fireEvent.click(screen.getAllByRole('button', { name: '立即检查' })[0]);
+    await waitFor(() => expect(f.send).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(window.localStorage.getItem(key)!)).toMatchObject({
+      taskId: 'old-owner-task',
+    });
+  });
+
   it('can actually submit again when another tab clears the guard during terminal refresh', async () => {
     const f = fixture();
     await openDetails();

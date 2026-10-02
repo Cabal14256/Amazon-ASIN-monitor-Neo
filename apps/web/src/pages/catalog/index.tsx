@@ -941,6 +941,8 @@ export function CatalogPage({
       );
     }
   }, [canCheck, recovery]);
+  const restoreCurrentCheck = useRef(restoreCheck);
+  restoreCurrentCheck.current = restoreCheck;
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -1136,6 +1138,7 @@ export function CatalogPage({
     const current = () => mounted.current && checkOwner.current === userId;
     const controller = new AbortController();
     checkRequest.current = controller;
+    let staleSubmission = false;
     try {
       if (!recovery) throw new Error('CHECK_GATE_UNAVAILABLE');
       const result = await recovery.submit(
@@ -1149,7 +1152,10 @@ export function CatalogPage({
           ),
         current,
       );
-      if (!current() || result.kind === 'stale') return;
+      if (!current() || result.kind === 'stale') {
+        staleSubmission = true;
+        return;
+      }
       if (result.kind === 'task' || result.kind === 'blocked') {
         const gate = result.gate;
         setCheckState({
@@ -1232,7 +1238,13 @@ export function CatalogPage({
             : '无法安全保存检查记录，请恢复浏览器本地存储和跨标签锁后重试；尚未发送新请求。',
       });
     } finally {
-      if (checkRequest.current === controller) checkRequest.current = null;
+      if (checkRequest.current === controller) {
+        checkRequest.current = null;
+        // The new owner's effect may have run while this old request was set.
+        // Restore that owner's persisted gate, rather than clearing shared state.
+        if (mounted.current && (staleSubmission || !current()))
+          restoreCurrentCheck.current();
+      }
     }
   }
 
