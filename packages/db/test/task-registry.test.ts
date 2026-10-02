@@ -370,6 +370,18 @@ describe('Redis task registry behavior', () => {
       message: '监控任务已取消，已提交的结果保留',
     });
   });
+  it('rejects the retired absence-only check transition without altering metadata', async () => {
+    const { repository } = fixture();
+    const task = await repository.create(checkInput);
+    await expect(
+      repository.mutate(
+        task.taskId,
+        { kind: 'check-not-enqueued', message: 'not queued' } as never,
+        task,
+      ),
+    ).rejects.toThrow();
+    expect(await repository.read(task.taskId)).toEqual(task);
+  });
   it('preserves a check cancellation when an exhausted queue failure is reconciled', async () => {
     const { repository } = fixture();
     const task = await repository.create(checkInput);

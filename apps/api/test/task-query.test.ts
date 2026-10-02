@@ -529,6 +529,65 @@ describe('own task query HTTP and bounded reconciliation', () => {
     task = null;
     expect((await get()).statusCode).toBe(404);
   });
+  it.each(['asin-check', 'variant-group-check'])(
+    'keeps an old %s pending when successful queue lookup finds no job',
+    async (taskSubType) => {
+      task = taskFixture({
+        taskType: 'variant-check',
+        taskSubType,
+        createdAt: new Date(Date.now() - 31_000).toISOString(),
+      });
+      rows = [task];
+      const original = structuredClone(task);
+      const detail = await get();
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().data).toMatchObject({
+        status: 'pending',
+        error: null,
+      });
+      const list = await get('/tasks');
+      expect(list.statusCode).toBe(200);
+      expect(list.json().data[0]).toMatchObject({
+        status: 'pending',
+        error: null,
+      });
+      expect(port.store.mutate).not.toHaveBeenCalled();
+      expect(task).toEqual(original);
+    },
+  );
+  it.each(['young', 'queued', 'processing', 'dependency'])(
+    'preserves uncertain check metadata for %s',
+    async (condition) => {
+      task = taskFixture({
+        taskType: 'variant-check',
+        taskSubType: 'asin-check',
+        createdAt: new Date(
+          Date.now() - (condition === 'young' ? 1000 : 31_000),
+        ).toISOString(),
+      });
+      if (condition === 'queued') queue = { ...task, status: 'pending' };
+      if (condition === 'processing') task.status = 'processing';
+      if (condition === 'dependency')
+        vi.mocked(port.findJob).mockRejectedValueOnce(new Error('unavailable'));
+      const response = await get();
+      expect(response.statusCode).toBe(condition === 'dependency' ? 500 : 200);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+      expect(task.status).toBe(
+        condition === 'processing' ? 'processing' : 'pending',
+      );
+    },
+  );
+  it('does not turn a successful queue absence lookup into a metadata mutation', async () => {
+    task = taskFixture({
+      taskType: 'variant-check',
+      taskSubType: 'asin-check',
+      createdAt: new Date(Date.now() - 2 * 86400_000).toISOString(),
+    });
+    expect((await get()).json().data.status).toBe('pending');
+    expect(port.findJob).toHaveBeenCalledWith(task.taskId, task.taskType);
+    expect(port.store.mutate).not.toHaveBeenCalled();
+    expect(task.error).toBeNull();
+  });
   it('denies queue owner mismatch before touching own registry', async () => {
     queue = { ...task!, status: 'completed', userId: 'other' };
     expect((await get()).statusCode).toBe(403);

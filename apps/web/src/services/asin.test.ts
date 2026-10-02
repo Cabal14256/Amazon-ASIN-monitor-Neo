@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpClient } from '../lib/http';
 import { jsonResponse, sessionFixture } from '../lib/transport-fixtures';
 import {
+  checkAsin,
+  checkVariantGroup,
   createAsin,
   createVariantGroup,
   deleteAsin,
@@ -27,6 +29,16 @@ const group = {
   statusSource: 'MANUAL',
   children: [{ id: 'child-1', asin: 'B00FIXTURE', country: 'US', isBroken: 0 }],
 };
+const variantView = {
+  asin: 'B00FIXTURE',
+  title: 'Fixture child',
+  hasVariation: true,
+  isBroken: false,
+  parentAsin: 'B00PARENT1',
+  brotherAsins: ['B00SIBLING'],
+  brand: 'Fixture',
+  raw: null,
+};
 const clients: HttpClient[] = [];
 afterEach(() => {
   for (const client of clients.splice(0)) client.close();
@@ -44,6 +56,170 @@ function client(baseURL: string, fetcher: typeof fetch) {
 }
 
 describe('ASIN catalog transport', () => {
+  it.each(['/api', 'https://app.test/api/', 'https://app.test/api/v1/'])(
+    'submits both checks with normalized %s URLs and async defaults',
+    async (baseURL) => {
+      const fetcher = vi.fn<typeof fetch>(async (url) =>
+        jsonResponse({
+          success: true,
+          errorCode: 0,
+          data: {
+            taskId: 'check-1',
+            status: 'pending',
+            taskType: String(url).includes('/variant-groups/')
+              ? 'variant-group-check'
+              : 'asin-check',
+          },
+        }),
+      );
+      const http = client(baseURL, fetcher);
+      await expect(checkAsin(http, 'child-1')).resolves.toEqual({
+        kind: 'task',
+        taskId: 'check-1',
+        status: 'pending',
+      });
+      await expect(checkVariantGroup(http, 'group-1')).resolves.toEqual({
+        kind: 'task',
+        taskId: 'check-1',
+        status: 'pending',
+      });
+      expect(
+        fetcher.mock.calls.map(([url, options]) => [
+          options?.method,
+          new URL(String(url)).pathname,
+          JSON.parse(String(options?.body)),
+        ]),
+      ).toEqual([
+        [
+          'POST',
+          '/api/v1/asins/child-1/check',
+          { forceRefresh: true, useAsync: true },
+        ],
+        [
+          'POST',
+          '/api/v1/variant-groups/group-1/check',
+          { forceRefresh: true, useAsync: true },
+        ],
+      ]);
+      expect(http.url('/api/v1/tasks/check-1/download')).toBe(
+        'https://app.test/api/v1/tasks/check-1/download',
+      );
+      expect(
+        fetcher.mock.calls.every(([url]) => !String(url).includes('/api/api/')),
+      ).toBe(true);
+    },
+  );
+
+  it('returns typed synchronous results for both routes and forwards explicit flags', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (url) =>
+      jsonResponse({
+        success: true,
+        errorCode: 0,
+        data: String(url).includes('/variant-groups/')
+          ? { isBroken: false, details: { results: [] } }
+          : variantView,
+      }),
+    );
+    const http = client('/api', fetcher);
+    const signal = new AbortController().signal;
+    await expect(
+      checkAsin(
+        http,
+        'child-1',
+        { forceRefresh: false, useAsync: false },
+        signal,
+      ),
+    ).resolves.toEqual({ kind: 'result', result: variantView });
+    await expect(
+      checkVariantGroup(http, 'group-1', { useAsync: false }),
+    ).resolves.toEqual({
+      kind: 'result',
+      result: { isBroken: false, details: { results: [] } },
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({
+      forceRefresh: false,
+      useAsync: false,
+    });
+    expect(fetcher.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(String(fetcher.mock.calls[1][1]?.body))).toEqual({
+      forceRefresh: true,
+      useAsync: false,
+    });
+  });
+
+  it.each([
+    ['asin', checkAsin, 'asin-check'],
+    ['group', checkVariantGroup, 'variant-group-check'],
+  ] as const)(
+    'retains a task lookup ID after uncertain %s submission',
+    async (_label, check, taskType) => {
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        jsonResponse(
+          {
+            success: false,
+            errorCode: 500,
+            errorMessage: '任务提交结果未确认',
+            data: { taskId: 'check-uncertain', status: 'unknown' },
+          },
+          500,
+        ),
+      );
+      const http = client('/api', fetcher);
+      await expect(
+        check(http, taskType === 'asin-check' ? 'child-1' : 'group-1'),
+      ).resolves.toEqual({
+        kind: 'task',
+        taskId: 'check-uncertain',
+        status: 'unknown',
+      });
+    },
+  );
+
+  it('rejects invalid check inputs and unexpected receipts without submitting twice', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      jsonResponse({
+        success: true,
+        errorCode: 0,
+        data: {
+          taskId: 'check-1',
+          status: 'completed',
+          taskType: 'asin-check',
+        },
+      }),
+    );
+    const http = client('/api/', fetcher);
+    await expect(checkAsin(http, '../outside')).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    await expect(
+      checkVariantGroup(http, 'group-1', { useAsync: 'invalid' as never }),
+    ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+    expect(fetcher).not.toHaveBeenCalled();
+    await expect(checkAsin(http, 'child-1')).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects malformed task IDs before the page starts polling', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      jsonResponse({
+        success: true,
+        errorCode: 0,
+        data: {
+          taskId: 'task/with-slash',
+          status: 'pending',
+          taskType: 'asin-check',
+        },
+      }),
+    );
+    await expect(
+      checkAsin(client('/api', fetcher), 'child-1'),
+    ).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
+  });
+
   it.each(['/api', 'https://app.test/api/'])(
     'normalizes %s for all single-item writes and validates their envelopes',
     async (baseURL) => {

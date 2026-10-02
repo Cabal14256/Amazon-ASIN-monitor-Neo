@@ -71,24 +71,29 @@ export function getQueuePolicy(name: QueueName, env: Env) {
     name === 'backup'
       ? Math.max(7 * 24 * 60 * 60, env.TASK_META_TTL_SECONDS)
       : undefined;
+  // Keep the original request identity available while metadata can be read.
+  // Explicit job removal can still erase it; absence is never non-execution proof.
+  const checkRetention =
+    name === 'variant-check' || name === 'batch-check'
+      ? env.TASK_META_TTL_SECONDS
+      : 0;
   const defaultJobOptions = {
     attempts: policy.attempts,
     ...(policy.attempts > 1
       ? { backoff: { type: 'exponential' as const, delay: 5000 } }
       : {}),
-    // Terminal monitor jobs are the recovery receipt when the final task
-    // registry write fails. Keep them for the full bounded metadata lifetime.
+    // Terminal monitor jobs serve as recovery receipts after lost acknowledgements.
     removeOnComplete: {
       age:
         name === 'monitor'
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
-          : backupRetention ?? policy.completeAge,
+          : backupRetention ?? Math.max(policy.completeAge, checkRetention),
     },
     removeOnFail: {
       age:
         name === 'monitor'
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
-          : backupRetention ?? policy.failureAge,
+          : backupRetention ?? Math.max(policy.failureAge, checkRetention),
     },
   };
   const limiter =

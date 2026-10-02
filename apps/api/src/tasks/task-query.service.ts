@@ -93,6 +93,9 @@ export class TaskQueryService {
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
+    // Cleanup, retention limits, or a lost completion acknowledgement can erase
+    // the job after a business commit. Without its immutable request digest,
+    // absence proves neither non-execution nor a result that we can recover.
     if (!queued) return task;
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
