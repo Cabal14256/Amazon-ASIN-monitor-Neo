@@ -56,6 +56,136 @@ function client(baseURL: string, fetcher: typeof fetch) {
 }
 
 describe('ASIN catalog transport', () => {
+  it('preserves a fifty-codepoint Unicode ID without depending on the shared HTTP layer', async () => {
+    const id = ` ${'😀'.repeat(48)} `;
+    expect([...id]).toHaveLength(50);
+    const request = vi
+      .fn()
+      .mockResolvedValue({ success: true, data: { ...group, id } });
+    await getVariantGroup(
+      { request } as unknown as Pick<HttpClient, 'request'>,
+      id,
+    );
+    expect(request.mock.calls[0][0]).toBe(
+      `/api/v1/variant-groups/${encodeURIComponent(id)}`,
+    );
+    expect(
+      decodeURIComponent(String(request.mock.calls[0][0]).split('/').at(-1)!),
+    ).toBe(id);
+  });
+
+  it('retains route boundaries for blank, control, separator, dot and over-fifty IDs before issuing any record operation', async () => {
+    const request = vi.fn();
+    const http = { request } as unknown as Pick<HttpClient, 'request'>;
+    for (const id of [
+      '',
+      ' ',
+      '.',
+      '..',
+      'a/b',
+      'a\\b',
+      'a?b',
+      'a#b',
+      'a\tb',
+      'a\nb',
+      'a\u0000b',
+      'a\u007fb',
+      '😀'.repeat(51),
+    ]) {
+      await expect(getVariantGroup(http, id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+      await expect(deleteVariantGroup(http, id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+      await expect(deleteAsin(http, id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+      await expect(
+        moveAsin(http, id, { targetGroupId: 'valid-target' }),
+      ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+    }
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(['/api/', 'https://app.test/gateway/api/'])(
+    'preserves canonical group/ASIN paths and parent/target payloads with actual %s HttpClient',
+    async (baseURL) => {
+      const groupId = ' Gróup 主营 ';
+      const childId = ' Child α ';
+      const targetId = ' Cible 目标 ';
+      const fetcher = vi.fn<typeof fetch>(async (url, options) =>
+        jsonResponse({
+          success: true,
+          data:
+            options?.method === 'DELETE'
+              ? '删除成功'
+              : String(url).includes('/asins')
+              ? { ...group.children[0], id: childId }
+              : { ...group, id: groupId },
+        }),
+      );
+      const http = client(baseURL, fetcher);
+      const groupInput = {
+        name: group.name,
+        country: group.country,
+        site: group.site,
+        brand: group.brand,
+      };
+      const asinInput = {
+        asin: 'B000000001',
+        country: 'US',
+        site: 'amazon.com',
+        brand: 'Fixture',
+      };
+      await getVariantGroup(http, groupId);
+      await updateVariantGroup(http, groupId, groupInput);
+      await deleteVariantGroup(http, groupId);
+      await createAsin(http, { ...asinInput, parentId: groupId });
+      await updateAsin(http, childId, asinInput);
+      await moveAsin(http, childId, { targetGroupId: targetId });
+      await deleteAsin(http, childId);
+      await updateVariantGroupNotify(http, groupId, true);
+      await updateVariantGroupManual(http, groupId, { markedBroken: false });
+      await updateAsinNotify(http, childId, false);
+      await updateAsinManual(http, childId, { action: 'CLEAR_SELF_MANUAL' });
+      const prefix = baseURL.includes('/gateway/')
+        ? '/gateway/api/v1'
+        : '/api/v1';
+      const groupPath = `${prefix}/variant-groups/${encodeURIComponent(
+        groupId,
+      )}`;
+      const childPath = `${prefix}/asins/${encodeURIComponent(childId)}`;
+      expect(
+        fetcher.mock.calls.map(([url, options]) => [
+          options?.method ?? 'GET',
+          new URL(String(url)).pathname,
+        ]),
+      ).toEqual([
+        ['GET', groupPath],
+        ['PUT', groupPath],
+        ['DELETE', groupPath],
+        ['POST', `${prefix}/asins`],
+        ['PUT', childPath],
+        ['POST', `${childPath}/move`],
+        ['DELETE', childPath],
+        ['PUT', `${groupPath}/feishu-notify`],
+        ['PUT', `${groupPath}/manual-broken`],
+        ['PUT', `${childPath}/feishu-notify`],
+        ['PUT', `${childPath}/manual-broken`],
+      ]);
+      expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body)).parentId).toBe(
+        groupId,
+      );
+      expect(
+        JSON.parse(String(fetcher.mock.calls[5][1]?.body)).targetGroupId,
+      ).toBe(targetId);
+      expect(
+        fetcher.mock.calls.every(([url]) => !String(url).includes('/api/api/')),
+      ).toBe(true);
+    },
+  );
+
   it.each(['/api', 'https://app.test/api/', 'https://app.test/api/v1/'])(
     'submits both checks with normalized %s URLs and async defaults',
     async (baseURL) => {
@@ -299,7 +429,7 @@ describe('ASIN catalog transport', () => {
     await expect(getVariantGroup(http, '..')).rejects.toMatchObject({
       kind: 'INVALID_INPUT',
     });
-    await expect(deleteVariantGroup(http, ' group-1 ')).rejects.toMatchObject({
+    await expect(deleteVariantGroup(http, 'group\n-1')).rejects.toMatchObject({
       kind: 'INVALID_INPUT',
     });
     await expect(
