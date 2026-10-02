@@ -95,7 +95,11 @@ export function historyError(error: unknown, subject = '监控历史'): string {
       case 429:
         return '查询繁忙，请稍后重试。';
       case 503:
+        if (error.message.startsWith('状态区间读取已关闭'))
+          return error.message;
         return `${subject}数据源暂不可用，请稍后重试。`;
+      case 504:
+        return '查询超时，请缩小时间范围或稍后重试。';
     }
     if (error.kind === 'INVALID_RESPONSE' && error.message === '服务器响应过大')
       return '页面读取上限已达到，请缩小范围或减少每页数量。';
@@ -131,6 +135,16 @@ function historyWallClockMs(value: string): number | undefined {
   )
     return undefined;
   return date.getTime();
+}
+
+/** A point-in-time record filter is valid, but cannot define an interval span. */
+export function historyHasIntervalWindow(
+  startTime: string,
+  endTime: string,
+): boolean {
+  const start = historyWallClockMs(startTime);
+  const end = historyWallClockMs(endTime);
+  return start !== undefined && end !== undefined && start < end;
 }
 
 /** Position an interval inside the selected Shanghai wall-clock window. */

@@ -12,6 +12,7 @@ import {
   type MonitorHistoryQueryRepositoryPort,
   type MonitorHistoryQueryUnit,
 } from '@asin-monitor/db';
+import { HttpException } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import jwt from 'jsonwebtoken';
 import { EventEmitter } from 'node:events';
@@ -117,7 +118,7 @@ describe('monitor history HTTP / current transaction authorization', () => {
   async function start(env: NodeJS.ProcessEnv = {}) {
     app = await sessionApp(
       f.auth,
-      env,
+      { ANALYTICS_STATUS_INTERVAL_ENABLED: 'true', ...env },
       (builder) =>
         builder
           .overrideProvider(MONITOR_HISTORY_REPOSITORY)
@@ -142,6 +143,61 @@ describe('monitor history HTTP / current transaction authorization', () => {
   });
   const get = (path = paths[0], auth = headers) =>
     app.http.inject({ method: 'GET', url: `/api/v1${path}`, headers: auth });
+  it('disables interval reads before touching projection tables while keeping history available', async () => {
+    await app.app.close();
+    await start({ ANALYTICS_STATUS_INTERVAL_ENABLED: 'false' });
+    const response = await get(paths[1]);
+    expect(response.statusCode).toBe(503);
+    expect(response.json().errorMessage).toContain('状态区间读取已关闭');
+    expect(f.repository.read).not.toHaveBeenCalled();
+    expect(f.unit.listStatusIntervals).not.toHaveBeenCalled();
+    expect(app.logger.error).not.toHaveBeenCalled();
+    expect((await get()).statusCode).toBe(200);
+    expect((await get(paths[2])).statusCode).toBe(200);
+  });
+
+  it.each(['57014', '55P03', 'timeout'])(
+    'maps nested %s interval timeouts to a safe recoverable 504',
+    async (code) => {
+      vi.mocked(f.unit.listStatusIntervals).mockRejectedValueOnce({
+        cause: { cause: { code, message: 'private-db-credentials' } },
+      });
+      const response = await get(paths[1]);
+      expect(response.statusCode).toBe(504);
+      expect(response.json().errorMessage).toContain('缩小时间范围');
+      expect(response.json().data).toBeUndefined();
+      expect(app.logger.warn).toHaveBeenCalledWith(
+        'API 查询暂不可用',
+        'ApiExceptionFilter',
+        {
+          status: 504,
+          reason: 'monitor-history-timeout',
+        },
+      );
+      expect(app.logger.error).not.toHaveBeenCalled();
+      expect(
+        response.body + JSON.stringify(app.logger.warn.mock.calls),
+      ).not.toContain('private-db');
+      expect((await get(paths[1])).statusCode).toBe(200);
+    },
+  );
+
+  it('does not expose lookalike driver errors through the recoverable-message boundary', async () => {
+    vi.mocked(f.repository.read).mockRejectedValueOnce(
+      Object.assign(
+        new HttpException({ errorMessage: 'private-db-credentials' }, 504),
+        {
+          reason: 'monitor-history-timeout',
+        },
+      ),
+    );
+    const response = await get(paths[1]);
+    expect(response.statusCode).toBe(504);
+    expect(response.json().errorMessage).toBe('服务器内部错误');
+    expect(response.body).not.toContain('private-db');
+    expect(app.logger.error).toHaveBeenCalled();
+  });
+
   it.each(paths)('requires login and monitor:read on %s', async (path) => {
     expect((await get(path, {} as never)).statusCode).toBe(401);
     f.auth.getPermissionCodes.mockResolvedValue([]);

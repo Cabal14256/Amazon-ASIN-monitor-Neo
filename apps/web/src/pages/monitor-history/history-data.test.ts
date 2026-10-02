@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../lib/http';
 import {
   historyError,
+  historyHasIntervalWindow,
   historyIntervalPosition,
   historyLinkFilter,
   historyNotification,
@@ -25,6 +26,27 @@ const record = (
 });
 
 describe('monitor history display boundaries', () => {
+  it('requires a positive, valid wall-clock span for interval requests', () => {
+    const start = '2026-09-01 12:00:00';
+    expect(historyHasIntervalWindow(start, start)).toBe(false);
+    expect(historyHasIntervalWindow(start, '2026-09-01 11:59:59')).toBe(false);
+    expect(historyHasIntervalWindow(start, '2026-09-01 12:00:01')).toBe(true);
+    expect(historyHasIntervalWindow('2026-02-30 12:00:00', start)).toBe(false);
+    expect(historyHasIntervalWindow('', start)).toBe(false);
+  });
+
+  it('explains disabled interval reads and recoverable query timeouts', () => {
+    expect(
+      historyError(
+        new ApiError('HTTP', '状态区间读取已关闭，请联系管理员启用后再试', 503),
+        '状态区间',
+      ),
+    ).toContain('已关闭');
+    expect(
+      historyError(new ApiError('HTTP', 'Gateway timeout', 504), '状态区间'),
+    ).toContain('缩小时间范围');
+  });
+
   it('maps Legacy catalog links to the matching history scope', () => {
     expect(historyLinkFilter('?type=group&id=group-1')).toEqual({
       key: 'variantGroupId',

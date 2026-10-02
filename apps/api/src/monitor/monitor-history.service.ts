@@ -13,6 +13,7 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import { RecoverableQueryException } from '../common/recoverable-query.exception';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 
@@ -23,6 +24,18 @@ const fail = (status: number, message: string): never => {
     status,
   );
 };
+function timedOut(error: unknown): boolean {
+  for (
+    let depth = 0;
+    error && typeof error === 'object' && depth < 4;
+    depth++
+  ) {
+    const row = error as { code?: unknown; cause?: unknown };
+    if (['57014', '55P03', 'timeout'].includes(String(row.code))) return true;
+    error = row.cause;
+  }
+  return false;
+}
 @Injectable()
 export class MonitorHistoryService {
   private active = 0;
@@ -88,6 +101,9 @@ export class MonitorHistoryService {
         if (error.code === 'too-large')
           fail(413, '状态区间结果过大，请缩小查询范围');
       }
+      if (timedOut(error)) {
+        throw new RecoverableQueryException('monitor-history-timeout');
+      }
       this.logger.error('监控历史查询失败', 'MonitorHistoryService', {
         operation,
         reason: 'monitor_history_query_failed',
@@ -117,6 +133,8 @@ export class MonitorHistoryService {
     reply: FastifyReply,
     raw: unknown,
   ): Promise<MonitorStatusIntervalData> {
+    if (!this.env.ANALYTICS_STATUS_INTERVAL_ENABLED)
+      throw new RecoverableQueryException('status-intervals-disabled');
     return this.read(principal, reply, 'status-intervals', async (unit) => {
       const query = parseMonitorStatusIntervalQuery(raw);
       return unit.listStatusIntervals(query);

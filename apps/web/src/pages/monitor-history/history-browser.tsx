@@ -35,6 +35,7 @@ import {
 } from './history-access';
 import {
   historyError,
+  historyHasIntervalWindow,
   historyIntervalPosition,
   historyLinkFilter,
   historyNotification,
@@ -547,7 +548,10 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
     refetchOnWindowFocus: true,
   });
   const intervalQuery =
-    source.getIntervals && query.startTime && query.endTime
+    source.getIntervals &&
+    query.startTime &&
+    query.endTime &&
+    historyHasIntervalWindow(query.startTime, query.endTime)
       ? {
           country: query.country,
           variantGroupId: query.variantGroupId,
@@ -954,7 +958,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
             <CardContent>
               {intervalQuery === null ? (
                 <p className="text-sm text-muted-foreground">
-                  选择开始和结束时间后读取状态区间。
+                  选择开始和结束时间后读取状态区间；结束时间须晚于开始时间。相同时间仍可查询检查记录。
                 </p>
               ) : intervals.isPending ? (
                 <Skeleton className="h-20" />
