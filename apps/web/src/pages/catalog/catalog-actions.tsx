@@ -24,6 +24,17 @@ import type {
 function flag(value: boolean | 0 | 1 | null | undefined): boolean {
   return value === true || value === 1;
 }
+function competitorText(value: string, max: number): boolean {
+  if (value.length > max * 2) return false;
+  const characters = [...value];
+  return (
+    characters.length <= max &&
+    characters.every((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code >= 32 && code !== 127;
+    })
+  );
+}
 function manualExpectedGroup(group: CatalogGroup) {
   return {
     manualBroken: flag(group.manualBroken),
@@ -218,6 +229,30 @@ export function CatalogActionPanel({
       setError('请选择不同的目标变体组。');
       return;
     }
+    if (config.id === 'competitor' && (groupForm || asinForm)) {
+      if (groupForm && (!name.trim() || !competitorText(name, 255))) {
+        setError('竞品变体组名称应为 1–255 个非控制字符。');
+        return;
+      }
+      if (asinForm && !competitorText(name, 500)) {
+        setError('竞品 ASIN 名称不能超过 500 个字符或包含控制字符。');
+        return;
+      }
+      if (!brand.trim() || !competitorText(brand, 100)) {
+        setError('竞品品牌应为 1–100 个非控制字符。');
+        return;
+      }
+      if (
+        groupForm &&
+        (country.length > 20 ||
+          !competitorText(country, 20) ||
+          !country.trim() ||
+          !competitorText(country.trim().toUpperCase(), 10))
+      ) {
+        setError('竞品国家代码应为 1–10 个非控制字符。');
+        return;
+      }
+    }
     const normalizedAsin =
       config.id === 'competitor'
         ? competitorAsinCode(asin)
@@ -273,9 +308,9 @@ export function CatalogActionPanel({
             case 'create-group':
               if (config.id === 'competitor')
                 await config.writes!.createGroup(http, {
-                  name: name.trim(),
+                  name,
                   country: country.trim().toUpperCase(),
-                  brand: brand.trim(),
+                  brand,
                 });
               else
                 await config.writes!.createGroup(http, {
@@ -288,9 +323,9 @@ export function CatalogActionPanel({
             case 'edit-group':
               if (config.id === 'competitor')
                 await config.writes!.updateGroup(http, action.group.id, {
-                  name: name.trim(),
+                  name,
                   country: country.trim().toUpperCase(),
-                  brand: brand.trim(),
+                  brand,
                   expectedSource: competitorExpectedGroup(action.group),
                 });
               else
@@ -315,9 +350,9 @@ export function CatalogActionPanel({
               if (config.id === 'competitor')
                 await config.writes!.createAsin(http, {
                   asin: normalizedAsin!,
-                  name: name.trim() || null,
+                  name: name || null,
                   country: action.group.country,
-                  brand: brand.trim(),
+                  brand,
                   parentId: action.group.id,
                   asinType: asinType ? (asinType as '1' | '2') : null,
                   expectedParent: competitorExpectedGroup(action.group),
@@ -337,9 +372,9 @@ export function CatalogActionPanel({
               if (config.id === 'competitor')
                 await config.writes!.updateAsin(http, action.child.id, {
                   asin: action.child.asin,
-                  name: name.trim() || null,
+                  name: name || null,
                   country: action.group.country,
-                  brand: brand.trim(),
+                  brand,
                   asinType: asinType ? (asinType as '1' | '2') : null,
                   expectedSource: competitorExpectedAsin(
                     action.child,
@@ -529,7 +564,7 @@ export function CatalogActionPanel({
                 <Input
                   {...control}
                   value={name}
-                  maxLength={255}
+                  maxLength={config.id === 'competitor' ? 510 : 255}
                   onChange={(event) => setName(event.target.value)}
                 />
               )}
@@ -553,7 +588,7 @@ export function CatalogActionPanel({
                   <Input
                     {...control}
                     value={name}
-                    maxLength={500}
+                    maxLength={config.id === 'competitor' ? 1000 : 500}
                     onChange={(event) => setName(event.target.value)}
                   />
                 )}
@@ -575,7 +610,7 @@ export function CatalogActionPanel({
                         ? group?.country ?? ''
                         : country
                     }
-                    maxLength={10}
+                    maxLength={config.id === 'competitor' ? 20 : 10}
                     disabled={config.id === 'competitor' && asinForm}
                     onChange={(event) => setCountry(event.target.value)}
                   />
@@ -598,7 +633,7 @@ export function CatalogActionPanel({
                   <Input
                     {...control}
                     value={brand}
-                    maxLength={100}
+                    maxLength={config.id === 'competitor' ? 200 : 100}
                     onChange={(event) => setBrand(event.target.value)}
                   />
                 )}
