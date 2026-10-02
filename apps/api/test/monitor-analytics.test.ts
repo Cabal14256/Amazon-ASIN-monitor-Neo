@@ -108,17 +108,16 @@ describe('monitor analytics / all fourteen HTTP routes and current authorization
     },
   );
   it.each(['monitor:read', 'analytics:read'])(
-    'accepts either grant %s for statistics and peak, enforces the other eleven',
+    'accepts either grant %s for analytics and monitor summaries',
     async (permission) => {
       f.permissions.splice(0, f.permissions.length, permission);
       // A stale guard cache cannot veto a newly committed grant either.
       f.auth.getPermissionCodes.mockResolvedValue([]);
       for (const operation of MONITOR_ANALYTICS_OPERATIONS) {
         const allowed =
-          ['statistics', 'peak-hours'].includes(operation) ||
-          (operation === 'abnormal-duration-statistics'
-            ? permission === 'monitor:read'
-            : permission === 'analytics:read');
+          ['statistics', 'peak-hours', 'abnormal-duration-statistics'].includes(
+            operation,
+          ) || permission === 'analytics:read';
         expect((await get(operation)).statusCode, operation).toBe(
           allowed ? 200 : 403,
         );

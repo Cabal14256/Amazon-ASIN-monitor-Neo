@@ -165,6 +165,8 @@ export function buildMonitorPeakMarkAreas({
   if (!start || !end) return [];
   const regions: PeakRegionCode[] = !country
     ? ['US', 'UK', 'EU_OTHER']
+    : country === 'EU'
+    ? ['UK', 'EU_OTHER']
     : country === 'US' || country === 'UK'
     ? [country]
     : ['DE', 'FR', 'ES', 'IT'].includes(country)
