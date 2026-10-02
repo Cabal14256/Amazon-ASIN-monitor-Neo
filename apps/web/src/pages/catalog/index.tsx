@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
@@ -784,7 +785,13 @@ export function GroupRows({
   );
 }
 
-export function CatalogPage({ config }: { config: CatalogConfig }) {
+export function CatalogPage({
+  config,
+  extra,
+}: {
+  config: CatalogConfig;
+  extra?: ReactNode;
+}) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
   const access = createAccess(
@@ -962,6 +969,8 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
             </Button>
           </div>
         </section>
+
+        {extra}
 
         {notice && (
           <p
