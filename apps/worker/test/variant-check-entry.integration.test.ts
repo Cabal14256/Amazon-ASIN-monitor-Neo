@@ -73,6 +73,17 @@ describe.skipIf(
             'utf8',
           ).replaceAll('public', schema),
         );
+      // 0004 changes the session search_path to pg_catalog first. Restore the
+      // owned schema before returning this connection to the fixture pool.
+      await connection.query(`SET search_path TO ${schema}`);
+      if (
+        (await connection.query('SELECT current_schema() AS schema')).rows[0]
+          ?.schema !== schema
+      )
+        throw new Error('Fixture migration changed primary schema ownership');
+    } catch (error) {
+      await connection.query('ROLLBACK');
+      throw error;
     } finally {
       connection.release();
     }
