@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { resultSchema } from '../envelope';
 
 /**
- * monitor 域契约（17 端点：2 个监控历史查询 + 14 个统计 + 手动触发）。
+ * monitor 域契约（18 端点：状态区间时间轴在 Neo 中提供，Legacy 端点仍保留）。
  * 来源：server/src/controllers/monitorController.js、models/MonitorHistory.js
  * 实读（2026-08-24）。
  * 注意：
@@ -334,6 +334,50 @@ export const monitorHistoryListResultSchema = resultSchema(
 /** GET /monitor-history/:id data */
 export const monitorHistoryDetailResultSchema = resultSchema(
   monitorHistoryRecordSchema,
+);
+
+/** GET /monitor-history/status-intervals query. */
+export const monitorStatusIntervalQuerySchema = z.object({
+  country: z.string().optional(),
+  variantGroupId: z.string().optional(),
+  asinId: z.string().optional(),
+  startTime: z.string(),
+  endTime: z.string(),
+  current: z.coerce.number().int().positive().optional(),
+  pageSize: z.coerce.number().int().positive().optional(),
+});
+export type MonitorStatusIntervalQuery = z.infer<
+  typeof monitorStatusIntervalQuerySchema
+>;
+
+export const monitorStatusIntervalRecordSchema = z.object({
+  asinKey: z.string().min(1),
+  asinId: z.string().nullable(),
+  asinCode: z.string().nullable(),
+  asinName: z.string().nullable(),
+  country: z.string().min(1),
+  variantGroupId: z.string().nullable(),
+  variantGroupName: z.string().nullable(),
+  intervalStart: dateTimeString,
+  intervalEnd: dateTimeString.nullable(),
+  isBroken: z.boolean(),
+});
+export type MonitorStatusIntervalRecord = z.infer<
+  typeof monitorStatusIntervalRecordSchema
+>;
+
+export const monitorStatusIntervalDataSchema = z.object({
+  list: z.array(monitorStatusIntervalRecordSchema),
+  total: z.number().int().nonnegative(),
+  current: z.number().int().positive(),
+  pageSize: z.number().int().positive(),
+  coverage: z.enum(['complete', 'stale']),
+});
+export type MonitorStatusIntervalData = z.infer<
+  typeof monitorStatusIntervalDataSchema
+>;
+export const monitorStatusIntervalResultSchema = resultSchema(
+  monitorStatusIntervalDataSchema,
 );
 
 /** GET /monitor-history/statistics data */

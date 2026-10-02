@@ -36,6 +36,19 @@ export class MonitorHistoryController {
       data: await this.service.list(request.auth!, reply, query),
     };
   }
+  @Get('status-intervals')
+  @Header('Cache-Control', 'no-store')
+  async statusIntervals(
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+    @Query() query: unknown,
+  ) {
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.statusIntervals(request.auth!, reply, query),
+    };
+  }
   @Get(':id')
   @Header('Cache-Control', 'no-store')
   async detail(
