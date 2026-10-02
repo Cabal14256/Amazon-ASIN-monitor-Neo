@@ -82,7 +82,12 @@ export class MonitorAnalyticsCache {
     return `${this.env.BULL_PREFIX.trim()}:neo:analytics:v1:${hash}`;
   }
   private async attempt<T>(action: () => Promise<T>): Promise<T | null> {
-    if (this.active >= 4) return null;
+    if (this.active >= 4) {
+      this.logger.warn('统计缓存暂不可用', 'MonitorAnalyticsCache', {
+        reason: 'analytics_cache_unavailable',
+      });
+      return null;
+    }
     this.active++;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // Retain admission until the underlying command actually settles, including

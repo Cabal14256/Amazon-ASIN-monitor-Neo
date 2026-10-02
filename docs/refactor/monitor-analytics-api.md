@@ -39,7 +39,7 @@
 | asin-by-country                      | asinStatisticsByCountry      |
 | asin-by-variant-group                | asinStatisticsByVariantGroup |
 
-标签使用 Legacy 统计缓存类型名称；不包含物理 Redis 前缀/键/摘要、用户、ASIN、国家或筛选值。指标表示此 API 进程的缓存访问，不能据此推断数据库查询次数或 Worker 全局运行状态。未命中率包含依赖降级；区分降级与正常冷缓存时结合固定原因码 `analytics_cache_unavailable` / `analytics_cache_invalid` 日志。
+标签使用 Legacy 统计缓存类型名称；不包含物理 Redis 前缀/键/摘要、用户、ASIN、国家或筛选值。指标表示此 API 进程的缓存访问，不能据此推断数据库查询次数或 Worker 全局运行状态。未命中率包含依赖降级：Redis 异常、500 毫秒超时和四命令容量保护均发出固定原因码 `analytics_cache_unavailable` 的 warn；JSON 解析或结构校验异常使用 `analytics_cache_invalid`。普通冷缓存或过期值不发这些降级告警，日志不包含原始缓存键或查询数据。
 
 ## 资源边界和错误
 

@@ -184,6 +184,7 @@ describe('monitor analytics response/cache resource bounds', () => {
   });
   it('counts each timeout and capacity fallback once and ignores late valid Redis responses', async () => {
     const f = fixture();
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
     await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
     const encoded = f.values.get(f.cache.key(query))!;
     let release!: (value: string) => void;
@@ -199,6 +200,13 @@ describe('monitor analytics response/cache resource bounds', () => {
     expect(await pending).toEqual([null, null, null, null]);
     expect(await f.cache.get(query)).toBeNull();
     expect(f.redis.eval).toHaveBeenCalledTimes(5); // One set plus four reads.
+    expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual(
+      Array.from({ length: 5 }, () => [
+        '统计缓存暂不可用',
+        'MonitorAnalyticsCache',
+        { reason: 'analytics_cache_unavailable' },
+      ]),
+    );
     expect(await f.metrics.cacheMissesTotal.get()).toMatchObject({
       values: [{ value: 5, labels: { cache_key_prefix: 'statisticsByTime' } }],
     });
@@ -209,6 +217,13 @@ describe('monitor analytics response/cache resource bounds', () => {
     expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
     expect(await f.cache.get(query)).toMatchObject({ data: [] });
     expect((await f.metrics.cacheHitsTotal.get()).values[0]!.value).toBe(1);
+  });
+  it('does not report a normal cold miss as unavailable cache', async () => {
+    const f = fixture();
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.length).toBe(warningsBefore);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
   });
   it('skips oversized writes and rejects a cache value copied from a different query', async () => {
     const f = fixture();
