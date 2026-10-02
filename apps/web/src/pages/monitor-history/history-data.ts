@@ -95,7 +95,11 @@ export function historyError(error: unknown, subject = '监控历史'): string {
       case 429:
         return '查询繁忙，请稍后重试。';
       case 503:
+        if (error.message.startsWith('状态区间读取已关闭'))
+          return error.message;
         return `${subject}数据源暂不可用，请稍后重试。`;
+      case 504:
+        return '查询超时，请缩小时间范围或稍后重试。';
     }
     if (error.kind === 'INVALID_RESPONSE' && error.message === '服务器响应过大')
       return '页面读取上限已达到，请缩小范围或减少每页数量。';
@@ -118,4 +122,56 @@ export function historyWallTime(value: string): string | undefined {
   )
     return undefined;
   return full.replace('T', ' ');
+}
+
+function historyWallClockMs(value: string): number | undefined {
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(normalized))
+    return undefined;
+  const date = new Date(`${normalized}Z`);
+  if (
+    !Number.isFinite(date.getTime()) ||
+    date.toISOString().slice(0, 19) !== normalized
+  )
+    return undefined;
+  return date.getTime();
+}
+
+/** A point-in-time record filter is valid, but cannot define an interval span. */
+export function historyHasIntervalWindow(
+  startTime: string,
+  endTime: string,
+): boolean {
+  const start = historyWallClockMs(startTime);
+  const end = historyWallClockMs(endTime);
+  return start !== undefined && end !== undefined && start < end;
+}
+
+/** Position an interval inside the selected Shanghai wall-clock window. */
+export function historyIntervalPosition(
+  intervalStart: string,
+  intervalEnd: string | null,
+  windowStart: string,
+  windowEnd: string,
+): { left: string; width: string } | undefined {
+  const start = historyWallClockMs(intervalStart);
+  const end = intervalEnd ? historyWallClockMs(intervalEnd) : undefined;
+  const rangeStart = historyWallClockMs(windowStart);
+  const rangeEnd = historyWallClockMs(windowEnd);
+  if (
+    start === undefined ||
+    rangeStart === undefined ||
+    rangeEnd === undefined ||
+    rangeEnd <= rangeStart ||
+    (end !== undefined && end <= start)
+  )
+    return undefined;
+  const clippedStart = Math.max(start, rangeStart);
+  const clippedEnd = Math.min(end ?? rangeEnd, rangeEnd);
+  if (clippedEnd <= clippedStart) return undefined;
+  const span = rangeEnd - rangeStart;
+  return {
+    left: `${((clippedStart - rangeStart) / span) * 100}%`,
+    width: `${((clippedEnd - clippedStart) / span) * 100}%`,
+  };
 }

@@ -339,7 +339,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
         const started = Date.now(),
           response = await get();
-        expect(response.statusCode).toBe(500);
+        expect(response.statusCode).toBe(504);
+        expect(response.json()).toEqual({
+          success: false,
+          errorCode: 504,
+          errorMessage: '查询超时，请尝试缩小时间范围或稍后重试',
+        });
+        expect(f.logger.warn).toHaveBeenCalledWith(
+          'API 查询暂不可用',
+          'ApiExceptionFilter',
+          { status: 504, reason: 'monitor-history-timeout' },
+        );
         expect(Date.now() - started).toBeLessThan(4000);
         expect(response.body).not.toContain('monitor_history');
         expect(response.json().data).toBeUndefined();

@@ -1,9 +1,12 @@
 import {
   monitorHistoryDetailResultSchema,
   monitorHistoryListResultSchema,
+  monitorStatusIntervalResultSchema,
   type MonitorHistoryListData,
   type MonitorHistoryListQuery,
   type MonitorHistoryRecord,
+  type MonitorStatusIntervalData,
+  type MonitorStatusIntervalQuery,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
 
@@ -77,4 +80,45 @@ export async function getMonitorHistoryDetail(
   if (record.id !== id)
     throw new ApiError('INVALID_RESPONSE', '监控历史详情标识不匹配');
   return record;
+}
+
+const INTERVAL_RESPONSE_LIMIT = 8 * 1024 * 1024;
+
+export async function getMonitorStatusIntervals(
+  http: Pick<HttpClient, 'request'>,
+  query: MonitorStatusIntervalQuery,
+  signal?: AbortSignal,
+): Promise<MonitorStatusIntervalData> {
+  const current = query.current ?? 1;
+  const pageSize = query.pageSize ?? 50;
+  if (
+    !query.startTime ||
+    !query.endTime ||
+    !Number.isSafeInteger(current) ||
+    current < 1 ||
+    !Number.isSafeInteger(pageSize) ||
+    pageSize < 1 ||
+    pageSize > 100 ||
+    (current - 1) * pageSize > 1_000_000
+  )
+    throw new ApiError('INVALID_INPUT', '状态区间查询参数无效');
+  const response = await http.request(
+    '/api/v1/monitor-history/status-intervals',
+    {
+      query,
+      signal,
+      timeoutMs: 30_000,
+      maxResponseBytes: INTERVAL_RESPONSE_LIMIT,
+    },
+    monitorStatusIntervalResultSchema,
+  );
+  const data = requireData(response, '状态区间响应缺少数据');
+  if (
+    data.current !== current ||
+    data.pageSize !== pageSize ||
+    data.list.length > pageSize ||
+    !['complete', 'stale'].includes(data.coverage)
+  )
+    throw new ApiError('INVALID_RESPONSE', '状态区间响应契约不匹配');
+  return data;
 }
