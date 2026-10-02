@@ -10,19 +10,11 @@ import {
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { prepareChartOption, type NeoChartOption } from './chart-option';
-import { NeoChart } from './neo-chart';
 
-const deferred = vi.hoisted(() => {
-  let release!: () => void;
-  const ready = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return { ready, release, init: vi.fn() };
-});
-vi.mock('./echarts-runtime', async () => {
-  await deferred.ready;
-  return { init: deferred.init };
-});
+const deferred = vi.hoisted(() => ({ init: vi.fn(), imported: vi.fn() }));
+let NeoChart: typeof import('./neo-chart').NeoChart;
+let runtimeReady = Promise.resolve();
+let releaseRuntime: () => void = () => undefined;
 
 const option: NeoChartOption = {
   xAxis: { type: 'category', data: ['A', 'B'] },
@@ -44,7 +36,17 @@ const instances: Array<{
   dispose: ReturnType<typeof vi.fn>;
 }> = [];
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.resetModules();
+  runtimeReady = Promise.resolve();
+  releaseRuntime = () => undefined;
+  deferred.imported.mockReset();
+  vi.doMock('./echarts-runtime', async () => {
+    deferred.imported();
+    await runtimeReady;
+    return { init: deferred.init };
+  });
+  ({ NeoChart } = await import('./neo-chart'));
   width = 600;
   height = 300;
   reduced = false;
@@ -82,18 +84,25 @@ beforeEach(() => {
       motionListeners.delete(callback),
   }));
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  releaseRuntime();
+  await vi.dynamicImportSettled();
+  vi.doUnmock('./echarts-runtime');
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe('mounted NeoChart lifecycle', () => {
   it('never initializes a late module after the loading chart has unmounted', async () => {
+    runtimeReady = new Promise<void>((resolve) => {
+      releaseRuntime = resolve;
+    });
     const view = render(<NeoChart label="迟到加载" option={option} />);
+    await waitFor(() => expect(deferred.imported).toHaveBeenCalledOnce());
     expect(screen.getByRole('status').textContent).toContain('正在加载图表');
     view.unmount();
-    deferred.release();
+    releaseRuntime();
     await vi.dynamicImportSettled();
     expect(deferred.init).not.toHaveBeenCalled();
     expect(observers[0].disconnect).toHaveBeenCalledOnce();
@@ -124,6 +133,44 @@ describe('mounted NeoChart lifecycle', () => {
     expect(instances[0].dispose).toHaveBeenCalledOnce();
     expect(observers[0].disconnect).toHaveBeenCalledOnce();
     expect(motionListeners.size).toBe(0);
+  });
+
+  it('keeps the generated chart description accessible alongside the figure fallback label', async () => {
+    deferred.init.mockImplementationOnce((host: HTMLElement) => {
+      const chart = {
+        setOption: vi.fn(() => {
+          host.setAttribute('role', 'img');
+          host.setAttribute('aria-label', '折线数据：A 为 2，B 为 4。');
+        }),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      };
+      instances.push(chart);
+      return chart;
+    });
+    render(<NeoChart label="可读数据图表" option={option} />);
+    expect(screen.getByRole('figure', { name: '可读数据图表' })).toBeTruthy();
+    const description = await screen.findByRole('img', {
+      name: '折线数据：A 为 2，B 为 4。',
+    });
+    expect(description.closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it('contains an unsupported nested option in local feedback and preserves page input', async () => {
+    render(
+      <>
+        <input aria-label="图表之外的输入" />
+        <NeoChart
+          label="未支持的多配置"
+          option={{ baseOption: option } as unknown as NeoChartOption}
+        />
+      </>,
+    );
+    await screen.findByText('图表暂不可用');
+    const input = screen.getByRole('textbox', { name: '图表之外的输入' });
+    fireEvent.change(input, { target: { value: '可继续操作' } });
+    expect((input as HTMLInputElement).value).toBe('可继续操作');
+    expect(instances[0].dispose).toHaveBeenCalledOnce();
   });
 
   it('waits for a hidden container then resizes on element and window changes', async () => {
@@ -273,6 +320,57 @@ describe('mounted NeoChart lifecycle', () => {
 });
 
 describe('chart option policy', () => {
+  it.each([{ fontFamily: 'Fixture mono' }, { fontSize: 18 }])(
+    'retains token text color with partial textStyle %j and explicit color override',
+    (textStyle) => {
+      const host = document.createElement('div');
+      host.style.setProperty('--color-muted-foreground', '#234567');
+      const source: NeoChartOption = { ...option, textStyle };
+      const before = structuredClone(source);
+      expect(prepareChartOption(source, host, false).textStyle).toEqual({
+        color: '#234567',
+        ...textStyle,
+      });
+      expect(
+        prepareChartOption(
+          { ...source, textStyle: { ...textStyle, color: '#abcdef' } },
+          host,
+          false,
+        ).textStyle,
+      ).toEqual({ ...textStyle, color: '#abcdef' });
+      expect(source).toEqual(before);
+    },
+  );
+
+  const unsupportedOptions: NeoChartOption[] = [
+    {
+      // @ts-expect-error The foundation supports flat chart options only.
+      baseOption: { animation: true, animationDurationUpdate: 9000 },
+    },
+    {
+      // @ts-expect-error Timeline option containers are intentionally excluded.
+      options: [{ animation: true, animationDurationUpdate: 9000 }],
+    },
+    {
+      // @ts-expect-error Responsive option containers are intentionally excluded.
+      media: [{ option: { animation: true, animationDurationUpdate: 9000 } }],
+    },
+  ];
+  it.each(unsupportedOptions)(
+    'rejects unsupported multi-option containers even with an untyped caller: %j',
+    (source) => {
+      const host = document.createElement('div');
+      for (const reduced of [false, true])
+        expect(() =>
+          prepareChartOption(
+            source as unknown as NeoChartOption,
+            host,
+            reduced,
+          ),
+        ).toThrow('仅支持平铺图表配置');
+    },
+  );
+
   it('inherits global motion while preserving explicit series overrides within the cap', () => {
     const host = document.createElement('div');
     const source: NeoChartOption = {

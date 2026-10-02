@@ -148,7 +148,6 @@ export function NeoChart({
       {drawable && (
         <div
           ref={hostRef}
-          aria-hidden="true"
           data-chart-host
           className="w-full min-w-0"
           style={{ height }}

@@ -9,8 +9,9 @@ import type {
   LegendComponentOption,
   TooltipComponentOption,
 } from 'echarts/components';
-import type { ComposeOption } from 'echarts/core';
+import type { ComposeOption, EChartsCoreOption } from 'echarts/core';
 
+/** This foundation handles flat options; multi-option containers need their own policy. */
 export type NeoChartOption = ComposeOption<
   | BarSeriesOption
   | LineSeriesOption
@@ -19,7 +20,12 @@ export type NeoChartOption = ComposeOption<
   | GridComponentOption
   | LegendComponentOption
   | TooltipComponentOption
->;
+> & {
+  textStyle?: EChartsCoreOption['textStyle'];
+  baseOption?: never;
+  options?: never;
+  media?: never;
+};
 
 /** Keep the chart on the same CSS tokens as the rest of Neo. */
 export function chartPalette(host: HTMLElement) {
@@ -53,6 +59,14 @@ export function prepareChartOption(
   host: HTMLElement,
   reduced: boolean,
 ): NeoChartOption {
+  // Keep untyped callers inside the same boundary as the public TypeScript API.
+  if (
+    option.baseOption !== undefined ||
+    option.options !== undefined ||
+    option.media !== undefined
+  )
+    throw new Error('NeoChart 仅支持平铺图表配置');
+  const palette = chartPalette(host);
   const series = option.series
     ? Array.isArray(option.series)
       ? option.series
@@ -74,8 +88,9 @@ export function prepareChartOption(
     animationDelayUpdate: 0,
   });
   return {
-    ...chartPalette(host),
+    ...palette,
     ...option,
+    textStyle: { ...palette.textStyle, ...option.textStyle },
     ...motion({
       animation: option.animation,
       animationDuration: option.animationDuration,
