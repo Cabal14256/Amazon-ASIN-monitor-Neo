@@ -5,13 +5,21 @@ import {
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
+  Search,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { createAccess } from '../auth/access';
 import { useAuth, useIdentity } from '../auth/context';
 import { cn } from '../lib/utils';
 import { workspaceNavigation } from './app-shell-navigation';
+import { CommandNavigation } from './command-navigation';
 import { Button } from './ui/button';
 
 const COLLAPSE_KEY = 'asin-monitor-neo-sidebar-collapsed';
@@ -40,6 +48,8 @@ export function AppShell({
   });
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const commandReturnFocus = useRef<HTMLElement | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const mobilePanelRef = useRef<HTMLElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -67,6 +77,46 @@ export function AppShell({
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
+  const showCommands = commandOpen && access.isLogin;
+  const openCommands = useCallback(() => {
+    if (
+      !access.isLogin ||
+      mobileOpen ||
+      document.querySelector(
+        'dialog[open], [role="dialog"]:not([hidden]):not([aria-hidden="true"]), [role="alertdialog"]:not([hidden]):not([aria-hidden="true"])',
+      )
+    )
+      return false;
+    commandReturnFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setCommandOpen(true);
+    return true;
+  }, [access.isLogin, mobileOpen]);
+  useEffect(() => {
+    if (!access.isLogin) setCommandOpen(false);
+  }, [access.isLogin]);
+  useEffect(() => {
+    setCommandOpen(false);
+  }, [pathname]);
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        event.isComposing ||
+        event.altKey ||
+        !(event.metaKey || event.ctrlKey) ||
+        event.key.toLowerCase() !== 'k' ||
+        showCommands
+      )
+        return;
+      if (openCommands()) event.preventDefault();
+    };
+    document.addEventListener('keydown', shortcut);
+    return () => document.removeEventListener('keydown', shortcut);
+  }, [openCommands, showCommands]);
   const displayName =
     auth.status === 'authenticated'
       ? auth.identity.user.real_name || auth.identity.user.username
@@ -176,160 +226,190 @@ export function AppShell({
     </nav>
   );
   return (
-    <div className="flex min-h-screen bg-cream">
-      <a
-        href="#workspace-content"
-        className="sr-only rounded-pill bg-signal px-5 py-3 font-semibold focus:fixed focus:top-3 focus:left-3 focus:z-[60] focus:not-sr-only"
-      >
-        跳到主要内容
-      </a>
-      {mobileOpen && (
-        <button
-          type="button"
-          aria-label="关闭导航"
-          onClick={() => setMobileOpen(false)}
-          className="fixed inset-0 z-30 bg-ink/45 lg:hidden"
-        />
-      )}
-      <aside
-        ref={mobilePanelRef}
-        role={mobileOpen ? 'dialog' : undefined}
-        aria-modal={mobileOpen ? true : undefined}
-        aria-label={mobileOpen ? '主导航' : undefined}
-        onKeyDown={(event) => {
-          if (!mobileOpen) return;
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            setMobileOpen(false);
-            return;
-          }
-          if (event.key !== 'Tab') return;
-          const controls = Array.from(
-            mobilePanelRef.current?.querySelectorAll<HTMLElement>(
-              'a[href], button:not([disabled])',
-            ) ?? [],
-          ).filter((element) => element.getClientRects().length > 0);
-          const first = controls[0];
-          const last = controls.at(-1);
-          if (event.shiftKey && document.activeElement === first && last) {
-            event.preventDefault();
-            last.focus();
-          } else if (
-            !event.shiftKey &&
-            document.activeElement === last &&
-            first
-          ) {
-            event.preventDefault();
-            first.focus();
-          }
-        }}
-        className={cn(
-          'invisible fixed inset-y-0 left-0 z-40 flex w-[264px] shrink-0 -translate-x-full flex-col border-r border-border bg-card transition-transform duration-300 lg:visible lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:translate-x-0',
-          mobileOpen && 'visible translate-x-0',
-          collapsed && 'lg:w-20',
-        )}
-      >
-        <div className="flex h-20 items-center justify-between gap-2 border-b border-border px-5 lg:px-4">
-          <Link
-            to={access.mustChangePassword ? '/profile' : '/home'}
-            aria-label={
-              access.mustChangePassword ? '前往个人中心' : '返回监控总览'
-            }
-            onClick={() => setMobileOpen(false)}
-            className="flex min-w-0 items-center gap-3"
-          >
-            <span className="grid size-10 shrink-0 place-items-center rounded-control bg-ink text-lg font-black text-signal">
-              A
-            </span>
-            <span
-              className={cn(
-                'min-w-0 text-sm font-black tracking-tight',
-                collapsed && 'lg:sr-only',
-              )}
-            >
-              ASIN MONITOR{' '}
-              <span className="block text-xs font-medium text-muted-foreground">
-                Neo 工作台
-              </span>
-            </span>
-          </Link>
+    <>
+      <div className="flex min-h-screen bg-cream" inert={showCommands}>
+        <a
+          href="#workspace-content"
+          className="sr-only rounded-pill bg-signal px-5 py-3 font-semibold focus:fixed focus:top-3 focus:left-3 focus:z-[60] focus:not-sr-only"
+        >
+          跳到主要内容
+        </a>
+        {mobileOpen && (
           <button
-            ref={closeButtonRef}
             type="button"
             aria-label="关闭导航"
             onClick={() => setMobileOpen(false)}
-            className="rounded-control p-2 hover:bg-muted lg:hidden"
-          >
-            <X aria-hidden="true" className="size-5" />
-          </button>
-        </div>
-        {navigation}
-        <div className="border-t border-border p-3">
-          <button
-            type="button"
-            aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
-            onClick={toggleCollapsed}
-            className="hidden min-h-10 w-full items-center gap-3 rounded-control px-3 text-sm text-muted-foreground hover:bg-muted lg:flex"
-          >
-            {collapsed ? (
-              <PanelLeftOpen aria-hidden="true" className="size-[18px]" />
-            ) : (
-              <PanelLeftClose aria-hidden="true" className="size-[18px]" />
-            )}
-            {!collapsed && '收起侧栏'}
-          </button>
-        </div>
-      </aside>
-      <div className="min-w-0 flex-1" inert={mobileOpen}>
-        <header className="sticky top-0 z-20 flex min-h-20 items-center justify-between gap-3 border-b border-border bg-cream/95 px-5 backdrop-blur-sm sm:px-8 lg:px-10">
-          <div className="flex min-w-0 items-center gap-3">
+            className="fixed inset-0 z-30 bg-ink/45 lg:hidden"
+          />
+        )}
+        <aside
+          ref={mobilePanelRef}
+          role={mobileOpen ? 'dialog' : undefined}
+          aria-modal={mobileOpen ? true : undefined}
+          aria-label={mobileOpen ? '主导航' : undefined}
+          onKeyDown={(event) => {
+            if (!mobileOpen) return;
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setMobileOpen(false);
+              return;
+            }
+            if (event.key !== 'Tab') return;
+            const controls = Array.from(
+              mobilePanelRef.current?.querySelectorAll<HTMLElement>(
+                'a[href], button:not([disabled])',
+              ) ?? [],
+            ).filter((element) => element.getClientRects().length > 0);
+            const first = controls[0];
+            const last = controls.at(-1);
+            if (event.shiftKey && document.activeElement === first && last) {
+              event.preventDefault();
+              last.focus();
+            } else if (
+              !event.shiftKey &&
+              document.activeElement === last &&
+              first
+            ) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
+          className={cn(
+            'invisible fixed inset-y-0 left-0 z-40 flex w-[264px] shrink-0 -translate-x-full flex-col border-r border-border bg-card transition-transform duration-300 lg:visible lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:translate-x-0',
+            mobileOpen && 'visible translate-x-0',
+            collapsed && 'lg:w-20',
+          )}
+        >
+          <div className="flex h-20 items-center justify-between gap-2 border-b border-border px-5 lg:px-4">
+            <Link
+              to={access.mustChangePassword ? '/profile' : '/home'}
+              aria-label={
+                access.mustChangePassword ? '前往个人中心' : '返回监控总览'
+              }
+              onClick={() => setMobileOpen(false)}
+              className="flex min-w-0 items-center gap-3"
+            >
+              <span className="grid size-10 shrink-0 place-items-center rounded-control bg-ink text-lg font-black text-signal">
+                A
+              </span>
+              <span
+                className={cn(
+                  'min-w-0 text-sm font-black tracking-tight',
+                  collapsed && 'lg:sr-only',
+                )}
+              >
+                ASIN MONITOR{' '}
+                <span className="block text-xs font-medium text-muted-foreground">
+                  Neo 工作台
+                </span>
+              </span>
+            </Link>
             <button
-              ref={menuButtonRef}
+              ref={closeButtonRef}
               type="button"
-              aria-label="打开导航"
-              aria-expanded={mobileOpen}
-              onClick={() => setMobileOpen(true)}
+              aria-label="关闭导航"
+              onClick={() => setMobileOpen(false)}
               className="rounded-control p-2 hover:bg-muted lg:hidden"
             >
-              <Menu aria-hidden="true" className="size-5" />
+              <X aria-hidden="true" className="size-5" />
             </button>
-            <div className="min-w-0">
-              <p className="hidden text-[11px] font-semibold tracking-[.18em] text-muted-foreground sm:block">
-                WORKSPACE / NEO
-              </p>
-              <p className="truncate text-sm font-semibold">{title}</p>
+          </div>
+          {navigation}
+          <div className="border-t border-border p-3">
+            <button
+              type="button"
+              aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
+              onClick={toggleCollapsed}
+              className="hidden min-h-10 w-full items-center gap-3 rounded-control px-3 text-sm text-muted-foreground hover:bg-muted lg:flex"
+            >
+              {collapsed ? (
+                <PanelLeftOpen aria-hidden="true" className="size-[18px]" />
+              ) : (
+                <PanelLeftClose aria-hidden="true" className="size-[18px]" />
+              )}
+              {!collapsed && '收起侧栏'}
+            </button>
+          </div>
+        </aside>
+        <div className="min-w-0 flex-1" inert={mobileOpen}>
+          <header className="sticky top-0 z-20 flex min-h-20 items-center justify-between gap-3 border-b border-border bg-cream/95 px-5 backdrop-blur-sm sm:px-8 lg:px-10">
+            <div className="flex min-w-0 items-center gap-3">
+              <button
+                ref={menuButtonRef}
+                type="button"
+                aria-label="打开导航"
+                aria-expanded={mobileOpen}
+                disabled={showCommands}
+                onClick={() => {
+                  if (!showCommands) setMobileOpen(true);
+                }}
+                className="rounded-control p-2 hover:bg-muted lg:hidden"
+              >
+                <Menu aria-hidden="true" className="size-5" />
+              </button>
+              <div className="min-w-0">
+                <p className="hidden text-[11px] font-semibold tracking-[.18em] text-muted-foreground sm:block">
+                  WORKSPACE / NEO
+                </p>
+                <p className="truncate text-sm font-semibold">{title}</p>
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-4">
-            <Link
-              to="/profile"
-              className="max-w-32 truncate rounded-pill px-3 py-2 text-sm font-medium hover:bg-muted sm:max-w-48"
-              title={displayName}
-            >
-              {displayName}
-            </Link>
-            <Button
-              variant="ghost"
-              size="small"
-              pending={loggingOut}
-              aria-label="退出登录"
-              onClick={() => {
-                void logout();
-              }}
-            >
-              <LogOut aria-hidden="true" />{' '}
-              <span className="hidden sm:inline">退出</span>
-            </Button>
-          </div>
-        </header>
-        <main
-          id="workspace-content"
-          tabIndex={-1}
-          className="mx-auto w-full max-w-[1760px] px-5 py-7 sm:px-8 sm:py-9 lg:px-10"
-        >
-          {children}
-        </main>
+            <div className="flex items-center gap-2 sm:gap-4">
+              <Button
+                variant="secondary"
+                size="small"
+                aria-label="打开命令面板"
+                aria-haspopup="dialog"
+                aria-expanded={showCommands}
+                aria-keyshortcuts="Control+K Meta+K"
+                disabled={!access.isLogin}
+                onClick={openCommands}
+              >
+                <Search aria-hidden="true" />
+                <span className="hidden sm:inline">跳转页面</span>
+                <kbd
+                  aria-hidden="true"
+                  className="hidden text-[10px] text-muted-foreground md:inline"
+                >
+                  ⌘ / Ctrl K
+                </kbd>
+              </Button>
+              <Link
+                to="/profile"
+                className="max-w-32 truncate rounded-pill px-3 py-2 text-sm font-medium hover:bg-muted sm:max-w-48"
+                title={displayName}
+              >
+                {displayName}
+              </Link>
+              <Button
+                variant="ghost"
+                size="small"
+                pending={loggingOut}
+                aria-label="退出登录"
+                onClick={() => {
+                  void logout();
+                }}
+              >
+                <LogOut aria-hidden="true" />{' '}
+                <span className="hidden sm:inline">退出</span>
+              </Button>
+            </div>
+          </header>
+          <main
+            id="workspace-content"
+            tabIndex={-1}
+            className="mx-auto w-full max-w-[1760px] px-5 py-7 sm:px-8 sm:py-9 lg:px-10"
+          >
+            {children}
+          </main>
+        </div>
       </div>
-    </div>
+      <CommandNavigation
+        open={showCommands}
+        access={access}
+        onClose={() => setCommandOpen(false)}
+        returnFocus={commandReturnFocus}
+      />
+    </>
   );
 }
