@@ -11,6 +11,33 @@ import {
 } from '../src/backup/backup-files';
 
 describe('backup file boundary', () => {
+  it('addresses the complete task UUID and preserves older eight-digit filenames', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filenames = [
+      'backup_20261002-020000-10000000000040008000000000000161-primary.dump',
+      'backup_20261002-020001-abcdef01-competitor.dump',
+    ];
+    try {
+      for (const filename of filenames) {
+        await writeFile(join(directory, filename), 'PGDMPfixture');
+        expect(resolveBackupPath(directory, filename)).toBe(
+          join(directory, filename),
+        );
+      }
+      expect(
+        (await listBackupFiles(directory)).map((file) => file.filename).sort(),
+      ).toEqual(filenames.sort());
+      expect(() =>
+        resolveBackupPath(directory, `../${filenames[0]}`),
+      ).toThrow();
+      expect(() =>
+        resolveBackupPath(directory, `${filenames[0]}.partial`),
+      ).toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lists only Neo custom artifacts and rejects traversal', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
     try {

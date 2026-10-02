@@ -95,8 +95,10 @@ describe('Legacy to BullMQ queue policy parity', () => {
         const policy = getQueuePolicy(name, loadEnv(raw));
         expect(policy.physicalName).toBe(baseline.physicalName);
         if (name === 'backup') {
-          expect(policy.defaultJobOptions).toMatchObject({ attempts: 1 });
-          expect(policy.defaultJobOptions).not.toHaveProperty('backoff');
+          expect(policy.defaultJobOptions).toMatchObject({
+            attempts: 2,
+            backoff: { type: 'exponential', delay: 5000 },
+          });
         } else {
           expect(policy.defaultJobOptions).toEqual(
             baseline.options.defaultJobOptions,

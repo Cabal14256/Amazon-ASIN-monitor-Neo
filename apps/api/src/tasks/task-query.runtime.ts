@@ -413,7 +413,10 @@ export class TaskQueryRuntime implements OnModuleDestroy {
             throw error;
           }
           ensureOpen();
-          await queue.add(data.operation, data, { jobId: data.taskId });
+          await queue.add(data.operation, data, {
+            jobId: data.taskId,
+            ...(data.operation === 'restore' ? { attempts: 1 } : {}),
+          });
         }),
     };
   }

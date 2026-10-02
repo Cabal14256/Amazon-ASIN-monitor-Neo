@@ -1,9 +1,19 @@
+import { HttpException, type ExecutionContext } from '@nestjs/common';
+import {
+  FastifyAdapter,
+  type NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AuthenticationGuard } from '../src/auth/authentication.guard';
+import { PermissionsGuard } from '../src/auth/permissions.guard';
+import { BackupController } from '../src/backup/backup.controller';
 import { BackupService } from '../src/backup/backup.service';
+import { configureHttpApp } from '../src/http-app';
 
 const principal = { userId: 'backup-admin', sessionId: 'session-1' } as never;
 const createdAt = '2026-09-27T00:00:00.000Z';
@@ -133,6 +143,106 @@ async function fixture(maxBytes = 1024 * 1024) {
     service,
   };
 }
+
+describe('backup submission HTTP / global exception boundary', () => {
+  async function http(service: BackupService) {
+    const module = await Test.createTestingModule({
+      controllers: [BackupController],
+      providers: [{ provide: BackupService, useValue: service }],
+    })
+      .overrideGuard(AuthenticationGuard)
+      .useValue({
+        canActivate(context: ExecutionContext) {
+          context.switchToHttp().getRequest().auth = principal;
+          return true;
+        },
+      })
+      .overrideGuard(PermissionsGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+    const app = module.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter({ logger: false }),
+    );
+    configureHttpApp(app, {
+      logger: { error: vi.fn(), warn: vi.fn() } as never,
+    });
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+    return app;
+  }
+  it.each(['create', 'enqueue'] as const)(
+    'retains the generated UUID after an uncertain %s acknowledgement',
+    async (phase) => {
+      const f = await fixture();
+      const failure = new Error('private-driver-token');
+      if (phase === 'create')
+        f.port.store.create.mockRejectedValueOnce(failure);
+      else f.port.enqueue.mockRejectedValueOnce(failure);
+      const app = await http(f.service);
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/backup',
+          payload: {},
+        });
+        const taskId = f.port.store.create.mock.calls[0][0].taskId;
+        expect(taskId).toMatch(/^[a-f0-9-]{36}$/);
+        expect(response.statusCode).toBe(500);
+        expect(response.json()).toEqual({
+          success: false,
+          errorCode: 500,
+          errorMessage: '任务提交结果未确认，请查询此任务状态后再操作',
+          data: { taskId, status: 'unknown' },
+        });
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(
+          response.body + JSON.stringify(f.logger.error.mock.calls),
+        ).not.toContain('private-driver');
+      } finally {
+        await app.close();
+      }
+    },
+  );
+  it('preserves restore lookup identity and masks unrelated 5xx payloads', async () => {
+    const f = await fixture();
+    await writeFile(join(f.directory, filename), 'PGDMPfixture');
+    await writeMetadata(f.directory, 'postgresql');
+    f.port.enqueue.mockRejectedValueOnce(new Error('private-driver-token'));
+    const app = await http(f.service);
+    try {
+      const restore = await app.inject({
+        method: 'POST',
+        url: '/api/v1/backup/restore',
+        payload: { filename },
+      });
+      expect(restore.statusCode).toBe(500);
+      expect(restore.json().data.taskId).toBe(
+        f.port.store.create.mock.calls[0][0].taskId,
+      );
+      vi.spyOn(f.service, 'create').mockRejectedValueOnce(
+        new HttpException(
+          {
+            data: { taskId: 'private-driver-token' },
+            errorMessage: 'private-driver-token',
+          },
+          500,
+        ),
+      );
+      const failed = await app.inject({
+        method: 'POST',
+        url: '/api/v1/backup',
+        payload: {},
+      });
+      expect(failed.json()).toEqual({
+        success: false,
+        errorCode: 500,
+        errorMessage: '服务器内部错误',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});
 
 describe('backup API service', () => {
   it('returns 404 only for a missing dump and logs a partial deletion failure as 500', async () => {

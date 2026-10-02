@@ -173,6 +173,44 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
+  it('recovers a published creation receipt after registry completion ACK loss', async () => {
+    task = {
+      ...task!,
+      taskId: '10000000-0000-4000-8000-000000000161',
+      taskType: 'backup',
+      taskSubType: 'create',
+      status: 'processing',
+      startedAt: task!.createdAt,
+    };
+    const result = {
+      operation: 'create',
+      filename:
+        'backup_20261002-020000-10000000000040008000000000000161-primary.dump',
+      target: 'primary',
+      format: 'custom',
+      size: 12,
+      createdAt: '2026-10-02T00:00:00.000Z',
+      sourceEngine: 'postgresql',
+      restoreSupported: true,
+    };
+    queue = { ...task, status: 'completed', result };
+    const response = await get(`/tasks/${task.taskId}`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      status: 'completed',
+      progress: 100,
+      result,
+    });
+    expect(port.store.mutate).toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ kind: 'completed', result }),
+      {
+        userId: taskUserId,
+        taskType: 'backup',
+        createdAt: task!.createdAt,
+      },
+    );
+  });
   it.each(
     (['processing', 'cancelling', 'cancelled', 'failed'] as const).flatMap(
       (status) =>

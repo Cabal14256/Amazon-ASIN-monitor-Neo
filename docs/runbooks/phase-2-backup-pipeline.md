@@ -2,7 +2,7 @@
 
 ## 格式与边界
 
-Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，文件名为 `backup_YYYYMMDD-HHmmss-<任务 ID 前八位>-primary.dump` 或 `backup_YYYYMMDD-HHmmss-<任务 ID 前八位>-competitor.dump`。每个正式文件附带 `<文件名>.meta.json`，记录来源数据库类型和目标；两者都须保留。Legacy MySQL `.sql` 文件仅作为历史资料保留，不能通过 Neo 恢复接口导入。创建期间只写同目录 `.partial` 文件；校验 `PGDMP` 文件头、大小和权限后才改为正式文件名。异常退出留下的 `.partial` 文件须由运维核对无活跃任务后清理。
+Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，文件名为 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-primary.dump` 或 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-competitor.dump`，读取时兼容既有任务 ID 前八位的文件名。每个正式文件附带 `<文件名>.meta.json`，记录来源数据库类型和目标；两者都须保留。Legacy MySQL `.sql` 文件仅作为历史资料保留，不能通过 Neo 恢复接口导入。创建期间只写同目录 `.partial` 文件；校验 `PGDMP` 文件头、大小和权限后才改为正式文件名。同一创建任务重试会清理自己的未发布临时文件；其他异常退出留下的 `.partial` 文件须由运维核对无活跃任务后清理。
 
 `GET /api/v1/backup/:filename/download` 下载 `.tar`，其中包含原始 `.dump` 和经过校验的同名 `.meta.json`；缺失或无效的元数据会拒绝下载。跨实例恢复时先在受控环境解包，把两个文件以原文件名一起放入目标实例的 `BACKUP_STORAGE_DIRECTORY`，再执行恢复。备份创建时填写的描述会保存在元数据中，并出现在列表中。普通 PostgreSQL 新产物使用 v3 元数据；TimescaleDB 新产物使用 v4 元数据并同样强制保存和核对 SHA-256。旧 Timescale v2 元数据可保留及下载，但缺少绑定摘要，不能自动恢复。普通 PostgreSQL v3 元数据以 `scope: full` 或 `scope: selective` 明确完整/按表归档，并记录归档 SHA-256；恢复前 Worker 流式核对，错配时不运行 `pg_restore`。按表备份使用 PostgreSQL 16 的 `--table-and-children`，包括所选父表的分区与继承子表。新元数据也保存来源数据库的 TimeZone（优先数据库级配置，否则取来源连接有效值）、编码、`LC_COLLATE`、`LC_CTYPE`、locale provider 与 ICU locale/rules；旧元数据缺少可靠范围或字符集信息时 Neo 不自动恢复。
 
@@ -30,7 +30,9 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 完整归档先用 `TEMPLATE template0` 和归档中的字符集/locale 设置新建受限隔离库，并以 `ALTER DATABASE ... SET TimeZone` 恢复来源时区；旧 sidecar 未记录时区时使用 D8 所要求的 `Asia/Shanghai`。普通 PostgreSQL 随后用 `--dbname=<隔离库名> --single-transaction --exit-on-error --no-owner --no-acl` 恢复。两个引擎都在恢复后重新验证数据库级时区，防止 `LOCALTIMESTAMP` 默认值与触发器发生偏移；成功后保留隔离库供核对，失败或取消时清理本任务确认创建的隔离库。按表归档先确认在线目标库的字符集/locale 设置与备份一致，再使用 `--dbname=<在线目标库名> --single-transaction --exit-on-error --clean --if-exists --no-owner --no-acl` 原位恢复。`pg_restore` 成功退出即表示单事务已提交，任务立即记录 `targetDatabaseChanged: true`、`verification: unconfirmed`；后续健康检查成功才改为 `verification: confirmed`。若后续锁、健康检查或进度写入失败，任务仍显示数据库已变更、需人工核对，不能按已取消或未变更重试。缺少 `--dbname` 时，`pg_restore` 只会把 SQL 输出到 stdout，不能算恢复成功。取消会终止子进程并等待其关闭；单事务帮助避免中途失败留下部分 schema 改动。失败时清理未完成的 `.partial` 文件；已发布的有效 `.dump` 若在 Redis 完成确认时发生歧义，则保留给运维核对。无法确认状态时保留任务 ID，禁止重复提交同一恢复操作作为“补偿”。生产恢复前还须停止写入、安排维护窗口并备好独立回滚备份；自动化检查不能证明业务数据与扩展版本兼容。
 
-同一目标库的备份和恢复共用 PostgreSQL advisory lock，跨 Worker 实例互斥；primary 与 competitor 使用不同键，即使两库位于同一集群也可并行处理。占用时任务明确失败。若 Worker 被强制终止，锁连接会断开，须先确认目标库中没有遗留的 `pg_dump`/`pg_restore` 会话再提交新任务。备份队列 `attempts=1`，不会自动重放可能已部分执行的恢复；操作员应检查任务、文件和数据库状态，再决定是否创建新任务。
+同一目标库的备份和恢复共用 PostgreSQL advisory lock，跨 Worker 实例互斥；primary 与 competitor 使用不同键，即使两库位于同一集群也可并行处理。占用时创建任务按原任务重试，恢复任务明确失败。创建任务默认最多两次尝试、5 秒指数退避；恢复生产者单独使用 `attempts=1`，已开始的恢复即使因 stalled 再次投递也拒绝重新执行。若 Worker 被强制终止，须核对遗留 PostgreSQL 会话和任务回执，禁止通过新建恢复任务补偿未知提交。
+
+创建文件名由受理时间和完整任务 UUID 确定，保留既有 8 位标识文件的读取兼容。v3/v4 sidecar 保存绑定任务、所有者、目标和参数的摘要 `creationIdentity`；有效 `.dump` 的发布是持久化完成点。发布前失败会清理本任务临时文件，剩余尝试存在时保留非终态元数据；下一次投递重新抓取。发布后 Redis 完成确认丢失时返回有界 BullMQ 结果；重放先验证 sidecar 身份与归档 SHA-256，再恢复完成状态，不运行第二次 `pg_dump`，不覆盖不匹配的文件。API 创建或恢复受理结果不确定时，固定 500 信封保留生成的 `data.taskId`，先查询该 ID；其他 5xx 继续隐藏内部载荷。任务状态发布失败使用共享节流 warn，状态写入成功不会因通知失败被撤销。
 
 ## TimescaleDB 隔离恢复
 

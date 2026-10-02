@@ -5,11 +5,13 @@ import {
   Get,
   Header,
   HttpCode,
+  Inject,
   Param,
   Post,
   Req,
   Res,
   StreamableFile,
+  UseFilters,
   UseGuards,
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -17,13 +19,15 @@ import { AuthenticationGuard } from '../auth/authentication.guard';
 import { PermissionsGuard } from '../auth/permissions.guard';
 import { RequirePermissions } from '../auth/require-permissions.decorator';
 import { backupBundle } from './backup-bundle';
+import { BackupSubmissionFilter } from './backup-submission.exception';
 import { BackupService } from './backup.service';
 
 @Controller('backup')
 @UseGuards(AuthenticationGuard, PermissionsGuard)
 @RequirePermissions('settings:write')
+@UseFilters(BackupSubmissionFilter)
 export class BackupController {
-  constructor(private readonly backups: BackupService) {}
+  constructor(@Inject(BackupService) private readonly backups: BackupService) {}
 
   @Post()
   @HttpCode(200)

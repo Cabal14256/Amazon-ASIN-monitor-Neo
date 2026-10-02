@@ -39,7 +39,7 @@ export const backupFilenameSchema = z
   .min(1, '请指定备份文件名')
   .max(255, '备份文件名过长')
   .regex(
-    /^backup_[0-9]{8}-[0-9]{6}-[a-f0-9]{8}-(?:primary|competitor)\.dump$/,
+    /^backup_[0-9]{8}-[0-9]{6}-(?:[a-f0-9]{8}|[a-f0-9]{32})-(?:primary|competitor)\.dump$/,
     'Neo 仅接受本系统生成的 pg_dump custom 文件',
   );
 export type BackupFilename = z.infer<typeof backupFilenameSchema>;
@@ -143,6 +143,7 @@ export const backupArtifactMetadataSchema = z.union([
   z
     .object({
       version: z.literal(4),
+      creationIdentity: backupArchiveSha256Schema.optional(),
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('timescaledb'),
@@ -155,6 +156,7 @@ export const backupArtifactMetadataSchema = z.union([
   z
     .object({
       version: z.literal(3),
+      creationIdentity: backupArchiveSha256Schema.optional(),
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),
@@ -167,6 +169,7 @@ export const backupArtifactMetadataSchema = z.union([
   z
     .object({
       version: z.literal(3),
+      creationIdentity: backupArchiveSha256Schema.optional(),
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),

@@ -39,6 +39,7 @@ import {
   readBackupMetadata,
   resolveBackupPath,
 } from './backup-files';
+import { BackupSubmissionException } from './backup-submission.exception';
 
 export const BACKUP_CONFIG_REPOSITORY = Symbol('BACKUP_CONFIG_REPOSITORY');
 
@@ -195,15 +196,7 @@ export class BackupService implements OnModuleDestroy {
       this.logger.error('备份任务提交未确认', 'BackupService', {
         reason: 'backup_enqueue_outcome_unknown',
       });
-      throw new HttpException(
-        {
-          success: false,
-          errorCode: 500,
-          errorMessage: '任务提交结果未确认，请查询此任务状态后再操作',
-          data: { taskId, status: 'unknown' },
-        },
-        500,
-      );
+      throw new BackupSubmissionException(taskId);
     } finally {
       closed = true;
     }

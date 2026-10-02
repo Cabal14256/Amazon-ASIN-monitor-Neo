@@ -929,6 +929,18 @@ export function createBackupProcessor(
     let metadataPublishedPath: string | undefined;
     let publishedStagingDatabase: string | undefined;
     let committedRestore: BackupRestoreReceipt | undefined;
+    let publishedCreation: Record<string, unknown> | undefined;
+    const creationIdentity = createHash('sha256')
+      .update(
+        JSON.stringify([
+          data.taskId,
+          data.userId,
+          data.createdAt,
+          data.target,
+          data.params,
+        ]),
+      )
+      .digest('hex');
     const finishIsolatedRestore = async (
       restoredDatabase: string,
       filename: string,
@@ -968,7 +980,10 @@ export function createBackupProcessor(
     };
     try {
       const initial = await check();
-      if (initial.startedAt || initial.status === 'processing')
+      if (
+        data.operation === 'restore' &&
+        (initial.startedAt || initial.status === 'processing')
+      )
         throw new BackupCommandError('BACKUP_TASK_INTERRUPTED');
       await mutate({ kind: 'processing', message: '备份任务开始处理' });
       const lock = await acquireBackupTargetLock(options.env, data.target);
@@ -996,18 +1011,79 @@ export function createBackupProcessor(
           second: '2-digit',
           hour12: false,
         })
-          .formatToParts(new Date())
+          .formatToParts(new Date(data.createdAt))
           .reduce<Record<string, string>>((out, part) => {
             if (part.type !== 'literal') out[part.type] = part.value;
             return out;
           }, {});
         const filename = `backup_${stamp.year}${stamp.month}${stamp.day}-${
           stamp.hour
-        }${stamp.minute}${stamp.second}-${data.taskId.slice(0, 8)}-${
-          data.target
-        }.dump`;
+        }${stamp.minute}${stamp.second}-${data.taskId
+          .replaceAll('-', '')
+          .toLowerCase()}-${data.target}.dump`;
         const output = resolve(directory, basename(filename));
         const partial = `${output}.partial`;
+        const resultFor = (
+          metadata: { sourceEngine: string; description?: string },
+          details: { size: number; birthtime: Date },
+        ) => ({
+          operation: 'create' as const,
+          filename,
+          size: details.size,
+          createdAt: details.birthtime.toISOString(),
+          target: data.target,
+          format: 'custom' as const,
+          sourceEngine: metadata.sourceEngine,
+          restoreSupported: true,
+          ...(metadata.description
+            ? { description: metadata.description }
+            : {}),
+        });
+        let existing = false;
+        try {
+          await lstat(output);
+          existing = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+        }
+        if (existing) {
+          const metadata = await readBackupArtifactMetadataFile(
+            `${output}.meta.json`,
+          );
+          if (
+            (metadata.version !== 3 && metadata.version !== 4) ||
+            metadata.creationIdentity !== creationIdentity ||
+            metadata.filename !== filename ||
+            metadata.target !== data.target
+          )
+            throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
+          const details = await assertCustomDump(output, maxBytes);
+          if (
+            (await archiveSha256(output, async () => {
+              await check();
+              await lock.ensureHeld();
+            })) !== metadata.archiveSha256
+          )
+            throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+          publishedCreation = resultFor(metadata, details);
+          const completed = await mutate({
+            kind: 'completed',
+            result: publishedCreation,
+            message: '备份完成（已恢复发布结果）',
+          });
+          return completed.result;
+        }
+        // The target lease excludes another active publisher. Partial names
+        // contain the full immutable task UUID, so an interrupted attempt can
+        // clean only its own unpublished files before starting another dump.
+        for (const path of [
+          partial,
+          `${output}.meta.json.partial`,
+          `${output}.meta.json`,
+        ])
+          await unlink(path).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== 'ENOENT') throw error;
+          });
         artifactPath = partial;
         const reservation = await open(partial, 'wx', 0o600);
         await reservation.close();
@@ -1066,6 +1142,7 @@ export function createBackupProcessor(
           sourceManifest
             ? {
                 version: 4,
+                creationIdentity,
                 filename,
                 target: data.target,
                 sourceEngine: 'timescaledb',
@@ -1078,6 +1155,7 @@ export function createBackupProcessor(
               }
             : {
                 version: 3,
+                creationIdentity,
                 filename,
                 target: data.target,
                 sourceEngine: 'postgresql',
@@ -1096,31 +1174,23 @@ export function createBackupProcessor(
           flag: 'wx',
           mode: 0o600,
         });
+        await check();
+        await lock.ensureHeld();
         await rename(metadataPartialPath, `${output}.meta.json`);
         metadataPartialPath = undefined;
         metadataPublishedPath = `${output}.meta.json`;
         // The final dump name is the API's discovery boundary. Publish it
         // only after its complete sidecar exists; a failed rename removes the
         // orphan sidecar and partial archive in the catch path.
+        await check();
+        await lock.ensureHeld();
         await rename(partial, output);
         artifactPath = undefined;
         metadataPublishedPath = undefined;
-        const result = {
-          operation: 'create' as const,
-          filename,
-          size: details.size,
-          createdAt: details.birthtime.toISOString(),
-          target: data.target,
-          format: 'custom' as const,
-          sourceEngine: metadata.sourceEngine,
-          restoreSupported: true,
-          ...('description' in metadata && metadata.description
-            ? { description: metadata.description }
-            : {}),
-        };
+        publishedCreation = resultFor(metadata, details);
         const completed = await mutate({
           kind: 'completed',
-          result,
+          result: publishedCreation,
           message: '备份完成',
         });
         log.info('PostgreSQL 备份任务完成', {
@@ -1132,7 +1202,7 @@ export function createBackupProcessor(
       }
       const filename = data.params.filename;
       if (
-        !/^backup_[0-9]{8}-[0-9]{6}-[a-f0-9]{8}-(primary|competitor)\.dump$/i.test(
+        !/^backup_[0-9]{8}-[0-9]{6}-(?:[a-f0-9]{8}|[a-f0-9]{32})-(primary|competitor)\.dump$/i.test(
           filename,
         ) ||
         !filename.endsWith(`-${data.target}.dump`)
@@ -1268,6 +1338,14 @@ export function createBackupProcessor(
         await unlink(metadataPartialPath).catch(() => undefined);
       if (metadataPublishedPath)
         await unlink(metadataPublishedPath).catch(() => undefined);
+      if (publishedCreation) {
+        // Publication is the durable commit. A lost registry acknowledgement
+        // cannot cause a second pg_dump or turn an existing archive into failure.
+        log.warn('备份已发布，任务完成状态待核实', {
+          reason: 'backup_creation_status_unconfirmed',
+        });
+        return publishedCreation;
+      }
       if (committedRestore) {
         log.error('数据库恢复已保留，但任务完成确认失败', {
           target: data.target,
@@ -1335,6 +1413,9 @@ export function createBackupProcessor(
         ? '恢复目标数据库的字符集或排序规则与备份不一致，禁止原位恢复'
         : '备份任务失败，请核实数据库状态和备份文件';
       let cancelled = false;
+      const retryCreation =
+        data.operation === 'create' &&
+        job.attemptsMade + 1 < (job.opts?.attempts ?? 2);
       try {
         await options.assertJobLock(job, token);
         const state = verify(await store.read(data.taskId));
@@ -1348,18 +1429,24 @@ export function createBackupProcessor(
         ) {
           await mutate({ kind: 'cancelled', message: cancelledResult.message });
           cancelled = true;
-        } else await mutate({ kind: 'failed', message });
+        } else if (!retryCreation) await mutate({ kind: 'failed', message });
       } catch {
         log.warn('备份任务状态写入未确认', {
           reason: 'backup_status_unconfirmed',
         });
+      }
+      if (cancelled) return cancelledResult;
+      if (retryCreation) {
+        log.warn('备份创建未发布，将使用原任务重试', {
+          reason: 'backup_creation_retry',
+        });
+        throw new Error(message);
       }
       log.error('PostgreSQL 备份任务失败', {
         target: data.target,
         reason:
           error instanceof BackupCommandError ? error.reason : 'backup_failed',
       });
-      if (cancelled) return cancelledResult;
       throw new UnrecoverableError(message);
     } finally {
       try {

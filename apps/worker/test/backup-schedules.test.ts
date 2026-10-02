@@ -1,3 +1,4 @@
+import { getQueuePolicy, loadEnv } from '@asin-monitor/config';
 import { TaskRegistryError, type TaskState } from '@asin-monitor/db';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -129,5 +130,49 @@ describe('backup scheduler', () => {
     await run();
     expect(accepted.size).toBe(2);
     expect(tasks.size).toBe(2);
+  });
+  it('inherits creation retry and backoff for both scheduled targets', async () => {
+    const env = loadEnv({
+      DATABASE_URL: 'postgresql://localhost/primary',
+      COMPETITOR_DATABASE_URL: 'postgresql://localhost/competitor',
+      REDIS_URL: 'redis://localhost:6379',
+      AUTH_DATA_AUTHORITY: 'postgresql',
+      JWT_SECRET: 'fixture',
+    });
+    const policy = getQueuePolicy('backup', env).defaultJobOptions;
+    const accepted: unknown[] = [];
+    const store = {
+      create: async (input: object) => ({
+        ...input,
+        createdAt: '2026-10-02T00:00:00.000Z',
+      }),
+      read: vi.fn(),
+    };
+    const queue = {
+      add: async (name: string, data: unknown, options: object) =>
+        accepted.push({ name, data, options: { ...policy, ...options } }),
+    };
+    await enqueueScheduledBackups(
+      'fixture-prefix',
+      '2026-10-02T02:00',
+      store as never,
+      queue as never,
+    );
+    expect(accepted).toHaveLength(2);
+    for (const target of ['primary', 'competitor'])
+      expect(accepted).toContainEqual(
+        expect.objectContaining({
+          name: 'create',
+          data: expect.objectContaining({
+            operation: 'create',
+            target,
+            createdAt: '2026-10-02T00:00:00.000Z',
+          }),
+          options: expect.objectContaining({
+            attempts: 2,
+            backoff: { type: 'exponential', delay: 5000 },
+          }),
+        }),
+      );
   });
 });

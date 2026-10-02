@@ -19,7 +19,7 @@ import {
 
 /** Only files produced by the Neo worker are addressable through HTTP. */
 export const BACKUP_FILENAME_PATTERN =
-  /^backup_[0-9]{8}-[0-9]{6}-[a-f0-9]{8}-(primary|competitor)\.dump$/;
+  /^backup_[0-9]{8}-[0-9]{6}-(?:[a-f0-9]{8}|[a-f0-9]{32})-(primary|competitor)\.dump$/;
 
 export function backupFilenameTarget(filename: string): BackupTarget {
   const match = BACKUP_FILENAME_PATTERN.exec(filename);

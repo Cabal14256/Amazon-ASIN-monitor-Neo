@@ -19,6 +19,7 @@ import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { SchedulerLease } from './scheduler-lease';
+import { taskNotificationWarning } from './task-notification-warning';
 
 export function scheduledBackupTaskId(
   prefix: string,
@@ -108,7 +109,12 @@ export async function startBackupRuntime(env: Env, onFatal: () => void) {
     logger.error('备份配置数据库连接异常', { reason: 'backup_database_error' }),
   );
   const configRepository = new PgBackupConfigRepository(pool);
-  const store = new RedisTaskRepository(control, env);
+  const store = new RedisTaskRepository(
+    control,
+    env,
+    undefined,
+    taskNotificationWarning(),
+  );
   const queue = new Queue(
     getPhysicalQueueName('backup'),
     getQueueOptions('backup', env, connection),

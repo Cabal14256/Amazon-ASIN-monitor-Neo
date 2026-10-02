@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   backupArtifactMetadataSchema,
   backupConfigResultSchema,
+  backupFilenameSchema,
   backupJobDataSchema,
   backupListResultSchema,
   backupRestoreReceiptSchema,
@@ -78,6 +79,45 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('accepts complete UUID filenames and binds creation metadata to a bounded digest', () => {
+    const filename =
+      'backup_20261002-020000-10000000000040008000000000000161-primary.dump';
+    expect(backupFilenameSchema.parse(filename)).toBe(filename);
+    expect(
+      backupFilenameSchema.parse(
+        'backup_20261002-020000-abcdef01-primary.dump',
+      ),
+    ).toBeDefined();
+    for (const invalid of [
+      `../${filename}`,
+      `${filename}.partial`,
+      filename.replace('10000000000040008000000000000161', 'abcdef012'),
+    ])
+      expect(() => backupFilenameSchema.parse(invalid)).toThrow();
+    const metadata = {
+      version: 3,
+      filename,
+      target: 'primary',
+      sourceEngine: 'postgresql',
+      scope: 'full',
+      archiveSha256: 'a'.repeat(64),
+      creationIdentity: 'b'.repeat(64),
+      databaseSettings: {
+        encoding: 'UTF8',
+        lcCollate: 'C',
+        lcCtype: 'C',
+        localeProvider: 'libc',
+      },
+    };
+    expect(backupArtifactMetadataSchema.parse(metadata)).toEqual(metadata);
+    const { creationIdentity: _identity, ...older } = metadata;
+    expect(backupArtifactMetadataSchema.parse(older)).toEqual(older);
+    for (const creationIdentity of ['', 'b'.repeat(63), 'G'.repeat(64)])
+      expect(() =>
+        backupArtifactMetadataSchema.parse({ ...metadata, creationIdentity }),
+      ).toThrow();
+  });
+
   it('accepts only a bounded isolated restore receipt with an unchanged online target', () => {
     const receipt = {
       operation: 'restore',
