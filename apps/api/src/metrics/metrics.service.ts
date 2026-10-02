@@ -14,6 +14,16 @@ import {
 export const METRICS_PREFIX = 'amazon_asin_monitor_';
 const RATE_LIMIT_BACKENDS = ['disabled', 'memory', 'redis'] as const;
 type RateLimitBackendState = (typeof RATE_LIMIT_BACKENDS)[number];
+export const ANALYTICS_CACHE_PREFIXES = [
+  'statisticsByTime',
+  'allCountriesSummary',
+  'regionSummary',
+  'periodSummary',
+  'periodSummaryDetails',
+  'asinStatisticsByCountry',
+  'asinStatisticsByVariantGroup',
+] as const;
+export type AnalyticsCachePrefix = (typeof ANALYTICS_CACHE_PREFIXES)[number];
 
 @Injectable()
 export class MetricsService implements OnModuleDestroy {
@@ -81,14 +91,14 @@ export class MetricsService implements OnModuleDestroy {
 
   readonly cacheHitsTotal = new Counter({
     name: `${METRICS_PREFIX}cache_hits_total`,
-    help: '缓存命中总数（P2 阶段接入）',
+    help: '缓存命中总数',
     labelNames: ['cache_key_prefix'] as const,
     registers: [this.registry],
   });
 
   readonly cacheMissesTotal = new Counter({
     name: `${METRICS_PREFIX}cache_misses_total`,
-    help: '缓存未命中次数（P2 阶段接入）',
+    help: '缓存未命中次数',
     labelNames: ['cache_key_prefix'] as const,
     registers: [this.registry],
   });
@@ -142,6 +152,14 @@ export class MetricsService implements OnModuleDestroy {
     const labels = { dependency: input.dependency };
     this.healthDependencyUp.set(labels, input.up ? 1 : 0);
     this.healthProbeDurationSeconds.observe(labels, input.durationSeconds);
+  }
+
+  recordAnalyticsCacheAccess(prefix: AnalyticsCachePrefix, hit: boolean): void {
+    // Labels describe a cache family, never a physical Redis key or query value.
+    if (!ANALYTICS_CACHE_PREFIXES.includes(prefix) || typeof hit !== 'boolean')
+      return;
+    const counter = hit ? this.cacheHitsTotal : this.cacheMissesTotal;
+    counter.inc({ cache_key_prefix: prefix });
   }
 
   recordRateLimitDecision(input: {
