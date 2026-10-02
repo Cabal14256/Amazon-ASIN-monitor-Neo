@@ -14,7 +14,9 @@ import {
 import {
   BackupConfigError,
   backupConfigView,
+  isTerminalTaskStatus,
   type BackupConfigRepositoryPort,
+  type TaskState,
 } from '@asin-monitor/db';
 import {
   HttpException,
@@ -29,6 +31,7 @@ import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
+import type { QueueTaskSnapshot } from '../tasks/task-query-values';
 import { serializeTask } from '../tasks/task-query-values';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
 import {
@@ -380,25 +383,70 @@ export class BackupService implements OnModuleDestroy {
     return this.run('scheduled-tasks', async () => {
       await this.authorize(principal);
       const deadline = performance.now() + 3000;
-      const port = this.tasks.open(() => {
+      const ensureOpen = () => {
         if (performance.now() >= deadline)
           throw new Error('BACKUP_SCHEDULE_QUERY_DEADLINE');
-      });
+      };
+      const port = this.tasks.open(ensureOpen);
       const tasks = await port.store.listUser(BACKUP_SCHEDULER_USER_ID, {
         limit: 50,
       });
-      return tasks
-        .filter(
-          (task) =>
-            task.userId === BACKUP_SCHEDULER_USER_ID &&
-            task.taskType === 'backup' &&
-            task.taskSubType === 'create',
-        )
-        .map((task) => ({
-          ...serializeTask(task),
-          canCancel: false,
-          downloadUrl: null,
-        }));
+      const scheduled = tasks.filter(
+        (task) =>
+          task.userId === BACKUP_SCHEDULER_USER_ID &&
+          task.taskType === 'backup' &&
+          task.taskSubType === 'create',
+      );
+      const reconciled: TaskState[] = [];
+      for (const task of scheduled) {
+        ensureOpen();
+        let current = task;
+        if (!isTerminalTaskStatus(task.status)) {
+          const queued = await port.findJob(task.taskId, 'backup');
+          ensureOpen();
+          const verify = (candidate: TaskState | QueueTaskSnapshot | null) => {
+            if (
+              !candidate ||
+              candidate.taskId !== task.taskId ||
+              candidate.userId !== task.userId ||
+              candidate.taskType !== task.taskType ||
+              candidate.taskSubType !== task.taskSubType ||
+              candidate.createdAt !== task.createdAt
+            )
+              throw new Error('BACKUP_SCHEDULE_QUEUE_IDENTITY_MISMATCH');
+          };
+          if (queued) {
+            verify(queued);
+            if (queued.status === 'completed' || queued.status === 'failed') {
+              const recovered = await port.store.mutate(
+                task.taskId,
+                queued.status === 'completed'
+                  ? {
+                      kind: 'completed',
+                      result: queued.result ?? task.result,
+                      message: '备份完成（已从队列恢复）',
+                    }
+                  : { kind: 'failed', message: '备份任务失败' },
+                {
+                  userId: task.userId,
+                  taskType: task.taskType,
+                  taskSubType: task.taskSubType,
+                  createdAt: task.createdAt,
+                },
+              );
+              ensureOpen();
+              verify(recovered);
+              current = recovered!;
+            }
+          }
+        }
+        reconciled.push(current);
+      }
+      return reconciled.map((task) => ({
+        ...serializeTask(task),
+        canCancel: false,
+        downloadUrl: null,
+      }));
     });
   }
 

@@ -11,6 +11,22 @@ import {
 } from '../src/backup/backup-files';
 
 describe('backup file boundary', () => {
+  it('keeps expected absent, malformed and schema-invalid sidecars unrestorable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+    try {
+      expect(await readBackupMetadata(directory, filename)).toBeNull();
+      for (const content of [
+        '{broken JSON',
+        JSON.stringify({ version: 3, filename }),
+      ]) {
+        await writeFile(join(directory, `${filename}.meta.json`), content);
+        expect(await readBackupMetadata(directory, filename)).toBeNull();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('addresses the complete task UUID and preserves older eight-digit filenames', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
     const filenames = [

@@ -61,6 +61,19 @@ class BackupCommandError extends Error {
 }
 
 const cancelledResult = { cancelled: true, message: '备份任务已取消' };
+const cleanupErrorCodes = new Set([
+  'EACCES',
+  'EPERM',
+  'EIO',
+  'EROFS',
+  'ENOSPC',
+  'EBUSY',
+  'ETXTBSY',
+  'EMFILE',
+  'ENFILE',
+  'ENODEV',
+  'ESTALE',
+]);
 const identityFields = (data: BackupJobData) => ({
   userId: data.userId,
   taskType: data.taskType,
@@ -930,6 +943,34 @@ export function createBackupProcessor(
     let publishedStagingDatabase: string | undefined;
     let committedRestore: BackupRestoreReceipt | undefined;
     let publishedCreation: Record<string, unknown> | undefined;
+    let cleanupFailed = false;
+    const cleanupOwnedArtifact = async (
+      path: string,
+      artifact: 'archive-partial' | 'metadata-partial' | 'metadata-orphan',
+    ): Promise<boolean> => {
+      try {
+        await unlink(path);
+        return true;
+      } catch (error) {
+        const code =
+          error && typeof error === 'object' && 'code' in error
+            ? error.code
+            : undefined;
+        if (code === 'ENOENT') return true;
+        cleanupFailed = true;
+        log.warn('备份产物清理失败，请按任务 ID 核对残留产物', {
+          reason: 'backup_artifact_cleanup_failed',
+          taskId: data.taskId,
+          target: data.target,
+          artifact,
+          code:
+            typeof code === 'string' && cleanupErrorCodes.has(code)
+              ? code
+              : 'UNKNOWN',
+        });
+        return false;
+      }
+    };
     const creationIdentity = createHash('sha256')
       .update(
         JSON.stringify([
@@ -1076,14 +1117,13 @@ export function createBackupProcessor(
         // The target lease excludes another active publisher. Partial names
         // contain the full immutable task UUID, so an interrupted attempt can
         // clean only its own unpublished files before starting another dump.
-        for (const path of [
-          partial,
-          `${output}.meta.json.partial`,
-          `${output}.meta.json`,
-        ])
-          await unlink(path).catch((error: NodeJS.ErrnoException) => {
-            if (error.code !== 'ENOENT') throw error;
-          });
+        for (const [path, artifact] of [
+          [partial, 'archive-partial'],
+          [`${output}.meta.json.partial`, 'metadata-partial'],
+          [`${output}.meta.json`, 'metadata-orphan'],
+        ] as const)
+          if (!(await cleanupOwnedArtifact(path, artifact)))
+            throw new BackupCommandError('BACKUP_CREATION_CLEANUP_FAILED');
         artifactPath = partial;
         const reservation = await open(partial, 'wx', 0o600);
         await reservation.close();
@@ -1333,11 +1373,12 @@ export function createBackupProcessor(
       log.info('PostgreSQL 恢复任务完成', { target: data.target });
       return completed.result;
     } catch (error) {
-      if (artifactPath) await unlink(artifactPath).catch(() => undefined);
+      if (artifactPath)
+        await cleanupOwnedArtifact(artifactPath, 'archive-partial');
       if (metadataPartialPath)
-        await unlink(metadataPartialPath).catch(() => undefined);
+        await cleanupOwnedArtifact(metadataPartialPath, 'metadata-partial');
       if (metadataPublishedPath)
-        await unlink(metadataPublishedPath).catch(() => undefined);
+        await cleanupOwnedArtifact(metadataPublishedPath, 'metadata-orphan');
       if (publishedCreation) {
         // Publication is the durable commit. A lost registry acknowledgement
         // cannot cause a second pg_dump or turn an existing archive into failure.
@@ -1379,7 +1420,7 @@ export function createBackupProcessor(
         }
         throw new UnrecoverableError('备份任务已停止');
       }
-      const message = publishedStagingDatabase
+      let message = publishedStagingDatabase
         ? `隔离数据库 ${publishedStagingDatabase} 已恢复，但任务状态未确认；请人工核对，在线目标库未切换`
         : error instanceof BackupCommandError &&
           error.reason === 'BACKUP_SOURCE_TARGET_MISMATCH'
@@ -1412,6 +1453,8 @@ export function createBackupProcessor(
           error.reason === 'BACKUP_TARGET_LOCALE_MISMATCH'
         ? '恢复目标数据库的字符集或排序规则与备份不一致，禁止原位恢复'
         : '备份任务失败，请核实数据库状态和备份文件';
+      if (cleanupFailed)
+        message += '；备份产物清理未确认，请按任务 ID 核对残留产物';
       let cancelled = false;
       const retryCreation =
         data.operation === 'create' &&

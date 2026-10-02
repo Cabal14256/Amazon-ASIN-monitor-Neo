@@ -1,3 +1,5 @@
+import { BACKUP_SCHEDULER_USER_ID } from '@asin-monitor/contracts';
+import { transitionTask, type TaskState } from '@asin-monitor/db';
 import { HttpException, type ExecutionContext } from '@nestjs/common';
 import {
   FastifyAdapter,
@@ -11,9 +13,33 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthenticationGuard } from '../src/auth/authentication.guard';
 import { PermissionsGuard } from '../src/auth/permissions.guard';
+import { readBackupMetadata } from '../src/backup/backup-files';
 import { BackupController } from '../src/backup/backup.controller';
 import { BackupService } from '../src/backup/backup.service';
 import { configureHttpApp } from '../src/http-app';
+import type { QueueTaskSnapshot } from '../src/tasks/task-query-values';
+import { taskFixture } from './helpers/task-query-fixtures';
+
+const sidecarFailure = vi.hoisted(() => ({
+  stat: null as Error | null,
+  read: null as Error | null,
+}));
+vi.mock('node:fs/promises', async (original) => {
+  const fs = await original<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    lstat: async (...args: unknown[]) => {
+      if (sidecarFailure.stat && String(args[0]).endsWith('.meta.json'))
+        throw sidecarFailure.stat;
+      return Reflect.apply(fs.lstat, fs, args);
+    },
+    readFile: async (...args: unknown[]) => {
+      if (sidecarFailure.read && String(args[0]).endsWith('.meta.json'))
+        throw sidecarFailure.read;
+      return Reflect.apply(fs.readFile, fs, args);
+    },
+  };
+});
 
 const principal = { userId: 'backup-admin', sessionId: 'session-1' } as never;
 const createdAt = '2026-09-27T00:00:00.000Z';
@@ -64,6 +90,8 @@ async function writeMetadata(
 }
 
 afterEach(async () => {
+  sidecarFailure.stat = null;
+  sidecarFailure.read = null;
   await Promise.all(
     directories
       .splice(0)
@@ -100,10 +128,15 @@ async function fixture(maxBytes = 1024 * 1024) {
   };
   const scheduledStore = {
     listUser: vi.fn(async () => [] as Record<string, unknown>[]),
+    mutate: vi.fn(async () => null as TaskState | null),
+  };
+  const scheduledPort = {
+    store: scheduledStore,
+    findJob: vi.fn(async () => null as QueueTaskSnapshot | null),
   };
   const tasks = {
     openBackup: vi.fn(() => port),
-    open: vi.fn(() => ({ store: scheduledStore })),
+    open: vi.fn(() => scheduledPort),
   };
   const pools = {
     primaryPool: {
@@ -138,6 +171,7 @@ async function fixture(maxBytes = 1024 * 1024) {
     port,
     tasks,
     scheduledStore,
+    scheduledPort,
     pools,
     logger,
     service,
@@ -242,6 +276,150 @@ describe('backup submission HTTP / global exception boundary', () => {
       await app.close();
     }
   });
+});
+
+describe('scheduled backup queue reconciliation and sidecar storage errors', () => {
+  const scheduled = () =>
+    taskFixture({
+      taskId: '10000000-0000-4000-8000-000000000161',
+      userId: BACKUP_SCHEDULER_USER_ID,
+      taskType: 'backup',
+      taskSubType: 'create',
+      status: 'processing',
+      createdAt,
+    });
+  it.each(['completed', 'failed'] as const)(
+    'recovers a scheduled %s run after a lost registry acknowledgement',
+    async (status) => {
+      const f = await fixture();
+      let task = scheduled();
+      f.scheduledStore.listUser.mockResolvedValueOnce([task]);
+      f.scheduledPort.findJob.mockResolvedValueOnce({
+        ...task,
+        status,
+        result: { filename, format: 'custom', target: 'primary' },
+      });
+      f.scheduledStore.mutate.mockImplementation(async (...args: unknown[]) => {
+        task = transitionTask(task, args[1] as never, new Date());
+        return task;
+      });
+      await expect(f.service.scheduledTasks(principal)).resolves.toMatchObject([
+        { taskId: task.taskId, status, canCancel: false, downloadUrl: null },
+      ]);
+      expect(f.scheduledPort.findJob).toHaveBeenCalledWith(
+        task.taskId,
+        'backup',
+      );
+      expect(f.scheduledStore.mutate).toHaveBeenCalledWith(
+        task.taskId,
+        expect.objectContaining({ kind: status }),
+        {
+          userId: BACKUP_SCHEDULER_USER_ID,
+          taskType: 'backup',
+          taskSubType: 'create',
+          createdAt,
+        },
+      );
+    },
+  );
+  it.each([
+    ['taskId', 'another-task'],
+    ['userId', 'another-owner'],
+    ['taskType', 'export'],
+    ['taskSubType', 'restore'],
+    ['createdAt', '2026-09-28T00:00:00.000Z'],
+  ])(
+    'rejects a replaced queue %s before registry mutation',
+    async (key, value) => {
+      const f = await fixture();
+      const task = scheduled();
+      f.scheduledStore.listUser.mockResolvedValueOnce([task]);
+      f.scheduledPort.findJob.mockResolvedValueOnce({
+        ...task,
+        status: 'completed',
+        [key]: value,
+      });
+      await expect(f.service.scheduledTasks(principal)).rejects.toMatchObject({
+        status: 500,
+      });
+      expect(f.scheduledStore.mutate).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain(value);
+    },
+  );
+  it('rejects an identity replacement during the registry CAS', async () => {
+    const f = await fixture();
+    const task = scheduled();
+    f.scheduledStore.listUser.mockResolvedValueOnce([task]);
+    f.scheduledPort.findJob.mockResolvedValueOnce({
+      ...task,
+      status: 'completed',
+    });
+    f.scheduledStore.mutate.mockResolvedValueOnce({
+      ...task,
+      userId: 'another-owner',
+    });
+    await expect(f.service.scheduledTasks(principal)).rejects.toMatchObject({
+      status: 500,
+    });
+  });
+  it.each([null, 'processing'] as const)(
+    'keeps a nonterminal record when queue state is %s',
+    async (status) => {
+      const f = await fixture();
+      const task = scheduled();
+      f.scheduledStore.listUser.mockResolvedValueOnce([task]);
+      if (status)
+        f.scheduledPort.findJob.mockResolvedValueOnce({ ...task, status });
+      await expect(f.service.scheduledTasks(principal)).resolves.toMatchObject([
+        { status: 'processing' },
+      ]);
+      expect(f.scheduledStore.mutate).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['list', 'restore', 'download'] as const)(
+    'reports sidecar storage errors from %s without leaking the volume path',
+    async (operation) => {
+      for (const [phase, code] of [
+        ['stat', 'EACCES'],
+        ['read', 'EIO'],
+      ] as const) {
+        const f = await fixture();
+        await writeFile(join(f.directory, filename), 'PGDMPfixture');
+        await writeMetadata(f.directory, 'postgresql');
+        const error = Object.assign(new Error(`private-token ${f.directory}`), {
+          code,
+        });
+        sidecarFailure[phase] = error;
+        await expect(readBackupMetadata(f.directory, filename)).rejects.toBe(
+          error,
+        );
+        const result =
+          operation === 'list'
+            ? f.service.list(principal)
+            : operation === 'restore'
+            ? f.service.restore(principal, { filename })
+            : f.service.download(principal, filename);
+        await expect(result).rejects.toMatchObject({ status: 500 });
+        expect(f.logger.error).toHaveBeenCalledWith(
+          '备份操作失败',
+          'BackupService',
+          {
+            operation,
+            reason: 'backup_operation_failed',
+            code,
+          },
+        );
+        expect(f.port.enqueue).not.toHaveBeenCalled();
+        expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain(
+          f.directory,
+        );
+        expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain(
+          'private-token',
+        );
+        sidecarFailure[phase] = null;
+      }
+    },
+  );
 });
 
 describe('backup API service', () => {

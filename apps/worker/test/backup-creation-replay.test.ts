@@ -23,6 +23,39 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createBackupProcessor } from '../src/backup-processor';
 
 const dependencies = vi.hoisted(() => ({ pool: vi.fn(), spawn: vi.fn() }));
+const filesystemFailure = vi.hoisted(() => ({
+  unlinkSuffix: null as string | null,
+  renameSuffix: null as string | null,
+  code: 'EACCES',
+}));
+vi.mock('node:fs/promises', async (original) => {
+  const fs = await original<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    unlink: async (path: string) => {
+      if (
+        filesystemFailure.unlinkSuffix &&
+        path.endsWith(filesystemFailure.unlinkSuffix)
+      ) {
+        await fs.lstat(path);
+        throw Object.assign(new Error(`private-token ${path}`), {
+          code: filesystemFailure.code,
+        });
+      }
+      return fs.unlink(path);
+    },
+    rename: async (from: string, to: string) => {
+      if (
+        filesystemFailure.renameSuffix &&
+        from.endsWith(filesystemFailure.renameSuffix)
+      )
+        throw Object.assign(new Error(`private-token ${from}`), {
+          code: 'EIO',
+        });
+      return fs.rename(from, to);
+    },
+  };
+});
 vi.mock('@asin-monitor/db', async (original) => ({
   ...(await original<typeof import('@asin-monitor/db')>()),
   createPgPool: dependencies.pool,
@@ -30,6 +63,8 @@ vi.mock('@asin-monitor/db', async (original) => ({
 vi.mock('node:child_process', () => ({ spawn: dependencies.spawn }));
 const directories: string[] = [];
 afterEach(async () => {
+  filesystemFailure.unlinkSuffix = null;
+  filesystemFailure.renameSuffix = null;
   await Promise.all(
     directories
       .splice(0)
@@ -156,6 +191,77 @@ async function fixture() {
 }
 
 describe('creation attempts and durable publication', () => {
+  it('stops before a replacement dump when its previous partial cannot be removed', async () => {
+    const f = await fixture();
+    f.failDumps(1);
+    filesystemFailure.unlinkSuffix = '.dump.partial';
+    filesystemFailure.code = 'EACCES';
+    await expect(f.processor(f.job, 'lock')).rejects.not.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state().status).toBe('processing');
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+    f.job.attemptsMade = 1;
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+    expect(f.state()).toMatchObject({
+      status: 'failed',
+      message: expect.stringContaining('产物清理未确认'),
+    });
+    expect(f.log.warn).toHaveBeenCalledWith(
+      '备份产物清理失败，请按任务 ID 核对残留产物',
+      expect.objectContaining({
+        taskId: f.data.taskId,
+        artifact: 'archive-partial',
+        code: 'EACCES',
+      }),
+    );
+  });
+  it.each([
+    ['archive-partial', '.dump.partial', null, 'EACCES'],
+    ['metadata-partial', '.meta.json.partial', '.meta.json.partial', 'EROFS'],
+    ['metadata-orphan', '.meta.json', '.dump.partial', 'EIO'],
+    ['archive-partial', '.dump.partial', null, 'ESECRET_TOKEN_VALUE'],
+  ] as const)(
+    'reports an orphaned %s after failed publication and failed cleanup',
+    async (artifact, suffix, renameSuffix, code) => {
+      const f = await fixture();
+      f.job.opts.attempts = 1;
+      if (!renameSuffix) f.failDumps(1);
+      filesystemFailure.unlinkSuffix = suffix;
+      filesystemFailure.renameSuffix = renameSuffix;
+      filesystemFailure.code = code;
+      await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+        UnrecoverableError,
+      );
+      expect(f.log.warn).toHaveBeenCalledWith(
+        '备份产物清理失败，请按任务 ID 核对残留产物',
+        {
+          reason: 'backup_artifact_cleanup_failed',
+          taskId: f.data.taskId,
+          target: 'primary',
+          artifact,
+          code: code === 'ESECRET_TOKEN_VALUE' ? 'UNKNOWN' : code,
+        },
+      );
+      expect(f.state()).toMatchObject({
+        status: 'failed',
+        message: expect.stringContaining('产物清理未确认'),
+      });
+      expect(
+        (await readdir(f.directory)).some((name) => name.endsWith(suffix)),
+      ).toBe(true);
+      const logs = JSON.stringify([
+        f.log.warn.mock.calls,
+        f.log.error.mock.calls,
+      ]);
+      expect(logs).not.toContain(f.directory);
+      expect(logs).not.toContain('private-token');
+      expect(logs).not.toContain('ESECRET_TOKEN_VALUE');
+    },
+  );
   it('retries a transient dump failure without making task metadata terminal', async () => {
     const f = await fixture();
     f.failDumps(1);

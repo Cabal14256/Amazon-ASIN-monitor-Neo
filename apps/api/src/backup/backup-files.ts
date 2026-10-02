@@ -77,8 +77,16 @@ export async function readBackupMetadata(directory: string, filename: string) {
       parsed.data.target === target
       ? parsed.data
       : null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (
+      error instanceof SyntaxError ||
+      (error &&
+        typeof error === 'object' &&
+        'code' in error &&
+        error.code === 'ENOENT')
+    )
+      return null;
+    throw error;
   }
 }
 
