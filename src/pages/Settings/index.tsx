@@ -139,9 +139,19 @@ const SettingsPage: React.FC<unknown> = () => {
   const [monitorForm] = ProForm.useForm();
   const [feishuForm] = ProForm.useForm();
   const [backups, setBackups] = useState<API.BackupInfo[]>([]);
+  const [scheduledBackups, setScheduledBackups] = useState<
+    API.BackupScheduledTask[]
+  >([]);
   const [backupLoading, setBackupLoading] = useState(false);
   const [restoreModalVisible, setRestoreModalVisible] = useState(false);
   const [restoreFilename, setRestoreFilename] = useState<string>('');
+  const selectedBackup = backups.find(
+    (backup) => backup.filename === restoreFilename,
+  );
+  const isolatedRestore = selectedBackup?.restoreMode === 'isolated';
+  const restoreWarning = isolatedRestore
+    ? `将从“${restoreFilename}”创建隔离恢复数据库；在线目标数据库不会切换。恢复完成后请核对任务结果中的数据库名称。`
+    : `将用“${restoreFilename}”覆盖当前数据库，且不可撤销。请确认已有可用备份。`;
   const [backupForm] = ProForm.useForm();
   const [backupConfigLoading, setBackupConfigLoading] = useState(false);
   const [backupConfigForm] = ProForm.useForm();
@@ -247,6 +257,13 @@ const SettingsPage: React.FC<unknown> = () => {
           setBackups(response);
         }
       }
+      try {
+        const scheduled = await backupServices.listScheduledBackups();
+        setScheduledBackups(scheduled.data || []);
+      } catch {
+        // Legacy deployments do not provide this Neo-only view.
+        setScheduledBackups([]);
+      }
     } catch (error) {
       console.error('加载备份列表失败:', error);
       message.error('加载备份列表失败');
@@ -273,7 +290,8 @@ const SettingsPage: React.FC<unknown> = () => {
             backupConfigForm.setFieldsValue({
               enabled: config?.enabled || false,
               scheduleType: config?.scheduleType || 'daily',
-              scheduleValue: config?.scheduleValue,
+              scheduleValue:
+                config?.scheduleType === 'daily' ? null : config?.scheduleValue,
               backupTime: config?.backupTime
                 ? dayjs(config.backupTime, 'HH:mm')
                 : dayjs('02:00', 'HH:mm'),
@@ -298,7 +316,8 @@ const SettingsPage: React.FC<unknown> = () => {
       await backupServices.saveBackupConfig({
         enabled: values.enabled || false,
         scheduleType: values.scheduleType || 'daily',
-        scheduleValue: values.scheduleValue,
+        scheduleValue:
+          values.scheduleType === 'daily' ? null : values.scheduleValue,
         backupTime,
       });
       message.success('自动备份配置已保存');
@@ -348,16 +367,20 @@ const SettingsPage: React.FC<unknown> = () => {
 
   // 恢复备份
   const handleRestoreBackup = async () => {
-    if (!restoreFilename) {
+    if (!restoreFilename || !selectedBackup) {
       message.error('请选择要恢复的备份文件');
+      return;
+    }
+    if (selectedBackup.restoreSupported === false) {
+      message.error('此备份与当前恢复目标不兼容，请刷新备份列表');
       return;
     }
 
     Modal.confirm({
       title: '确认恢复备份',
-      content: `确定要恢复备份文件 "${restoreFilename}" 吗？此操作将覆盖当前数据库，且不可撤销！`,
+      content: restoreWarning,
       okText: '确认恢复',
-      okType: 'danger',
+      okType: isolatedRestore ? 'primary' : 'danger',
       cancelText: '取消',
       onOk: async () => {
         try {
@@ -397,12 +420,12 @@ const SettingsPage: React.FC<unknown> = () => {
       const downloadUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      a.download = filename;
+      a.download = filename.replace(/\.dump$/, '.tar');
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(downloadUrl);
-      antdMessage.success('下载成功');
+      antdMessage.success('备份下载成功；请核对文件格式及对应恢复环境');
     } catch (error: any) {
       message.error(error?.errorMessage || '下载备份失败');
     }
@@ -812,7 +835,7 @@ const SettingsPage: React.FC<unknown> = () => {
           <Card title="创建备份">
             <Alert
               message="备份说明"
-              description="备份将保存为SQL文件，包含完整的数据库结构和数据。可以选择备份所有表或指定表。"
+              description="文件格式由当前服务端决定：Neo PostgreSQL 使用 .dump，下载时连同恢复元数据打包；Legacy MySQL 使用 .sql。请在备份列表核对文件名与恢复能力。"
               type="info"
               showIcon
               style={{ marginBottom: 16 }}
@@ -871,6 +894,12 @@ const SettingsPage: React.FC<unknown> = () => {
                   render: (time: string) => formatBeijing(time),
                 },
                 {
+                  title: '描述',
+                  dataIndex: 'description',
+                  key: 'description',
+                  render: (description?: string) => description || '—',
+                },
+                {
                   title: '操作',
                   key: 'action',
                   render: (_: any, record: API.BackupInfo) => (
@@ -889,6 +918,7 @@ const SettingsPage: React.FC<unknown> = () => {
                       </Button>
                       <Button
                         type="link"
+                        disabled={record.restoreSupported === false}
                         onClick={() => {
                           if (!record.filename) {
                             message.warning('备份文件名缺失');
@@ -898,7 +928,11 @@ const SettingsPage: React.FC<unknown> = () => {
                           setRestoreModalVisible(true);
                         }}
                       >
-                        恢复
+                        {record.restoreSupported === false
+                          ? '不可恢复'
+                          : record.restoreMode === 'isolated'
+                          ? '隔离恢复'
+                          : '恢复'}
                       </Button>
                       <Popconfirm
                         title="确定要删除这个备份吗？"
@@ -928,6 +962,25 @@ const SettingsPage: React.FC<unknown> = () => {
             />
           </Card>
 
+          <Card title="自动备份执行记录" style={{ marginTop: 16 }}>
+            <Table
+              dataSource={scheduledBackups}
+              rowKey="taskId"
+              columns={[
+                { title: '任务', dataIndex: 'title', key: 'title' },
+                { title: '状态', dataIndex: 'status', key: 'status' },
+                { title: '说明', dataIndex: 'message', key: 'message' },
+                {
+                  title: '创建时间',
+                  dataIndex: 'createdAt',
+                  key: 'createdAt',
+                  render: (time: string) => formatBeijing(time),
+                },
+              ]}
+              pagination={{ pageSize: 10 }}
+            />
+          </Card>
+
           <Modal
             title="恢复备份"
             open={restoreModalVisible}
@@ -937,13 +990,17 @@ const SettingsPage: React.FC<unknown> = () => {
               setRestoreFilename('');
             }}
             okText="确认恢复"
-            okType="danger"
+            okType={isolatedRestore ? 'primary' : 'danger'}
+            okButtonProps={{
+              disabled:
+                !selectedBackup || selectedBackup.restoreSupported === false,
+            }}
             cancelText="取消"
           >
             <Alert
-              message="警告"
-              description={`确定要恢复备份文件 "${restoreFilename}" 吗？此操作将覆盖当前数据库，且不可撤销！请确保已备份当前数据。`}
-              type="error"
+              message={isolatedRestore ? '隔离恢复' : '警告'}
+              description={restoreWarning}
+              type={isolatedRestore ? 'info' : 'error'}
               showIcon
               style={{ marginBottom: 16 }}
             />

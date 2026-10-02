@@ -51,6 +51,7 @@ const POLICIES: Record<QueueName, QueuePolicy> = {
   },
   backup: {
     ...standard,
+    // Creation is replay-safe; producers override destructive restores to one attempt.
     duration: 2000,
     concurrencyKey: 'BACKUP_QUEUE_WORKER_CONCURRENCY',
   },
@@ -63,6 +64,13 @@ const POLICIES: Record<QueueName, QueuePolicy> = {
 
 export function getQueuePolicy(name: QueueName, env: Env) {
   const policy = POLICIES[name];
+  // A committed restore may have only a BullMQ receipt while the separate
+  // task registry is unavailable. Keep it throughout the metadata lifetime;
+  // no count cap may evict it early when newer jobs complete.
+  const backupRetention =
+    name === 'backup'
+      ? Math.max(7 * 24 * 60 * 60, env.TASK_META_TTL_SECONDS)
+      : undefined;
   // Keep the original request identity available while metadata can be read.
   // Explicit job removal can still erase it; absence is never non-execution proof.
   const checkRetention =
@@ -79,13 +87,13 @@ export function getQueuePolicy(name: QueueName, env: Env) {
       age:
         name === 'monitor'
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
-          : Math.max(policy.completeAge, checkRetention),
+          : backupRetention ?? Math.max(policy.completeAge, checkRetention),
     },
     removeOnFail: {
       age:
         name === 'monitor'
           ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
-          : Math.max(policy.failureAge, checkRetention),
+          : backupRetention ?? Math.max(policy.failureAge, checkRetention),
     },
   };
   const limiter =

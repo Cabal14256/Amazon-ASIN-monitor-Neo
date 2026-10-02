@@ -1,3 +1,4 @@
+import { BACKUP_FILENAME_PATTERN } from '../backup/backup-files';
 import { auditText } from './audit-data';
 
 export interface AuditAction {
@@ -5,6 +6,30 @@ export interface AuditAction {
   resource: string;
   resourceId: string | null;
   resourceName: string | null;
+}
+
+const backupFilename = (value: unknown): string | null =>
+  typeof value === 'string' && BACKUP_FILENAME_PATTERN.test(value)
+    ? value
+    : null;
+const backupTarget = (value: unknown): string | null =>
+  value === 'primary' || value === 'competitor' ? value : null;
+
+/** Backup audit records identify the operation and artifact, never free-text
+ * descriptions, table names, or unvalidated filenames. */
+export function auditBackupBody(
+  route: string,
+  body: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!body) return null;
+  if (route === '/api/v1/backup') return { target: backupTarget(body.target) };
+  if (route === '/api/v1/backup/restore')
+    return {
+      filename: backupFilename(body.filename),
+      target: backupTarget(body.target),
+    };
+  if (route === '/api/v1/backup/config') return { change: 'backup_schedule' };
+  return null;
 }
 
 /** 迁移 legacy 路径/方法优先级；只匹配 API 路由模板，不匹配 query 内容。 */
@@ -28,6 +53,16 @@ export function auditAction(
     resourceId: auditText(id, 50),
     resourceName: auditText(name, 255),
   });
+  if (path === '/backup' && method === 'POST')
+    return entry('CREATE', 'backup', null, backupTarget(body.target));
+  if (path === '/backup/restore' && method === 'POST')
+    return entry('RESTORE', 'backup', backupFilename(body.filename));
+  if (path === '/backup/:filename' && method === 'DELETE')
+    return entry('DELETE', 'backup', backupFilename(params.filename));
+  if (path === '/backup/config' && method === 'POST')
+    return entry('UPDATE', 'backup_config', null, '备份配置');
+  if (path === '/backup/:filename/download' && method === 'GET')
+    return entry('EXPORT', 'backup', backupFilename(params.filename));
   if (path.startsWith('/export/') || path === '/tasks/export') {
     if (method !== 'GET' && method !== 'POST') return undefined;
     return entry(

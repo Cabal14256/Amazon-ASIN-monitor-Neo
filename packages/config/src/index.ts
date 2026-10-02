@@ -5,8 +5,10 @@ import { config as loadDotenv } from 'dotenv';
 import { parse as parsePostgresConnectionString } from 'pg-connection-string';
 import { z } from 'zod';
 
+export * from './backup-lifecycle';
 export * from './queue-policy';
 export * from './queues';
+export { parsePostgresConnectionString };
 
 /**
  * 共享环境变量校验。
@@ -27,6 +29,49 @@ const optionalNonEmptyStringSchema = z.preprocess(
     typeof value === 'string' && value.trim() === '' ? undefined : value,
   z.string().trim().min(1).optional(),
 );
+
+const absolutePathSchema = optionalNonEmptyStringSchema.refine(
+  (value) =>
+    value === undefined || (isAbsolute(value) && !/[\0\r\n]/.test(value)),
+  '路径必须是共享存储的绝对路径且不得包含控制字符',
+);
+
+/**
+ * Executable paths are passed to spawnFile with shell=false. Keep this value
+ * to one executable path/name so environment files cannot inject arguments or
+ * shell syntax into the backup worker.
+ */
+export const BACKUP_COMMAND_PATH_MAX_LENGTH = 512;
+const backupCommandPathSchema = (defaultValue: string) =>
+  z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(BACKUP_COMMAND_PATH_MAX_LENGTH)
+      .regex(/^[^\0\r\n;&|<>`$]+$/, '备份命令路径包含非法字符')
+      .refine(
+        (value) => isAbsolute(value) || !/\s/.test(value),
+        '备份命令名称不得包含参数；带空格的路径必须是绝对路径',
+      )
+      .default(defaultValue),
+  );
+
+const backupCommandTimeoutSchema = z.coerce
+  .number()
+  .int()
+  .min(1_000)
+  .max(86_400_000)
+  .default(3_600_000);
+
+const backupMaxBytesSchema = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .max(1_099_511_627_776)
+  .default(10_737_418_240);
 
 // Legacy getWorkerConcurrency: invalid/nonpositive values fall back to one,
 // positive fractions are floored (with a minimum of one).
@@ -241,6 +286,15 @@ const envObjectSchema = z.object({
       value === undefined || (isAbsolute(value) && !value.includes('\0')),
     'IMPORT_STORAGE_DIRECTORY 必须是共享存储的绝对路径',
   ),
+  // Backup artifacts must live on a persistent shared mount, never container
+  // temp storage. Empty values use the repository var/neo/backups default.
+  BACKUP_STORAGE_DIRECTORY: absolutePathSchema,
+  // A bare executable name uses PATH; absolute paths are allowed for pinned
+  // PostgreSQL installations. Arguments and shell metacharacters are rejected.
+  PG_DUMP_PATH: backupCommandPathSchema('pg_dump'),
+  PG_RESTORE_PATH: backupCommandPathSchema('pg_restore'),
+  BACKUP_COMMAND_TIMEOUT_MS: backupCommandTimeoutSchema,
+  BACKUP_MAX_BYTES: backupMaxBytesSchema,
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
   PASSWORD_EXPIRE_DAYS: z.coerce.number().int().min(1).max(3650).default(90),
@@ -500,6 +554,17 @@ export function getImportStorageDirectory(
   const workspaceRoot = findWorkspaceRoot(cwd);
   if (!workspaceRoot) throw new Error('IMPORT_STORAGE_DIRECTORY_REQUIRED');
   return join(workspaceRoot, 'var', 'neo', 'imports');
+}
+
+/** API and Worker share one persistent backup directory. */
+export function getBackupStorageDirectory(
+  env: Pick<Env, 'BACKUP_STORAGE_DIRECTORY'>,
+  cwd = process.cwd(),
+): string {
+  if (env.BACKUP_STORAGE_DIRECTORY) return env.BACKUP_STORAGE_DIRECTORY;
+  const workspaceRoot = findWorkspaceRoot(cwd);
+  if (!workspaceRoot) throw new Error('BACKUP_STORAGE_DIRECTORY_REQUIRED');
+  return join(workspaceRoot, 'var', 'neo', 'backups');
 }
 
 /** Neo 专用配置优先，根前端配置作为补充；已有进程环境变量始终优先。 */

@@ -6,7 +6,9 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  backupJobDataSchema,
   primaryMonitorJobSchema,
+  type BackupJobData,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
 } from '@asin-monitor/contracts';
@@ -64,6 +66,10 @@ export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
 }
+export interface BackupProducerPort {
+  store: Pick<RedisTaskRepository, 'create'>;
+  enqueue(data: BackupJobData): Promise<void>;
+}
 export interface MonitorProducerPort {
   store: Pick<RedisTaskRepository, 'create' | 'mutate'>;
   assertConsumer(): Promise<void>;
@@ -90,6 +96,12 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   const failure = status === 'failed' ? '任务执行失败' : null;
   const owner = job.data?.userId;
   let checkOperation: QueueTaskSnapshot['checkOperation'];
+  let backupData: QueueTaskSnapshot['backupData'];
+  if (type === 'backup') {
+    backupData = backupJobDataSchema.parse(job.data);
+    if (backupData.taskId !== job.id || job.name !== backupData.operation)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+  }
   if (['variant-check', 'batch-check'].includes(type)) {
     const data = parseVariantCheckJob(job.data);
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
@@ -107,6 +119,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   }
   return {
     ...(checkOperation ? { checkOperation } : {}),
+    ...(backupData ? { backupData } : {}),
     taskId: job.id!,
     taskType: type,
     userId:
@@ -144,6 +157,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private backupQueue?: Queue;
   private monitorQueue?: Queue;
   private readonly checkQueues = new Map<
     'variant-check' | 'batch-check',
@@ -396,6 +410,43 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openBackup(ensureOpen: () => void): BackupProducerPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.createStore(ensureOpen),
+      enqueue: (input) =>
+        command(async () => {
+          const data = backupJobDataSchema.parse(input);
+          const queue = (this.backupQueue ??= new Queue(
+            getPhysicalQueueName('backup'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('backup', this.env)
+                .defaultJobOptions,
+            },
+          ));
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('备份队列连接异常', 'TaskQueryRuntime', {
+                reason: 'backup_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.backupQueue === queue) this.backupQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          await queue.add(data.operation, data, {
+            jobId: data.taskId,
+            ...(data.operation === 'restore' ? { attempts: 1 } : {}),
+          });
+        }),
+    };
+  }
   openMonitor(ensureOpen: () => void): MonitorProducerPort {
     const command = this.command(ensureOpen);
     const readyQueue = async () => {
@@ -488,6 +539,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.backupQueue ? [this.backupQueue] : []),
         ...(this.monitorQueue ? [this.monitorQueue] : []),
         ...this.checkQueues.values(),
       ].map((queue) => queue.close()),

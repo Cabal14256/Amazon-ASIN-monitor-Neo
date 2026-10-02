@@ -11,6 +11,7 @@ import {
   TaskQueryRuntime,
   type TaskQueryPort,
 } from '../src/tasks/task-query.runtime';
+import { backupCreationFixture } from './helpers/backup-creation-fixtures';
 import { sessionApp } from './helpers/session-app';
 import {
   taskAuthFixture,
@@ -68,6 +69,122 @@ describe('own task query HTTP and bounded reconciliation', () => {
       url: `/api/v1${path}`,
       headers: requestHeaders,
     });
+  it.each(['cancelling', 'cancelled', 'failed'] as const)(
+    'recovers a published create receipt from %s without leaking internal proof in actual HTTP',
+    async (status) => {
+      const published = backupCreationFixture(taskUserId);
+      task = taskFixture({
+        ...published.data,
+        status,
+        result: null,
+        cancelRequestedAt: '2026-09-02T00:00:00.000Z',
+      });
+      rows = [task];
+      queue = {
+        ...task,
+        status: 'completed',
+        result: published.result,
+        backupData: published.data,
+      };
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'completed',
+        result: {
+          filename: published.result.filename,
+          createdAt: published.result.createdAt,
+        },
+      });
+      expect(response.body).not.toContain('backupCreationCommit');
+      expect(response.body).not.toContain('creationIdentity');
+      expect(response.body).not.toContain(
+        published.result.backupCreationCommit.archiveSha256,
+      );
+      expect(response.body).not.toContain('params');
+      expect(port.store.mutate).toHaveBeenCalledWith(
+        task.taskId,
+        expect.objectContaining({ kind: 'backup-create-committed' }),
+        {
+          userId: taskUserId,
+          taskType: 'backup',
+          taskSubType: 'create',
+          createdAt: task.createdAt,
+        },
+      );
+    },
+  );
+  it('retries a lost receipt CAS acknowledgement on the next actual HTTP read', async () => {
+    const published = backupCreationFixture(taskUserId);
+    task = taskFixture({ ...published.data, status: 'cancelled' });
+    queue = {
+      ...task,
+      status: 'completed',
+      result: published.result,
+      backupData: published.data,
+    };
+    vi.mocked(port.store.mutate).mockRejectedValueOnce(
+      new Error('private-redis-token'),
+    );
+    const failed = await get(`/tasks/${task.taskId}`);
+    expect(failed.statusCode).toBe(500);
+    expect(failed.body).not.toContain('private-redis');
+    expect(task.status).toBe('cancelled');
+    const recovered = await get(`/tasks/${task.taskId}`);
+    expect(recovered.json().data.status).toBe('completed');
+  });
+  it.each([null, 'legacy-completion'] as const)(
+    'preserves a cancelled create when queue publication evidence is %s',
+    async (proof) => {
+      const published = backupCreationFixture(taskUserId);
+      task = taskFixture({ ...published.data, status: 'cancelled' });
+      queue = proof
+        ? {
+            ...task,
+            status: 'completed',
+            result: { filename: published.result.filename },
+          }
+        : null;
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.json().data.status).toBe('cancelled');
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'owner',
+    'task',
+    'version',
+    'params',
+    'digest',
+    'target',
+    'restore',
+  ] as const)(
+    'rejects changed creation %s evidence before actual HTTP registry mutation',
+    async (field) => {
+      const published = backupCreationFixture(taskUserId);
+      task = taskFixture({ ...published.data, status: 'cancelled' });
+      const result = structuredClone(published.result);
+      const data = structuredClone(published.data);
+      if (field === 'owner') result.backupCreationCommit.userId = 'foreign';
+      if (field === 'task')
+        result.backupCreationCommit.taskId =
+          '10000000-0000-4000-8000-000000000162';
+      if (field === 'version')
+        (result.backupCreationCommit as { version: number }).version = 2;
+      if (field === 'params') data.params.description = 'changed request';
+      if (field === 'digest')
+        result.backupCreationCommit.creationIdentity = 'f'.repeat(64);
+      if (field === 'target') result.target = 'competitor';
+      if (field === 'restore')
+        Object.assign(data, {
+          operation: 'restore',
+          taskSubType: 'restore',
+          params: { filename: result.filename },
+        });
+      queue = { ...task, status: 'completed', result, backupData: data };
+      expect((await get(`/tasks/${task.taskId}`)).statusCode).toBe(500);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(paths)('requires login: %s', async (path) => {
     expect((await get(path, {} as never)).statusCode).toBe(401);
     expect(runtime.open).not.toHaveBeenCalled();
@@ -266,6 +383,155 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
+  it('keeps nonterminal recovery compatibility for an older creation queue result without commit proof', async () => {
+    task = {
+      ...task!,
+      taskId: '10000000-0000-4000-8000-000000000161',
+      taskType: 'backup',
+      taskSubType: 'create',
+      status: 'processing',
+      startedAt: task!.createdAt,
+    };
+    const result = {
+      operation: 'create',
+      filename:
+        'backup_20261002-020000-10000000000040008000000000000161-primary.dump',
+      target: 'primary',
+      format: 'custom',
+      size: 12,
+      createdAt: '2026-10-02T00:00:00.000Z',
+      sourceEngine: 'postgresql',
+      restoreSupported: true,
+    };
+    queue = { ...task, status: 'completed', result };
+    const response = await get(`/tasks/${task.taskId}`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      status: 'completed',
+      progress: 100,
+      result,
+    });
+    expect(port.store.mutate).toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ kind: 'completed', result }),
+      {
+        userId: taskUserId,
+        taskType: 'backup',
+        taskSubType: 'create',
+        createdAt: task!.createdAt,
+      },
+    );
+  });
+  it.each(
+    (['processing', 'cancelling', 'cancelled', 'failed'] as const).flatMap(
+      (status) =>
+        (['in-place', 'isolated'] as const).map((restoreMode) => ({
+          status,
+          restoreMode,
+        })),
+    ),
+  )(
+    'recovers a retained restore receipt despite stale registry state: %j',
+    async ({ status, restoreMode }) => {
+      task = {
+        ...task!,
+        taskType: 'backup',
+        taskSubType: 'restore',
+        status,
+        ...(status === 'cancelling' || status === 'cancelled'
+          ? { cancelRequestedAt: new Date().toISOString() }
+          : {}),
+      };
+      const result = {
+        operation: 'restore',
+        format: 'custom',
+        filename: 'backup_20260927-230000-1234abcd-primary.dump',
+        target: 'primary',
+        restoreMode,
+        targetDatabaseChanged: restoreMode === 'in-place',
+        ...(restoreMode === 'isolated'
+          ? { restoredDatabase: 'neo_restore_primary_0123456789abcdef' }
+          : {}),
+        verification: 'unconfirmed',
+        message: '数据库已恢复，请核对',
+      };
+      queue = { ...task, status: 'completed', result };
+      const response = await get();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'completed',
+        result,
+      });
+      expect(port.store.mutate).toHaveBeenCalledWith(
+        'task-95',
+        { kind: 'restore-committed', result },
+        expect.objectContaining({
+          taskType: 'backup',
+          taskSubType: 'restore',
+          createdAt: task!.createdAt,
+        }),
+      );
+    },
+  );
+  it.each(
+    (['cancelled', 'failed'] as const).flatMap((status) =>
+      (['cancel-marker', 'missing', 'invalid'] as const).flatMap((evidence) =>
+        (['detail', 'list'] as const).map((endpoint) => ({
+          status,
+          evidence,
+          endpoint,
+        })),
+      ),
+    ),
+  )(
+    'preserves a terminal restore without commit evidence in actual HTTP: %j',
+    async ({ status, evidence, endpoint }) => {
+      task = taskFixture({
+        taskType: 'backup',
+        taskSubType: 'restore',
+        status,
+        result: null,
+      });
+      rows = [task];
+      queue = {
+        ...task,
+        status: 'completed',
+        result:
+          evidence === 'cancel-marker'
+            ? { cancelled: true, message: '备份任务已取消' }
+            : evidence === 'missing'
+            ? null
+            : { operation: 'restore', verification: 'confirmed' },
+      };
+      const response = await get(
+        endpoint === 'detail' ? `/tasks/${task.taskId}` : '/tasks',
+      );
+      expect(response.statusCode).toBe(200);
+      const result =
+        endpoint === 'detail'
+          ? response.json().data
+          : response
+              .json()
+              .data.find((row: TaskState) => row.taskId === task!.taskId);
+      expect(result).toMatchObject({ status, result: null });
+      expect(task.status).toBe(status);
+      expect(task.result).toBeNull();
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['createdAt', 'taskSubType'] as const)(
+    'rejects a restore receipt from a different queue %s',
+    async (field) => {
+      task = { ...task!, taskType: 'backup', taskSubType: 'restore' };
+      queue = {
+        ...task,
+        status: 'completed',
+        [field]: field === 'createdAt' ? '2020-01-01T00:00:00.000Z' : 'create',
+      };
+      expect((await get()).statusCode).toBe(500);
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(['pending', 'processing', 'cancelling'])(
     'does not replace nonterminal %s metadata with queue progress',
     async (status) => {

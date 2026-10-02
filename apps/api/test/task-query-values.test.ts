@@ -135,6 +135,33 @@ describe('task query values and actual Legacy public model', () => {
       downloadUrl: '/api/v1/tasks/A%2FB%3FC/download',
     });
   });
+  it('does not advertise the unsupported task download endpoint for backup results', () => {
+    const artifact = 'backup_20260927-020000-abcdef01-primary.dump';
+    const backup = taskFixture({
+      taskType: 'backup',
+      taskSubType: 'create',
+      status: 'completed',
+      result: { filename: artifact, operation: 'create' },
+    });
+    expect(serializeTask(backup)).toMatchObject({
+      filename: artifact,
+      downloadUrl: null,
+    });
+    expect(
+      serializeTask({
+        ...backup,
+        result: {
+          filename: artifact,
+          filepath: '/private/backup.dump',
+          downloadUrl: '/legacy/download',
+        },
+      }),
+    ).toMatchObject({
+      filename: artifact,
+      downloadUrl: null,
+      result: { filename: artifact, downloadUrl: null },
+    });
+  });
   it.each(['', 'x'.repeat(201), 'a\u0000b', undefined])(
     'rejects invalid task identifier %j',
     (value) => expect(() => parseTaskId(value)).toThrow(),

@@ -1,4 +1,10 @@
-import { variantCheckResultReferenceSchema } from '@asin-monitor/contracts';
+import {
+  backupCreationFilename,
+  backupCreationReceiptSchema,
+  backupFilenameCreatedAt,
+  backupRestoreReceiptSchema,
+  variantCheckResultReferenceSchema,
+} from '@asin-monitor/contracts';
 import { z } from 'zod';
 import { parseVariantCheckOperation } from '../domain/variant-check-receipt';
 
@@ -59,7 +65,31 @@ const mutationSchema = z.discriminatedUnion('kind', [
     result: z.unknown().optional(),
     message,
   }),
+  // Only callers with a verified durable publication receipt may use this.
+  z.object({
+    kind: z.literal('backup-create-committed'),
+    result: backupCreationReceiptSchema,
+    message,
+  }),
   z.object({ kind: z.literal('failed'), message: z.string().min(1).max(2000) }),
+  // Only a backup worker that confirmed nothing was published and cleanup is
+  // certain may use this failure. Durable commit mutations stay separate.
+  z.object({
+    kind: z.literal('backup-uncommitted-failed'),
+    message: z.string().min(1).max(2000),
+  }),
+  z.object({
+    kind: z.literal('restore-committed'),
+    result: backupRestoreReceiptSchema.refine(
+      (value) => value.verification === 'unconfirmed',
+    ),
+  }),
+  z.object({
+    kind: z.literal('restore-confirmed'),
+    result: backupRestoreReceiptSchema.refine(
+      (value) => value.verification === 'confirmed',
+    ),
+  }),
   // Only callers that confirmed the immutable PostgreSQL receipt may use this.
   z.object({
     kind: z.literal('check-completed'),
@@ -80,7 +110,55 @@ export function transitionTask(
   now: Date,
 ): TaskState {
   const change = mutationSchema.parse(mutation);
-  if (change.kind === 'check-completed') {
+  if (
+    change.kind === 'backup-uncommitted-failed' &&
+    (task.taskType !== 'backup' ||
+      !['create', 'restore'].includes(task.taskSubType ?? ''))
+  )
+    throw new Error('BACKUP_TASK_IDENTITY_INVALID');
+  if (change.kind === 'backup-create-committed') {
+    const proof = change.result.backupCreationCommit;
+    if (
+      task.taskType !== 'backup' ||
+      task.taskSubType !== 'create' ||
+      proof.taskId !== task.taskId ||
+      proof.userId !== task.userId ||
+      proof.taskCreatedAt !== task.createdAt ||
+      change.result.filename !==
+        backupCreationFilename(
+          task.taskId,
+          task.createdAt,
+          change.result.target,
+        ) ||
+      change.result.createdAt !==
+        backupFilenameCreatedAt(change.result.filename)
+    )
+      throw new Error('BACKUP_CREATION_TASK_INVALID');
+    // A later cancellation cannot undo the final archive rename. Idempotently
+    // preserve an existing completed result; never affect restore/other tasks.
+    if (task.status === 'completed') return task;
+  } else if (
+    change.kind === 'restore-committed' ||
+    change.kind === 'restore-confirmed'
+  ) {
+    if (task.taskType !== 'backup' || task.taskSubType !== 'restore')
+      throw new Error('BACKUP_RESTORE_TASK_INVALID');
+    const previous = backupRestoreReceiptSchema.safeParse(task.result);
+    if (change.kind === 'restore-confirmed') {
+      if (
+        task.status !== 'completed' ||
+        !previous.success ||
+        previous.data.verification !== 'unconfirmed' ||
+        previous.data.filename !== change.result.filename ||
+        previous.data.target !== change.result.target ||
+        previous.data.restoreMode !== change.result.restoreMode ||
+        (previous.data.restoreMode === 'isolated' &&
+          change.result.restoreMode === 'isolated' &&
+          previous.data.restoredDatabase !== change.result.restoredDatabase)
+      )
+        return task;
+    } else if (previous.success && task.status === 'completed') return task;
+  } else if (change.kind === 'check-completed') {
     const { kind: _kind, version: _version, ...reference } = change.result;
     parseVariantCheckOperation({
       ...reference,
@@ -132,17 +210,34 @@ export function transitionTask(
       next.message = change.message ?? '任务已取消';
       break;
     case 'completed':
+    case 'backup-create-committed':
     case 'check-completed':
+    case 'restore-committed':
+    case 'restore-confirmed':
       next.status = 'completed';
       next.progress = 100;
       next.completedAt = timestamp;
       next.result = change.result ?? null;
       next.error = null;
-      next.message = change.message ?? '任务已完成';
+      if (
+        change.kind === 'backup-create-committed' ||
+        change.kind === 'restore-committed' ||
+        change.kind === 'restore-confirmed'
+      )
+        next.cancelledAt = null;
+      next.message =
+        change.kind === 'restore-committed' ||
+        change.kind === 'restore-confirmed'
+          ? change.result.message
+          : change.message ?? '任务已完成';
       break;
     case 'failed':
+    case 'backup-uncommitted-failed':
       if (
-        ['variant-check', 'batch-check', 'monitor'].includes(task.taskType) &&
+        (change.kind === 'backup-uncommitted-failed' ||
+          ['variant-check', 'batch-check', 'monitor'].includes(
+            task.taskType,
+          )) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';
@@ -150,7 +245,9 @@ export function transitionTask(
         next.completedAt = timestamp;
         next.error = null;
         next.message =
-          task.taskType === 'monitor'
+          change.kind === 'backup-uncommitted-failed'
+            ? '备份任务已取消'
+            : task.taskType === 'monitor'
             ? '监控任务已取消，已提交的结果保留'
             : '检查任务已取消，已提交的检查结果保留';
         break;

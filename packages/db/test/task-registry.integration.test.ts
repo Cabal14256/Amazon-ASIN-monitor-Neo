@@ -98,6 +98,43 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
       );
     }
   });
+  it.each(['create', 'restore'])(
+    'honors cancellation accepted after an uncommitted %s failure read in real Redis CAS',
+    async (operation) => {
+      const taskId = `backup-cas-${operation}`;
+      const userId = 'backup-race-owner';
+      keys.add(metaKey(taskId));
+      keys.add(userKey(userId));
+      const task = await repository.create({
+        taskId,
+        userId,
+        taskType: 'backup',
+        taskSubType: operation,
+      });
+      const evalOriginal = redis.eval.bind(redis);
+      const first = vi
+        .spyOn(redis, 'eval')
+        .mockImplementationOnce(async (...args) => {
+          await other.mutate(taskId, { kind: 'cancel-request' }, task);
+          return Reflect.apply(evalOriginal, redis, args);
+        });
+      try {
+        expect(
+          await repository.mutate(
+            taskId,
+            {
+              kind: 'backup-uncommitted-failed',
+              message: 'unpublished failure',
+            },
+            task,
+          ),
+        ).toMatchObject({ status: 'cancelled', error: null });
+        expect(await other.read(taskId)).toMatchObject({ status: 'cancelled' });
+      } finally {
+        first.mockRestore();
+      }
+    },
+  );
   it('filters the bounded user index without overlooking older active tasks and trims to the configured cap', async () => {
     const small = new RedisTaskRepository(redis, {
       ...config,
