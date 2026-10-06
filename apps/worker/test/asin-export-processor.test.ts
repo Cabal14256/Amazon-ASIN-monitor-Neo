@@ -16,6 +16,7 @@ import type { WriteStream } from 'node:fs';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { finished } from 'node:stream/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAsinExportProcessor } from '../src/asin-export-processor';
 import { ASIN_EXPORT_HEADER, asinExportRows } from '../src/asin-export-rows';
@@ -228,6 +229,76 @@ async function harness(pages: AsinGroupReadResult[], maxBytes?: number) {
 }
 
 describe('ASIN streaming export', () => {
+  it.each(['cancelling', 'cancelled'] as const)(
+    'removes an earlier attempt artifact when %s is observed before reading it',
+    async (status) => {
+      const h = await harness([]);
+      h.onMutation((change) => {
+        if (change.kind === 'completed') throw new Error('fixture-ack-lost');
+      });
+      await expect(h.processor(h.job, 'token')).rejects.toThrow(
+        'EXPORT_COMPLETION_UNCONFIRMED',
+      );
+      expect(await h.artifacts.read(taskId)).not.toBeNull();
+      const neighbour = randomUUID();
+      const temporary = await h.artifacts.temporary(neighbour);
+      temporary.stream.end(Buffer.from([0x50, 0x4b, 0x03, 0x04, 1]));
+      await finished(temporary.stream);
+      await h.artifacts.publish(
+        neighbour,
+        temporary.path,
+        new AbortController().signal,
+      );
+      await h.artifacts.discard(temporary.path);
+      h.setState({
+        ...h.state,
+        status,
+        cancelRequestedAt: createdAt,
+        cancelledAt: status === 'cancelled' ? createdAt : null,
+      });
+      h.onMutation(() => undefined);
+      const read = vi.spyOn(h.artifacts, 'read');
+      const previousQueries = h.list.mock.calls.length;
+      h.job.attemptsMade = 1;
+      await expect(h.processor(h.job, 'token')).resolves.toMatchObject({
+        cancelled: true,
+      });
+      expect(read).not.toHaveBeenCalled();
+      expect(h.state.status).toBe('cancelled');
+      expect(h.list).toHaveBeenCalledTimes(previousQueries);
+      expect(await h.artifacts.read(taskId)).toBeNull();
+      expect(await h.artifacts.read(neighbour)).not.toBeNull();
+    },
+  );
+
+  it.each(['completed', 'foreign'] as const)(
+    'retains an earlier artifact when the retry sees a %s task',
+    async (boundary) => {
+      const h = await harness([]);
+      h.onMutation((change) => {
+        if (change.kind === 'completed') throw new Error('fixture-ack-lost');
+      });
+      await expect(h.processor(h.job, 'token')).rejects.toThrow(
+        'EXPORT_COMPLETION_UNCONFIRMED',
+      );
+      const artifact = await h.artifacts.read(taskId);
+      h.setState({
+        ...h.state,
+        ...(boundary === 'completed'
+          ? { status: 'completed' as const, result: { artifact } }
+          : { userId: 'another-owner', status: 'cancelled' as const }),
+      });
+      const remove = vi.spyOn(h.artifacts, 'discardFinal');
+      h.job.attemptsMade = 1;
+      const attempt = h.processor(h.job, 'token');
+      if (boundary === 'completed')
+        await expect(attempt).resolves.toEqual({ artifact });
+      else await expect(attempt).rejects.toThrow('ASIN_EXPORT_ATTEMPT_FAILED');
+      expect(remove).not.toHaveBeenCalled();
+      expect(await h.artifacts.read(taskId)).toEqual(artifact);
+    },
+  );
+
   it.each(['deadline', 'cancellation', 'shutdown'] as const)(
     'interrupts stalled XLSX finalization on %s, closes the real stream and prevents late publication',
     async (reason) => {

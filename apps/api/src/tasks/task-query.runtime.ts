@@ -100,7 +100,8 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
     state === 'completed' &&
     (['variant-check', 'batch-check', 'monitor', 'competitor-monitor'].includes(
       type,
-    ) || (type === 'export' && job.name === 'asin')) &&
+    ) ||
+      (type === 'export' && job.name === 'asin')) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'

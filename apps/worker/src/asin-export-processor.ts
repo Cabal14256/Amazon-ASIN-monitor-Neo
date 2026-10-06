@@ -131,7 +131,8 @@ export function createAsinExportProcessor(
     const mutate = async (change: TaskMutation) =>
       verify(await store.mutate(data.taskId, change, identity(data)));
     const discardCancelledFinal = async () => {
-      if (!published) return;
+      // An earlier attempt may have published before its completion ACK was
+      // lost. Cancellation can be observed before this attempt reads that file.
       await artifacts.discardFinal(data.taskId).catch(() =>
         log.warn('已取消 ASIN 导出文件清理失败', {
           reason: 'export_cancelled_artifact_cleanup_failed',

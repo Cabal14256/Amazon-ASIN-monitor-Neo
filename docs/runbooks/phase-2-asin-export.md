@@ -25,6 +25,8 @@
 
 ## 验证与回滚
 
+- 取消在重试开始前即可生效：若此前尝试已发布文件但完成确认丢失，API 在确认取消并移除排队重试后，按校验过的不可变任务身份删除该任务的最终文件。已运行的重试由 Worker 收尾；即使取消早于本次文件读取，也会清理前次产物。完成、其他所有者、身份变化及其他导出类型的文件保留。API 清理共享原有 3 秒请求截止，失败仅记录固定原因，取消结果仍有效；周期清理继续作为故障兜底。
+
 - 运行 `corepack pnpm --filter contracts test`、`corepack pnpm --filter export test`、`corepack pnpm --filter api test`、`corepack pnpm --filter worker test`、`corepack pnpm build:api`、`corepack pnpm build:worker`。隔离 PostgreSQL/Redis 集成测试需设置 `RUN_INTEGRATION_TESTS=true` 和仓库测试环境变量；API 集成测试使用编译后的 Worker 文件、独立 PostgreSQL schema、唯一 Redis 前缀及临时导出目录。
 - 启动故障测试使用操作系统临时目录创建私有夹具，真实文件存储校验同样覆盖 Windows 和 Linux；队列或消费者未就绪仍必须在原 5 秒截止清理全部已分配连接。真实 BullMQ 保留期测试分别验证监控与导出成功/失败回执在 7 天和 14 天元数据期限内保留原始任务身份、到期后清理，不仅验证配置对象。
 - CI 显式运行共享 `export` 包的单元测试与类型检查。任务元数据缺失时，仅合法 ASIN 导出作业的不可变身份可用于回执对账；完成回执中的取消标记继续显示取消，不生成下载链接，也不重建已过期元数据。
