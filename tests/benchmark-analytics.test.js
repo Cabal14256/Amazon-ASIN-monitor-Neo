@@ -15,6 +15,7 @@ const {
   comparableResponse,
   digestValue,
   firstDifferencePath,
+  numericDifferenceAtPath,
   joinApiUrl,
   normalizeBaseUrl,
   passesPerformanceGate,
@@ -98,6 +99,49 @@ test('benchmark requests opt into the isolated cache bypass without persisting c
     'X-Analytics-Cache-Bypass': '1',
     Authorization: 'Bearer runtime-secret',
   });
+});
+
+test('numeric mismatch diagnostics preserve exact equality and emit only allowed finite metrics', () => {
+  const oldResponse = {
+    data: [{ normalDurationHours: 1.2345, id: 123, token: 'private-old' }],
+  };
+  const newResponse = {
+    data: [{ normalDurationHours: 1.2346, id: 456, token: 'private-new' }],
+  };
+  const metricPath = '$.data[0].normalDurationHours';
+  assert.deepEqual(
+    numericDifferenceAtPath(oldResponse, newResponse, metricPath),
+    {
+      oldValue: 1.2345,
+      newValue: 1.2346,
+      delta: 1.2346 - 1.2345,
+    },
+  );
+  assert.equal(
+    numericDifferenceAtPath(oldResponse, newResponse, '$.data[0].id'),
+    null,
+  );
+  assert.equal(
+    numericDifferenceAtPath(oldResponse, newResponse, '$.data[0].token'),
+    null,
+  );
+  assert.equal(
+    numericDifferenceAtPath(
+      oldResponse,
+      { data: [{ normalDurationHours: Infinity }] },
+      metricPath,
+    ),
+    null,
+  );
+  const result = comparePairResults(
+    { status: 200, comparable: { data: { normalDurationHours: 1.2345 } } },
+    { status: 200, comparable: { data: { normalDurationHours: 1.2346 } } },
+    { expectedStatus: 200, cardinalityPath: ['data'], minimumCardinality: 1 },
+    1,
+  );
+  assert.equal(result.matches, false);
+  assert.equal(result.differencePath, '$.data.normalDurationHours');
+  assert.equal(result.numericDifference.newValue, 1.2346);
 });
 
 test('promotion matrix covers two windows, three granularities and filters', () => {
