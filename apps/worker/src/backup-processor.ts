@@ -1523,7 +1523,7 @@ export function createBackupProcessor(
       let cancelled = false;
       const retryCreation =
         data.operation === 'create' &&
-        !(cleanupFailed && error instanceof TaskStopped) &&
+        !cleanupFailed &&
         !(
           error instanceof BackupCommandError &&
           error.reason === 'BACKUP_TASK_EXPIRED'

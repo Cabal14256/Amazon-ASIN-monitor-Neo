@@ -271,7 +271,6 @@ describe('creation attempts and durable publication', () => {
   it('preserves failure when partial cleanup is uncertain while cancellation races', async () => {
     const f = await fixture();
     f.failDumps(1);
-    f.job.attemptsMade = 1;
     filesystemFailure.unlinkSuffix = '.dump.partial';
     const mutate = f.store.mutate.getMockImplementation()!;
     f.store.mutate.mockImplementation(async (id, change) => {
@@ -416,15 +415,15 @@ describe('creation attempts and durable publication', () => {
     expect(f.state().status).not.toBe('completed');
     expect(dependencies.spawn).toHaveBeenCalledTimes(1);
   });
-  it('stops before a replacement dump when its previous partial cannot be removed', async () => {
+  it('stops all retries immediately when its unpublished partial cannot be removed', async () => {
     const f = await fixture();
     f.failDumps(1);
     filesystemFailure.unlinkSuffix = '.dump.partial';
     filesystemFailure.code = 'EACCES';
-    await expect(f.processor(f.job, 'lock')).rejects.not.toBeInstanceOf(
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
       UnrecoverableError,
     );
-    expect(f.state().status).toBe('processing');
+    expect(f.state().status).toBe('failed');
     expect(dependencies.spawn).toHaveBeenCalledOnce();
     f.job.attemptsMade = 1;
     await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
@@ -445,6 +444,45 @@ describe('creation attempts and durable publication', () => {
     );
   });
   it.each([
+    ['archive-partial', '.dump.partial', null],
+    ['metadata-partial', '.meta.json.partial', '.meta.json.partial'],
+    ['metadata-orphan', '.meta.json', '.dump.partial'],
+  ] as const)(
+    'cannot confirm cancellation on redelivery after a non-cancellation failure leaves an unconfirmed %s',
+    async (_artifact, suffix, renameSuffix) => {
+      const f = await fixture();
+      if (!renameSuffix) f.failDumps(1);
+      filesystemFailure.unlinkSuffix = suffix;
+      filesystemFailure.renameSuffix = renameSuffix;
+      const initial = await f
+        .processor(f.job, 'lock')
+        .catch((error: unknown) => error);
+      const files = await readdir(f.directory);
+      expect(files).toHaveLength(1);
+      expect(files[0]?.endsWith(suffix)).toBe(true);
+      // Even an unexpected redelivery after a user requests cancellation must
+      // preserve the failed/manual-check receipt, rather than forget uncertainty.
+      f.setState(
+        transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+      );
+      f.job.attemptsMade = 1;
+      await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+        UnrecoverableError,
+      );
+      expect(initial).toBeInstanceOf(UnrecoverableError);
+      expect(f.state()).toMatchObject({
+        status: 'failed',
+        message: expect.stringContaining('产物清理未确认'),
+      });
+      expect(await readdir(f.directory)).toEqual(files);
+      expect(dependencies.spawn).toHaveBeenCalledOnce();
+      expect(f.log.warn).not.toHaveBeenCalledWith(
+        '备份创建未发布，将使用原任务重试',
+        { reason: 'backup_creation_retry' },
+      );
+    },
+  );
+  it.each([
     ['archive-partial', '.dump.partial', null, 'EACCES'],
     ['metadata-partial', '.meta.json.partial', '.meta.json.partial', 'EROFS'],
     ['metadata-orphan', '.meta.json', '.dump.partial', 'EIO'],
@@ -453,7 +491,6 @@ describe('creation attempts and durable publication', () => {
     'reports an orphaned %s after failed publication and failed cleanup',
     async (artifact, suffix, renameSuffix, code) => {
       const f = await fixture();
-      f.job.opts.attempts = 1;
       if (!renameSuffix) f.failDumps(1);
       filesystemFailure.unlinkSuffix = suffix;
       filesystemFailure.renameSuffix = renameSuffix;
