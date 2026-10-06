@@ -49,12 +49,12 @@ describe.each(['primary','competitor'] as const)('%s scheduled complete frozen m
     expect(freezeScheduledMonitorSnapshot(job,[scheduledGroup(domain)],[])[0].members).toEqual([]);
   });
   it.each([
-    ['rename',(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].group.name = '篡改'; }],
-    ['member',(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].members[0].asin = 'B000000009'; }],
-    ['ordinal',(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].ordinal = 1; }],
-    ['digest',(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].snapshotDigest = 'a'.repeat(64); }],
-    ['country',(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].country = 'UK'; }],
-  ])('rejects %s snapshot pollution', (_name,change) => {
+    { name:'rename',change:(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].group.name = '篡改'; } },
+    { name:'member',change:(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].members[0].asin = 'B000000009'; } },
+    { name:'ordinal',change:(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].ordinal = 1; } },
+    { name:'digest',change:(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].snapshotDigest = 'a'.repeat(64); } },
+    { name:'country',change:(rows: ReturnType<typeof freezeScheduledMonitorSnapshot>) => { rows[0].country = 'UK'; } },
+  ])('rejects $name snapshot pollution', ({ change }) => {
     const job = scheduledJob(domain);
     const frozen = freezeScheduledMonitorSnapshot(job,[scheduledGroup(domain)],[scheduledMember(domain)]);
     change(frozen);

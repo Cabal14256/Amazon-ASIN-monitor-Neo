@@ -165,8 +165,8 @@ export function scheduledMonitorGroupSnapshotDigest(
 const country = (value: string) => value.replace(/ +$/, '').toUpperCase();
 const orderedRows = <T extends { id: string; create_time: string | null }>(rows: T[]) =>
   orderScheduledMonitorGroups(rows.map((row) => ({
-    ...row, createTimeNative: row.create_time,
-  }))).map(({ createTimeNative: _native, ...row }) => row as T);
+    id: row.id, createTimeNative: row.create_time, row,
+  }))).map((item) => item.row);
 
 export function parseScheduledMonitorSnapshot(
   inputJob: unknown,
@@ -345,3 +345,4 @@ export function scheduledMonitorGroupOperation(job: ScheduledMonitorJob, group: 
     resultKind: job.domain === 'primary' ? 'group' as const : 'competitor-group' as const,
   };
 }
+export type ScheduledMonitorGroupOperation = ReturnType<typeof scheduledMonitorGroupOperation>;

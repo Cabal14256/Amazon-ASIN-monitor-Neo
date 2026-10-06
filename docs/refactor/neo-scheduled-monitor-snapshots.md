@@ -43,3 +43,21 @@ corepack pnpm --filter db exec vitest run test/scheduled-monitor-run.integration
 ```
 
 本层的仓库/收据读回不能替代 #188 的真实 BullMQ/Redis/双 PG 编译入口、业务事务故障注入和发送 ACK 丢失回归；生产数据对拍、旧 Bull drain 与 Legacy 退役门槛仍保持独立。
+
+## Producer、source 与消费者接续边界
+
+`actor.kind=system` 是内部任务身份字段，不是独立的鉴权凭据。只有受信任的服务调度/续接路径可产生此类任务；Redis 队列访问、Worker 选择与服务数据库连接仍需使用内部部署边界。普通 HTTP 用户不能通过提交 `source`、`actor` 或 `taskType` 字段调用本仓库，也不能让现有手动任务接口把用户输入转成 scheduled 任务。scheduled 身份不能写入普通用户的任务索引、任务分页或公共 WS task room。
+
+首次 payload 来自 #189 的当前计划 slot 和实际首次投递时钟。消费者验证严格契约、确定性 jobId/taskId 和已持久化摘要；重试次数、进程重启、配置热更新均不能改变 `plannedSlot/requestedAt/createdAt/expiresAt`、country、interval 或 batch。严格解析失败时，freshness helper 的 Bull timestamp fallback 不会把伪造或不完整 payload 变成有效 scheduled 身份。
+
+Producer 的 Queue.add ACK 丢失后，应先取回同一稳定 jobId 的原 Bull payload，或使用已经持久化的原 producer intent；无法确认时先停止投递并等待恢复。不能以新 requestedAt 再构造同 slot 的替代 payload，也不能调用 `accept()` 来提前冻结目录并充当 producer outbox。该方法只在消费者首次执行受理时固定业务集合。#208 的 `read(job)` 要求完整原身份；尚未提供仅凭 slot 找回 producer intent 的接口，#189 需处理首次投递与 ACK 不确定性的持久化安排。
+
+US 竞品 child 的稳定身份与相同 slot/country/batch 的独立 competitor scheduled 任务会占用同一命名空间。#189 应让 US 主营完成路径成为该 child 的唯一 producer；不能同时用独立 US 竞品 scheduler 重建同一个 child。若以后确需两个独立来源，必须先升级契约和身份命名空间，不得删除旧 job、覆盖原 payload 或放宽 job digest 冲突校验。
+
+后续 #188 的固定组入口应接收仓库读回的 `ScheduledMonitorGroupSnapshot` 和由它生成的 `ScheduledMonitorGroupOperation`。网络检查遍历该快照的成员；不能把原 groupId 交给现有 `checkGroup(groupId)` 后重新加载实时成员。组/成员在执行期间被删除、重建、移动或不再满足原身份时，提交失败并保留原快照；不允许修改 run 快照、吸收新成员或自动用新目录重抓。
+
+同一组业务事务的锁顺序为 scheduled run advisory/行锁 → ordinal 回执锁 → 业务组 → 按原始 ID 排序的成员。取消、组写入和完成边界都先核对相同 run 身份；组状态、成员状态、GROUP/ASIN 历史与原 ordinal 回执在同一次 COMMIT 内落库。外部请求不持有 SQL 事务或这些业务锁。
+
+恢复处理先查原 operation 收据：已提交组只回放原结果，不能重新请求 SP-API/HTML 或再写历史。未提交组必须仍新鲜才可开始外部检查，提交前再检查 lease/取消/新鲜度；新鲜度已过的余下组不得继续抓取。全部组已经提交但父完成标记尚未确认时，可用原收据恢复 `completeBusiness()`，不刷新父时钟。已有 `business-completed` 则只恢复原 child 的投递，再调用 `complete()`；不能走 `start()` 重开业务。
+
+`commit-uncertain` 必须先用原 operation 读回数据库收据。有效收据允许恢复原结果；收据损坏或读取不可用必须明确报告待核实，不能据此判断此前 COMMIT 失败并重抓。以上为后续接口与事务纪律，本次没有实现业务检查适配器、group receipt 写入、Worker dispatcher 或真实外部调用。

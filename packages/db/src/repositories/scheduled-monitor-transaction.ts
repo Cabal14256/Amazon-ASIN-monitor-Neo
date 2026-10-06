@@ -57,10 +57,10 @@ export class PgScheduledMonitorTransactions {
       if (stopped) throw stopped;
       if (finished) throw new ScheduledMonitorRunError('closed');
     };
-    const query: ScheduledMonitorTransaction['query'] = async (text, values) => {
+    const query = async <T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<T[]> => {
       ensureOpen();
       if (!client) throw new ScheduledMonitorRunError('dependency');
-      const result = await client.query(text, values);
+      const result = await client.query<T>(text, values);
       ensureOpen();
       return result.rows;
     };
