@@ -69,7 +69,7 @@ const backupCommandTimeoutSchema = z.coerce
 const backupMaxBytesSchema = z.coerce
   .number()
   .int()
-  .min(1)
+  .min(5)
   .max(1_099_511_627_776)
   .default(10_737_418_240);
 

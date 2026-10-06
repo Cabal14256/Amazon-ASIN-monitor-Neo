@@ -20,6 +20,14 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 `PG_DUMP_PATH` 和 `PG_RESTORE_PATH` 最长为 512 字符；启动环境校验与 Worker 执行校验使用同一上限，超限配置在启动时拒绝。只接受可执行文件名或绝对路径，不接受命令参数。
 
+`BACKUP_MAX_BYTES` 至少为 5，才能容纳 custom archive 必需的 `PGDMP` 文件头；1–4 在启动校验时拒绝。这个最小值只保证配置不会小于格式头，实际归档仍须通过完整大小、摘要和元数据验证。
+
+备份命令按照锁定的 `pg-connection-string` 2.14.0 / `pg` 8.23.0 实际 SSL 解析结果生成 libpq 环境，不直接照搬 URL 的 `sslmode` 文本。`ssl=true` / `ssl=1` 以及默认的 `sslmode=prefer`、`require`、`verify-ca`、`verify-full` 都要求 TLS、CA 和主机名校验，命令使用 `verify-full`；显式 `ssl=0` / `sslmode=disable` 使用 `disable`。当前应用驱动默认未开启 TLS 时命令也明确 `disable`，不会采用 libpq 的 `prefer` 默认退回行为。URL 显式设置覆盖 `PGSSLMODE`；无 URL SSL 设置时，环境值按当前应用驱动相同规则转换。
+
+只有应用配置显式关闭服务器证书校验（`sslmode=no-verify`、`ssl=no-verify`，或 `uselibpqcompat=true` 下未指定 CA 的 `require` / `prefer`）时，CLI 才使用只要求加密的 `require`。`uselibpqcompat=true` 下指定 CA 的 `require` / `verify-ca` 使用 `verify-ca`；自定义 CA、客户端证书和密钥保留 URL 的文件路径。命令同时禁止 GSS 覆盖 TLS，并为未配置的 libpq HOME 证书、密钥、根证书和 CRL 使用独立不存在路径，避免应用未采用的 `.postgresql` 文件改变认证策略。
+
+未指定自定义 CA 的严格 TLS 命令，会在私有临时目录生成该 Worker 的 Node 默认 CA PEM（目录 0700、文件 0600），传给该命令，子进程 `close` 后逐项清理；证书内容不放入环境变量、命令参数、sidecar 或日志。Node 22+ 使用 `getCACertificates('default')` 的实际默认集合；Node 20 使用 bundled roots，并加入配置的 `NODE_EXTRA_CA_CERTS` 文件。Node 20 显式 `--use-openssl-ca` 无法列举其有效信任集时会失败关闭，需在连接 URL 提供 `sslrootcert`；不会自行换成系统 CA 集合。以上规则以[锁定 parser 文档](https://github.com/brianc/node-postgres/blob/master/packages/pg-connection-string/README.md)、[PostgreSQL 16 SSL 行为](https://www.postgresql.org/docs/16/libpq-ssl.html)和 [Node TLS CA API](https://nodejs.org/api/tls.html#tlsgetcacertificatestype)为依据；升级驱动时须重新跑实际 driver 参数和真实 CLI 回归。
+
 对于普通 PostgreSQL 的选择性归档，列表能力检查及恢复入队前都读取目标数据库的编码、collation、ctype、locale provider 和 ICU locale/rules；不匹配时列表不提供恢复，提交返回 409。目录读取失败时按不可恢复处理。Worker 执行前再次核对，避免排队期间目标配置变化。完整归档在隔离库使用源 locale，因此不要求与在线目标库 locale 相同。
 
 API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BACKUP_STORAGE_DIRECTORY`。未设置时，仓库部署使用 `var/neo/backups`；生产环境必须把它映射到组织批准的持久卷，禁止使用容器临时文件系统。`BACKUP_MAX_BYTES` 限制单个产物大小，`BACKUP_COMMAND_TIMEOUT_MS` 限制外部命令最长运行时间。

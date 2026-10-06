@@ -32,20 +32,24 @@ import {
 } from '@asin-monitor/db';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   rename,
+  rmdir,
   stat,
   unlink,
   writeFile,
 } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
+import * as tls from 'node:tls';
 import { logger } from './logger';
 
 export interface BackupProcessorOptions {
@@ -93,6 +97,30 @@ function targetUrl(env: Env, target: BackupJobData['target']): string {
   return target === 'primary' ? env.DATABASE_URL : env.COMPETITOR_DATABASE_URL;
 }
 
+// Keep trust-source metadata private; never serialize certificate contents into
+// argv, process env, receipts or logs. The command wrapper creates an owned PEM
+// only while a subprocess is alive and removes it after that child closes.
+const commandDefaultTrust = new WeakSet<NodeJS.ProcessEnv>();
+
+function applicationSslFromEnvironment(
+  defaults: NodeJS.ProcessEnv,
+): boolean | tls.ConnectionOptions {
+  // pg 8.23.0 connection-parameters.js readSSLConfigFromEnvironment. Its
+  // prefer/require/verify-ca settings require CA and hostname validation; they
+  // do not mean libpq's weaker modes. URL parser output takes precedence.
+  switch (defaults.PGSSLMODE) {
+    case 'prefer':
+    case 'require':
+    case 'verify-ca':
+    case 'verify-full':
+      return true;
+    case 'no-verify':
+      return { rejectUnauthorized: false };
+    default:
+      return false;
+  }
+}
+
 export function commandEnvironment(
   connectionString: string,
   defaults: NodeJS.ProcessEnv = process.env,
@@ -129,26 +157,43 @@ export function commandEnvironment(
     Number(port) > 65_535
   )
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
-  const sslMode = url.searchParams.get('sslmode') || defaults.PGSSLMODE;
-  if (
-    sslMode &&
-    ![
-      'disable',
-      'allow',
-      'prefer',
-      'require',
-      'verify-ca',
-      'verify-full',
-    ].includes(sslMode)
-  )
-    throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
+  const ssl =
+    parsed.ssl === undefined
+      ? applicationSslFromEnvironment(defaults)
+      : parsed.ssl === 'no-verify'
+      ? { rejectUnauthorized: false }
+      : parsed.ssl;
+  const sslOptions =
+    typeof ssl === 'object' && ssl !== null
+      ? (ssl as tls.ConnectionOptions)
+      : undefined;
+  const sslFilePath = (name: string): string => {
+    const value = parsed[name];
+    if (typeof value !== 'string')
+      throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
+    return value;
+  };
+  const sslMode = !ssl
+    ? 'disable'
+    : sslOptions?.rejectUnauthorized === false
+    ? 'require'
+    : typeof sslOptions?.checkServerIdentity === 'function'
+    ? 'verify-ca'
+    : 'verify-full';
+  // Explicit non-existent paths suppress libpq's automatic HOME certificates,
+  // keys and CRLs, which node-postgres never uses. In particular, require must
+  // not turn no-verify into verify-ca just because ~/.postgresql/root.crt exists.
+  const noAutomaticFile = resolve(
+    tmpdir(),
+    `neo-backup-no-automatic-tls-${randomUUID()}`,
+  );
   // Drop unrelated libpq controls (PGSERVICE, PGHOSTADDR, PGOPTIONS, etc.).
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) => !key.toUpperCase().startsWith('PG'),
     ),
   );
-  return {
+  const environment: NodeJS.ProcessEnv = {
     ...inherited,
     PGHOST: host.replace(/^\[|\]$/g, ''),
     PGPORT: port,
@@ -156,17 +201,20 @@ export function commandEnvironment(
     ...(password ? { PGPASSWORD: password } : {}),
     ...(passfile ? { PGPASSFILE: passfile } : {}),
     PGDATABASE: database,
-    ...(sslMode ? { PGSSLMODE: sslMode } : {}),
-    ...(url.searchParams.has('sslrootcert')
-      ? { PGSSLROOTCERT: url.searchParams.get('sslrootcert')! }
-      : {}),
-    ...(url.searchParams.has('sslcert')
-      ? { PGSSLCERT: url.searchParams.get('sslcert')! }
-      : {}),
-    ...(url.searchParams.has('sslkey')
-      ? { PGSSLKEY: url.searchParams.get('sslkey')! }
-      : {}),
+    PGSSLMODE: sslMode,
+    PGGSSENCMODE: 'disable',
+    PGSSLROOTCERT:
+      sslMode !== 'disable' && sslMode !== 'require' && sslOptions?.ca
+        ? sslFilePath('sslrootcert')
+        : noAutomaticFile,
+    PGSSLCERT: sslOptions?.cert ? sslFilePath('sslcert') : noAutomaticFile,
+    PGSSLKEY: sslOptions?.key ? sslFilePath('sslkey') : noAutomaticFile,
+    PGSSLCRL: noAutomaticFile,
+    PGSSLCRLDIR: noAutomaticFile,
   };
+  if (sslMode === 'verify-full' && !sslOptions?.ca)
+    commandDefaultTrust.add(environment);
+  return environment;
 }
 
 function commandPath(value: string | undefined, fallback: string): string {
@@ -342,20 +390,86 @@ export function restoreCommandArgs(database: string, input: string): string[] {
   ];
 }
 
-export function processCommand(
+interface BackupCommandOptions {
+  timeoutMs: number;
+  maxBytes: number;
+  signal: AbortSignal;
+  checkpoint: () => Promise<void>;
+  onProgress: (bytes: number) => Promise<void>;
+  pollIntervalMs?: number;
+  /** A zero pg_restore exit means its single transaction committed. */
+  zeroExitIsCommitted?: boolean;
+}
+
+async function defaultNodeCertificateAuthorities(): Promise<string[]> {
+  if (typeof tls.getCACertificates === 'function')
+    return tls.getCACertificates('default');
+  // Node 20 uses the bundled roots unless OpenSSL CA mode was explicitly
+  // selected. Its effective OpenSSL store cannot be enumerated; fail closed
+  // rather than substituting a different trust set. A URL sslrootcert avoids
+  // this fallback and provides the exact explicit CA to both clients.
+  if (
+    process.execArgv.includes('--use-openssl-ca') ||
+    /(?:^|\s)--use-openssl-ca(?:\s|$)/.test(process.env.NODE_OPTIONS ?? '')
+  )
+    throw new BackupCommandError('BACKUP_TLS_ROOTS_UNAVAILABLE');
+  const roots = [...tls.rootCertificates];
+  if (process.env.NODE_EXTRA_CA_CERTS) {
+    const extra = await readFile(process.env.NODE_EXTRA_CA_CERTS, 'utf8');
+    roots.push(extra);
+  }
+  return roots;
+}
+
+export async function processCommand(
   command: string,
   args: string[],
   environment: NodeJS.ProcessEnv,
-  options: {
-    timeoutMs: number;
-    maxBytes: number;
-    signal: AbortSignal;
-    checkpoint: () => Promise<void>;
-    onProgress: (bytes: number) => Promise<void>;
-    pollIntervalMs?: number;
-    /** A zero pg_restore exit means its single transaction committed. */
-    zeroExitIsCommitted?: boolean;
-  },
+  options: BackupCommandOptions,
+): Promise<void> {
+  if (options.signal.aborted)
+    throw new BackupCommandError('BACKUP_COMMAND_CANCELLED');
+  let trustDirectory: string | undefined;
+  let trustFile: string | undefined;
+  try {
+    let effectiveEnvironment = environment;
+    if (commandDefaultTrust.has(environment)) {
+      const roots = await defaultNodeCertificateAuthorities();
+      if (roots.length === 0)
+        throw new BackupCommandError('BACKUP_TLS_ROOTS_UNAVAILABLE');
+      trustDirectory = await mkdtemp(resolve(tmpdir(), 'neo-backup-trust-'));
+      await chmod(trustDirectory, 0o700);
+      trustFile = resolve(trustDirectory, 'node-default-ca.pem');
+      await writeFile(trustFile, roots.join('\n'), { mode: 0o600, flag: 'wx' });
+      effectiveEnvironment = { ...environment, PGSSLROOTCERT: trustFile };
+    }
+    return await executeBackupCommand(
+      command,
+      args,
+      effectiveEnvironment,
+      options,
+    );
+  } finally {
+    // Only remove our exact newly-created file and empty owned directory. A
+    // retained public CA is a recoverable hygiene issue, not a failed archive.
+    if (trustFile)
+      await unlink(trustFile).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT')
+          logger.warn('备份临时信任证书清理失败', { code: error.code });
+      });
+    if (trustDirectory)
+      await rmdir(trustDirectory).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT')
+          logger.warn('备份临时信任目录清理失败', { code: error.code });
+      });
+  }
+}
+
+function executeBackupCommand(
+  command: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+  options: BackupCommandOptions,
 ): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     let child: ChildProcess | undefined;

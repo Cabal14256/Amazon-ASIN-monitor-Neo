@@ -8,10 +8,18 @@ import {
   type TaskState,
 } from '@asin-monitor/db';
 import type { Job } from 'bullmq';
-import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  rm,
+  truncate,
+  writeFile,
+} from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as tls from 'node:tls';
 import { describe, expect, it, vi } from 'vitest';
 import {
   commandEnvironment,
@@ -239,7 +247,7 @@ describe('backup command boundary', () => {
       PGUSER: 'backup-user',
       PGPASSWORD: 'backup-pass',
       PGDATABASE: 'main',
-      PGSSLMODE: 'require',
+      PGSSLMODE: 'verify-full',
     });
     const defaults = {
       PGHOST: 'db.internal',
@@ -303,6 +311,205 @@ describe('backup command boundary', () => {
     expect(args).toContain('--dbname=backup_ci');
     expect(args).toContain('--single-transaction');
     expect(args.join(' ')).not.toContain('private_password');
+  });
+
+  it.each([
+    ['ssl=true', 'verify-full'],
+    ['ssl=1', 'verify-full'],
+    ['ssl=0', 'disable'],
+    ['sslmode=disable', 'disable'],
+    ['sslmode=no-verify', 'require'],
+    ['ssl=no-verify', 'require'],
+    ['sslmode=prefer', 'verify-full'],
+    ['sslmode=require', 'verify-full'],
+    ['sslmode=verify-ca', 'verify-full'],
+    ['sslmode=verify-full', 'verify-full'],
+    ['sslmode=prefer&uselibpqcompat=true', 'require'],
+    ['sslmode=require&uselibpqcompat=true', 'require'],
+  ])(
+    'preserves the pinned application driver TLS policy for %s',
+    (query, mode) => {
+      const connectionString = `postgresql://backup@localhost/main?${query}`;
+      const { Client } = createRequire(
+        join(__dirname, '../../../packages/db/package.json'),
+      )('pg') as {
+        Client: new (config: { connectionString: string }) => {
+          connectionParameters: {
+            ssl: boolean | { rejectUnauthorized?: boolean };
+          };
+        };
+      };
+      const ssl = new Client({ connectionString }).connectionParameters.ssl;
+      expect(mode).toBe(
+        ssl === false
+          ? 'disable'
+          : typeof ssl === 'object' && ssl.rejectUnauthorized === false
+          ? 'require'
+          : 'verify-full',
+      );
+      const environment = commandEnvironment(connectionString, {
+        PGSSLMODE: 'disable',
+      });
+      expect(environment.PGSSLMODE).toBe(mode);
+      expect(environment.PGGSSENCMODE).toBe('disable');
+    },
+  );
+
+  it.each([
+    [undefined, 'disable'],
+    ['disable', 'disable'],
+    ['prefer', 'verify-full'],
+    ['require', 'verify-full'],
+    ['verify-ca', 'verify-full'],
+    ['verify-full', 'verify-full'],
+    ['no-verify', 'require'],
+  ])(
+    'translates application PGSSLMODE default %s without TLS fallback',
+    (input, mode) => {
+      expect(
+        commandEnvironment('postgresql://backup@localhost/main', {
+          PGSSLMODE: input,
+          PGSSLROOTCERT: '/unrelated/root.crt',
+          PGSSLCERT: '/unrelated/client.crt',
+          PGSSLKEY: '/unrelated/client.key',
+        }).PGSSLMODE,
+      ).toBe(mode);
+    },
+  );
+
+  it('preserves explicit CA-only libpq compatibility and client credentials', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-tls-fixture-'));
+    try {
+      const ca = join(directory, 'ca.crt');
+      const cert = join(directory, 'client.crt');
+      const key = join(directory, 'client.key');
+      await writeFile(ca, tls.rootCertificates[0]);
+      await writeFile(cert, 'synthetic-client-certificate');
+      await writeFile(key, 'synthetic-client-key');
+      for (const mode of ['require', 'verify-ca']) {
+        const url = new URL('postgresql://backup@localhost/main');
+        url.searchParams.set('sslmode', mode);
+        url.searchParams.set('uselibpqcompat', 'true');
+        url.searchParams.set('sslrootcert', ca);
+        url.searchParams.set('sslcert', cert);
+        url.searchParams.set('sslkey', key);
+        const environment = commandEnvironment(url.toString(), {});
+        expect(environment).toMatchObject({
+          PGSSLMODE: 'verify-ca',
+          PGSSLROOTCERT: ca,
+          PGSSLCERT: cert,
+          PGSSLKEY: key,
+        });
+        url.searchParams.delete('uselibpqcompat');
+        expect(commandEnvironment(url.toString(), {}).PGSSLMODE).toBe(
+          'verify-full',
+        );
+        url.searchParams.set('sslmode', 'no-verify');
+        const unverified = commandEnvironment(url.toString(), {});
+        expect(unverified.PGSSLMODE).toBe('require');
+        expect(unverified.PGSSLROOTCERT).not.toBe(ca);
+        await expect(lstat(unverified.PGSSLROOTCERT!)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([0, 1])(
+    'uses the actual Node default CA bundle and cleans it after child exit %s',
+    async (exitCode) => {
+      const directory = await mkdtemp(join(tmpdir(), 'neo-backup-tls-child-'));
+      try {
+        const report = join(directory, 'trust.json');
+        const environment = commandEnvironment(
+          'postgresql://backup@localhost/main?ssl=1',
+          {},
+        );
+        const running = processCommand(
+          process.execPath,
+          [
+            '-e',
+            "const fs=require('node:fs'); fs.writeFileSync(process.argv[1], JSON.stringify({ root:process.env.PGSSLROOTCERT, bundle:fs.readFileSync(process.env.PGSSLROOTCERT,'utf8'), mode:process.env.PGSSLMODE, cert:process.env.PGSSLCERT })); process.exit(Number(process.argv[2]));",
+            report,
+            String(exitCode),
+          ],
+          environment,
+          options(new AbortController().signal),
+        );
+        if (exitCode === 0) await expect(running).resolves.toBeUndefined();
+        else await expect(running).rejects.toThrow('BACKUP_COMMAND_FAILED');
+        const observed = JSON.parse(await readFile(report, 'utf8')) as {
+          root: string;
+          bundle: string;
+          mode: string;
+          cert: string;
+        };
+        const actualRoots =
+          typeof tls.getCACertificates === 'function'
+            ? tls.getCACertificates('default')
+            : [...tls.rootCertificates];
+        expect(observed.mode).toBe('verify-full');
+        expect(observed.bundle).toBe(actualRoots.join('\n'));
+        expect(observed.root).not.toBe(environment.PGSSLROOTCERT);
+        await expect(lstat(observed.root)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(lstat(observed.cert)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the strict trust file until a cancelled child closes, then removes it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-tls-cancel-'));
+    const controller = new AbortController();
+    try {
+      const report = join(directory, 'trust.json');
+      const environment = commandEnvironment(
+        'postgresql://backup@localhost/main?ssl=true',
+        {},
+      );
+      await expect(
+        processCommand(
+          process.execPath,
+          [
+            '-e',
+            "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({root:process.env.PGSSLROOTCERT})); setInterval(()=>undefined,1000);",
+            report,
+          ],
+          environment,
+          {
+            ...options(controller.signal),
+            checkpoint: async () => {
+              const observed = await readFile(report, 'utf8').catch(
+                (error: NodeJS.ErrnoException) => {
+                  if (error.code === 'ENOENT') return null;
+                  throw error;
+                },
+              );
+              if (!observed) return;
+              const root = (JSON.parse(observed) as { root: string }).root;
+              expect((await lstat(root)).isFile()).toBe(true);
+              controller.abort();
+            },
+          },
+        ),
+      ).rejects.toThrow('BACKUP_COMMAND_CANCELLED');
+      const observed = JSON.parse(await readFile(report, 'utf8')) as {
+        root: string;
+      };
+      await expect(lstat(observed.root)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      controller.abort();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it.each([

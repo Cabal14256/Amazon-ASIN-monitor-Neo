@@ -279,6 +279,13 @@ describe('loadEnv', () => {
     expect(
       loadEnv({ ...validEnv, BACKUP_MAX_BYTES: '1048576' }).BACKUP_MAX_BYTES,
     ).toBe(1048576);
+    for (const value of ['1', '2', '3', '4'])
+      expect(() => loadEnv({ ...validEnv, BACKUP_MAX_BYTES: value })).toThrow(
+        EnvValidationError,
+      );
+    expect(
+      loadEnv({ ...validEnv, BACKUP_MAX_BYTES: '5' }).BACKUP_MAX_BYTES,
+    ).toBe(5);
   });
   it('keeps batch deletion defaults, Legacy fallback/flooring and a nonzero bounded chunk size', () => {
     const defaults = loadEnv(validEnv);

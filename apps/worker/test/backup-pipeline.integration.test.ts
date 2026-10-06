@@ -18,7 +18,9 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   acquireBackupTargetLock,
+  commandEnvironment,
   createBackupProcessor,
+  processCommand,
   stagingDatabaseName,
 } from '../src/backup-processor';
 
@@ -215,6 +217,91 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await adminPool?.end();
       if (directory) await rm(directory, { recursive: true, force: true });
     }, 30000);
+
+    it.each(['ssl=true', 'ssl=1', 'sslmode=no-verify'])(
+      'rejects a plaintext-only CI server for actual driver, pg_dump and pg_restore %s',
+      async (query) => {
+        // The dedicated service uses stock ssl=off. Prove the command cannot
+        // silently use libpq prefer and produce an archive over plaintext.
+        expect((await scratchPool.query('SHOW ssl')).rows[0].ssl).toBe('off');
+        const url = new URL(scratchUrl);
+        for (const [key, value] of new URLSearchParams(query))
+          url.searchParams.set(key, value);
+        const secured = url.toString();
+        const applicationPool = createPgPool(secured, {
+          max: 1,
+          connectionTimeoutMillis: 2000,
+        });
+        try {
+          await expect(applicationPool.query('SELECT 1')).rejects.toThrow(
+            /SSL|TLS/,
+          );
+        } finally {
+          await applicationPool.end();
+        }
+        const output = join(directory, `tls-required-${randomUUID()}.partial`);
+        await expect(
+          processCommand(
+            'pg_dump',
+            ['--format=custom', '--schema-only', `--file=${output}`],
+            commandEnvironment(secured),
+            {
+              timeoutMs: 5000,
+              maxBytes: 10_000_000,
+              signal: new AbortController().signal,
+              checkpoint: async () => undefined,
+              onProgress: async () => undefined,
+            },
+          ),
+        ).rejects.toThrow('BACKUP_COMMAND_FAILED');
+        const bytes = await readFile(output).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return Buffer.alloc(0);
+            throw error;
+          },
+        );
+        expect(bytes.length).toBe(0);
+
+        const validInput = join(directory, `tls-source-${randomUUID()}.dump`);
+        const plain = new URL(scratchUrl);
+        plain.searchParams.set('sslmode', 'disable');
+        const options = {
+          timeoutMs: 5000,
+          maxBytes: 10_000_000,
+          signal: new AbortController().signal,
+          checkpoint: async () => undefined,
+          onProgress: async () => undefined,
+        };
+        await processCommand(
+          'pg_dump',
+          [
+            '--format=custom',
+            '--schema-only',
+            `--table=public.${tableA}`,
+            `--file=${validInput}`,
+          ],
+          commandEnvironment(plain.toString()),
+          options,
+        );
+        // An intentionally absent TOC table makes even a regressed plaintext
+        // connection harmless to the scratch data while testing actual restore
+        // connection negotiation (not the offline --list mode).
+        await expect(
+          processCommand(
+            'pg_restore',
+            [
+              `--dbname=${scratchName}`,
+              '--data-only',
+              '--table=never_in_tls_fixture_toc',
+              validInput,
+            ],
+            commandEnvironment(secured),
+            options,
+          ),
+        ).rejects.toThrow('BACKUP_COMMAND_FAILED');
+      },
+      20000,
+    );
 
     it('backs up and restores only the literal mixed-case table using the real pg_dump parser', async () => {
       const mixed = `BackupMixed_${scratchName.slice(-12)}`;
