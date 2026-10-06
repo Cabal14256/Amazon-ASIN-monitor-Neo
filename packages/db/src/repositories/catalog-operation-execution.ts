@@ -61,13 +61,17 @@ export function withCatalogOperationExemptExecution<T>(
 export function assertCatalogWriteExecution(
   db: Pick<Db, 'execute'>,
   domain: CatalogOperationDomain,
-  allowCheckExemption = false,
+  allowCheckExemption: boolean | 'scheduled-system' = false,
 ): void {
   const scope = scopes.getStore();
   if (!scope || !scope.allowedDatabases.has(db))
     throw new CatalogOperationError('CATALOG_OPERATION_MISSING');
   if (scope.kind === 'exempt') {
-    if (!allowCheckExemption)
+    if (
+      !allowCheckExemption ||
+      (allowCheckExemption === 'scheduled-system' &&
+        scope.reason !== 'scheduled-system')
+    )
       throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
   } else if (scope.identity.domain !== domain)
     throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');

@@ -1,3 +1,4 @@
+import type { PrimaryMonitorJob } from '@asin-monitor/contracts';
 import { sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -21,6 +22,7 @@ import { withAsinDatabaseTransaction } from '../src/repositories/asin-query-repo
 import { DrizzleAsinWriteUnit } from '../src/repositories/asin-write-repository';
 import { withCatalogOperationExecution } from '../src/repositories/catalog-operation-execution';
 import { PgCatalogOperationRepository } from '../src/repositories/catalog-operation-repository';
+import { PgPrimaryMonitorRepository } from '../src/repositories/primary-monitor-repository';
 
 // Synthetic private schema only. No .env loading, public writes or expiry-based recovery.
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
@@ -112,7 +114,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         resolve(__dirname, '../migrations/0000_baseline.sql'),
         'utf8',
       );
-      for (const table of ['variant_groups', 'asins']) {
+      for (const table of ['variant_groups', 'asins', 'monitor_history']) {
         const ddl = baseline.match(
           new RegExp(
             `CREATE TABLE IF NOT EXISTS ${table} \\([\\s\\S]*?\\n\\);`,
@@ -121,10 +123,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         if (!ddl) throw new Error('Missing actual baseline fixture table');
         await pool.query(ddl);
       }
+      await pool.query(
+        readFileSync(
+          resolve(__dirname, '../migrations/0012_primary_monitor.sql'),
+          'utf8',
+        ).replaceAll('public.', `${qualified}.`),
+      );
     });
     beforeEach(async () => {
       await pool.query(
-        'DROP TABLE IF EXISTS catalog_operation_pins; DROP TABLE IF EXISTS catalog_operation_slots; DELETE FROM asins; DELETE FROM variant_groups;',
+        'DROP TABLE IF EXISTS catalog_operation_pins; DROP TABLE IF EXISTS catalog_operation_slots; DELETE FROM primary_monitor_runs; DELETE FROM monitor_history; DELETE FROM asins; DELETE FROM variant_groups;',
       );
       await migration();
     });
@@ -203,6 +211,111 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         (await pool.query('SELECT count(*)::int AS n FROM variant_groups'))
           .rows[0].n,
       ).toBe(0);
+    });
+    it('pins actual monitor snapshots and notification history until the blocked physical COMMIT settles', async () => {
+      const monitor = new PgPrimaryMonitorRepository(pool);
+      const binding: CatalogTaskBinding = {
+        ...task,
+        taskId: randomUUID(),
+        taskType: 'monitor',
+        taskSubType: 'primary',
+      };
+      const job: PrimaryMonitorJob = {
+        ...binding,
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        countries: ['US'],
+        expiresAt: '2099-10-08T00:00:00.000Z',
+      };
+      await pool.query(
+        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('literal group ','synthetic','US','fixture','fixture')",
+      );
+      await expect(monitor.groups(job)).rejects.toMatchObject({
+        code: 'CATALOG_OPERATION_MISSING',
+      });
+      expect(
+        (
+          await pool.query(
+            'SELECT count(*)::int AS n FROM primary_monitor_runs',
+          )
+        ).rows[0].n,
+      ).toBe(0);
+      const identity = await repository.reserve(
+        { ownerId: task.userId, domain: 'asin', kind: 'monitor' },
+        async () => undefined,
+      );
+      await repository.bindTask(identity, binding);
+      await withCatalogOperationExecution(repository, identity, async () => {
+        expect(await monitor.groups(job)).toEqual([
+          { groupId: 'literal group ', country: 'US' },
+        ]);
+        expect(await monitor.claimNotification(job.taskId, 'US')).toBe('new');
+      });
+      await pool.query(
+        "INSERT INTO monitor_history(country,check_time,is_broken,monitor_task_id) VALUES('US','2026-10-07 08:00:00',true,$1)",
+        [job.taskId],
+      );
+      const lockName = `${schema}:monitor-complete`;
+      await pool.query(`CREATE FUNCTION ${qualified}.wait_monitor_notification() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_advisory_xact_lock(hashtextextended('${lockName}',0)); RETURN NEW; END $$;
+        CREATE TRIGGER wait_monitor_notification BEFORE UPDATE ON primary_monitor_notifications
+        FOR EACH ROW EXECUTE FUNCTION ${qualified}.wait_monitor_notification();`);
+      const blocker = await pool.connect();
+      let pending: Promise<void> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        const blockerPid = Number(
+          (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+        );
+        await blocker.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+          [lockName],
+        );
+        pending = withCatalogOperationExecution(repository, identity, () =>
+          monitor.completeNotification(job.taskId, 'US', true),
+        );
+        await vi.waitFor(async () => {
+          expect(
+            (
+              await pool.query(
+                'SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+                [blockerPid],
+              )
+            ).rows[0].n,
+          ).toBe(1);
+        });
+        expect(await repository.read(task.userId, 'asin')).toMatchObject({
+          pendingPins: 1,
+          uncertainPins: 0,
+        });
+        expect(await repository.release(identity)).toBe(false);
+        expect(
+          (await pool.query('SELECT notification_sent FROM monitor_history'))
+            .rows[0].notification_sent,
+        ).toBe(false);
+        await blocker.query('COMMIT');
+        await pending;
+        expect(await repository.read(task.userId, 'asin')).toMatchObject({
+          pendingPins: 0,
+          uncertainPins: 0,
+        });
+        expect(
+          (await pool.query('SELECT notification_sent FROM monitor_history'))
+            .rows[0].notification_sent,
+        ).toBe(true);
+        await repository.close(identity, {
+          source: 'worker',
+          status: 'completed',
+          task: binding,
+        });
+        expect(await repository.release(identity)).toBe(true);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        await pending;
+        await pool.query(`DROP TRIGGER wait_monitor_notification ON primary_monitor_notifications;
+          DROP FUNCTION ${qualified}.wait_monitor_notification();`);
+      }
     });
     it('holds the exact slot/pin SQL locks through business COMMIT, blocking concurrent generation close', async () => {
       const identity = await reserve();

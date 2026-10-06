@@ -1,5 +1,11 @@
 import type { PrimaryMonitorJob } from '@asin-monitor/contracts';
 import type { Pool, PoolClient } from 'pg';
+import { createDb } from '../client';
+import type { CatalogPhysicalOutcome } from '../domain/catalog-operation';
+import {
+  assertCatalogWriteExecution,
+  catalogTransactionExecution,
+} from './catalog-operation-execution';
 
 export interface PrimaryMonitorGroup {
   country: PrimaryMonitorJob['countries'][number];
@@ -31,17 +37,54 @@ export class PgPrimaryMonitorRepository {
     return removed.rowCount ?? 0;
   }
   private async transaction<T>(action: (client: PoolClient) => Promise<T>) {
-    const client = await this.pool.connect();
+    const execution = catalogTransactionExecution();
+    await execution.begin();
+    let client: PoolClient | undefined;
+    let commitStarted = false;
+    let connectionFailed = false;
+    let outcome: CatalogPhysicalOutcome = 'uncertain';
+    const connectionError = () => {
+      connectionFailed = true;
+    };
     try {
+      client = await this.pool.connect();
+      client.on('error', connectionError);
       await client.query('BEGIN');
+      const db = createDb(client);
+      await execution.guard(db);
+      // Actual notification/snapshot writes are catalog work. Only internal
+      // scheduled monitors may omit the owner fence; anonymous checks may not.
+      assertCatalogWriteExecution(db, 'asin', 'scheduled-system');
+      if (connectionFailed) throw new Error('MONITOR_DATABASE_CONNECTION_LOST');
       const value = await action(client);
+      if (connectionFailed) throw new Error('MONITOR_DATABASE_CONNECTION_LOST');
+      commitStarted = true;
       await client.query('COMMIT');
+      if (connectionFailed)
+        throw new Error('MONITOR_DATABASE_COMMIT_UNCERTAIN');
+      outcome = 'committed';
       return value;
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      if (!client) outcome = 'rolled-back'; // No SQL was started.
+      else if (!commitStarted && !connectionFailed) {
+        try {
+          await client.query('ROLLBACK');
+          if (!connectionFailed) outcome = 'rolled-back';
+        } catch {
+          // A failed ROLLBACK or lost COMMIT ACK must keep its durable pin.
+        }
+      }
       throw error;
     } finally {
-      client.release();
+      try {
+        client?.removeListener('error', connectionError);
+        client?.release(outcome === 'uncertain');
+      } finally {
+        // Record physical settlement only after the actual query promise has
+        // ended and the borrowed client is returned. The Worker may have
+        // already timed out/cancelled its outer promise without stopping SQL.
+        await execution.settled(outcome);
+      }
     }
   }
   async groups(job: PrimaryMonitorJob): Promise<PrimaryMonitorGroup[]> {
