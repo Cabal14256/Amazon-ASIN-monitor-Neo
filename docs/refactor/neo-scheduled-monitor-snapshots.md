@@ -31,7 +31,7 @@
 
 收据核验先读取 `COUNT` 元数据，再利用 `(task_id,ordinal)` 唯一索引逐行 seek；每次 SQL 最多返回一张完整收据。计数、所有页和最终一次完成 UPDATE 共享原 repeatable-read 快照及 run 锁，每张原始结果即时完整解析、核对身份/成员/完成时间并累计计数，不在数组中保留整个任务的结果。单收据原有 32 MiB 上限继续生效，不增加任务累计字节限制，也不先用 `SUM(result::text)` 全量转换结果。
 
-此边界避免合法 1000 张收据在一次驱动查询中累计到约 32 GiB；它不承诺该极端任务能在原 15 秒默认总时限内完成，也不提高原有时限。核验超时或末页损坏时不写部分完成状态，原 run 与已提交业务收据继续供 `read()` 核验；修复读取条件后只能重试完成边界，不能因此重抓商品或重写历史。COMMIT 已发出后的错误仍按原 `commit-uncertain` 流程核验，不能假定回滚。
+此边界避免合法 1000 张收据在一次驱动查询中累计到约 32 GiB；它不承诺该极端任务能在原 15 秒默认总时限内完成，也不提高原有时限。核验超时或末页损坏时不写部分完成状态，原 run 与已提交业务收据继续供 `read()` 核验；修复读取条件后只能重试完成边界，不能因此重抓商品或重写历史。已存收据的 schema 或容量解码错误统一报告非重试 `identity`，保留原内容待核实；不能归类为临时 `dependency` 并自动继续。COMMIT 已发出后的错误仍按原 `commit-uncertain` 流程核验，不能假定回滚。
 
 `followUp=true` 只适用于 US 主营。仓库使用实际业务完成时间一次性构建严格 system competitor child，保留父 slot、interval、batch，完整保存 child payload、digest、requestedAt，与父 `business-completed` 在同一事务内提交。child 的 requestedAt 和 createdAt 必须精确等于原 businessCompletedAt，expiresAt 必须等于父值；即使替换后的 payload 和 digest 相互匹配，也不能刷新时钟或更改 TTL。重放返回原 child，不能用当前时间重建。竞品或非 US 主营不能递归保存 child。保留期结束前无法构造有效 child 时拒绝新的完成边界，不能延长原任务 TTL。
 
@@ -41,7 +41,7 @@
 
 每仓库最多 4 个操作，每次事务默认总时限 15 秒、单语句/锁等待 5 秒。每次事务使用局部限制，不改变共享池配置。连接取得、SQL、取消和关闭均纳入时限；迟到连接被销毁，容量槽直到该操作真正释放才归还。COMMIT 发出后的断连/取消/超时统一报告 `commit-uncertain`，不能证明回滚。
 
-repeatable-read 的视图可能在 advisory lock 等待前建立。需要已有 run 的状态转换在锁后仍看不到记录时，最多重新开启三次完整事务，读取先前受理并提交的原身份和原快照；确实无记录最终仍返回 `identity`。已有记录的错摘要/错域/损坏快照立即拒绝，不按缺行重试；连接错误或 COMMIT 未知也不重试。普通 `read()` 仍允许不存在的记录返回 undefined，不创建或补写 run。
+repeatable-read 的视图可能在 advisory lock 等待前建立。需要已有 run 的状态转换及 `read()` 对账在锁后仍看不到记录时，最多重新开启三次完整事务，读取先前受理并提交的原身份和原快照。确实无记录时，状态转换最终仍返回 `identity`，普通 `read()` 才返回 undefined；不创建或补写 run。已有记录的错摘要/错域/损坏快照立即拒绝，不按缺行重试；取消、连接错误或 COMMIT 未知也不重试。
 
 只对 PostgreSQL 明确拒绝的 serialization conflict，以及受理阶段的唯一键冲突，最多重新尝试 3 次 DB-only 事务。repeatable-read 的快照可能早于 advisory lock 等待，冲突后必须开启新事务；不能在旧快照下假定刚提交的 run 不存在。这里不包含外部请求，因此冲突重试不会重抓商品。
 

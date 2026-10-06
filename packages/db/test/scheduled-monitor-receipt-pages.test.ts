@@ -22,6 +22,7 @@ function fixture(
     gap?: boolean;
     forgedOrdinal?: number;
     oversized?: boolean;
+    malformed?: boolean;
     pauseSecondPage?: boolean;
   } = {},
 ) {
@@ -120,7 +121,9 @@ function fixture(
                 options.forgedOrdinal === ordinal
                   ? 'a'.repeat(64)
                   : operation.requestHash,
-              result,
+              result: options.malformed
+                ? { ...result, isBroken: 'corrupt' }
+                : result,
               completed_at: now,
             },
           ],
@@ -165,7 +168,17 @@ function fixture(
     statements.filter(({ text }) =>
       text.includes("SET state='business-completed'"),
     );
-  return { repository, job, row, pages, statements, summary, updates, resume };
+  return {
+    repository,
+    job,
+    row,
+    pages,
+    statements,
+    summary,
+    updates,
+    resume,
+    connect,
+  };
 }
 
 describe.each(['primary', 'competitor'] as const)(
@@ -225,19 +238,24 @@ describe.each(['primary', 'competitor'] as const)(
         }
       },
     );
-    it('still rejects a single oversized result via the real decoder without completing business', async () => {
-      const f = fixture(domain, 1, { oversized: true });
-      try {
-        await expect(
-          f.repository.completeBusiness(f.job, f.summary),
-        ).rejects.toBeInstanceOf(Error);
-        expect(f.pages).toEqual([0]);
-        expect(f.updates()).toEqual([]);
-        expect(f.row.state).toBe('running');
-      } finally {
-        f.repository.close();
-      }
-    }, 15_000);
+    it.each([{ oversized: true }, { malformed: true }])(
+      'classifies a permanently invalid stored result as identity without an automatic retry %j',
+      async (options) => {
+        const f = fixture(domain, 1, options);
+        try {
+          await expect(
+            f.repository.completeBusiness(f.job, f.summary),
+          ).rejects.toMatchObject({ code: 'identity' });
+          expect(f.connect).toHaveBeenCalledTimes(1);
+          expect(f.pages).toEqual([0]);
+          expect(f.updates()).toEqual([]);
+          expect(f.row.state).toBe('running');
+        } finally {
+          f.repository.close();
+        }
+      },
+      15_000,
+    );
     it('keeps a timed-out run inspectable and retries only completion after late SQL settles', async () => {
       vi.useFakeTimers();
       const f = fixture(domain, 3, { pauseSecondPage: true });

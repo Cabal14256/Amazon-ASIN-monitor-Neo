@@ -24,6 +24,7 @@ import {
   type ScheduledMonitorGroupSnapshot,
   type ScheduledMonitorRun,
 } from '../domain/scheduled-monitor-run';
+import { VariantCheckError } from '../domain/variant-check';
 import { decodeVariantCheckReceiptResult } from '../domain/variant-check-receipt';
 import {
   PgScheduledMonitorTransactions,
@@ -186,7 +187,9 @@ export class PgScheduledMonitorRunRepository {
         return await this.transactions.run(action, signal, admission);
       } catch (error) {
         if (error instanceof ScheduledMonitorMissingSnapshot) {
-          if (attempt === 2) throw new ScheduledMonitorRunError('identity');
+          // Preserve the private missing-row marker so optional read can report
+          // genuine absence only after exhausting fresh RR transactions.
+          if (attempt === 2) throw error;
         } else if (!(error instanceof ScheduledMonitorSerializationRetry)) {
           throw error;
         }
@@ -363,10 +366,12 @@ export class PgScheduledMonitorRunRepository {
     signal?: AbortSignal,
   ): Promise<ScheduledMonitorRun | undefined> {
     const job = this.job(value);
-    return this.transaction(async (tx) => {
-      await this.lock(tx, job);
-      return this.existing(tx, job);
-    }, signal);
+    return this.transaction((tx) => this.require(tx, job), signal).catch(
+      (error: unknown) => {
+        if (error instanceof ScheduledMonitorMissingSnapshot) return undefined;
+        throw error;
+      },
+    );
   }
   private async snapshot(
     tx: ScheduledMonitorTransaction,
@@ -637,10 +642,20 @@ export class PgScheduledMonitorRunRepository {
           )
         )
           throw new ScheduledMonitorRunError('identity');
-        const counts = receiptCounts(
-          decodeVariantCheckReceiptResult(row.result, operation.resultKind),
-          run.groups[ordinal],
-        );
+        let decoded: unknown;
+        try {
+          decoded = decodeVariantCheckReceiptResult(
+            row.result,
+            operation.resultKind,
+          );
+        } catch (error) {
+          // This row is already persisted. Malformed or oversized contents are
+          // permanent receipt violations, not a transient transport failure.
+          if (error instanceof VariantCheckError)
+            throw new ScheduledMonitorRunError('identity');
+          throw error;
+        }
+        const counts = receiptCounts(decoded, run.groups[ordinal]);
         const completedAt = iso(row.completed_at);
         if (!completedAt || completedAt < job.createdAt || completedAt > now)
           throw new ScheduledMonitorRunError('identity');

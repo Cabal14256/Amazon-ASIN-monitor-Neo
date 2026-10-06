@@ -378,7 +378,7 @@ suite.each(['primary', 'competitor'] as const)(
         peer.close();
       }
     });
-    it.each(['start', 'requestCancellation'] as const)(
+    it.each(['start', 'requestCancellation', 'read'] as const)(
       'refreshes the RR snapshot after %s actually waits for initial acceptance on another connection',
       async (operation) => {
         const job = await nowJob();
@@ -390,7 +390,7 @@ suite.each(['primary', 'competitor'] as const)(
           | ReturnType<typeof settled<ScheduledMonitorRun>>
           | undefined;
         let transition:
-          | ReturnType<typeof settled<ScheduledMonitorRun>>
+          | ReturnType<typeof settled<ScheduledMonitorRun | undefined>>
           | undefined;
         try {
           await blocker.query('BEGIN');
@@ -429,6 +429,9 @@ suite.each(['primary', 'competitor'] as const)(
           if (!accepted.ok) throw accepted.error;
           const changed = await transition;
           if (!changed.ok) throw changed.error;
+          expect(changed.value).toBeDefined();
+          if (!changed.value)
+            throw new Error('Committed acceptance must be visible');
           expect(changed.value.job).toEqual(accepted.value.job);
           expect(changed.value.groups).toEqual(accepted.value.groups);
           expect(changed.value.snapshotDigest).toBe(
@@ -596,6 +599,67 @@ suite.each(['primary', 'competitor'] as const)(
         storage().finishWithoutBusiness(job, 'failed'),
       ).rejects.toMatchObject({ code: 'state' });
     });
+    it.each(['schema', 'conservative-capacity'] as const)(
+      'classifies a persisted %s decoder violation as identity while keeping the original receipt and run',
+      async (violation) => {
+        const job = await nowJob();
+        await insertRows(groupTable, [scheduledGroup(domain)]);
+        await insertRows(memberTable, [scheduledMember(domain)]);
+        const run = await storage().accept(job);
+        await storage().start(job);
+        await insertReceipt(run);
+        if (violation === 'schema') {
+          await connection().query(
+            `UPDATE ${qualified}."${receiptTable}" SET result=result || jsonb_build_object('isBroken','corrupt'::text) WHERE task_id=$1`,
+            [job.taskId],
+          );
+        } else {
+          // PostgreSQL's physical size CHECK still permits this ~1.2 MiB JSON.
+          // JS decodes each numeric value to exponent form; the business decoder's
+          // conservative numeric expansion bound permanently rejects it. Do not
+          // remove a real size CHECK to manufacture an impossible oversized row.
+          await connection().query(
+            `UPDATE ${qualified}."${receiptTable}" SET result=result || jsonb_build_object('raw',
+              (SELECT jsonb_agg(0.0000001::numeric) FROM generate_series(1,110000))) WHERE task_id=$1`,
+            [job.taskId],
+          );
+        }
+        const fingerprint = async () =>
+          (
+            await connection().query(
+              `SELECT md5(result::text) AS digest,octet_length(result::text) AS bytes FROM ${qualified}."${receiptTable}" WHERE task_id=$1`,
+              [job.taskId],
+            )
+          ).rows;
+        const original = await fingerprint();
+        expect(original).toHaveLength(1);
+        expect(original[0].bytes).toBeLessThan(33554432);
+        const observed = observeReceiptTransport();
+        try {
+          await expect(
+            observed.repository.completeBusiness(job, summary(run)),
+          ).rejects.toMatchObject({ code: 'identity' });
+          expect(observed.pages).toEqual([{ after: -1, rows: 1, ordinal: 0 }]);
+          expect(
+            observed.statements.filter(
+              (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+            ),
+          ).toHaveLength(1);
+          expect(observed.completions).toBe(0);
+          expect(await fingerprint()).toEqual(original);
+          expect((await storage().read(job))?.state).toBe('running');
+          // An explicit inspection does not make invalid evidence transient or
+          // re-run business. Repeating completion remains the same identity error.
+          await expect(
+            storage().completeBusiness(job, summary(run)),
+          ).rejects.toMatchObject({ code: 'identity' });
+          expect(await fingerprint()).toEqual(original);
+        } finally {
+          observed.repository.close();
+        }
+      },
+      15_000,
+    );
     it('requires matching transactional receipts, original member results and aggregate counts before business completion', async () => {
       const job = await nowJob();
       await insertRows(groupTable, [scheduledGroup(domain)]);

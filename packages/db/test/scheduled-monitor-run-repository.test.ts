@@ -142,62 +142,100 @@ describe.each(['primary', 'competitor'] as const)(
         repository.close();
       }
     });
-    it('rejects a foreign immutable identity immediately without a retry or state change', async () => {
-      const { repository, job, row, connect } = fixture(domain);
+    it.each(['requestCancellation', 'read'] as const)(
+      'rejects a foreign immutable identity in %s immediately without a retry or state change',
+      async (operation) => {
+        const { repository, job, row, connect } = fixture(domain);
+        try {
+          await expect(
+            repository[operation]({
+              ...job,
+              expiresAt: new Date(Date.parse(job.expiresAt) + 1).toISOString(),
+            }),
+          ).rejects.toMatchObject({ code: 'identity' });
+          expect(connect).toHaveBeenCalledTimes(1);
+          expect(row.state).toBe('pending');
+          expect(row.cancel_requested_at).toBeNull();
+        } finally {
+          repository.close();
+        }
+      },
+    );
+    it('refreshes an optional read after stale absence and returns only the original accepted run', async () => {
+      const { repository, job, connect, clients } = fixture(domain, {
+        missing: 'first',
+      });
       try {
-        await expect(
-          repository.requestCancellation({
-            ...job,
-            expiresAt: new Date(Date.parse(job.expiresAt) + 1).toISOString(),
-          }),
-        ).rejects.toMatchObject({ code: 'identity' });
-        expect(connect).toHaveBeenCalledTimes(1);
-        expect(row.state).toBe('pending');
-        expect(row.cancel_requested_at).toBeNull();
+        expect(await repository.read(job)).toMatchObject({
+          job,
+          state: 'pending',
+        });
+        expect(connect).toHaveBeenCalledTimes(2);
+        expect(clients[0].release).toHaveBeenCalledExactlyOnceWith(true);
+        expect(clients[1].release).toHaveBeenCalledExactlyOnceWith(false);
+        expect(
+          clients
+            .flatMap(({ query }) => query.mock.calls)
+            .every(([text]) => !/^(INSERT|UPDATE|DELETE)\b/.test(text)),
+        ).toBe(true);
       } finally {
         repository.close();
       }
     });
-    it('keeps an absent optional read as undefined without creating or retrying a run', async () => {
-      const { repository, job, connect } = fixture(domain, {
+    it('bounds genuine optional absence to three fresh read transactions without creating a run', async () => {
+      const { repository, job, connect, clients } = fixture(domain, {
         missing: 'always',
       });
       try {
         await expect(repository.read(job)).resolves.toBeUndefined();
-        expect(connect).toHaveBeenCalledTimes(1);
+        expect(connect).toHaveBeenCalledTimes(3);
+        expect(
+          clients.every(({ release }) => release.mock.calls.length === 1),
+        ).toBe(true);
+        expect(
+          clients
+            .flatMap(({ query }) => query.mock.calls)
+            .every(([text]) => !/^(COMMIT|INSERT|UPDATE|DELETE)\b/.test(text)),
+        ).toBe(true);
       } finally {
         repository.close();
       }
     });
-    it('honors an abort between stale-snapshot attempts without another connection or write', async () => {
-      const controller = new AbortController();
-      const { repository, job, row, connect } = fixture(domain, {
-        missing: 'first',
-        onRelease: () => controller.abort(),
-      });
-      try {
-        await expect(
-          repository.start(job, controller.signal),
-        ).rejects.toMatchObject({ code: 'cancelled' });
-        expect(connect).toHaveBeenCalledTimes(1);
-        expect(row.state).toBe('pending');
-        expect(repository.getDiagnostics().active).toBe(0);
-      } finally {
-        repository.close();
-      }
-    });
-    it('does not retry an unknown COMMIT after acquiring the original row', async () => {
-      const { repository, job, connect } = fixture(domain, {
-        lostCommit: true,
-      });
-      try {
-        await expect(repository.start(job)).rejects.toMatchObject({
-          code: 'commit-uncertain',
+    it.each(['start', 'read'] as const)(
+      'honors an abort between stale-snapshot %s attempts without another connection or write',
+      async (operation) => {
+        const controller = new AbortController();
+        const { repository, job, row, connect } = fixture(domain, {
+          missing: 'first',
+          onRelease: () => controller.abort(),
         });
-        expect(connect).toHaveBeenCalledTimes(1);
-      } finally {
-        repository.close();
-      }
-    });
+        try {
+          await expect(
+            repository[operation](job, controller.signal),
+          ).rejects.toMatchObject({ code: 'cancelled' });
+          expect(connect).toHaveBeenCalledTimes(1);
+          expect(row.state).toBe('pending');
+          expect(repository.getDiagnostics().active).toBe(0);
+        } finally {
+          repository.close();
+        }
+      },
+    );
+    it.each(['start', 'read'] as const)(
+      'does not retry an unknown %s COMMIT after acquiring the original row',
+      async (operation) => {
+        const { repository, job, connect } = fixture(domain, {
+          lostCommit: true,
+        });
+        try {
+          await expect(repository[operation](job)).rejects.toMatchObject({
+            code: 'commit-uncertain',
+          });
+          expect(connect).toHaveBeenCalledTimes(1);
+        } finally {
+          repository.close();
+        }
+      },
+    );
   },
 );
