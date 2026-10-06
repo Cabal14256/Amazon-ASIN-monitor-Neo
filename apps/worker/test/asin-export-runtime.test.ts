@@ -1,4 +1,5 @@
 import type { Env } from '@asin-monitor/config';
+import { ExportArtifactStore } from '@asin-monitor/export';
 import { mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -7,7 +8,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const fixture = vi.hoisted(() => ({
   stalled: 'queue' as 'queue' | 'worker' | 'none',
   directory: '',
-  tasks: new Map<string, { status: string }>(),
+  tasks: new Map<string, { status: string; [key: string]: unknown }>(),
+  rejectMutation: false,
   queueClosed: 0,
   workerClosed: 0,
   redisDisconnected: 0,
@@ -31,6 +33,22 @@ vi.mock('@asin-monitor/db', () => ({
   RedisTaskRepository: class {
     async read(taskId: string) {
       return fixture.tasks.get(taskId) ?? null;
+    }
+    async mutate(
+      taskId: string,
+      _transition: unknown,
+      identity: Record<string, unknown>,
+    ) {
+      if (fixture.rejectMutation) throw new Error('fixture Redis unavailable');
+      const current = fixture.tasks.get(taskId);
+      if (
+        !current ||
+        Object.entries(identity).some(([key, value]) => current[key] !== value)
+      )
+        return null;
+      const next = { ...current, status: 'failed' };
+      fixture.tasks.set(taskId, next);
+      return next;
     }
   },
 }));
@@ -107,11 +125,13 @@ const env = {
 const directories: string[] = [];
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   fixture.queueClosed = 0;
   fixture.workerClosed = 0;
   fixture.redisDisconnected = 0;
   fixture.poolEnded = 0;
   fixture.tasks.clear();
+  fixture.rejectMutation = false;
   fixture.directory = '';
   for (const directory of directories.splice(0)) {
     if (
@@ -124,6 +144,83 @@ afterEach(async () => {
 });
 
 describe('ASIN export startup deadline', () => {
+  it('retains a durable rejection during a Redis failure and recovers it on the next Worker start', async () => {
+    fixture.stalled = 'none';
+    fixture.directory = await mkdtemp(join(tmpdir(), 'neo-export-runtime-'));
+    directories.push(fixture.directory);
+    const artifacts = new ExportArtifactStore(fixture.directory);
+    const proof = {
+      taskId: '10000000-0000-4000-8000-000000000166',
+      userId: '20000000-0000-4000-8000-000000000166',
+      createdAt: '2026-10-07T00:00:00.000Z',
+      taskType: 'export' as const,
+      taskSubType: 'asin' as const,
+    };
+    await artifacts.recordRejectedSubmission(proof);
+    fixture.tasks.set(proof.taskId, { ...proof, status: 'pending' });
+    fixture.rejectMutation = true;
+    const first = await startAsinExportRuntime(env, vi.fn());
+    try {
+      await vi.waitFor(async () => {
+        const { logger } = await import('../src/logger');
+        expect(logger.warn).toHaveBeenCalledWith('ASIN 导出文件清理暂不可用', {
+          reason: 'export_cleanup_failed',
+        });
+      });
+      expect(await artifacts.readRejectedSubmission(proof.taskId)).toEqual(
+        proof,
+      );
+      expect(fixture.tasks.get(proof.taskId)?.status).toBe('pending');
+    } finally {
+      await first.close();
+    }
+    fixture.rejectMutation = false;
+    const restarted = await startAsinExportRuntime(env, vi.fn());
+    try {
+      await vi.waitFor(async () => {
+        expect(await artifacts.readRejectedSubmission(proof.taskId)).toBeNull();
+      });
+      expect(fixture.tasks.get(proof.taskId)?.status).toBe('failed');
+    } finally {
+      await restarted.close();
+    }
+  });
+  it('keeps one blocked cleanup sweep across interval ticks and releases the gate only after it settles', async () => {
+    fixture.stalled = 'none';
+    fixture.directory = await mkdtemp(join(tmpdir(), 'neo-export-runtime-'));
+    directories.push(fixture.directory);
+    vi.useFakeTimers();
+    let release!: (value: number) => void;
+    const blocked = new Promise<number>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(
+      ExportArtifactStore.prototype,
+      'reconcileRejectedSubmissions',
+    ).mockResolvedValue(undefined);
+    const cleanup = vi
+      .spyOn(ExportArtifactStore.prototype, 'cleanup')
+      .mockImplementationOnce(() => blocked)
+      .mockResolvedValue(0);
+    const runtime = await startAsinExportRuntime(env, vi.fn());
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      release(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cleanup).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(cleanup).toHaveBeenCalledTimes(6);
+      await runtime.close();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(cleanup).toHaveBeenCalledTimes(6);
+    } finally {
+      release(0);
+      await runtime.close();
+    }
+  });
   it('reclaims real crash-orphaned partials after 45 minutes while respecting active writes and final retention', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-02T18:00:00Z'));

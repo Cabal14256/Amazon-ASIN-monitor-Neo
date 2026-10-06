@@ -1,6 +1,10 @@
 import {
   asinExportArtifactSchema,
+  asinExportJobDataSchema,
+  createExportTaskRequestSchema,
   type AsinExportArtifact,
+  type AsinExportJobData,
+  type CreateExportTaskRequest,
 } from '@asin-monitor/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -12,7 +16,14 @@ import {
   writev,
   type WriteStream,
 } from 'node:fs';
-import { link, lstat, mkdir, readdir, unlink } from 'node:fs/promises';
+import {
+  link,
+  lstat,
+  mkdir,
+  open as openFile,
+  readdir,
+  unlink,
+} from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 
 export const MAX_EXPORT_BYTES = 268_435_456;
@@ -20,6 +31,21 @@ const taskIdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const partialPattern = /^export-([0-9a-f-]{36})\.([0-9a-f-]{36})\.part$/;
 const finalPattern = /^export-([0-9a-f-]{36})\.xlsx$/;
+const rejectionPattern = /^export-rejected-([0-9a-f-]{36})\.json$/;
+const rejectionIdentitySchema = asinExportJobDataSchema
+  .pick({
+    taskId: true,
+    userId: true,
+    createdAt: true,
+    taskType: true,
+    taskSubType: true,
+  })
+  .extend({ taskSubType: createExportTaskRequestSchema.shape.exportType })
+  .strict();
+export type ExportRejectionIdentity = Pick<
+  AsinExportJobData,
+  'taskId' | 'userId' | 'createdAt' | 'taskType'
+> & { taskSubType: CreateExportTaskRequest['exportType'] };
 const missing = (error: unknown) =>
   (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 
@@ -138,6 +164,95 @@ export class ExportArtifactStore {
     await unlink(this.path(taskId)).catch((error: unknown) => {
       if (!missing(error)) throw error;
     });
+  }
+  private rejectionPath(taskId: string) {
+    this.path(taskId);
+    return join(this.directory, `export-rejected-${taskId}.json`);
+  }
+  /** Written only after the producer proves queue.add was never attempted.
+   * A shared immutable journal survives Redis outages and API restarts. */
+  async recordRejectedSubmission(identity: ExportRejectionIdentity) {
+    const data = rejectionIdentitySchema.parse(identity);
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const partial = this.partialPath(data.taskId);
+    const handle = await openFile(partial, 'wx', 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(data), 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      try {
+        await link(partial, this.rejectionPath(data.taskId));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error;
+      }
+      const saved = await this.readRejectedSubmission(data.taskId);
+      if (!saved || JSON.stringify(saved) !== JSON.stringify(data))
+        throw new ExportArtifactError('invalid');
+    } finally {
+      await this.discard(partial);
+    }
+  }
+  async readRejectedSubmission(
+    taskId: string,
+  ): Promise<ExportRejectionIdentity | null> {
+    const path = this.rejectionPath(taskId);
+    const info = await lstat(path).catch((error: unknown) => {
+      if (!missing(error)) throw error;
+      return undefined;
+    });
+    if (!info) return null;
+    if (
+      !info.isFile() ||
+      info.isSymbolicLink() ||
+      info.size < 1 ||
+      info.size > 4096
+    )
+      throw new ExportArtifactError('invalid');
+    const handle = await openFile(path, 'r');
+    try {
+      // A fixed buffer also bounds a file replaced after lstat.
+      const buffer = Buffer.alloc(4097);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead !== info.size || bytesRead > 4096)
+        throw new ExportArtifactError('invalid');
+      const data = rejectionIdentitySchema.parse(
+        JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')),
+      );
+      if (data.taskId !== taskId) throw new ExportArtifactError('invalid');
+      return data;
+    } finally {
+      await handle.close();
+    }
+  }
+  async discardRejectedSubmission(taskId: string) {
+    await unlink(this.rejectionPath(taskId)).catch((error: unknown) => {
+      if (!missing(error)) throw error;
+    });
+  }
+  async reconcileRejectedSubmissions(
+    limit: number,
+    settle: (identity: ExportRejectionIdentity) => Promise<boolean>,
+  ) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new ExportArtifactError('invalid');
+    const entries = await readdir(this.directory, {
+      withFileTypes: true,
+    }).catch((error: unknown) => {
+      if (!missing(error)) throw error;
+      return [];
+    });
+    let inspected = 0;
+    for (const entry of entries) {
+      const match = rejectionPattern.exec(entry.name);
+      if (!entry.isFile() || !match || !taskIdPattern.test(match[1]!)) continue;
+      if (inspected++ >= limit) break;
+      const identity = await this.readRejectedSubmission(match[1]!);
+      if (identity && (await settle(identity)))
+        await this.discardRejectedSubmission(identity.taskId);
+    }
   }
   private async inspectFile(
     path: string,

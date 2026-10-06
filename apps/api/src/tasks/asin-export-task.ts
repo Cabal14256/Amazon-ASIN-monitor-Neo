@@ -28,6 +28,7 @@ import type { AuthPrincipal } from '../auth/auth.types';
 import { AuthenticationGuard } from '../auth/authentication.guard';
 import { PermissionsGuard } from '../auth/permissions.guard';
 import { RequirePermissions } from '../auth/require-permissions.decorator';
+import { ExportSubmissionRejectedException } from '../common/export-submission-rejected.exception';
 import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
@@ -133,6 +134,23 @@ export class AsinExportTaskService implements OnModuleDestroy {
       )
         fail(429, '导出队列已满，请稍后再试');
       if (error instanceof ExportEnqueueRejected && taskCreatedAt && port) {
+        const rejectedIdentity = {
+          taskId,
+          userId: principal.userId,
+          taskType: 'export' as const,
+          taskSubType: 'asin' as const,
+          createdAt: taskCreatedAt,
+        };
+        // A lost Redis cleanup ACK cannot change the known fact that add was
+        // never called. Retain that fact on the shared private volume so query
+        // or Worker recovery can release admission even after an API restart.
+        try {
+          await port.recordRejected?.(rejectedIdentity);
+        } catch {
+          this.logger.error('导出拒绝回执保存失败', 'AsinExportTaskService', {
+            reason: 'export_rejection_journal_failed',
+          });
+        }
         try {
           const state = await this.tasks
             .openExport(() => {
@@ -149,10 +167,11 @@ export class AsinExportTaskService implements OnModuleDestroy {
               },
             );
           if (state?.status === 'failed')
-            fail(503, 'ASIN 导出未入队，请稍后再试');
+            throw new ExportSubmissionRejectedException(taskId, 'asin');
         } catch (failure) {
           if (failure instanceof HttpException) throw failure;
         }
+        throw new ExportSubmissionRejectedException(taskId, 'asin');
       }
       if (submissionStarted) {
         this.logger.warn('ASIN 导出任务提交未确认', 'AsinExportTaskService', {

@@ -1,4 +1,5 @@
 import {
+  getExportStorageDirectory,
   getNeoQueuePrefix,
   getPhysicalQueueName,
   getQueuePolicy,
@@ -22,6 +23,10 @@ import {
   type TaskRedisPort,
   type TaskState,
 } from '@asin-monitor/db';
+import {
+  ExportArtifactStore,
+  type ExportRejectionIdentity,
+} from '@asin-monitor/export';
 import { isImportTaskData, type ImportTaskData } from '@asin-monitor/import';
 import {
   parseVariantCheckJob,
@@ -53,6 +58,7 @@ const MONITOR_QUEUE_MAX_IN_FLIGHT = 50;
 export interface TaskQueryPort {
   store: Pick<RedisTaskRepository, 'read' | 'listUser' | 'mutate'>;
   findJob(taskId: string, taskType?: string): Promise<QueueTaskSnapshot | null>;
+  reconcileRejectedExport?(task: TaskState): Promise<TaskState | null>;
 }
 export interface TaskCancellationPort {
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>;
@@ -73,6 +79,7 @@ export interface CheckProducerPort {
 export interface ExportProducerPort {
   store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
   enqueue(data: AsinExportJobData): Promise<void>;
+  recordRejected?(identity: ExportRejectionIdentity): Promise<void>;
 }
 export class ExportEnqueueRejected extends Error {
   constructor(readonly reason: 'unavailable' | 'invalid') {
@@ -178,6 +185,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
 /** Dedicated request connection: no Worker blocking/retry policy or Legacy Bull4 keys. */
 @Injectable()
 export class TaskQueryRuntime implements OnModuleDestroy {
+  private readonly exportArtifacts: ExportArtifactStore;
   private readonly redis: Redis;
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
@@ -196,6 +204,9 @@ export class TaskQueryRuntime implements OnModuleDestroy {
     @Inject(ENV) private readonly env: Env,
     @Inject(AppLogger) private readonly logger: AppLogger,
   ) {
+    this.exportArtifacts = new ExportArtifactStore(
+      getExportStorageDirectory(env),
+    );
     this.redis = new Redis(env.REDIS_URL, {
       lazyConnect: true,
       connectTimeout: 1000,
@@ -320,6 +331,50 @@ export class TaskQueryRuntime implements OnModuleDestroy {
     const command = this.command(ensureOpen);
     return {
       store: this.createStore(ensureOpen),
+      reconcileRejectedExport: async (task) => {
+        if (
+          task.taskType !== 'export' ||
+          task.taskSubType !== 'asin' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+            task.taskId,
+          )
+        )
+          return null;
+        ensureOpen();
+        let proof: ExportRejectionIdentity | null;
+        try {
+          proof = await this.exportArtifacts.readRejectedSubmission(
+            task.taskId,
+          );
+        } catch {
+          this.logger.warn('导出拒绝回执读取暂不可用', 'TaskQueryRuntime', {
+            reason: 'export_rejection_read_failed',
+          });
+          return null;
+        }
+        ensureOpen();
+        if (
+          !proof ||
+          Object.entries(proof).some(
+            ([key, value]) => task[key as keyof TaskState] !== value,
+          )
+        )
+          return null;
+        const next = await this.createStore(ensureOpen).mutate(
+          task.taskId,
+          { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+          proof,
+        );
+        if (next && ['failed', 'cancelled', 'completed'].includes(next.status))
+          await this.exportArtifacts
+            .discardRejectedSubmission(task.taskId)
+            .catch(() =>
+              this.logger.warn('导出拒绝回执清理暂不可用', 'TaskQueryRuntime', {
+                reason: 'export_rejection_cleanup_failed',
+              }),
+            );
+        return next;
+      },
       findJob: async (id, type) => {
         const names = TASK_QUERY_QUEUES.filter(
           (name) => type === undefined || name === type,
@@ -448,6 +503,8 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   ): ExportProducerPort {
     return {
       store: this.createStore(ensureOpen, onCreateWriteStarted),
+      recordRejected: (identity) =>
+        this.exportArtifacts.recordRejectedSubmission(identity),
       enqueue: async (input) => {
         const parsed = asinExportJobDataSchema.safeParse(input);
         if (!parsed.success) throw new ExportEnqueueRejected('invalid');

@@ -75,6 +75,7 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
   let worker: Worker | undefined;
   let cleanupTimer: ReturnType<typeof setInterval> | undefined;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  let cleanupActive = false;
   const shutdown = new AbortController();
   const ensureStarting = () => {
     if (closing) throw new Error('EXPORT_STARTUP_STOPPED');
@@ -128,8 +129,37 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     ]);
     const activeWorker = worker!;
     const cleanup = async () => {
+      // A stalled filesystem operation cannot be cancelled by the callback
+      // deadline. Retain one sweep until it settles instead of accumulating
+      // another blocked readdir/lstat/unlink on each interval tick.
+      if (closing || cleanupActive) return;
+      cleanupActive = true;
       const deadline = performance.now() + 2000;
       try {
+        await artifacts.reconcileRejectedSubmissions(100, async (proof) => {
+          if (closing || performance.now() >= deadline) return false;
+          const task = await store.read(proof.taskId);
+          if (!task) return true;
+          // An expired UUID may identify a replacement. Remove only the stale
+          // journal, never mutate that task or touch its artifact.
+          if (
+            Object.entries(proof).some(
+              ([key, value]) => task[key as keyof typeof task] !== value,
+            )
+          )
+            return true;
+          if (['completed', 'failed', 'cancelled'].includes(task.status))
+            return true;
+          if (closing || performance.now() >= deadline) return false;
+          const next = await store.mutate(
+            proof.taskId,
+            { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+            proof,
+          );
+          return (
+            !next || ['completed', 'failed', 'cancelled'].includes(next.status)
+          );
+        });
         // A retry owns a new random partial. Never retain a crashed attempt's
         // unreachable file for the lifetime of downloadable task metadata.
         const partials = await artifacts.cleanup(
@@ -168,6 +198,8 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
           logger.warn('ASIN 导出文件清理暂不可用', {
             reason: 'export_cleanup_failed',
           });
+      } finally {
+        cleanupActive = false;
       }
     };
     cleanupTimer = setInterval(() => void cleanup(), 60_000);

@@ -30,6 +30,7 @@ const createLimitedExport = vi.fn(
 );
 const enqueue = vi.fn(async () => undefined);
 const mutate = vi.fn(async () => ({ status: 'failed' }));
+const recordRejected = vi.fn(async (_identity: unknown) => undefined);
 const openExport = vi.fn(
   (_ensureOpen: () => void, onCreateWriteStarted?: () => void) => ({
     store: {
@@ -42,6 +43,7 @@ const openExport = vi.fn(
       mutate,
     },
     enqueue,
+    recordRejected,
   }),
 );
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -167,6 +169,50 @@ describe('ASIN export producer', () => {
     expect(mutate).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a definitive rejection when Redis terminal cleanup fails and persists its immutable recovery identity', async () => {
+    enqueue.mockRejectedValueOnce(new ExportEnqueueRejected('unavailable'));
+    mutate.mockRejectedValueOnce(new Error('fixture Redis outage'));
+    let response: unknown;
+    try {
+      await service().create(principal, { exportType: 'asin' });
+    } catch (error) {
+      expect(error).toBeInstanceOf(HttpException);
+      expect((error as HttpException).getStatus()).toBe(503);
+      response = (error as HttpException).getResponse();
+    }
+    expect(response).toMatchObject({
+      data: {
+        taskId: expect.any(String),
+        exportType: 'asin',
+        status: 'rejected',
+      },
+    });
+    expect(recordRejected).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: (response as { data: { taskId: string } }).data.taskId,
+        userId: principal.userId,
+        taskType: 'export',
+        taskSubType: 'asin',
+        createdAt,
+      }),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { reason: 'export_enqueue_outcome_unknown' },
+    );
+  });
+
+  it('never journals an uncertain add outcome as proof of rejection', async () => {
+    enqueue.mockRejectedValueOnce(
+      new Error('fixture add acknowledgement lost'),
+    );
+    expect(
+      await service().create(principal, { exportType: 'asin' }),
+    ).toMatchObject({ status: 'unknown' });
+    expect(recordRejected).not.toHaveBeenCalled();
+  });
+
   it('rejects a Redis readiness failure before task creation but preserves uncertain EVAL outcomes', async () => {
     openExport.mockImplementationOnce(() => ({
       store: {
@@ -176,6 +222,7 @@ describe('ASIN export producer', () => {
         mutate,
       },
       enqueue,
+      recordRejected,
     }));
     await expect(
       service().create(principal, { exportType: 'asin' }),
@@ -191,6 +238,7 @@ describe('ASIN export producer', () => {
         mutate,
       },
       enqueue,
+      recordRejected,
     }));
     await expect(
       service().create(principal, { exportType: 'asin' }),

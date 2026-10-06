@@ -25,6 +25,10 @@
 
 ## 验证与回滚
 
+- 明确在 `queue.add` 调用前拒绝时，API 将不可变 task/owner/createdAt/type 身份写入私有共享卷 `export-rejected-<taskId>.json`。即使 Redis 终态写入失败，响应仍为 503，并附任务 ID 与 `status=rejected`；不会改报为提交结果未知。任务中心的已授权详情/列表和 Worker 启动及每分钟巡检按这份回执恢复失败状态、释放名额；同一 ID 的身份发生变化时不能修改替代任务。Redis 恢复前保留回执，明确取消仍优先。仅队列无作业、任务年龄或通用入队 ACK 丢失均不能产生这种回执。共享卷写入也失败时会记录固定错误原因，需运维核对该任务；不能靠猜测队列缺席将其它任务标为失败。
+- 文件清理与拒绝回执恢复共用单轮执行门：文件系统阻塞期间不会每分钟叠加新的目录读取/删除；只有原轮实际结束后才允许下一轮。每轮拒绝回执最多检查 100 项，恢复保留当前不可变身份和终态边界。
+- Neo 任务中心仅对已完成且 artifact 标识、SHA-256、大小和文件名均符合契约的 ASIN 导出提供下载按钮。下载通过当前认证请求取得 XLSX，撤销 `asin:read`、更换用户/会话、强制改密或离开页面均中止下载并禁止迟到保存；采用服务端校验后的 `ASIN数据_YYYY-MM-DD.xlsx` 文件名。
+
 - 取消在重试开始前即可生效：若此前尝试已发布文件但完成确认丢失，API 在确认取消并移除排队重试后，按校验过的不可变任务身份删除该任务的最终文件。已运行的重试由 Worker 收尾；即使取消早于本次文件读取，也会清理前次产物。完成、其他所有者、身份变化及其他导出类型的文件保留。API 清理共享原有 3 秒请求截止，失败仅记录固定原因，取消结果仍有效；周期清理继续作为故障兜底。
 
 - 运行 `corepack pnpm --filter contracts test`、`corepack pnpm --filter export test`、`corepack pnpm --filter api test`、`corepack pnpm --filter worker test`、`corepack pnpm build:api`、`corepack pnpm build:worker`。隔离 PostgreSQL/Redis 集成测试需设置 `RUN_INTEGRATION_TESTS=true` 和仓库测试环境变量；API 集成测试使用编译后的 Worker 文件、独立 PostgreSQL schema、唯一 Redis 前缀及临时导出目录。

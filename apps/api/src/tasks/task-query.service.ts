@@ -87,6 +87,16 @@ export class TaskQueryService {
     const userId = principal.userId;
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
+    // Queue absence alone is never proof. Only the producer's immutable,
+    // shared-volume receipt can terminalize a definitive pre-add rejection.
+    if (port.reconcileRejectedExport) {
+      const rejected = await port.reconcileRejectedExport(task);
+      if (rejected) {
+        this.owner(rejected, userId);
+        if (isTerminalTaskStatus(rejected.status)) return rejected;
+      }
+    }
+    ensureOpen();
     const queued = await port.findJob(task.taskId, task.taskType);
     // Cleanup, retention limits, or a lost completion acknowledgement can erase
     // the job after a business commit. Without its immutable request digest,
