@@ -11,6 +11,7 @@ import { UnrecoverableError, type Job } from 'bullmq';
 import { EventEmitter } from 'node:events';
 import {
   mkdtemp,
+  open,
   readdir,
   readFile,
   rename,
@@ -122,24 +123,29 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
     cancelledAt: null,
     revision: 0,
   };
-  const query = vi.fn(async (text: string) => ({
-    rows: text.includes('pg_try_advisory_lock')
-      ? [{ acquired: true }]
-      : text.includes('SELECT EXISTS')
-      ? [{ enabled: false }]
-      : text.includes('pg_encoding_to_char')
-      ? [
-          {
-            encoding: 'UTF8',
-            lcCollate: 'C',
-            lcCtype: 'C',
-            localeProvider: 'c',
-          },
-        ]
-      : text.includes('timezone')
-      ? [{ timezone: 'Asia/Shanghai' }]
-      : [],
-  }));
+  const query = vi.fn(async (input: string | { text: string }) => {
+    const text = typeof input === 'string' ? input : input.text;
+    return {
+      rows: text.includes('backup_selective_restore_dependencies')
+        ? [{ blocked: false }]
+        : text.includes('pg_try_advisory_lock')
+        ? [{ acquired: true }]
+        : text.includes('SELECT EXISTS')
+        ? [{ enabled: false }]
+        : text.includes('pg_encoding_to_char')
+        ? [
+            {
+              encoding: 'UTF8',
+              lcCollate: 'C',
+              lcCtype: 'C',
+              localeProvider: 'c',
+            },
+          ]
+        : text.includes('timezone')
+        ? [{ timezone: 'Asia/Shanghai' }]
+        : [],
+    };
+  });
   dependencies.pool.mockImplementation(() => ({
     connect: async () => ({ query, release: vi.fn() }),
     end: vi.fn(),
@@ -173,6 +179,20 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
     assertJobLock: vi.fn(async () => undefined),
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const shutdown = new AbortController();
+  const publicationSync = {
+    syncFile: vi.fn(async (path: string) => {
+      const handle = await open(path, 'r+');
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    }),
+    // Windows cannot fsync a directory with Node. Publication ordering is
+    // injected here; Linux real-CLI Integration uses the default native path.
+    syncDirectory: vi.fn(async (_path: string): Promise<void> => undefined),
+  };
   const processor = createBackupProcessor(
     store,
     {
@@ -185,8 +205,9 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
         BACKUP_MAX_BYTES: 1024,
         TASK_META_TTL_SECONDS: ttl,
       } as never,
-      shutdownSignal: new AbortController().signal,
+      shutdownSignal: shutdown.signal,
       ...execution,
+      publicationSync,
       updateProgress: vi.fn(async () => undefined),
     },
     log,
@@ -206,6 +227,9 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
     processor,
     log,
     execution,
+    publicationSync,
+    shutdown,
+    query,
     state: () => current,
     setState: (value: TaskState) => {
       current = value;
@@ -217,6 +241,196 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
 }
 
 describe('creation attempts and durable publication', () => {
+  it('checks incoming dependency safety again under the target lease before any restore command', async () => {
+    const f = await fixture();
+    f.job.data = { ...f.data, params: { tables: ['public.OrderItems'] } };
+    const artifact = (await f.processor(f.job, 'lock')) as { filename: string };
+    const data = {
+      ...f.data,
+      taskSubType: 'restore',
+      operation: 'restore',
+      params: { filename: artifact.filename },
+    };
+    f.job.name = 'restore';
+    f.job.data = data;
+    f.setState({
+      ...f.state(),
+      taskSubType: 'restore',
+      status: 'pending',
+      startedAt: null,
+      result: null,
+    });
+    const query = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (input) => {
+      const text = typeof input === 'string' ? input : input.text;
+      return text.includes('backup_selective_restore_dependencies')
+        ? { rows: [{ blocked: true }] }
+        : query(input);
+    });
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+      '未包含在归档中的外部依赖',
+    );
+    expect(f.state()).toMatchObject({ status: 'failed', result: null });
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+  });
+  it('honors cancellation during partial sync before publishing either final file', async () => {
+    const f = await fixture();
+    const sync = f.publicationSync.syncFile.getMockImplementation()!;
+    f.publicationSync.syncFile.mockImplementation(async (path) => {
+      await sync(path);
+      f.setState(
+        transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+      );
+    });
+    await expect(f.processor(f.job, 'lock')).resolves.toMatchObject({
+      cancelled: true,
+    });
+    expect(f.state().status).toBe('cancelled');
+    expect(await readdir(f.directory)).toEqual([]);
+    expect(f.publicationSync.syncDirectory).not.toHaveBeenCalled();
+  });
+  it('finishes a durable publication when cancellation races with successful directory sync', async () => {
+    const f = await fixture();
+    f.publicationSync.syncDirectory.mockImplementation(async () => {
+      f.setState(
+        transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+      );
+    });
+    await f.processor(f.job, 'lock');
+    expect(f.state()).toMatchObject({ status: 'completed', cancelledAt: null });
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+  });
+  it('does not confirm cancellation or completion after shutdown interrupts a late final directory sync', async () => {
+    const f = await fixture();
+    let finish!: () => void;
+    f.publicationSync.syncDirectory.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const outcome = f.processor(f.job, 'lock');
+    const rejected = expect(outcome).rejects.toBeInstanceOf(UnrecoverableError);
+    await vi.waitFor(
+      () => expect(f.publicationSync.syncDirectory).toHaveBeenCalledOnce(),
+      { interval: 5 },
+    );
+    f.setState(
+      transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+    );
+    f.shutdown.abort();
+    await rejected;
+    finish();
+    await Promise.resolve();
+    expect(f.state().status).toBe('failed');
+    expect(
+      f.store.mutate.mock.calls.some(
+        ([, mutation]) => mutation.kind === 'backup-create-committed',
+      ),
+    ).toBe(false);
+    expect(await readdir(f.directory)).toHaveLength(2);
+    f.publicationSync.syncDirectory.mockResolvedValue(undefined);
+    await f.processor(f.job, 'lock');
+    expect(f.state().status).toBe('completed');
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+  });
+  it('cleans only its unpublished files after a failed partial file sync without a completed proof', async () => {
+    const f = await fixture();
+    f.publicationSync.syncFile.mockRejectedValue(
+      new Error('private-disk-token'),
+    );
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow();
+    expect(f.state().status).toBe('processing');
+    expect(await readdir(f.directory)).toEqual([]);
+    expect(f.publicationSync.syncDirectory).not.toHaveBeenCalled();
+    expect(
+      f.store.mutate.mock.calls.some(
+        ([, mutation]) => mutation.kind === 'backup-create-committed',
+      ),
+    ).toBe(false);
+  });
+  it('does not manufacture a recovered completion after a retained final file fails sync', async () => {
+    const f = await fixture();
+    const result = await f.processor(f.job, 'lock');
+    f.setState({ ...f.state(), status: 'failed', result: null });
+    f.store.mutate.mockClear();
+    f.publicationSync.syncFile.mockRejectedValue(
+      new Error('private-disk-token'),
+    );
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state().status).toBe('failed');
+    expect(
+      f.store.mutate.mock.calls.some(
+        ([, mutation]) => mutation.kind === 'backup-create-committed',
+      ),
+    ).toBe(false);
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+    f.publicationSync.syncFile.mockImplementation(async (path) => {
+      const file = await open(path, 'r+');
+      try {
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    });
+    expect(await f.processor(f.job, 'lock')).toEqual(result);
+  });
+  it('syncs both partial files before rename and the containing directory before the completion proof', async () => {
+    const f = await fixture();
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'backup-create-committed') {
+        expect(
+          f.publicationSync.syncFile.mock.calls.map(([path]) =>
+            path.slice(path.lastIndexOf('.dump')),
+          ),
+        ).toEqual(['.dump.partial', '.dump.meta.json.partial']);
+        expect(f.publicationSync.syncDirectory).toHaveBeenCalledWith(
+          f.directory,
+        );
+        expect(
+          (await readdir(f.directory)).some((name) =>
+            name.endsWith('.partial'),
+          ),
+        ).toBe(false);
+      }
+      return mutate(id, change);
+    });
+    await f.processor(f.job, 'lock');
+    expect(f.state().status).toBe('completed');
+  });
+  it('retains both final files without a completed proof when directory sync fails and recovers only after successful sync', async () => {
+    const f = await fixture();
+    f.publicationSync.syncDirectory.mockRejectedValue(
+      new Error('private-volume-token'),
+    );
+    await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+      UnrecoverableError,
+    );
+    expect(f.state().status).not.toBe('completed');
+    expect(
+      f.store.mutate.mock.calls.some(
+        ([, mutation]) => mutation.kind === 'backup-create-committed',
+      ),
+    ).toBe(false);
+    expect(
+      (await readdir(f.directory)).filter((name) => !name.endsWith('.partial')),
+    ).toHaveLength(2);
+    f.publicationSync.syncDirectory.mockResolvedValue(undefined);
+    await f.processor(f.job, 'lock');
+    expect(f.state().status).toBe('completed');
+    expect(
+      f.publicationSync.syncFile.mock.calls
+        .slice(-2)
+        .map(([path]) => path.slice(path.lastIndexOf('.dump'))),
+    ).toEqual(['.dump', '.dump.meta.json']);
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.log.error.mock.calls)).not.toContain(
+      'private-volume-token',
+    );
+  });
   it('replays an older v3 sidecar with an explicitly labeled filename-time fallback', async () => {
     const f = await fixture();
     const current = (await f.processor(f.job, 'lock')) as { filename: string };
@@ -302,6 +516,7 @@ describe('creation attempts and durable publication', () => {
     await f.processor(f.job, 'lock');
     expect(dependencies.spawn.mock.calls[0]?.[1]).toEqual(
       expect.arrayContaining([
+        '--strict-names',
         '--table-and-children="public"."OrderItems"',
         '--table-and-children="MixedSchema"."MixedTable"',
         '--table-and-children="Simple"',

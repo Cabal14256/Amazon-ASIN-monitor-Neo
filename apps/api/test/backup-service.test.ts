@@ -172,7 +172,9 @@ async function fixture(maxBytes = 1024 * 1024) {
   const pools = {
     primaryPool: {
       query: vi.fn(async (query: { text: string }) => ({
-        rows: query.text.includes('pg_database')
+        rows: query.text.includes('backup_selective_restore_dependencies')
+          ? [{ blocked: false }]
+          : query.text.includes('pg_database')
           ? ([{ ...databaseSettings, localeProvider: 'c' }] as Record<
               string,
               unknown
@@ -213,6 +215,43 @@ async function fixture(maxBytes = 1024 * 1024) {
 }
 
 describe('backup submission HTTP / global exception boundary', () => {
+  it('rejects selective restore before task creation when an unselected relation depends on the selection', async () => {
+    const f = await fixture();
+    await writeFile(join(f.directory, filename), 'PGDMPfixture');
+    await writeMetadata(f.directory, 'postgresql', 3, 'selective');
+    const query = f.pools.primaryPool.query.getMockImplementation()!;
+    f.pools.primaryPool.query.mockImplementation(async (config) =>
+      config.text.includes('backup_selective_restore_dependencies')
+        ? { rows: [{ blocked: true }] }
+        : query(config),
+    );
+    await expect(
+      f.service.restore(principal, { filename }),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { errorMessage: expect.stringContaining('未包含') },
+    });
+    expect(f.tasks.openBackup).not.toHaveBeenCalled();
+    expect(f.port.enqueue).not.toHaveBeenCalled();
+    expect(f.logger.error).not.toHaveBeenCalled();
+    const app = await http(f.service);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/backup/restore',
+        payload: { filename },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        success: false,
+        errorCode: 409,
+        errorMessage: expect.stringContaining('未包含'),
+      });
+      expect(f.tasks.openBackup).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
   async function http(service: BackupService) {
     const module = await Test.createTestingModule({
       controllers: [BackupController],

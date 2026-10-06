@@ -127,8 +127,10 @@ describe('backup creation execution time proof', () => {
       { ...timed, execution: undefined },
       {
         ...timed,
-        execution: { ...execution, dumpStartedAt: '2026-09-30T23:59:59.999Z' },
-        createdAt: '2026-09-30T23:59:59.999Z',
+        execution: {
+          ...execution,
+          dumpCompletedAt: '2026-10-03T00:59:59.999Z',
+        },
       },
     ]) {
       expect(() => parseBackupCreationReceipt(data, changed)).toThrow(
@@ -142,6 +144,54 @@ describe('backup creation execution time proof', () => {
         ),
       ).toThrow();
     }
+  });
+
+  it('accepts a valid worker execution window earlier than the API clock without changing task identity', () => {
+    const { data, result } = creationReceipt({
+      taskId: '10000000-0000-4000-8000-000000000161',
+      userId: 'owner',
+      createdAt: '2026-10-03T01:00:05.000Z',
+    });
+    const execution = {
+      timeSource: 'dump-start' as const,
+      dumpStartedAt: '2026-10-03T01:00:00.000Z',
+      dumpCompletedAt: '2026-10-03T01:00:01.000Z',
+      publicationStartedAt: '2026-10-03T01:00:02.000Z',
+    };
+    const timed = {
+      ...result,
+      createdAt: execution.dumpStartedAt,
+      timeSource: 'dump-start' as const,
+      execution,
+    };
+    expect(parseBackupCreationReceipt(data, timed)).toEqual(timed);
+    const task = {
+      ...data,
+      title: 'clock-skew fixture',
+      status: 'processing' as const,
+      progress: 99,
+      message: '',
+      error: null,
+      result: null,
+      updatedAt: data.createdAt,
+      startedAt: data.createdAt,
+      completedAt: null,
+      cancelRequestedAt: null,
+      cancelledAt: null,
+      revision: 1,
+    };
+    expect(
+      transitionTask(
+        task,
+        { kind: 'backup-create-committed', result: timed },
+        new Date(execution.publicationStartedAt),
+      ),
+    ).toMatchObject({
+      status: 'completed',
+      createdAt: data.createdAt,
+      result: timed,
+    });
+    expect(timed.backupCreationCommit).toEqual(result.backupCreationCommit);
   });
 });
 

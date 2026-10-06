@@ -42,11 +42,10 @@ export function parseBackupCreationReceipt(input: unknown, result: unknown) {
         data.data.target,
       ) ||
     receipt.data.target !== data.data.target ||
-    (receipt.data.execution
-      ? Date.parse(receipt.data.execution.dumpStartedAt) <
-        Date.parse(data.data.createdAt)
-      : receipt.data.createdAt !==
-        backupFilenameCreatedAt(receipt.data.filename))
+    // API acceptance and Worker execution use different host clocks. Only the
+    // execution schema may order timestamps captured on the same Worker.
+    (!receipt.data.execution &&
+      receipt.data.createdAt !== backupFilenameCreatedAt(receipt.data.filename))
   )
     throw new Error('BACKUP_CREATION_RECEIPT_INVALID');
   return receipt.data;

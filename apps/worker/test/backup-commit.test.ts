@@ -65,21 +65,26 @@ describe('committed restore recovery when the registry connection fails', () => 
           databaseSettings: settings,
         }),
       );
-      const query = vi.fn(async (sql: string) => ({
-        rows: sql.includes('pg_try_advisory_lock')
-          ? [{ acquired: true }]
-          : sql.includes('SELECT EXISTS')
-          ? [{ enabled: false }]
-          : sql.includes('pg_encoding_to_char')
-          ? [{ ...settings, localeProvider: 'c' }]
-          : sql.includes('AS timezone')
-          ? [{ timezone: 'Asia/Shanghai' }]
-          : sql.includes('pg_get_userbyid')
-          ? [{ owned: true }]
-          : sql.includes('SELECT current_database()')
-          ? [{ database: stagingDatabaseName(taskId, 'primary') }]
-          : [],
-      }));
+      const query = vi.fn(async (input: string | { text: string }) => {
+        const sql = typeof input === 'string' ? input : input.text;
+        return {
+          rows: sql.includes('backup_selective_restore_dependencies')
+            ? [{ blocked: false }]
+            : sql.includes('pg_try_advisory_lock')
+            ? [{ acquired: true }]
+            : sql.includes('SELECT EXISTS')
+            ? [{ enabled: false }]
+            : sql.includes('pg_encoding_to_char')
+            ? [{ ...settings, localeProvider: 'c' }]
+            : sql.includes('AS timezone')
+            ? [{ timezone: 'Asia/Shanghai' }]
+            : sql.includes('pg_get_userbyid')
+            ? [{ owned: true }]
+            : sql.includes('SELECT current_database()')
+            ? [{ database: stagingDatabaseName(taskId, 'primary') }]
+            : [],
+        };
+      });
       dependencies.pool.mockImplementation(() => ({
         query,
         connect: async () => ({ query, release: vi.fn() }),
@@ -185,7 +190,10 @@ describe('committed restore recovery when the registry connection fails', () => 
           restoredDatabase: stagingDatabaseName(taskId, 'primary'),
         });
         expect(
-          query.mock.calls.some(([sql]) => sql.startsWith('DROP DATABASE')),
+          query.mock.calls.some(
+            ([sql]) =>
+              typeof sql === 'string' && sql.startsWith('DROP DATABASE'),
+          ),
         ).toBe(false);
       }
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024);

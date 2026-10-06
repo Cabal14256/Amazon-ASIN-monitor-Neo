@@ -5,7 +5,9 @@ import {
   backupTaskResultDataSchema,
 } from '@asin-monitor/contracts';
 import {
+  backupSelectiveRestoreQuery,
   createPgPool,
+  selectiveBackupRestoreBlocked,
   transitionTask,
   type TaskMutation,
   type TaskState,
@@ -21,6 +23,7 @@ import {
   commandEnvironment,
   createBackupProcessor,
   processCommand,
+  restoreCommandArgs,
   stagingDatabaseName,
 } from '../src/backup-processor';
 
@@ -345,6 +348,217 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         (await scratchPool.query(`SELECT note FROM public.${folded}`)).rows,
       ).toEqual([{ note: 'folded-after' }]);
     }, 30000);
+    it('refuses a valid plus missing literal table instead of publishing a partial-selection archive', async () => {
+      const taskId = randomUUID();
+      await expect(
+        runJob(
+          scratchUrl,
+          'create',
+          {
+            tables: [`public.${tableA}`, `public.absent_${scratchName}`],
+          },
+          { taskId },
+        ),
+      ).rejects.toThrow();
+      expect(states.get(taskId)).toMatchObject({
+        status: 'processing',
+        result: null,
+      });
+      expect(
+        (await readdir(directory)).filter((name) =>
+          name.includes(taskId.replaceAll('-', '')),
+        ),
+      ).toEqual([]);
+      expect(
+        (
+          await scratchPool.query(
+            `SELECT note FROM public.${tableA} WHERE id=1`,
+          )
+        ).rows,
+      ).toEqual([{ note: 'original-a' }]);
+    }, 30000);
+    it.each(['foreign-key', 'view', 'materialized-view'] as const)(
+      'refuses an unselected incoming %s before restore and leaves all live objects intact',
+      async (kind) => {
+        const name = `incoming_${kind.replaceAll('-', '_')}_${randomUUID()
+          .replaceAll('-', '')
+          .slice(0, 8)}`;
+        const created = await runJob(scratchUrl, 'create', {
+          tables: [`public.${tableA}`],
+        });
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        if (!artifact.filename) throw new Error('Missing selective fixture');
+        await scratchPool.query(
+          `UPDATE public.${tableA} SET note='blocked-live-value' WHERE id=1`,
+        );
+        try {
+          if (kind === 'foreign-key') {
+            await scratchPool.query(
+              `CREATE TABLE public.${name} (id integer PRIMARY KEY REFERENCES public.${tableA}(id))`,
+            );
+            await scratchPool.query(`INSERT INTO public.${name} VALUES (1)`);
+          } else {
+            await scratchPool.query(
+              `CREATE ${
+                kind === 'materialized-view' ? 'MATERIALIZED ' : ''
+              }VIEW public.${name} AS SELECT id, note FROM public.${tableA}`,
+            );
+          }
+          const probe = await scratchPool.query(
+            backupSelectiveRestoreQuery([`public.${tableA}`]),
+          );
+          expect(selectiveBackupRestoreBlocked(probe.rows)).toBe(true);
+          await expect(
+            runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+          ).rejects.toThrow('未包含在归档中的外部依赖');
+          expect(
+            (
+              await scratchPool.query(
+                `SELECT note FROM public.${tableA} WHERE id=1`,
+              )
+            ).rows,
+          ).toEqual([{ note: 'blocked-live-value' }]);
+          expect(
+            (await scratchPool.query(`SELECT id FROM public.${name}`)).rows,
+          ).toEqual([{ id: 1 }]);
+        } finally {
+          await scratchPool.query(
+            `DROP ${
+              kind === 'foreign-key'
+                ? 'TABLE'
+                : kind === 'materialized-view'
+                ? 'MATERIALIZED VIEW'
+                : 'VIEW'
+            } IF EXISTS public.${name}`,
+          );
+          await scratchPool.query(
+            `UPDATE public.${tableA} SET note='original-a' WHERE id=1`,
+          );
+        }
+      },
+      30000,
+    );
+    it('restores a closed foreign-key selection atomically and detects references to a selected partition descendant', async () => {
+      const suffix = randomUUID().replaceAll('-', '').slice(0, 8);
+      const parent = `closed_parent_${suffix}`,
+        child = `closed_child_${suffix}`,
+        external = `partition_reference_${suffix}`;
+      try {
+        await scratchPool.query(
+          `CREATE TABLE public.${parent} (id integer PRIMARY KEY, note text)`,
+        );
+        await scratchPool.query(
+          `CREATE TABLE public.${child} (id integer PRIMARY KEY, parent_id integer REFERENCES public.${parent}(id), note text)`,
+        );
+        await scratchPool.query(
+          `INSERT INTO public.${parent} VALUES (1, 'original-parent')`,
+        );
+        await scratchPool.query(
+          `INSERT INTO public.${child} VALUES (1, 1, 'original-child')`,
+        );
+        const tables = [`public.${parent}`, `public.${child}`];
+        expect(
+          selectiveBackupRestoreBlocked(
+            (await scratchPool.query(backupSelectiveRestoreQuery(tables))).rows,
+          ),
+        ).toBe(false);
+        const created = await runJob(scratchUrl, 'create', { tables });
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        if (!artifact.filename) throw new Error('Missing closed fixture');
+        await scratchPool.query(
+          `UPDATE public.${parent} SET note='mutated-parent'`,
+        );
+        await scratchPool.query(
+          `UPDATE public.${child} SET note='mutated-child'`,
+        );
+        await runJob(scratchUrl, 'restore', { filename: artifact.filename });
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${parent}`)).rows,
+        ).toEqual([{ note: 'original-parent' }]);
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${child}`)).rows,
+        ).toEqual([{ note: 'original-child' }]);
+        await scratchPool.query(
+          `ALTER TABLE public.${partition} ADD UNIQUE (id)`,
+        );
+        await scratchPool.query(
+          `CREATE TABLE public.${external} (id integer REFERENCES public.${partition}(id))`,
+        );
+        expect(
+          selectiveBackupRestoreBlocked(
+            (
+              await scratchPool.query(
+                backupSelectiveRestoreQuery([`public.${partitioned}`]),
+              )
+            ).rows,
+          ),
+        ).toBe(true);
+      } finally {
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${external}`);
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${child}`);
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${parent}`);
+      }
+    }, 30000);
+    it('refuses ambiguous unqualified names instead of counting a hidden referencing table as archived', async () => {
+      const hidden = `hidden_${randomUUID().replaceAll('-', '').slice(0, 8)}`;
+      await scratchPool.query(`CREATE SCHEMA ${hidden}`);
+      try {
+        await scratchPool.query(
+          `CREATE TABLE ${hidden}.${tableB} (id integer REFERENCES public.${tableA}(id))`,
+        );
+        const tables = [tableA, tableB];
+        const created = await runJob(scratchUrl, 'create', { tables });
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        if (!artifact.filename) throw new Error('Missing unqualified archive');
+        expect(
+          selectiveBackupRestoreBlocked(
+            (await scratchPool.query(backupSelectiveRestoreQuery(tables))).rows,
+          ),
+        ).toBe(true);
+        await expect(
+          runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+        ).rejects.toThrow('未包含在归档中的外部依赖');
+        expect(
+          selectiveBackupRestoreBlocked(
+            (
+              await scratchPool.query(
+                backupSelectiveRestoreQuery([
+                  `public.${tableA}`,
+                  `public.${tableB}`,
+                ]),
+              )
+            ).rows,
+          ),
+        ).toBe(true);
+      } finally {
+        await scratchPool.query(`DROP TABLE ${hidden}.${tableB}`);
+        await scratchPool.query(`DROP SCHEMA ${hidden}`);
+      }
+    }, 30000);
+    it('publishes and replays a real dump when the API clock is ahead without changing its original identity', async () => {
+      const createdAt = new Date(Date.now() + 60000).toISOString();
+      const taskId = randomUUID();
+      const created = await runJob(
+        scratchUrl,
+        'create',
+        { tables: [`public.${tableA}`] },
+        { createdAt, taskId },
+      );
+      const result = backupTaskResultDataSchema.parse(created.result);
+      expect(created.state.status).toBe('completed');
+      expect(created.state.createdAt).toBe(createdAt);
+      expect(Date.parse(result.execution!.dumpStartedAt)).toBeLessThan(
+        Date.parse(createdAt),
+      );
+      const replay = await runJob(
+        scratchUrl,
+        'create',
+        { tables: [`public.${tableA}`] },
+        { createdAt, taskId },
+      );
+      expect(replay.result).toEqual(created.result);
+      expect(replay.state.status).toBe('completed');
+    }, 30000);
     it('records a real delayed pg_dump execution window separately from its immutable acceptance timestamp', async () => {
       const acceptedAt = new Date(Date.now() - 2 * 86400000).toISOString();
       const beforeDump = Date.now();
@@ -470,6 +684,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await expect(
         runJob(scratchUrl, 'restore', { filename: artifact.filename }),
       ).rejects.toThrow();
+      // The public path now rejects the known dependency before spawning.
+      // Still prove the same actual CLI transaction rolls back every selected
+      // table if a catalog dependency appears after a successful preflight.
+      await expect(
+        processCommand(
+          'pg_restore',
+          restoreCommandArgs(scratchName, join(directory, artifact.filename)),
+          commandEnvironment(scratchUrl),
+          {
+            timeoutMs: 30000,
+            maxBytes: 10_000_000,
+            signal: new AbortController().signal,
+            checkpoint: async () => undefined,
+            onProgress: async () => undefined,
+          },
+        ),
+      ).rejects.toThrow('BACKUP_COMMAND_FAILED');
       expect(
         (await scratchPool.query(`SELECT note FROM public.${tableA}`)).rows[0]
           .note,

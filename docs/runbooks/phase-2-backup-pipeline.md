@@ -56,6 +56,18 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 新 v3/v4 sidecar 的可选 `execution` 保存实际 `pg_dump` 启动前的 `dumpStartedAt`、成功退出后的 `dumpCompletedAt` 和归档/sidecar 原子发布开始前的 `publicationStartedAt`，并标明 `timeSource: dump-start`。列表、创建完成凭据与公开结果的 `createdAt` 使用该执行起点，重放和下载沿用原 sidecar 全部时间。`dump-start` 是 Legacy 同样采用的执行开始时刻，不能声称它是 PostgreSQL 精确 MVCC 快照瞬间；恢复点属于成功 dump 的执行窗口，`publicationStartedAt` 也不宣称文件 rename 已完成。队列不可变 `createdAt`、task identity、确定性文件名和 `creationIdentity` 摘要仍采用首次受理信息，执行时间不会重置六天期限或改变原私有 proof。
 
+API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变身份与 Worker 内的 `dumpStartedAt <= dumpCompletedAt <= publicationStartedAt`，不要求 dump 起点晚于 API 受理时刻。部署仍需时钟同步，执行窗口不是精确 MVCC 时间证明。
+
+新发布在 rename 前分别 fsync 完整临时 dump 和 sidecar，两个 final 名称发布后 fsync 所在目录，全部成功才发出私有完成凭据或 Redis/BullMQ completed。原生目录同步不受支持（例如 Windows Node 打开目录返回 EPERM）时明确拒绝完成，不提供静默跳过选项；运行环境与备份持久卷必须支持该同步语义。同步等待有最多 30 秒的独立上限及创建期取消/停机边界，迟到原生回调负责关闭其句柄，不会补发完成凭据。最终名称已存在但目录同步失败时保留两份文件供核对，不自动启动替代 dump；重放先验证原身份和哈希，再重新同步原文件及目录后才恢复完成。同步不能证明存储控制器或远端文件系统具有其未提供的断电保证。
+
+旧 v1 私有队列回执继续采用原严格身份/参数摘要，在 3 秒任务查询内恢复原状态，不追加大文件哈希或文件同步；这是可信旧队列结果的兼容恢复，不能据此追溯证明旧发布已完成目录 fsync。旧 sidecar 的 Worker 重放会先执行上述同步，原时间、文件名、内容和 proof/hash 不变。已完成历史任务的普通读取不改终态、也不把兼容显示升级为新的磁盘持久化证据。
+
+选择性 dump 增加 `--strict-names`：任意一个原样、区分大小写的所选表不存在时整体失败，不发布仅包含其余表的归档。选择性原位恢复在 API 创建任务之前、Worker 取得目标 advisory lock 后分别读取真实 `pg_catalog`，递归包含所选分区/继承子表，拒绝未包含在选择中的 incoming FK、视图/物化视图和其他阻止 DROP 的正常依赖，以及 extension-owned 对象。API 返回固定 409，建议完整隔离恢复或包含依赖的备份；列表中的 `restoreSupported` 仅代表格式/引擎/容量/locale 初步资格，不能替代这次实际目录预检。不会使用 CASCADE 删除外部对象。预检后新增的依赖仍由原 `--clean --single-transaction` 失败并整体回滚；真实 CLI 回归继续验证该最后边界。
+
+`GET /backup/scheduled-tasks` 记录于独立 [Neo 增量端点清单](../../packages/contracts/docs/neo-endpoint-inventory.md)，合并迁移清单为 119 项；原 118 项冻结对拍基线和 backup 7 项保持不变。实际控制器仍使用认证与 `settings:write`，增量清单不替代运行时鉴权。
+
+未带 schema 的表模式由 pg_dump 按来源 search_path 可见性解析，旧元数据没有冻结该 path。恢复预检发现同名关系跨 schema 时拒绝该含糊选择，建议使用完整 `schema.table` 重新备份；不会将不可见同名表误算为归档内的依赖闭合成员。依据 [PostgreSQL 16 pg_dump 官方源码的模式展开](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/bin/pg_dump/pg_dump.c) 和 [官方 strict-names 说明](https://www.postgresql.org/docs/16/app-pgdump.html)。
+
 旧 v3/v4 sidecar 和旧队列凭据仍兼容，缺少 `execution` 的归档时间明确显示 `timeSource: filename`；旧文件名日历无效时显示 `timeSource: mtime` 并需运维核对。已经完成且不再查询队列的旧创建任务，仅在原私有凭据与任务/所有者/受理时间、确定性文件名和原结果时间一致时，展示来源为 `filename`；无法验证的旧结果标为 `unavailable`。展示不修改终态、存储中的原凭据或 hash，也不重新采样时刻。兼容旧 Intl 以 `24` 表示当日零点的文件名，不使用复制、解压时生成的新 birthtime；这些回退时间不能被当作观测到的实际 dump 时间。不存在（ENOENT）或无效 custom 产物可省略/返回 404；非法下载/删除文件名在鉴权后的请求边界返回固定 400，并仅记录固定 warn reason，不记录原输入。EACCES、EIO、ESTALE 等读取异常仍返回固定 500 并记录最小错误码，不能误报为空列表或不存在。
 
 ## TimescaleDB 隔离恢复

@@ -19,7 +19,9 @@ import {
 import {
   BackupConfigError,
   backupConfigView,
+  backupSelectiveRestoreQuery,
   isTerminalTaskStatus,
+  selectiveBackupRestoreBlocked,
   type BackupConfigRepositoryPort,
   type TaskState,
 } from '@asin-monitor/db';
@@ -342,6 +344,25 @@ export class BackupService implements OnModuleDestroy {
           409,
           '恢复目标数据库的字符集或排序规则与备份不一致，禁止原位恢复',
         );
+      if (metadata.version === 3 && metadata.scope === 'selective') {
+        const pool =
+          target === 'primary'
+            ? this.pools.primaryPool
+            : this.pools.competitorPool;
+        const dependencies = await pool.query(
+          backupSelectiveRestoreQuery(metadata.tables),
+        );
+        if (selectiveBackupRestoreBlocked(dependencies.rows)) {
+          this.logger.warn('按表恢复包含未归档的外部依赖', 'BackupService', {
+            target,
+            reason: 'backup_selective_restore_dependencies',
+          });
+          return fail(
+            409,
+            '所选表有未包含在归档中的外部依赖，请使用完整隔离恢复或创建包含依赖的备份',
+          );
+        }
+      }
       const task = await this.enqueue(principal, {
         taskType: 'backup',
         taskSubType: 'restore',

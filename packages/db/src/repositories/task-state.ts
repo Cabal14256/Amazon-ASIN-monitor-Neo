@@ -130,10 +130,8 @@ export function transitionTask(
           task.createdAt,
           change.result.target,
         ) ||
-      (change.result.execution
-        ? Date.parse(change.result.execution.dumpStartedAt) <
-          Date.parse(task.createdAt)
-        : change.result.createdAt !==
+      (!change.result.execution &&
+        change.result.createdAt !==
           backupFilenameCreatedAt(change.result.filename))
     )
       throw new Error('BACKUP_CREATION_TASK_INVALID');

@@ -24,9 +24,11 @@ import {
 } from '@asin-monitor/contracts';
 import {
   backupCreationIdentity,
+  backupSelectiveRestoreQuery,
   createPgPool,
   isTerminalTaskStatus,
   RedisTaskRepository,
+  selectiveBackupRestoreBlocked,
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
@@ -50,6 +52,11 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
 import * as tls from 'node:tls';
+import {
+  nativeBackupPublicationSync,
+  waitForBackupSync,
+  type BackupPublicationSync,
+} from './backup-artifact-durability';
 import { logger } from './logger';
 
 export interface BackupProcessorOptions {
@@ -58,6 +65,7 @@ export interface BackupProcessorOptions {
   isClosing(): boolean;
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
+  publicationSync?: BackupPublicationSync;
 }
 
 class TaskStopped extends Error {
@@ -639,6 +647,16 @@ export async function acquireBackupTargetLock(
             throw new BackupCommandError('BACKUP_TIMESCALE_REQUIRED');
           return readTimescaleManifest(lockedClient);
         },
+        async assertSelectiveRestoreSupported(tables: readonly string[]) {
+          if (released) throw new BackupCommandError('BACKUP_TARGET_LOCK_LOST');
+          const result = await lockedClient.query(
+            backupSelectiveRestoreQuery(tables),
+          );
+          if (selectiveBackupRestoreBlocked(result.rows))
+            throw new BackupCommandError(
+              'BACKUP_SELECTIVE_RESTORE_DEPENDENCIES',
+            );
+        },
         async readDatabaseSettings(): Promise<BackupDatabaseSettings> {
           const result = await lockedClient.query(
             'SELECT pg_encoding_to_char(encoding) AS encoding, datcollate AS "lcCollate", datctype AS "lcCtype", datlocprovider AS "localeProvider", daticulocale AS "icuLocale", daticurules AS "icuRules" FROM pg_database WHERE datname = current_database()',
@@ -1122,6 +1140,30 @@ export function createBackupProcessor(
       data.operation === 'create'
         ? backupCreationFilename(data.taskId, data.createdAt, data.target)
         : undefined;
+    const publicationSync =
+      options.publicationSync ?? nativeBackupPublicationSync;
+    const syncPublication = async (
+      paths: readonly string[],
+      includeDirectory: boolean,
+      signal?: AbortSignal,
+    ) => {
+      try {
+        for (const path of paths)
+          await waitForBackupSync(
+            () => publicationSync.syncFile(path),
+            options.env.BACKUP_COMMAND_TIMEOUT_MS,
+            signal,
+          );
+        if (includeDirectory)
+          await waitForBackupSync(
+            () => publicationSync.syncDirectory(directory),
+            options.env.BACKUP_COMMAND_TIMEOUT_MS,
+            signal,
+          );
+      } catch {
+        throw new BackupCommandError('BACKUP_PUBLICATION_SYNC_UNCONFIRMED');
+      }
+    };
     const resultFor = (
       metadata: BackupArtifactMetadata & { archiveSha256: string },
       details: { size: number },
@@ -1192,6 +1234,11 @@ export function createBackupProcessor(
         )) !== metadata.archiveSha256
       )
         throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+      // An observed rename is not a durability receipt. This also upgrades
+      // older valid sidecars by syncing their unchanged original files before
+      // emitting the existing proof; never changes identity or archive hash.
+      await syncPublication([output, `${output}.meta.json`], true);
+      verify(await store.read(data.taskId));
       publishedCreation = resultFor(metadata, details);
       await mutate({
         kind: 'backup-create-committed',
@@ -1300,6 +1347,7 @@ export function createBackupProcessor(
             '--no-owner',
             '--no-acl',
             `--file=${partial}`,
+            ...(tables.length ? ['--strict-names'] : []),
             ...tables.map(
               (table) => `--table-and-children=${literalTablePattern(table)}`,
             ),
@@ -1388,6 +1436,11 @@ export function createBackupProcessor(
           flag: 'wx',
           mode: 0o600,
         });
+        await syncPublication(
+          [partial, metadataPartialPath],
+          false,
+          controller.signal,
+        );
         await check();
         await lock.ensureHeld();
         checkDeadline();
@@ -1401,8 +1454,10 @@ export function createBackupProcessor(
         await lock.ensureHeld();
         checkDeadline();
         await rename(partial, output);
+        publishedCreationObserved = true;
         artifactPath = undefined;
         metadataPublishedPath = undefined;
+        await syncPublication([], true, controller.signal);
         if (metadata.version !== 3 && metadata.version !== 4)
           throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
         publishedCreation = resultFor(metadata, details);
@@ -1507,6 +1562,7 @@ export function createBackupProcessor(
       )
         throw new BackupCommandError('BACKUP_TARGET_LOCALE_MISMATCH');
       await progress(5, '正在恢复 PostgreSQL 备份');
+      await lock.assertSelectiveRestoreSupported(metadata.tables);
       await processCommand(
         commandPath(options.env.PG_RESTORE_PATH, 'pg_restore'),
         restoreCommandArgs(environment.PGDATABASE!, input),
@@ -1650,6 +1706,12 @@ export function createBackupProcessor(
         : error instanceof BackupCommandError &&
           error.reason === 'BACKUP_TARGET_LOCALE_MISMATCH'
         ? '恢复目标数据库的字符集或排序规则与备份不一致，禁止原位恢复'
+        : error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_SELECTIVE_RESTORE_DEPENDENCIES'
+        ? '所选表有未包含在归档中的外部依赖，禁止原位恢复；请使用完整隔离恢复或包含依赖的备份'
+        : error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_PUBLICATION_SYNC_UNCONFIRMED'
+        ? '备份文件持久化同步未确认，请按任务 ID 核对归档和元数据，禁止自动创建替代备份'
         : '备份任务失败，请核实数据库状态和备份文件';
       if (cleanupFailed)
         message += '；备份产物清理未确认，请按任务 ID 核对残留产物';
@@ -1657,6 +1719,7 @@ export function createBackupProcessor(
       const retryCreation =
         data.operation === 'create' &&
         !cleanupFailed &&
+        !publishedCreationObserved &&
         !(
           error instanceof BackupCommandError &&
           error.reason === 'BACKUP_TASK_EXPIRED'
