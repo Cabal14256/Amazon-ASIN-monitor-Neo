@@ -296,7 +296,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           '   ',
           '😺'.repeat(50),
         ];
-        const neighbors = ['Raw Ś', 'Lead Ś', 'Tail Ś', 'case', 'cafe'];
+        // The actual fixture has a unique rtrim(group id) index. A purely
+        // trailing-space alias cannot coexist with its trimmed neighbor.
+        // Leading-space aliases remain separate and exercise the SQL boundary.
+        const neighbors = ['Raw Ś', 'Lead Ś', 'case', 'cafe'];
         for (const [index, id] of [...selected, ...neighbors].entries()) {
           await group(id, 0);
           if (id.length <= 50)
@@ -305,6 +308,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               [`${id}-a0`, `B${String(index).padStart(9, '0')}`, id],
             );
         }
+        await expect(group('Tail Ś', 0)).rejects.toMatchObject({
+          code: '23505',
+          constraint: 'variant_groups_rtrim_idx',
+        });
         let result;
         if (useAsync) {
           const id = await accepted({ groupIds: selected });
