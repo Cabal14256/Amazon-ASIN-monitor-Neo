@@ -2,12 +2,14 @@ import { getPhysicalQueueName, type Env } from '@asin-monitor/config';
 import {
   createPgPool,
   PgAsinBatchDeleteRepository,
+  PgCatalogOperationRepository,
   PgCompetitorBatchDeleteRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { createBatchDeleteProcessor } from './asin-batch-delete-processor';
+import { createCatalogFencedProcessor } from './catalog-operation-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -71,6 +73,12 @@ export async function startAsinBatchDeleteRuntime(
     competitorPool,
     concurrency,
   );
+  const store = new RedisTaskRepository(
+    control,
+    env,
+    undefined,
+    taskNotificationWarning(),
+  );
   let queue: Queue | undefined;
   let worker: Worker | undefined;
   let closing = false;
@@ -105,32 +113,32 @@ export async function startAsinBatchDeleteRuntime(
         const activeQueue = queue;
         worker = new Worker(
           getPhysicalQueueName('batch-delete'),
-          createBatchDeleteProcessor(
-            { asin: repository, competitor: competitorRepository },
-            new RedisTaskRepository(
-              control,
-              env,
-              undefined,
-              taskNotificationWarning(),
+          createCatalogFencedProcessor(
+            'batch-delete',
+            new PgCatalogOperationRepository(pool),
+            store,
+            createBatchDeleteProcessor(
+              { asin: repository, competitor: competitorRepository },
+              store,
+              {
+                chunkSize: env.BATCH_DELETE_CHUNK_SIZE,
+                isClosing: () => closing,
+                assertJobLock: async (job, token) => {
+                  if (
+                    !token ||
+                    !job.id ||
+                    (await control.get(`${activeQueue.toKey(job.id)}:lock`)) !==
+                      token
+                  )
+                    throw new Error('BATCH_DELETE_JOB_LOCK_LOST');
+                },
+                updateProgress: async (job, value) => {
+                  const current = await activeQueue.getJob(job.id!);
+                  if (!current) throw new Error('BATCH_DELETE_JOB_MISSING');
+                  await current.updateProgress(value);
+                },
+              },
             ),
-            {
-              chunkSize: env.BATCH_DELETE_CHUNK_SIZE,
-              isClosing: () => closing,
-              assertJobLock: async (job, token) => {
-                if (
-                  !token ||
-                  !job.id ||
-                  (await control.get(`${activeQueue.toKey(job.id)}:lock`)) !==
-                    token
-                )
-                  throw new Error('BATCH_DELETE_JOB_LOCK_LOST');
-              },
-              updateProgress: async (job, value) => {
-                const current = await activeQueue.getJob(job.id!);
-                if (!current) throw new Error('BATCH_DELETE_JOB_MISSING');
-                await current.updateProgress(value);
-              },
-            },
           ),
           {
             ...getWorkerOptions('batch-delete', env, connection),

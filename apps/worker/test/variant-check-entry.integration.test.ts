@@ -5,6 +5,7 @@ import type {
 } from '@asin-monitor/contracts';
 import {
   createPgPool,
+  PgCatalogOperationRepository,
   PgCompetitorCheckRepository,
   PgVariantCheckRepository,
   RedisTaskRepository,
@@ -25,6 +26,10 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import {
+  createCatalogFixtureTask,
+  withCatalogFixtureTask,
+} from './helpers/catalog-operation-fixture';
 
 /** Real compiled entry, combined BullMQ consumers and isolated PG completion storage.
  * Empty groups and pre-existing receipts avoid contacting live Amazon in CI.
@@ -89,6 +94,9 @@ describe.skipIf(
     }
     await f.pool.query(
       "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g1','Empty one','US','amazon.com','Fixture'),('g2','Empty two','US','amazon.com','Fixture')",
+    );
+    await f.pool.query(
+      "INSERT INTO users(id,username,password) VALUES('fixture-check','fixture-check','unused-fixture-hash'),('fixture-batch','fixture-batch','unused-fixture-hash')",
     );
     competitorSchema = `competitor_worker_178_${randomUUID().replace(
       /-/g,
@@ -299,10 +307,11 @@ describe.skipIf(
     type: 'variant-check' | 'batch-check',
     subtype: string,
     params: unknown,
+    ownerId = 'fixture-owner',
   ): Promise<VariantCheckJobData> {
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
-      userId: 'fixture-owner',
+      userId: ownerId,
       taskType: type,
       taskSubType: subtype,
       title: 'Fixture check',
@@ -326,21 +335,27 @@ describe.skipIf(
   }
   it('consumes group and batch jobs with the real entry and keeps full results in PostgreSQL', async () => {
     await start();
-    const jobs = [
-      await data('variant-check', 'variant-group-check', {
-        groupId: 'g1',
-        forceRefresh: true,
-      }),
-      await data('batch-check', 'variant-group', {
-        groupIds: ['g1', 'g2'],
-        forceRefresh: true,
-      }),
+    const cases = [
+      () =>
+        data('variant-check', 'variant-group-check', {
+          groupId: 'g1',
+          forceRefresh: true,
+        }),
+      () =>
+        data('batch-check', 'variant-group', {
+          groupIds: ['g1', 'g2'],
+          forceRefresh: true,
+        }),
     ];
-    for (const job of jobs) {
+    for (const prepare of cases) {
+      const job = await prepare();
       const result = await enqueue(job);
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024);
       const task = (await store.read(job.taskId))!;
       expect(task.status).toBe('completed');
+      expect(
+        await new PgCatalogOperationRepository(f.pool).read(job.userId, 'asin'),
+      ).toBeNull();
       const full = await repository.transaction((unit) =>
         unit.readReceipt(variantCheckResultOperation(task, result)),
       );
@@ -370,6 +385,80 @@ describe.skipIf(
     ]);
     expect(output).toContain("mode: 'business-worker'");
   }, 30_000);
+  it.each(['asin', 'competitor'] as const)(
+    'compiled consumer rejects an unbound %s task before any receipt or catalog write',
+    async (domain) => {
+      await start();
+      const task = await store.create({
+        taskId: randomUUID(),
+        userId: 'fixture-owner',
+        taskType: 'variant-check',
+        taskSubType:
+          domain === 'asin'
+            ? 'variant-group-check'
+            : 'competitor-variant-group-check',
+      });
+      const job = {
+        taskId: task.taskId,
+        userId: task.userId,
+        taskType: 'variant-check',
+        taskSubType: task.taskSubType,
+        createdAt: task.createdAt,
+        expiresAt: new Date(
+          Date.parse(task.createdAt) + 3600_000,
+        ).toISOString(),
+        params: {
+          groupId: domain === 'asin' ? 'g1' : 'cg1',
+          forceRefresh: true,
+        },
+      } as VariantCheckJobData;
+      await expect(enqueue(job)).rejects.toThrow('目录操作身份无效');
+      expect((await store.read(job.taskId))?.status).toBe('pending');
+      expect(
+        await new PgCatalogOperationRepository(f.pool).read(job.userId, domain),
+      ).toBeNull();
+      for (const pool of [f.pool, competitorPool!]) {
+        const table =
+          pool === f.pool
+            ? 'variant_check_receipts'
+            : 'competitor_variant_check_receipts';
+        expect(
+          (await pool.query(`SELECT count(*)::int AS count FROM ${table}`))
+            .rows[0].count,
+        ).toBe(0);
+      }
+    },
+    30_000,
+  );
+  it('compiled consumer rejects a changed task incarnation and preserves its original reservation', async () => {
+    const job = await data('variant-check', 'variant-group-check', {
+      groupId: 'g1',
+      forceRefresh: true,
+    });
+    await start();
+    await expect(
+      enqueue({
+        ...job,
+        createdAt: new Date(Date.parse(job.createdAt) + 1).toISOString(),
+      }),
+    ).rejects.toThrow('目录操作身份无效');
+    expect((await store.read(job.taskId))?.status).toBe('pending');
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(job.userId, 'asin'),
+    ).toMatchObject({
+      state: 'open',
+      task: { taskId: job.taskId, createdAt: job.createdAt },
+      pendingPins: 0,
+      uncertainPins: 0,
+    });
+    expect(
+      (
+        await f.pool.query(
+          'SELECT count(*)::int AS count FROM variant_check_receipts',
+        )
+      ).rows[0].count,
+    ).toBe(0);
+  }, 30_000);
   it('recovers a complete parent result larger than Redis metadata without replaying Amazon requests', async () => {
     const job = await data('variant-check', 'parent-asin-query', {
       asins: ['B000000001'],
@@ -388,8 +477,10 @@ describe.skipIf(
         error: null,
       },
     ];
-    await repository.transaction((unit) =>
-      unit.saveReceipt(variantCheckJobOperation(job), complete),
+    await withCatalogFixtureTask(f.pool, job, () =>
+      repository.transaction((unit) =>
+        unit.saveReceipt(variantCheckJobOperation(job), complete),
+      ),
     );
     await store.mutate(job.taskId, { kind: 'processing' }, job);
     await start();
@@ -420,6 +511,8 @@ describe.skipIf(
         forceRefresh: true,
       },
     );
+    await start();
+    const groupReference = await enqueue(groupJob);
     const asinJob = await data('variant-check', 'competitor-asin-check', {
       asinId: 'ca1',
       forceRefresh: true,
@@ -431,12 +524,12 @@ describe.skipIf(
         result: { hasVariants: true, variantCount: 1 },
       },
     };
-    await competitorRepository.transaction((unit) =>
-      unit.saveReceipt(variantCheckJobOperation(asinJob), completedAsin),
+    await withCatalogFixtureTask(f.pool, asinJob, () =>
+      competitorRepository.transaction((unit) =>
+        unit.saveReceipt(variantCheckJobOperation(asinJob), completedAsin),
+      ),
     );
     await store.mutate(asinJob.taskId, { kind: 'processing' }, asinJob);
-    await start();
-    const groupReference = await enqueue(groupJob);
     const asinReference = await enqueue(asinJob);
     expect(groupReference).toMatchObject({ resultKind: 'competitor-group' });
     expect(asinReference).toMatchObject({ resultKind: 'competitor-asin' });
@@ -521,7 +614,7 @@ describe.skipIf(
     const readyKey = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
     expect(await f.redis.get(readyKey)).toBe('1');
     expect(await f.redis.zcard(`${readyKey}:owners`)).toBe(1);
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
@@ -538,18 +631,28 @@ describe.skipIf(
       countries: ['US'],
     };
     const jobs = [
-      await data('variant-check', 'variant-group-check', {
-        groupId: 'g1',
-        forceRefresh: true,
-      }),
+      await data(
+        'variant-check',
+        'variant-group-check',
+        {
+          groupId: 'g1',
+          forceRefresh: true,
+        },
+        'fixture-check',
+      ),
       await data('variant-check', 'competitor-variant-group-check', {
         groupId: 'cg1',
         forceRefresh: true,
       }),
-      await data('batch-check', 'variant-group', {
-        groupIds: ['g1', 'g2'],
-        forceRefresh: true,
-      }),
+      await data(
+        'batch-check',
+        'variant-group',
+        {
+          groupIds: ['g1', 'g2'],
+          forceRefresh: true,
+        },
+        'fixture-batch',
+      ),
     ];
     const queuedMonitor = await queue.add('primary-monitor', monitor, {
       jobId: monitor.taskId,
