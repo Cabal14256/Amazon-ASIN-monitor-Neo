@@ -54,6 +54,21 @@ suite.each(['primary', 'competitor'] as const)(
       if (!repository) throw new Error('Fixture repository not ready');
       return repository;
     };
+    const waitFor = async (probe: () => Promise<boolean>) => {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        if (await probe()) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(
+        'Fixture did not observe the required PostgreSQL lock wait',
+      );
+    };
+    const settled = <T>(promise: Promise<T>) =>
+      promise.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
     const nowJob = async (
       ageMinutes = 0,
       totalBatches = 1,
@@ -286,6 +301,95 @@ suite.each(['primary', 'competitor'] as const)(
         peer.close();
       }
     });
+    it.each(['start', 'requestCancellation'] as const)(
+      'refreshes the RR snapshot after %s actually waits for initial acceptance on another connection',
+      async (operation) => {
+        const job = await nowJob();
+        await insertRows(groupTable, [scheduledGroup(domain)]);
+        await insertRows(memberTable, [scheduledMember(domain)]);
+        const blocker = await connection().connect();
+        let released = false;
+        let acceptance:
+          | ReturnType<typeof settled<ScheduledMonitorRun>>
+          | undefined;
+        let transition:
+          | ReturnType<typeof settled<ScheduledMonitorRun>>
+          | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            `LOCK TABLE ${qualified}."${groupTable}" IN ACCESS EXCLUSIVE MODE`,
+          );
+          acceptance = settled(storage().accept(job));
+          let accepterPid: number | undefined;
+          await waitFor(async () => {
+            const waiting = await connection().query<{ pid: number }>(
+              `SELECT pid FROM pg_catalog.pg_locks WHERE relation=$1::regclass
+               AND NOT granted AND mode='AccessShareLock'`,
+              [`${qualified}."${groupTable}"`],
+            );
+            accepterPid = waiting.rows[0]?.pid;
+            return typeof accepterPid === 'number';
+          });
+          transition = settled(storage()[operation](job));
+          await waitFor(async () => {
+            const waiting = await connection().query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_locks waiter JOIN pg_catalog.pg_locks holder
+                  ON waiter.classid=holder.classid AND waiter.objid=holder.objid
+                  AND waiter.objsubid=holder.objsubid AND waiter.database=holder.database
+                WHERE holder.pid=$1 AND holder.locktype='advisory' AND holder.granted
+                  AND waiter.locktype='advisory' AND NOT waiter.granted
+              ) AS waiting`,
+              [accepterPid],
+            );
+            return waiting.rows[0]?.waiting === true;
+          });
+          await blocker.query('COMMIT');
+          blocker.release();
+          released = true;
+          const accepted = await acceptance;
+          if (!accepted.ok) throw accepted.error;
+          const changed = await transition;
+          if (!changed.ok) throw changed.error;
+          expect(changed.value.job).toEqual(accepted.value.job);
+          expect(changed.value.groups).toEqual(accepted.value.groups);
+          expect(changed.value.snapshotDigest).toBe(
+            accepted.value.snapshotDigest,
+          );
+          expect(changed.value.state).toBe(
+            operation === 'start' ? 'running' : 'pending',
+          );
+          if (operation === 'requestCancellation') {
+            expect(changed.value.cancelRequestedAt).not.toBeNull();
+            await expect(storage().start(job)).rejects.toMatchObject({
+              code: 'cancelled',
+            });
+          } else {
+            expect(changed.value.cancelRequestedAt).toBeNull();
+          }
+          expect(
+            (
+              await connection().query(
+                `SELECT count(*)::integer AS n FROM ${qualified}."${runTable}" WHERE task_id=$1`,
+                [job.taskId],
+              )
+            ).rows[0].n,
+          ).toBe(1);
+          expect(await storage().read(job)).toEqual(changed.value);
+        } finally {
+          if (!released) {
+            try {
+              await blocker.query('ROLLBACK');
+            } finally {
+              blocker.release();
+            }
+          }
+          await Promise.all([acceptance, transition].filter(Boolean));
+        }
+      },
+      30_000,
+    );
     it('selects raw CRC32 batches before enforcing the selected group limit and preserves microsecond ordering', async () => {
       const job = await nowJob(0, 3);
       const groups = [' raw 😀 ', 'é', 'e\u0301', '😀', '\uE000', 'null'].map(

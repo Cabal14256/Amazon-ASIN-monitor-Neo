@@ -33,6 +33,13 @@ import {
 
 type Domain = 'primary' | 'competitor';
 type Row = Record<string, unknown>;
+/** A required row may be hidden by the RR snapshot taken before the lock wait.
+ * Keep this private: malformed or mismatched stored identities never retry. */
+class ScheduledMonitorMissingSnapshot extends ScheduledMonitorRunError {
+  constructor() {
+    super('identity');
+  }
+}
 const MAX_CATALOG_GROUPS = 100_000;
 const PAGE_SIZE = 1000;
 const terminal = new Set([
@@ -170,13 +177,19 @@ export class PgScheduledMonitorRunRepository {
     signal?: AbortSignal,
     admission = false,
   ): Promise<T> {
-    // A repeatable-read snapshot may predate an advisory-lock wait. Retry only
-    // explicit PostgreSQL conflicts, never connection loss or COMMIT uncertainty.
+    // Refresh an RR snapshot that may predate an advisory-lock wait. Only a
+    // missing required row or explicit PG conflict retries, never a mismatched
+    // identity, connection loss or COMMIT uncertainty. Genuine absence remains
+    // an identity failure after at most three whole transactions.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         return await this.transactions.run(action, signal, admission);
       } catch (error) {
-        if (!(error instanceof ScheduledMonitorSerializationRetry)) throw error;
+        if (error instanceof ScheduledMonitorMissingSnapshot) {
+          if (attempt === 2) throw new ScheduledMonitorRunError('identity');
+        } else if (!(error instanceof ScheduledMonitorSerializationRetry)) {
+          throw error;
+        }
       }
     }
     throw new ScheduledMonitorRunError('dependency');
@@ -323,7 +336,7 @@ export class PgScheduledMonitorRunRepository {
   ) {
     await this.lock(tx, job);
     const run = await this.existing(tx, job);
-    if (!run) throw new ScheduledMonitorRunError('identity');
+    if (!run) throw new ScheduledMonitorMissingSnapshot();
     return run;
   }
   async assertReady(signal?: AbortSignal): Promise<void> {

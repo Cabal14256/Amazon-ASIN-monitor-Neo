@@ -37,6 +37,8 @@
 
 每仓库最多 4 个操作，每次事务默认总时限 15 秒、单语句/锁等待 5 秒。每次事务使用局部限制，不改变共享池配置。连接取得、SQL、取消和关闭均纳入时限；迟到连接被销毁，容量槽直到该操作真正释放才归还。COMMIT 发出后的断连/取消/超时统一报告 `commit-uncertain`，不能证明回滚。
 
+repeatable-read 的视图可能在 advisory lock 等待前建立。需要已有 run 的状态转换在锁后仍看不到记录时，最多重新开启三次完整事务，读取先前受理并提交的原身份和原快照；确实无记录最终仍返回 `identity`。已有记录的错摘要/错域/损坏快照立即拒绝，不按缺行重试；连接错误或 COMMIT 未知也不重试。普通 `read()` 仍允许不存在的记录返回 undefined，不创建或补写 run。
+
 只对 PostgreSQL 明确拒绝的 serialization conflict，以及受理阶段的唯一键冲突，最多重新尝试 3 次 DB-only 事务。repeatable-read 的快照可能早于 advisory lock 等待，冲突后必须开启新事务；不能在旧快照下假定刚提交的 run 不存在。这里不包含外部请求，因此冲突重试不会重抓商品。
 
 纯域测试覆盖原始 Unicode ID、六位微秒、固定成员/人工状态、污染、容量、批次和 child 摘要。事务测试覆盖时限、容量、迟到连接、取消、断连及不确定 COMMIT。真实 PostgreSQL 回归使用显式 `RUN_NEO_SCHEDULED_MONITOR_INTEGRATION=1`、两个不同 database 中随机私有 schema；只写自有 schema，结束时清理。缺少连接配置或连接失败会令已启用回归失败；未启用会明确 skip，不代表真实服务验收。
