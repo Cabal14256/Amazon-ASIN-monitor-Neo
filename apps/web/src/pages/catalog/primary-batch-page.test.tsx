@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { QueryClientProvider } from '@tanstack/react-query';
 import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from '@tanstack/react-router';
+import {
   act,
   cleanup,
   fireEvent,
@@ -13,6 +21,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
+import { RouteGate } from '../../auth/route-gate';
 import {
   deferred,
   jsonResponse,
@@ -39,6 +48,7 @@ beforeEach(() => {
     value: { request: async (_name: string, work: () => unknown) => work() },
   });
   HTMLElement.prototype.scrollIntoView = vi.fn();
+  vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
 });
 afterEach(() => {
   cleanup();
@@ -55,6 +65,7 @@ function fixture(
   permissions = ['asin:read', 'asin:write'],
   competitor = false,
   groupId = 'group-1',
+  gated = false,
 ) {
   const group = {
     id: groupId,
@@ -215,10 +226,36 @@ function fixture(
   });
   runtimes.push(runtime);
   const config = competitor ? COMPETITOR_CATALOG : ASIN_CATALOG;
+  const root = createRootRoute({ component: Outlet });
+  const router = gated
+    ? createRouter({
+        history: createMemoryHistory({ initialEntries: ['/asin'] }),
+        routeTree: root.addChildren([
+          createRoute({
+            getParentRoute: () => root,
+            path: '/asin',
+            component: () => (
+              <RouteGate>
+                <CatalogPage config={config} />
+              </RouteGate>
+            ),
+          }),
+          createRoute({
+            getParentRoute: () => root,
+            path: '/login',
+            component: () => <p>Fixture 登录页</p>,
+          }),
+        ]),
+      })
+    : undefined;
   const page = () => (
     <AuthContext.Provider value={{ runtime, identity, announce: vi.fn() }}>
       <QueryClientProvider client={runtime.queryClient}>
-        <CatalogPage config={config} />
+        {router ? (
+          <RouterProvider router={router} />
+        ) : (
+          <CatalogPage config={config} />
+        )}
       </QueryClientProvider>
     </AuthContext.Provider>
   );
@@ -318,6 +355,126 @@ const guardKey = catalogSafetyKey('operator', 'asin');
 const fiftyPointGroupId = ` ${'😀'.repeat(48)} `;
 
 describe('actual primary batch-create catalog integration', () => {
+  it.each(['logout', 'permission-then-logout'] as const)(
+    'retires an unprotected receipt when the actual RouteGate unmounts on %s',
+    async (change) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+      );
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+      expect(readAsinBatchReceipt('operator', owner)).toBeTruthy();
+      if (change === 'permission-then-logout')
+        await f.identity('operator', ['asin:read']);
+      await f.logout();
+      await screen.findByText('Fixture 登录页');
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      await waitFor(() =>
+        expect(readAsinBatchReceipt('operator', owner)).toBeNull(),
+      );
+      expect(
+        Object.keys(window.localStorage).filter((key) =>
+          key.startsWith('neo:asin-batch-create-receipt:'),
+        ),
+      ).toHaveLength(0);
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+  it('keeps completed rows through a same-session actual RouteGate unmount and remount', async () => {
+    const f = fixture(
+      '/api/',
+      ['asin:read', 'asin:write'],
+      false,
+      'group-1',
+      true,
+    );
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+    const original = readAsinBatchReceipt('operator', owner);
+    f.unmount();
+    expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+    f.remount();
+    await screen.findByRole('region', { name: '批量添加结果' });
+    expect(screen.getByText('Fixture duplicate')).toBeTruthy();
+    expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+    expect(f.posts()).toHaveLength(1);
+  });
+  it('keeps the exact protected receipt after the actual RouteGate logout unmounts the catalog', async () => {
+    const f = fixture(
+      '/api/',
+      ['asin:read', 'asin:write'],
+      false,
+      'group-1',
+      true,
+    );
+    f.failReads(true);
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+    const original = readAsinBatchReceipt('operator', owner);
+    const originalGate = window.localStorage.getItem(guardKey);
+    expect(original).toBeTruthy();
+    expect(originalGate).not.toBeNull();
+    await f.logout();
+    await screen.findByText('Fixture 登录页');
+    expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+    expect(window.localStorage.getItem(guardKey)).toBe(originalGate);
+    expect(f.posts()).toHaveLength(1);
+  });
+  it('holds the original owner WebLock before retiring an unmounted receipt and preserves a queued peer gate', async () => {
+    const f = fixture(
+      '/api/',
+      ['asin:read', 'asin:write'],
+      false,
+      'group-1',
+      true,
+    );
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+    const original = readAsinBatchReceipt('operator', owner)!;
+    const queued = deferred<void>();
+    const lock = vi.fn(async (_name: string, work: () => unknown) => {
+      await queued.promise;
+      return work();
+    });
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request: lock },
+    });
+    await f.logout();
+    await screen.findByText('Fixture 登录页');
+    await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+    expect(lock.mock.calls[0][0]).toBe(guardKey);
+    const peerGate = JSON.stringify({
+      phase: 'inspection',
+      operationId: original.receipt.operationId,
+    });
+    window.localStorage.setItem(guardKey, peerGate);
+    await act(async () => queued.resolve());
+    expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+    expect(window.localStorage.getItem(guardKey)).toBe(peerGate);
+    expect(f.posts()).toHaveLength(1);
+  });
   it.each(['owner', 'session', 'logout', 'permission-then-logout'] as const)(
     'removes only an unprotected completed receipt when the session changes by %s',
     async (change) => {

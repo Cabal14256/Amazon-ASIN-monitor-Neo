@@ -1092,6 +1092,41 @@ export function CatalogPage({
   const knownBatchReceipts = useRef(
     new Map<string, { receipt: AsinBatchReceipt; persisted: boolean }>(),
   );
+  const retireBatchReceipt = useCallback((receipt: AsinBatchReceipt) => {
+    if (!navigator.locks) return;
+    const originalUser = JSON.parse(receipt.owner)[1] as string;
+    // Cleanup always uses the receipt's original scope and rechecks the actual
+    // shared gate under its lock. A redirect must not choose a new owner key.
+    void navigator.locks
+      .request(catalogSafetyKey(originalUser, 'asin'), async () => {
+        if (removeUnprotectedAsinBatchReceipt(originalUser, receipt)) {
+          const memory = knownBatchReceipts.current.get(receipt.operationId);
+          if (memory?.receipt.owner === receipt.owner)
+            knownBatchReceipts.current.delete(receipt.operationId);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+  useEffect(
+    () => () => {
+      // RouteGate can replace this page with Navigate before it renders an
+      // anonymous identity. Retire on that identity transition, while ordinary
+      // navigation/remount within the same live session keeps completed rows.
+      const previous = batchResultRef.current;
+      const latest = identity.getSnapshot();
+      const latestOwner =
+        latest.status === 'authenticated'
+          ? JSON.stringify([
+              config.id,
+              latest.identity.user.id,
+              latest.identity.sessionId ?? null,
+            ])
+          : '';
+      if (previous && previous.owner !== latestOwner)
+        retireBatchReceipt(previous.receipt);
+    },
+    [config.id, identity, retireBatchReceipt],
+  );
   const [batchReceiptWarning, setBatchReceiptWarning] = useState<string | null>(
     null,
   );
@@ -1286,20 +1321,8 @@ export function CatalogPage({
     batchReceiptRecoveryEpoch.current++;
     const previous = batchResultRef.current;
     if (previous && previous.owner !== batchOwner && navigator.locks) {
-      const receipt = previous.receipt;
       batchResultRef.current = null;
-      const originalUser = JSON.parse(receipt.owner)[1] as string;
-      // The next identity must not choose the lock/storage key for the previous
-      // session. Retain receipts referenced by an active or unreadable gate.
-      void navigator.locks
-        .request(catalogSafetyKey(originalUser, 'asin'), async () => {
-          if (removeUnprotectedAsinBatchReceipt(originalUser, receipt)) {
-            const memory = knownBatchReceipts.current.get(receipt.operationId);
-            if (memory?.receipt.owner === receipt.owner)
-              knownBatchReceipts.current.delete(receipt.operationId);
-          }
-        })
-        .catch(() => undefined);
+      retireBatchReceipt(previous.receipt);
     }
     setBatchReceiptWarning(null);
     setBatchRecoveryNotice(null);
@@ -1329,7 +1352,12 @@ export function CatalogPage({
         current?.type === 'batch-create-asins' ? null : current,
       );
     }
-  }, [batchOwner, access.canWriteASIN, access.mustChangePassword]);
+  }, [
+    batchOwner,
+    access.canWriteASIN,
+    access.mustChangePassword,
+    retireBatchReceipt,
+  ]);
   useLayoutEffect(() => {
     if (
       config.id !== 'asin' ||

@@ -58,6 +58,14 @@
 
 ## 浏览器验收
 
+### 生产 RouteGate 注销卸载回收（评论 4200823271）
+
+`RouteGate` 在身份变为匿名时直接渲染 `Navigate`，目录页没有再次 render 的机会。本轮在目录卸载时读取最新 IdentityStore snapshot；只有 logout、owner 或 session 已与原回执归属不同才调用退休逻辑，普通导航和同会话重新挂载仍保留可查看的完成结果。身份变化 effect 与卸载共用同一回收方法，始终在原用户的 catalog Web Lock 内读取实际持久 gate；未知操作、仍绑定原 operation 或不可读的保护记录继续保留，不提交请求，不清除门禁。
+
+- 使用实际 TanStack memory router、原 `RouteGate`/`Navigate` 和真实 CatalogPage/HttpClient。原 head 普通 logout、先撤写权限再 logout 和原 owner 锁排队三个场景 RED，保护中的原回执对照 GREEN；修复后四项 GREEN。
+- 首次完整受影响检查发现无条件卸载退休会破坏五个原有同会话 remount 场景，已收窄为真实身份变化，而非删掉原测试。两个受影响文件随后 **111/111** 通过（页面 65、receipt 46）。又补实际 RouteGate 同会话 remount 对照，最新五个生产 gate 场景 **5/5** 通过，61 项仅因名称筛选跳过。
+- 本轮 Web strict `tsc -p tsconfig.json --noEmit`、两个改动源/测试文件 ESLint、3 文件 Prettier、URL 去重 3 项、changed-format 5 项与 `git diff --check` 通过；仅轻量受影响检查，不重复完整 Web/build，重型窗口仍由 root 协调。mounted 证据不能替代真实浏览器验收。
+
 ### 本轮回执审查修复（评论 4200536701 / 4200536711）
 
 完成结果仍打开时，owner/session 变化或退出会在原用户的 catalog Web Lock 内重新检查原共享门禁，精确移除不再受保护的原 operation 回执与 head；写权限先撤回而隐藏结果、随后退出也执行相同清理。仍引用原 operation、缺少 operation 绑定、损坏或不可读的门禁及不可访问存储均保留回执，清理流程不删除门禁、不提交请求。显式关闭结果或开始新批次会释放最后一个内存引用。
