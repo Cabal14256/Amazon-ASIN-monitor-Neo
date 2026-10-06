@@ -296,10 +296,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           '   ',
           '😺'.repeat(50),
         ];
-        // The actual fixture has a unique rtrim(group id) index. A purely
-        // trailing-space alias cannot coexist with its trimmed neighbor.
-        // Leading-space aliases remain separate and exercise the SQL boundary.
-        const neighbors = ['Raw Ś', 'Lead Ś', 'case', 'cafe'];
+        // The inherited ICU/rtrim unique index rejects trailing-space,
+        // case and accent aliases. Leading-space neighbors can coexist.
+        const neighbors = ['Raw Ś', 'Lead Ś'];
         for (const [index, id] of [...selected, ...neighbors].entries()) {
           await group(id, 0);
           if (id.length <= 50)
@@ -308,10 +307,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               [`${id}-a0`, `B${String(index).padStart(9, '0')}`, id],
             );
         }
-        await expect(group('Tail Ś', 0)).rejects.toMatchObject({
-          code: '23505',
-          constraint: 'variant_groups_rtrim_idx',
-        });
+        for (const alias of ['Tail Ś', 'case', 'cafe'])
+          await expect(group(alias, 0)).rejects.toMatchObject({
+            code: '23505',
+            constraint: 'variant_groups_rtrim_idx',
+          });
         let result;
         if (useAsync) {
           const id = await accepted({ groupIds: selected });
@@ -335,6 +335,35 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(
           (await rows('asins')).map((row) => row.variant_group_id).sort(),
         ).toEqual(neighbors.sort());
+        // Once the literal originals are absent, these normalized neighbors
+        // are legal. Retrying the original raw IDs must not delete them.
+        const missingLiterals = ['Tail Ś ', 'Case', 'café'];
+        const aliasNeighbors = ['Tail Ś', 'case', 'cafe'];
+        for (const id of aliasNeighbors) await group(id, 0);
+        let missingResult;
+        if (useAsync) {
+          const id = await accepted({ groupIds: missingLiterals });
+          expect((await queue.getJob(id))?.data.groupIds).toEqual(
+            missingLiterals,
+          );
+          missingResult = (await terminal(id)).result;
+        } else {
+          const response = await request({
+            groupIds: missingLiterals,
+            useAsync,
+          });
+          expect(response.statusCode).toBe(200);
+          missingResult = response.json().data;
+        }
+        expect(missingResult).toMatchObject({
+          totalRequested: 3,
+          deletedGroupCount: 0,
+          deletedNestedAsinCount: 0,
+          skipped: { groupIds: missingLiterals, asinIds: [] },
+        });
+        expect(
+          (await rows('variant_groups')).map((row) => row.id).sort(),
+        ).toEqual([...neighbors, ...aliasNeighbors].sort());
       },
     );
     it.each([false, true])(
