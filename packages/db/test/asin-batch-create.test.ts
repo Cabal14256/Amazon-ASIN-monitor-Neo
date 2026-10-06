@@ -4,6 +4,7 @@ import { legacyAsinBatch } from '../../../apps/api/test/helpers/asin-batch-legac
 import type { Db } from '../src/client';
 import { prepareBatchAsins } from '../src/domain/asin-batch-create';
 import { DrizzleAsinWriteUnit } from '../src/repositories/asin-write-repository';
+import { CompetitorBatchCreateUnit } from '../src/repositories/competitor-batch-create-unit';
 
 const item = (index = 1, parentId = 'g') => ({
   asin: `B${String(index).padStart(9, '0')}`,
@@ -59,6 +60,58 @@ function writer(
 }
 
 describe('primary HTTP batch parent identity and locked readable capacity', () => {
+  it('freezes competitor normalization and exact parent Map failure through both actual services', async () => {
+    const rows = [item(1, 'group ')];
+    const groups = [{ id: 'group ', country: 'US' }];
+    const legacy = await legacyAsinBatch(rows, {
+      domain: 'competitor',
+      groups,
+    });
+    expect(legacy.result).toMatchObject({ successCount: 0, failedCount: 1 });
+    expect(legacy.result.errors[0].message).toBe('所属变体组不存在');
+    expect(legacy.inserts).toEqual([]);
+    const selected = vi.fn(() => {
+      const query = {
+        from: () => query,
+        where: () => query,
+        orderBy: () => query,
+        for: () => query,
+        then: Promise.resolve(groups).then.bind(Promise.resolve(groups)),
+      };
+      return query;
+    });
+    const insert = vi.fn(() => {
+      throw new Error('Frozen mismatch must not write');
+    });
+    const db = { select: selected, insert } as unknown as Db;
+    const result = await new CompetitorBatchCreateUnit(
+      db,
+      () => undefined,
+    ).create(rows);
+    expect(result).toEqual(legacy.result);
+    expect(selected).toHaveBeenCalledTimes(1);
+    expect(insert).not.toHaveBeenCalled();
+  });
+  it('freezes actual Legacy file-import parent normalization separately from primary HTTP', async () => {
+    const groups = [
+      { id: 'g', country: 'US' },
+      { id: ' g ', country: 'US' },
+    ];
+    const legacy = await legacyAsinBatch([item(1, ' g ')], {
+      groups,
+      clearCache: false,
+    });
+    expect(legacy.result.results).toMatchObject([
+      { success: true, parentId: 'g' },
+    ]);
+    expect(legacy.inserts[0][7]).toBe('g');
+    const blank = await legacyAsinBatch([item(1, '   ')], {
+      groups: [{ id: '   ', country: 'US' }],
+      clearCache: false,
+    });
+    expect(blank.result.errors[0].message).toBe('所属变体组不能为空');
+    expect(blank.inserts).toEqual([]);
+  });
   it('preserves the literal parent in the actual Legacy service', async () => {
     const result = await legacyAsinBatch([item(1, ' g ')], {
       groups: [

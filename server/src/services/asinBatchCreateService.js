@@ -140,7 +140,7 @@ function addSuccess(result, item) {
   });
 }
 
-function normalizeItems(items, config, result) {
+function normalizeItems(items, config, result, preserveLiteralParent = false) {
   const seen = new Set();
   const validItems = [];
 
@@ -155,7 +155,9 @@ function normalizeItems(items, config, result) {
       country: normalizeCountryCode(item.country),
       site: normalizeOptionalText(item.site),
       brand: normalizeOptionalText(item.brand),
-      parentId: literalParentId(item.parentId || item.variantGroupId),
+      parentId: preserveLiteralParent
+        ? literalParentId(item.parentId || item.variantGroupId)
+        : normalizeOptionalText(item.parentId || item.variantGroupId),
     };
 
     if (!normalized.asin || !ASIN_CODE_PATTERN.test(normalized.asin)) {
@@ -178,7 +180,7 @@ function normalizeItems(items, config, result) {
       addFailure(result, normalized, '所属变体组不能为空');
       return;
     }
-    if (!safeParentId(normalized.parentId)) {
+    if (preserveLiteralParent && !safeParentId(normalized.parentId)) {
       addFailure(result, normalized, '所属变体组ID格式无效');
       return;
     }
@@ -328,7 +330,14 @@ async function batchCreateASINs({
   }
 
   const result = createEmptyResult(items.length);
-  const normalizedItems = normalizeItems(items, config, result);
+  // The canonical-ID safety fix belongs to primary HTTP batch creation.
+  // Competitor and clearCache:false file imports keep their frozen normalizer.
+  const normalizedItems = normalizeItems(
+    items,
+    config,
+    result,
+    config.domain === 'asin' && clearCache,
+  );
 
   if (normalizedItems.length > 0) {
     await config.database.withTransaction(async ({ query }) => {

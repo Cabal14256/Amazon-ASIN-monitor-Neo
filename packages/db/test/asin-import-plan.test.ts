@@ -43,6 +43,23 @@ function legacy(raw: unknown[], hasSite = true) {
   return JSON.parse(JSON.stringify(module.exports.fixture(raw)));
 }
 describe('import batch preparation spans all bounded database chunks', () => {
+  it.each([true, false])(
+    'freezes import parent trimming and validation phase (hasSite=%s)',
+    (hasSite) => {
+      const raw = [
+        { ...item(1), parentId: ' group ' },
+        { ...item(2), parentId: '   ' },
+      ];
+      let id = 0;
+      const prepare = hasSite
+        ? prepareImportAsins
+        : prepareCompetitorImportAsins;
+      const plan = prepare(raw, () => `id-${id++}`);
+      expect(plan.items.map((row) => row.parentId)).toEqual(['group']);
+      expect(plan.result.errors[0].message).toBe('所属变体组不能为空');
+      expect(plan).toEqual(legacy(raw, hasSite));
+    },
+  );
   it('matches Legacy competitor normalization and duplicate detection without site', () => {
     const raw = Array.from({ length: 1002 }, (_, index) => ({
       ...item(index),

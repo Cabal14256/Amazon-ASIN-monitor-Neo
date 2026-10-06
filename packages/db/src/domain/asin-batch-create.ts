@@ -85,7 +85,13 @@ export function prepareBatchAsins(
   items: unknown[],
   idFactory: () => string = randomUUID,
 ): BatchAsinPlan {
-  return prepareAsins(items, idFactory, MAX_ASIN_BATCH_CREATE_ITEMS);
+  return prepareAsins(
+    items,
+    idFactory,
+    MAX_ASIN_BATCH_CREATE_ITEMS,
+    true,
+    true,
+  );
 }
 
 /** Competitor rows share Legacy normalization but have no site column. */
@@ -118,6 +124,7 @@ function prepareAsins(
   idFactory: () => string,
   maximum: number,
   hasSite = true,
+  preserveLiteralParent = false,
 ): BatchAsinPlan {
   if (!items.length || items.length > maximum)
     throw new Error('Invalid ASIN batch size');
@@ -143,7 +150,9 @@ function prepareAsins(
         country: batchCountry(raw.country),
         site: optionalText(raw.site),
         brand: optionalText(raw.brand),
-        parentId: literalParentId(raw.parentId || raw.variantGroupId),
+        parentId: preserveLiteralParent
+          ? literalParentId(raw.parentId || raw.variantGroupId)
+          : optionalText(raw.parentId || raw.variantGroupId),
       };
     } catch {
       // Untrusted JSON objects may shadow toString. Treat only this row as invalid.
@@ -174,7 +183,7 @@ function prepareAsins(
       ? '品牌不能为空'
       : !item.parentId
       ? '所属变体组不能为空'
-      : !safeParentId(item.parentId)
+      : preserveLiteralParent && !safeParentId(item.parentId)
       ? '所属变体组ID格式无效'
       : raw.asinType && !item.asinType
       ? 'ASIN类型必须是 1（主链）或 2（副评）'
