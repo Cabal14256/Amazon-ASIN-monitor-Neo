@@ -3,7 +3,7 @@ import {
   AsinBatchDeleteRepositoryError,
   AsinTimestampPolicyError,
   BatchDeleteInputError,
-  parseBatchDeleteRequest,
+  parseNeoBatchDeleteRequest,
   useAsyncBatchDelete,
   type AsinBatchDeleteRepositoryPort,
 } from '@asin-monitor/db';
@@ -83,7 +83,7 @@ export class AsinBatchDeleteService {
     try {
       const accepted = await this.repository.transaction(async (unit) => {
         await authorizeAdministration(unit, principal, 'asin:delete');
-        const request = parseBatchDeleteRequest(body);
+        const request = parseNeoBatchDeleteRequest(body);
         const analysis = await unit.analyze(request);
         if (
           !useAsyncBatchDelete(analysis, request.useAsync, {
