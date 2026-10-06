@@ -171,8 +171,26 @@ export async function loadMonthlyRows<T>(
   if (signal?.aborted) abort();
   else signal?.addEventListener('abort', abort, { once: true });
   try {
-    const rows = await Promise.all(
-      months.map((month) => load(month, controller.signal)),
+    const rows: (readonly T[])[] = Array(months.length);
+    let next = 0;
+    // Do not enqueue every month in the shared REST admission queue. Its slot
+    // release happens before this caller observes a failed response; a queued
+    // sibling could otherwise reach fetch in that gap.
+    const worker = async () => {
+      while (next < months.length) {
+        if (controller.signal.aborted)
+          throw new ApiError('CANCELLED', '请求已取消');
+        const index = next++;
+        try {
+          rows[index] = await load(months[index], controller.signal);
+        } catch (error) {
+          abort();
+          throw error;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(2, months.length) }, worker),
     );
     return rows.flatMap((monthRows) => [...monthRows]);
   } catch (error) {

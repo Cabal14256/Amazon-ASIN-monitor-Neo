@@ -286,10 +286,12 @@ describe('analytics page filters and display values', () => {
   it('aborts sibling monthly requests when one month fails', async () => {
     let rejectFirst!: (error: Error) => void;
     const aborted: string[] = [];
+    const started: string[] = [];
     const promise = loadMonthlyRows(
       ['2026-12', '2027-01', '2027-02'],
-      (month, signal) =>
-        month === '2026-12'
+      (month, signal) => {
+        started.push(month);
+        return month === '2026-12'
           ? new Promise<number[]>((_resolve, reject) => {
               rejectFirst = reject;
             })
@@ -298,11 +300,13 @@ describe('analytics page filters and display values', () => {
                 aborted.push(month);
                 reject(new Error('cancelled'));
               });
-            }),
+            });
+      },
     );
     rejectFirst(new Error('month failed'));
     await expect(promise).rejects.toThrow('month failed');
-    expect(aborted).toEqual(['2027-01', '2027-02']);
+    expect(aborted).toEqual(['2027-01']);
+    expect(started).toEqual(['2026-12', '2027-01']);
   });
 
   it('combines ASIN rows into one abnormal-duration point per time period', () => {

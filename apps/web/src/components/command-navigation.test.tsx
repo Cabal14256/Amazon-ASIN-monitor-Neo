@@ -341,14 +341,14 @@ describe('workspace command navigation', () => {
     );
   });
 
-  it('excludes unavailable and ungranted pages using the current navigation policy', () => {
+  it('includes the available analytics page and excludes ungranted pages using the current navigation policy', () => {
     fixture(authenticated(['analytics:read']));
     const { panel } = open();
     expect(
       within(panel)
         .getAllByRole('option')
         .map((item) => item.getAttribute('href')),
-    ).toEqual(['/home', '/tasks', '/profile']);
+    ).toEqual(['/home', '/tasks', '/analytics', '/profile']);
   });
 
   it('reacts to revoked permissions and the password gate before Enter can navigate', () => {

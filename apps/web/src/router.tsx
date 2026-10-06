@@ -54,6 +54,7 @@ export function createAppRouter(
           throw redirect(routerDestination(decision.to));
       },
       component: function PageRoute() {
+        const pageName = page.name;
         return (
           <RouteGate>
             <Suspense fallback={<IdentityPending />}>
@@ -88,7 +89,7 @@ export function createAppRouter(
               ) : page.path === '/settings' ? (
                 <SettingsPage />
               ) : (
-                <UnavailablePage title={page.name} />
+                <UnavailablePage title={pageName} />
               )}
             </Suspense>
           </RouteGate>
