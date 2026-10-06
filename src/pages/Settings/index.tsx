@@ -24,7 +24,11 @@ import {
   message as antdMessage,
 } from 'antd';
 import dayjs from 'dayjs';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  readScheduledBackupHistory,
+  scheduledHistoryFailureMessage,
+} from './scheduled-backup-history';
 
 const { getSPAPIConfigs, updateSPAPIConfig } = services.SPAPIConfigController;
 const { getFeishuConfigs, upsertFeishuConfig } = services.FeishuController;
@@ -142,6 +146,13 @@ const SettingsPage: React.FC<unknown> = () => {
   const [scheduledBackups, setScheduledBackups] = useState<
     API.BackupScheduledTask[]
   >([]);
+  const [scheduledHistoryError, setScheduledHistoryError] = useState<
+    string | null
+  >(null);
+  const [scheduledHistoryUnsupported, setScheduledHistoryUnsupported] =
+    useState(false);
+  const [scheduledHistoryLoading, setScheduledHistoryLoading] = useState(false);
+  const scheduledHistoryRequest = useRef(false);
   const [backupLoading, setBackupLoading] = useState(false);
   const [restoreModalVisible, setRestoreModalVisible] = useState(false);
   const [restoreFilename, setRestoreFilename] = useState<string>('');
@@ -245,6 +256,27 @@ const SettingsPage: React.FC<unknown> = () => {
     }
   };
 
+  const loadScheduledBackups = async () => {
+    if (scheduledHistoryRequest.current) return;
+    scheduledHistoryRequest.current = true;
+    setScheduledHistoryLoading(true);
+    setScheduledHistoryError(null);
+    setScheduledHistoryUnsupported(false);
+    try {
+      const result = await readScheduledBackupHistory<API.BackupScheduledTask>(
+        () => backupServices.listScheduledBackups({ skipErrorHandler: true }),
+      );
+      setScheduledBackups(result.tasks);
+      setScheduledHistoryUnsupported(result.kind === 'unsupported');
+    } catch (error) {
+      setScheduledBackups([]);
+      setScheduledHistoryError(scheduledHistoryFailureMessage(error));
+    } finally {
+      scheduledHistoryRequest.current = false;
+      setScheduledHistoryLoading(false);
+    }
+  };
+
   // 加载备份列表
   const loadBackups = async () => {
     setBackupLoading(true);
@@ -257,13 +289,7 @@ const SettingsPage: React.FC<unknown> = () => {
           setBackups(response);
         }
       }
-      try {
-        const scheduled = await backupServices.listScheduledBackups();
-        setScheduledBackups(scheduled.data || []);
-      } catch {
-        // Legacy deployments do not provide this Neo-only view.
-        setScheduledBackups([]);
-      }
+      await loadScheduledBackups();
     } catch (error) {
       console.error('加载备份列表失败:', error);
       message.error('加载备份列表失败');
@@ -962,23 +988,51 @@ const SettingsPage: React.FC<unknown> = () => {
             />
           </Card>
 
-          <Card title="自动备份执行记录" style={{ marginTop: 16 }}>
-            <Table
-              dataSource={scheduledBackups}
-              rowKey="taskId"
-              columns={[
-                { title: '任务', dataIndex: 'title', key: 'title' },
-                { title: '状态', dataIndex: 'status', key: 'status' },
-                { title: '说明', dataIndex: 'message', key: 'message' },
-                {
-                  title: '创建时间',
-                  dataIndex: 'createdAt',
-                  key: 'createdAt',
-                  render: (time: string) => formatBeijing(time),
-                },
-              ]}
-              pagination={{ pageSize: 10 }}
-            />
+          <Card
+            title="自动备份执行记录"
+            style={{ marginTop: 16 }}
+            extra={
+              <Button
+                onClick={() => void loadScheduledBackups()}
+                loading={scheduledHistoryLoading}
+              >
+                重新读取执行记录
+              </Button>
+            }
+          >
+            {scheduledHistoryError ? (
+              <Alert
+                message="执行记录读取失败"
+                description={scheduledHistoryError}
+                type="error"
+                showIcon
+              />
+            ) : scheduledHistoryUnsupported ? (
+              <Alert
+                message="当前 Legacy 部署未提供自动备份执行记录接口"
+                description="备份列表仍可使用；此提示不代表没有执行记录。"
+                type="info"
+                showIcon
+              />
+            ) : (
+              <Table
+                loading={scheduledHistoryLoading}
+                dataSource={scheduledBackups}
+                rowKey="taskId"
+                columns={[
+                  { title: '任务', dataIndex: 'title', key: 'title' },
+                  { title: '状态', dataIndex: 'status', key: 'status' },
+                  { title: '说明', dataIndex: 'message', key: 'message' },
+                  {
+                    title: '创建时间',
+                    dataIndex: 'createdAt',
+                    key: 'createdAt',
+                    render: (time: string) => formatBeijing(time),
+                  },
+                ]}
+                pagination={{ pageSize: 10 }}
+              />
+            )}
           </Card>
 
           <Modal
