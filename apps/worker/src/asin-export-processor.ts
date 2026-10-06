@@ -17,7 +17,6 @@ import {
 import { ExportArtifactError, ExportArtifactStore } from '@asin-monitor/export';
 import { mapAsinQueryGroups } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
-import ExcelJS from 'exceljs';
 import type { WriteStream } from 'node:fs';
 import { finished } from 'node:stream/promises';
 import {
@@ -26,6 +25,7 @@ import {
   asinExportFilename,
   asinExportRows,
 } from './asin-export-rows';
+import { createBoundedExportWorkbook } from './bounded-export-workbook';
 import { logger } from './logger';
 
 const GROUP_PAGE_SIZE = MAX_ASIN_EXPORT_GROUP_PAGE_SIZE;
@@ -107,7 +107,15 @@ export function createAsinExportProcessor(
     let checking = false;
     let partial: string | undefined;
     let outputStream: WriteStream | undefined;
+    let boundedWorkbook:
+      | ReturnType<typeof createBoundedExportWorkbook>
+      | undefined;
     const abortWriter = () => {
+      boundedWorkbook?.stop(
+        controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new Error('EXPORT_WRITER_ABORTED'),
+      );
       if (outputStream && !outputStream.destroyed)
         outputStream.destroy(
           controller.signal.reason instanceof Error
@@ -219,14 +227,14 @@ export function createAsinExportProcessor(
         abortWriter();
         controller.signal.throwIfAborted();
       }
-      const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-        stream: output.stream,
-        useSharedStrings: false,
-        useStyles: false,
-      });
+      boundedWorkbook = createBoundedExportWorkbook(output.stream, (error) =>
+        controller.abort(error),
+      );
+      const workbook = boundedWorkbook.workbook;
       const sheet = workbook.addWorksheet('ASIN数据');
       sheet.columns = ASIN_EXPORT_WIDTHS.map((width) => ({ width }));
       sheet.addRow([...ASIN_EXPORT_HEADER]).commit();
+      await boundedWorkbook.drain(controller.signal);
       let total = 0;
       let processed = 0;
       let rowCount = 0;
@@ -245,7 +253,14 @@ export function createAsinExportProcessor(
           for (const row of asinExportRows([group])) {
             if (++rowCount > MAX_ROWS)
               throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
+            if (
+              row.some(
+                (value) => typeof value === 'string' && value.length > 32767,
+              )
+            )
+              throw new ExportCapacityError('EXPORT_CELL_LIMIT_EXCEEDED');
             sheet.addRow(row).commit();
+            await boundedWorkbook!.drain(controller.signal);
             if (rowCount % 500 === 0) await snapshotCheck();
           }
         };
@@ -412,7 +427,9 @@ export function createAsinExportProcessor(
         if (capacity || job.attemptsMade + 1 >= (job.opts.attempts ?? 1)) {
           const next = await mutate({
             kind: 'failed',
-            message: 'ASIN 导出失败，请重试',
+            message: capacity
+              ? 'ASIN 导出超过上限，请缩小筛选范围'
+              : 'ASIN 导出失败，请重试',
           });
           if (next.status === 'cancelled') return cancelledResult;
           if (capacity && error instanceof ExportArtifactError)
@@ -439,6 +456,8 @@ export function createAsinExportProcessor(
       clearTimeout(deadline);
       options.shutdownSignal.removeEventListener('abort', shutdown);
       controller.signal.removeEventListener('abort', abortWriter);
+      if (outputStream && !outputStream.writableFinished)
+        boundedWorkbook?.stop();
       let canDiscard = true;
       if (outputStream && !outputStream.closed) {
         let onClose!: () => void;

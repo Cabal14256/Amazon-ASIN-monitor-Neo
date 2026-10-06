@@ -74,6 +74,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
     this.active++;
     const taskId = randomUUID();
     let submissionStarted = false;
+    let enqueueAttempted = false;
     let taskCreatedAt: string | undefined;
     let port: ExportProducerPort | undefined;
     let closed = false;
@@ -104,8 +105,14 @@ export class AsinExportTaskService implements OnModuleDestroy {
         },
         2,
         100,
+        (prepared) => {
+          // Capture the repository's identity before EVAL, including when its
+          // committed reply is lost or arrives after the request deadline.
+          taskCreatedAt = prepared.createdAt;
+        },
       );
       taskCreatedAt = task.createdAt;
+      enqueueAttempted = true;
       await port.enqueue({
         taskId,
         userId: principal.userId,
@@ -133,7 +140,12 @@ export class AsinExportTaskService implements OnModuleDestroy {
         error.code === 'TASK_EXPORT_GLOBAL_LIMIT'
       )
         fail(429, '导出队列已满，请稍后再试');
-      if (error instanceof ExportEnqueueRejected && taskCreatedAt && port) {
+      if (
+        taskCreatedAt &&
+        port &&
+        (error instanceof ExportEnqueueRejected ||
+          (submissionStarted && !enqueueAttempted))
+      ) {
         const rejectedIdentity = {
           taskId,
           userId: principal.userId,

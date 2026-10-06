@@ -483,6 +483,7 @@ describe('ASIN streaming export', () => {
     const publish = vi.spyOn(h.artifacts, 'publish');
     await expect(h.processor(h.job, 'token')).rejects.toThrow('超过上限');
     expect(h.state.status).toBe('failed');
+    expect(h.state.message).toBe('ASIN 导出超过上限，请缩小筛选范围');
     expect(publish).not.toHaveBeenCalled();
     expect(await readdir(h.directory)).toEqual([]);
     expect(await h.artifacts.read(taskId)).toBeNull();
@@ -899,9 +900,38 @@ describe('ASIN streaming export', () => {
       'ASIN 导出超过上限',
     );
     expect(h.state.status).toBe('failed');
+    expect(h.state.message).toBe('ASIN 导出超过上限，请缩小筛选范围');
     expect(h.list).toHaveBeenCalledTimes(1);
     expect(await readdir(h.directory)).toEqual([]);
   });
+
+  it.each([32767, 32768])(
+    'enforces the actual XLSX cell limit at %i characters',
+    async (length) => {
+      const name = '=literal ' + 'x'.repeat(length - 9);
+      const h = await harness([
+        { groups: [group('wide', name)], asins: [], total: 1, totalASINs: 0 },
+      ] as unknown as AsinGroupReadResult[]);
+      if (length > 32767) {
+        await expect(h.processor(h.job, 'token')).rejects.toThrow(
+          'ASIN 导出超过上限',
+        );
+        expect(h.state.status).toBe('failed');
+        expect(h.state.message).toBe('ASIN 导出超过上限，请缩小筛选范围');
+        expect(await readdir(h.directory)).toEqual([]);
+      } else {
+        await h.processor(h.job, 'token');
+        const ref = await h.artifacts.read(taskId);
+        const path = await h.artifacts.verifiedPath(
+          ref!,
+          new AbortController().signal,
+        );
+        const book = new ExcelJS.Workbook();
+        await book.xlsx.readFile(path);
+        expect(book.worksheets[0]!.getRow(2).getCell(1).value).toBe(name);
+      }
+    },
+  );
 
   it('keeps cancellation when it arrives between a capacity failure read and CAS', async () => {
     const h = await harness([

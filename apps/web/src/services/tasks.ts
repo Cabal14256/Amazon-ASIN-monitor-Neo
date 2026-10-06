@@ -25,6 +25,8 @@ export const isTaskMessage = (message: WsMessage) =>
 
 // Check results can reach 32 MiB before the HTTP envelope and task metadata.
 const TASK_READ_RESPONSE_LIMIT = 40 * 1024 * 1024;
+// Matches the API task-download ASIN workbook stream deadline.
+const ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 const XLSX_MIME =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -194,7 +196,11 @@ export class TaskApi {
     if (!filename) throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
     const result = task.result as { fileSizeBytes: number };
     const expectedBytes = result.fileSizeBytes;
-    const blob = await this.download(task.taskId, signal);
+    const blob = await this.http.download(
+      `${taskPath(task.taskId)}/download`,
+      signal,
+      { timeoutMs: ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS },
+    );
     if (blob.type !== XLSX_MIME || blob.size !== expectedBytes)
       throw new ApiError(
         'INVALID_RESPONSE',

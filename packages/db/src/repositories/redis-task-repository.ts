@@ -14,6 +14,10 @@ import {
 } from './task-state';
 
 export type TaskRedisPort = Pick<Redis, 'get' | 'eval' | 'zrevrange' | 'mget'>;
+export type PreparedExportTaskIdentity = Pick<
+  TaskState,
+  'taskId' | 'userId' | 'createdAt'
+> & { taskType: 'export'; taskSubType: 'asin' };
 export const TASK_RECORD_MAX_BYTES = 262_144;
 // A full 100-job queue can consume 100 hours with two 30-minute attempts
 // per job and one consumer. Leave room for retries and operational delay.
@@ -245,6 +249,7 @@ export class RedisTaskRepository {
     input: CreateTaskInput,
     maxActiveExports?: number,
     maxGlobalExports?: number,
+    onPrepared?: (identity: PreparedExportTaskIdentity) => void,
   ): Promise<TaskState> {
     const data = createTaskInputSchema.parse(input);
     const timestamp = this.now().toISOString();
@@ -265,6 +270,13 @@ export class RedisTaskRepository {
       cancelledAt: null,
       revision: 0,
     };
+    onPrepared?.({
+      taskId: task.taskId,
+      userId: task.userId,
+      taskType: 'export',
+      taskSubType: 'asin',
+      createdAt: task.createdAt,
+    });
     if (!(await this.save(null, task, maxActiveExports, maxGlobalExports)))
       throw new TaskRegistryError('TASK_EXISTS');
     return task;
@@ -279,6 +291,7 @@ export class RedisTaskRepository {
     input: CreateTaskInput,
     maxActiveExports: number,
     maxGlobalExports = 100,
+    onPrepared?: (identity: PreparedExportTaskIdentity) => void,
   ): Promise<TaskState> {
     if (
       input.taskType !== 'export' ||
@@ -294,7 +307,12 @@ export class RedisTaskRepository {
       maxGlobalExports > 100
     )
       throw new TaskRegistryError('TASK_RECORD_INVALID');
-    return this.createInternal(input, maxActiveExports, maxGlobalExports);
+    return this.createInternal(
+      input,
+      maxActiveExports,
+      maxGlobalExports,
+      onPrepared,
+    );
   }
 
   async read(taskId: string): Promise<TaskState | null> {

@@ -166,95 +166,107 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     });
 
-    it('releases definitive pre-add rejections through authenticated HTTP and a restarted compiled Worker using real Redis', async () => {
-      await worker!.close();
-      worker = undefined;
-      const open = queryRuntime.openExport.bind(queryRuntime);
-      const reject = vi
-        .spyOn(queryRuntime, 'openExport')
-        .mockImplementation((ensureOpen, onWrite) => {
-          const port = open(ensureOpen, onWrite);
-          return {
-            ...port,
-            store: {
-              createLimitedExport: (...args) =>
-                port.store.createLimitedExport(...args),
-              mutate: async () => {
-                throw new Error('fixture terminal Redis cleanup unavailable');
+    it.each(['pre-add', 'create-ack-lost', 'late-create-ack'] as const)(
+      'releases %s rejection through authenticated HTTP and a restarted compiled Worker using real Redis',
+      async (mode) => {
+        await worker!.close();
+        worker = undefined;
+        const open = queryRuntime.openExport.bind(queryRuntime);
+        const reject = vi
+          .spyOn(queryRuntime, 'openExport')
+          .mockImplementation((ensureOpen, onWrite) => {
+            const port = open(ensureOpen, onWrite);
+            return {
+              ...port,
+              store: {
+                createLimitedExport: async (...args) => {
+                  const created = await port.store.createLimitedExport(...args);
+                  if (mode === 'create-ack-lost')
+                    throw new Error('fixture committed create response lost');
+                  if (mode === 'late-create-ack') {
+                    await new Promise((resolve) => setTimeout(resolve, 3100));
+                    ensureOpen();
+                  }
+                  return created;
+                },
+                mutate: async () => {
+                  throw new Error('fixture terminal Redis cleanup unavailable');
+                },
               },
-            },
-            enqueue: async () => {
-              throw new ExportEnqueueRejected('unavailable');
-            },
-          };
-        });
-      const ids: string[] = [];
-      try {
-        for (let index = 0; index < 2; index++) {
-          const response = await f.app.inject({
-            method: 'POST',
-            url: '/api/v1/tasks/export',
-            headers: ownerHeaders,
-            payload: { exportType: 'asin', params: { country: 'US' } },
+              enqueue: async () => {
+                throw new ExportEnqueueRejected('unavailable');
+              },
+            };
           });
-          expect(response.statusCode).toBe(503);
-          expect(response.json().data.status).toBe('rejected');
-          const id = response.json().data.taskId as string;
-          ids.push(id);
-          expect((await store.read(id))?.status).toBe('pending');
-          expect(await artifacts.readRejectedSubmission(id)).not.toBeNull();
+        const ids: string[] = [];
+        try {
+          for (let index = 0; index < 2; index++) {
+            const response = await f.app.inject({
+              method: 'POST',
+              url: '/api/v1/tasks/export',
+              headers: ownerHeaders,
+              payload: { exportType: 'asin', params: { country: 'US' } },
+            });
+            expect(response.statusCode).toBe(503);
+            expect(response.json().data.status).toBe('rejected');
+            const id = response.json().data.taskId as string;
+            ids.push(id);
+            expect((await store.read(id))?.status).toBe('pending');
+            expect(await artifacts.readRejectedSubmission(id)).not.toBeNull();
+          }
+        } finally {
+          reject.mockRestore();
         }
-      } finally {
-        reject.mockRestore();
-      }
-      const recreated = new TaskQueryRuntime(env, appLogger);
-      const read = vi
-        .spyOn(queryRuntime, 'open')
-        .mockImplementation((ensureOpen) => recreated.open(ensureOpen));
-      try {
-        const foreign = await f.app.inject({
-          method: 'GET',
-          url: `/api/v1/tasks/${ids[0]}`,
-          headers: otherHeaders,
+        const recreated = new TaskQueryRuntime(env, appLogger);
+        const read = vi
+          .spyOn(queryRuntime, 'open')
+          .mockImplementation((ensureOpen) => recreated.open(ensureOpen));
+        try {
+          const foreign = await f.app.inject({
+            method: 'GET',
+            url: `/api/v1/tasks/${ids[0]}`,
+            headers: otherHeaders,
+          });
+          expect([403, 404]).toContain(foreign.statusCode);
+          expect((await store.read(ids[0]!))?.status).toBe('pending');
+          const response = await f.app.inject({
+            method: 'GET',
+            url: `/api/v1/tasks/${ids[0]}`,
+            headers: ownerHeaders,
+          });
+          expect(response.statusCode).toBe(200);
+          expect(response.json().data.status).toBe('failed');
+          expect(await artifacts.readRejectedSubmission(ids[0]!)).toBeNull();
+        } finally {
+          read.mockRestore();
+          await recreated.onModuleDestroy();
+          worker = await compiled().startAsinExportRuntime(env, () => fatal());
+        }
+        const recovered = await eventually(async () => {
+          const task = await store.read(ids[1]!);
+          return task?.status === 'failed' ? task : null;
         });
-        expect([403, 404]).toContain(foreign.statusCode);
-        expect((await store.read(ids[0]!))?.status).toBe('pending');
-        const response = await f.app.inject({
-          method: 'GET',
-          url: `/api/v1/tasks/${ids[0]}`,
+        expect(recovered.taskId).toBe(ids[1]);
+        await eventually(async () =>
+          (await artifacts.readRejectedSubmission(ids[1]!)) === null
+            ? true
+            : null,
+        );
+        const next = await f.app.inject({
+          method: 'POST',
+          url: '/api/v1/tasks/export',
           headers: ownerHeaders,
+          payload: { exportType: 'asin', params: { country: 'DE' } },
         });
-        expect(response.statusCode).toBe(200);
-        expect(response.json().data.status).toBe('failed');
-        expect(await artifacts.readRejectedSubmission(ids[0]!)).toBeNull();
-      } finally {
-        read.mockRestore();
-        await recreated.onModuleDestroy();
-        worker = await compiled().startAsinExportRuntime(env, () => fatal());
-      }
-      const recovered = await eventually(async () => {
-        const task = await store.read(ids[1]!);
-        return task?.status === 'failed' ? task : null;
-      });
-      expect(recovered.taskId).toBe(ids[1]);
-      await eventually(async () =>
-        (await artifacts.readRejectedSubmission(ids[1]!)) === null
-          ? true
-          : null,
-      );
-      const next = await f.app.inject({
-        method: 'POST',
-        url: '/api/v1/tasks/export',
-        headers: ownerHeaders,
-        payload: { exportType: 'asin', params: { country: 'DE' } },
-      });
-      expect(next.statusCode).toBe(200);
-      await eventually(async () => {
-        const task = await store.read(next.json().data.taskId as string);
-        return task?.status === 'completed' ? task : null;
-      });
-      expect(fatal).not.toHaveBeenCalled();
-    }, 45_000);
+        expect(next.statusCode).toBe(200);
+        await eventually(async () => {
+          const task = await store.read(next.json().data.taskId as string);
+          return task?.status === 'completed' ? task : null;
+        });
+        expect(fatal).not.toHaveBeenCalled();
+      },
+      45_000,
+    );
 
     it('exports one group with more than 5,000 child ASINs', async () => {
       const created = await f.app.inject({

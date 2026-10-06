@@ -72,6 +72,31 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it('captures the actual export identity before a committed EVAL loses its acknowledgement', async () => {
+    const { repository, redis, rows } = fixture();
+    const prepared = vi.fn();
+    redis.eval.mockImplementationOnce(async (_script, keyCount, ...args) => {
+      expect(prepared).toHaveBeenCalledOnce();
+      rows.set(args[0]!, args[keyCount + 1]!);
+      throw new Error('fixture EVAL reply lost');
+    });
+    const exportInput = {
+      taskId: '10000000-0000-4000-8000-000000000166',
+      userId: 'owner-a',
+      taskType: 'export',
+      taskSubType: 'asin',
+    };
+    await expect(
+      repository.createLimitedExport(exportInput, 2, 100, prepared),
+    ).rejects.toThrow('fixture EVAL reply lost');
+    const committed = await repository.read(exportInput.taskId);
+    expect(committed?.status).toBe('pending');
+    expect(prepared).toHaveBeenCalledWith({
+      ...exportInput,
+      createdAt: committed?.createdAt,
+    });
+  });
+
   it('preserves an accepted monitor cancellation against a racing final completion', async () => {
     const { repository } = fixture();
     const task = await repository.create({

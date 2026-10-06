@@ -139,7 +139,14 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
         await artifacts.reconcileRejectedSubmissions(100, async (proof) => {
           if (closing || performance.now() >= deadline) return false;
           const task = await store.read(proof.taskId);
-          if (!task) return true;
+          // A create EVAL may commit after the producer has already lost its
+          // response. Keep proof through its metadata lifetime rather than
+          // deleting it during an initially empty lookup.
+          if (!task)
+            return (
+              Date.now() >=
+              Date.parse(proof.createdAt) + env.TASK_META_TTL_SECONDS * 1000
+            );
           // An expired UUID may identify a replacement. Remove only the stale
           // journal, never mutate that task or touch its artifact.
           if (

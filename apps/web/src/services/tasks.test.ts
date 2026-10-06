@@ -156,6 +156,103 @@ describe('task API boundary', () => {
     expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
   });
 
+  it('finishes a valid ASIN workbook body after the old 125 second cutoff', async () => {
+    const f = setup();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([80]));
+        setTimeout(() => {
+          controller.enqueue(new Uint8Array([75, 3, 4]));
+          controller.close();
+        }, 126_000);
+      },
+    });
+    f.fetcher.mockResolvedValueOnce(
+      new Response(stream, {
+        headers: { 'content-type': workbook().headers.get('content-type')! },
+      }),
+    );
+    let settled = false;
+    const transfer = f.tasks.downloadAsinExport(exportTask()).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(125_001);
+    expect(settled).toBe(false);
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(999);
+    const file = await transfer;
+    expect(file.blob.size).toBe(4);
+    expect(file.filename).toBe('ASIN数据_2026-10-07.xlsx');
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('aborts an unfinished ASIN export at the bounded 30 minute deadline', async () => {
+    const f = setup();
+    f.fetcher.mockImplementationOnce(
+      async (_url, init) =>
+        new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          ),
+        ),
+    );
+    const timedOut = expect(
+      f.tasks.downloadAsinExport(exportTask()),
+    ).rejects.toMatchObject({ kind: 'TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await timedOut;
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+
+  it('keeps the existing 125 second deadline for ordinary task downloads', async () => {
+    const f = setup();
+    f.fetcher.mockImplementationOnce(
+      async (_url, init) =>
+        new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          ),
+        ),
+    );
+    const timedOut = expect(f.tasks.download('job-1')).rejects.toMatchObject({
+      kind: 'TIMEOUT',
+    });
+    await vi.advanceTimersByTimeAsync(124_999);
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await timedOut;
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+
+  it('still cancels a slow ASIN transfer immediately when the runtime session resets', async () => {
+    const f = setup();
+    f.fetcher.mockImplementationOnce(
+      async (_url, init) =>
+        new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          ),
+        ),
+    );
+    const runtime = createTransportRuntime({
+      pageOrigin: 'https://app.test',
+      baseURL: '/api/',
+      session: f.store,
+      fetch: f.fetcher,
+    });
+    cleanups.push(runtime.dispose);
+    const cancelled = expect(
+      runtime.tasks.downloadAsinExport(exportTask()),
+    ).rejects.toMatchObject({ kind: 'CANCELLED' });
+    await vi.advanceTimersByTimeAsync(126_000);
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    runtime.reset();
+    await cancelled;
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+
   it('uses one normalized request/download origin and keeps Cookie authentication', async () => {
     const f = setup();
     await f.tasks.get('job-1');

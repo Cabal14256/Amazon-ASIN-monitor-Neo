@@ -144,6 +144,54 @@ afterEach(async () => {
 });
 
 describe('ASIN export startup deadline', () => {
+  it('retains proof for initially absent metadata and reconciles a late create on the next sweep', async () => {
+    fixture.stalled = 'none';
+    fixture.directory = await mkdtemp(join(tmpdir(), 'neo-export-runtime-'));
+    directories.push(fixture.directory);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-07T00:00:00.000Z'));
+    const artifacts = new ExportArtifactStore(fixture.directory);
+    const proof = {
+      taskId: '10000000-0000-4000-8000-000000000167',
+      userId: '20000000-0000-4000-8000-000000000166',
+      createdAt: new Date().toISOString(),
+      taskType: 'export' as const,
+      taskSubType: 'asin' as const,
+    };
+    await artifacts.recordRejectedSubmission(proof);
+    let completedSweep!: () => void;
+    const firstSweep = new Promise<void>((resolve) => {
+      completedSweep = resolve;
+    });
+    const reconcile =
+      ExportArtifactStore.prototype.reconcileRejectedSubmissions;
+    vi.spyOn(
+      ExportArtifactStore.prototype,
+      'reconcileRejectedSubmissions',
+    ).mockImplementationOnce(async function (
+      this: ExportArtifactStore,
+      ...args
+    ) {
+      await reconcile.apply(this, args);
+      completedSweep();
+    });
+    const runtime = await startAsinExportRuntime(env, vi.fn());
+    try {
+      await firstSweep;
+      expect(await artifacts.readRejectedSubmission(proof.taskId)).toEqual(
+        proof,
+      );
+      fixture.tasks.set(proof.taskId, { ...proof, status: 'pending' });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(async () => {
+        expect(await artifacts.readRejectedSubmission(proof.taskId)).toBeNull();
+      });
+      expect(fixture.tasks.get(proof.taskId)?.status).toBe('failed');
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('retains a durable rejection during a Redis failure and recovers it on the next Worker start', async () => {
     fixture.stalled = 'none';
     fixture.directory = await mkdtemp(join(tmpdir(), 'neo-export-runtime-'));

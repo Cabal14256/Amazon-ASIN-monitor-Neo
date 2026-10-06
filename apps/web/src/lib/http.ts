@@ -47,6 +47,10 @@ export interface RequestOptions {
   /** Login failures are not expired sessions; callers can suppress global logout. */
   authFailure?: 'notify' | 'ignore';
 }
+export interface DownloadOptions {
+  /** File transfers may opt into the API's bounded 30 minute export window. */
+  timeoutMs?: number;
+}
 export interface ResponseSchema<T> {
   parse(value: unknown): T;
 }
@@ -391,10 +395,17 @@ export class HttpClient {
     });
   }
   /** Bounded authenticated file transfer for Cookie and legacy Bearer sessions. */
-  async download(path: string, signal?: AbortSignal): Promise<Blob> {
+  async download(
+    path: string,
+    signal?: AbortSignal,
+    options: DownloadOptions = {},
+  ): Promise<Blob> {
     if (this.closed) throw new ApiError('CLOSED', '请求客户端已关闭');
     if (this.active.size >= 64)
       throw new ApiError('CAPACITY', '请求过多，请稍后重试');
+    const timeout = options.timeoutMs ?? 125_000;
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 30 * 60_000)
+      throw new ApiError('INVALID_INPUT', '下载期限无效');
     const url = this.url(path);
     const headers = new Headers({ accept: 'application/json' });
     const token = this.options.session.getLegacyToken();
@@ -406,7 +417,7 @@ export class HttpClient {
     else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(
       () => controller.abort(new ApiError('TIMEOUT', '下载超时')),
-      125_000,
+      timeout,
     );
     const revision = this.options.session.revision;
     this.active.add(controller);

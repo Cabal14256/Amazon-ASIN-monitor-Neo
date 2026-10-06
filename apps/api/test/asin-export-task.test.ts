@@ -23,10 +23,11 @@ const createLimitedExport = vi.fn(
     input: { taskId: string },
     _perUserLimit: number,
     _globalLimit: number,
-  ) => ({
-    ...input,
-    createdAt,
-  }),
+    onPrepared?: (identity: { createdAt: string }) => void,
+  ) => {
+    onPrepared?.({ createdAt });
+    return { ...input, createdAt };
+  },
 );
 const enqueue = vi.fn(async () => undefined);
 const mutate = vi.fn(async () => ({ status: 'failed' }));
@@ -100,6 +101,7 @@ describe('ASIN export producer', () => {
       expect.objectContaining({ taskId: result.taskId }),
       2,
       100,
+      expect.any(Function),
     );
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -213,7 +215,7 @@ describe('ASIN export producer', () => {
     expect(recordRejected).not.toHaveBeenCalled();
   });
 
-  it('rejects a Redis readiness failure before task creation but preserves uncertain EVAL outcomes', async () => {
+  it('rejects readiness failure and durably rejects a create EVAL whose committed reply is lost before enqueue', async () => {
     openExport.mockImplementationOnce(() => ({
       store: {
         createLimitedExport: vi.fn(async () => {
@@ -231,10 +233,13 @@ describe('ASIN export producer', () => {
 
     openExport.mockImplementationOnce((_ensureOpen, onWrite) => ({
       store: {
-        createLimitedExport: vi.fn(async () => {
-          onWrite?.();
-          throw new Error('Redis EVAL acknowledgement lost');
-        }),
+        createLimitedExport: vi.fn(
+          async (_input, _limit, _global, onPrepared) => {
+            onPrepared?.({ createdAt });
+            onWrite?.();
+            throw new Error('Redis EVAL acknowledgement lost');
+          },
+        ),
         mutate,
       },
       enqueue,
@@ -242,9 +247,20 @@ describe('ASIN export producer', () => {
     }));
     await expect(
       service().create(principal, { exportType: 'asin' }),
-    ).resolves.toMatchObject({
-      taskId: expect.any(String),
-      status: 'unknown',
-    });
+    ).rejects.toMatchObject({ status: 503 });
+    expect(recordRejected).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: principal.userId,
+        createdAt,
+        taskType: 'export',
+        taskSubType: 'asin',
+      }),
+    );
+    expect(mutate).toHaveBeenCalledWith(
+      expect.any(String),
+      { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+      expect.objectContaining({ userId: principal.userId, createdAt }),
+    );
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
