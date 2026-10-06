@@ -93,7 +93,7 @@ function DownloadAction({
   );
 }
 
-function TaskDetails({
+export function TaskDetails({
   task,
   canReadASIN,
 }: {

@@ -137,7 +137,14 @@ export function parseBackupFile(raw: unknown): BackupFile {
     size: value.size,
     createdAt: value.createdAt,
     timeSource: timeSource as BackupFile['timeSource'],
-    execution: execution as BackupFile['execution'],
+    execution: execution
+      ? {
+          timeSource: 'dump-start',
+          dumpStartedAt: execution.dumpStartedAt as string,
+          dumpCompletedAt: execution.dumpCompletedAt as string,
+          publicationStartedAt: execution.publicationStartedAt as string,
+        }
+      : undefined,
     restoreSupported: supported,
     restoreMode: supported
       ? (value.restoreMode as BackupRestoreMode)
@@ -159,7 +166,13 @@ export function parseBackupSubmission(raw: unknown): BackupSubmission {
       !['isolated', 'in-place'].includes(String(value.restoreMode)))
   )
     return invalid('备份响应缺少有效异步任务');
-  return value as unknown as BackupSubmission;
+  return {
+    taskId: value.taskId,
+    status: value.status as BackupSubmission['status'],
+    ...(value.restoreMode === undefined
+      ? {}
+      : { restoreMode: value.restoreMode as BackupRestoreMode }),
+  };
 }
 
 export function uncertainBackupSubmission(

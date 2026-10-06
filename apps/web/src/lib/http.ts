@@ -488,6 +488,7 @@ export class HttpClient {
       throw new ApiError('CAPACITY', '请求过多，请稍后重试');
     if (!validStreamOptions(options))
       throw new ApiError('INVALID_INPUT', '流式下载限制无效');
+    const deadline = performance.now() + options.timeoutMs;
     const url = this.url(path);
     const controller = new AbortController();
     const signal = controller.signal;
@@ -556,14 +557,24 @@ export class HttpClient {
           response.status,
         );
       }
-      return await writeDownloadStream(response, sink, options, signal);
+      return await writeDownloadStream(
+        response,
+        sink,
+        options,
+        signal,
+        deadline,
+      );
     })()
       .catch((error: unknown) => {
         void received?.body?.cancel(error).catch(() => undefined);
-        abortSink(error);
-        if (signal.aborted) throw signal.reason;
-        if (error instanceof ApiError) throw error;
-        throw new ApiError('NETWORK', '网络或保存文件失败，归档未完成');
+        const failure = signal.aborted
+          ? signal.reason
+          : error instanceof ApiError
+          ? error
+          : new ApiError('NETWORK', '网络或保存文件失败，归档未完成');
+        abortSink(failure);
+        if (!signal.aborted) controller.abort(failure);
+        throw failure;
       })
       .finally(() => {
         clearTimeout(timer);

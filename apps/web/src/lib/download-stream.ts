@@ -22,6 +22,7 @@ export async function writeDownloadStream(
   sink: DownloadSink,
   options: DownloadStreamOptions,
   signal: AbortSignal,
+  deadline = performance.now() + options.timeoutMs,
 ): Promise<number> {
   if (
     response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !==
@@ -47,6 +48,8 @@ export async function writeDownloadStream(
     reads = 0;
   const check = () => {
     if (signal.aborted) throw signal.reason;
+    if (performance.now() >= deadline)
+      throw new ApiError('TIMEOUT', '下载超时');
   };
   const abortReader = () => {
     void reader.cancel(signal.reason).catch(() => undefined);

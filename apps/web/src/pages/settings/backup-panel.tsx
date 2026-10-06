@@ -27,6 +27,8 @@ function failure(error: unknown): string {
     ? error.message
     : '读取或操作未确认，请重读并核实原任务、备份文件和数据库状态。';
 }
+const cancelled = (error: unknown) =>
+  error instanceof ApiError && error.kind === 'CANCELLED';
 const capability = (file: BackupFile) =>
   JSON.stringify([
     file.filename,
@@ -117,11 +119,19 @@ function BackupWorkspace({
   currentRef.current = active;
   const alive = useRef(true),
     requests = useRef(new Set<AbortController>());
+  const readChannels = useRef(new Map<string, AbortController>());
   const current = () => alive.current && currentRef.current();
   const recovery = useMemo(() => {
     try {
       return navigator.locks && window.localStorage
-        ? new BackupRecovery(owner, window.localStorage, navigator.locks)
+        ? new BackupRecovery(
+            owner,
+            window.localStorage,
+            navigator.locks,
+            undefined,
+            undefined,
+            window.sessionStorage,
+          )
         : null;
     } catch {
       return null;
@@ -158,9 +168,10 @@ function BackupWorkspace({
 
   useLayoutEffect(() => {
     alive.current = true;
+    const controllers = requests.current;
     return () => {
       alive.current = false;
-      for (const request of requests.current) request.abort();
+      for (const request of controllers) request.abort();
     };
   }, []);
   const onFailure = (error: unknown) => {
@@ -179,6 +190,7 @@ function BackupWorkspace({
       setGate(recovery.read());
       setDamaged(false);
     } catch {
+      setGate(null);
       setDamaged(true);
       setNotice(
         '备份操作保护记录损坏或不可读，请核实原任务、备份文件和数据库后再解除保护。',
@@ -188,20 +200,28 @@ function BackupWorkspace({
   };
   const request = async <T,>(
     work: (signal: AbortSignal) => Promise<T>,
+    channel?: string,
   ): Promise<T> => {
     if (!current()) throw new ApiError('CANCELLED', '会话已改变');
     const controller = new AbortController();
+    if (channel) {
+      readChannels.current.get(channel)?.abort();
+      readChannels.current.set(channel, controller);
+    }
     requests.current.add(controller);
     try {
       const result = await work(controller.signal);
-      if (!current()) throw new ApiError('CANCELLED', '会话已改变');
+      if (!current() || controller.signal.aborted)
+        throw new ApiError('CANCELLED', '会话或读取范围已改变');
       return result;
     } finally {
       requests.current.delete(controller);
+      if (channel && readChannels.current.get(channel) === controller)
+        readChannels.current.delete(channel);
     }
   };
   const loadFiles = async () => {
-    const rows = await request((signal) => api.list(signal));
+    const rows = await request((signal) => api.list(signal), 'files');
     setFiles(rows);
     setPage(0);
     setFileError(null);
@@ -209,7 +229,7 @@ function BackupWorkspace({
     setRefreshRequired(false);
   };
   const loadConfig = async () => {
-    const value = await request((signal) => api.config(signal));
+    const value = await request((signal) => api.config(signal), 'config');
     setConfig(value);
     setConfigError(null);
     if (!dirty.current) {
@@ -218,22 +238,25 @@ function BackupWorkspace({
     }
   };
   const loadScheduled = async () => {
-    const rows = await request((signal) => api.scheduled(signal));
+    const rows = await request((signal) => api.scheduled(signal), 'scheduled');
     setScheduled(rows);
     setScheduledError(null);
   };
   const refreshFiles = () =>
     void loadFiles().catch((error) => {
+      if (cancelled(error)) return;
       if (current()) setFileError(failure(error));
       onFailure(error);
     });
   const refreshConfig = () =>
     void loadConfig().catch((error) => {
+      if (cancelled(error)) return;
       if (current()) setConfigError(failure(error));
       onFailure(error);
     });
   const refreshScheduled = () =>
     void loadScheduled().catch((error) => {
+      if (cancelled(error)) return;
       if (current()) setScheduledError(failure(error));
       onFailure(error);
     });
@@ -303,7 +326,7 @@ function BackupWorkspace({
     if (selected.kind === 'restore') {
       setBusy(true);
       try {
-        const rows = await request((signal) => api.list(signal));
+        const rows = await request((signal) => api.list(signal), 'files');
         setFiles(rows);
         const fresh = rows.find(
           (file) => file.filename === selected.file.filename,
@@ -350,7 +373,7 @@ function BackupWorkspace({
     setBusy(true);
     try {
       await recovery.writeIfClear(async () => {
-        const fresh = await request((signal) => api.config(signal));
+        const fresh = await request((signal) => api.config(signal), 'config');
         if (scheduleIdentity(fresh) !== baseline.current) {
           setConfig(fresh);
           throw new ApiError(
@@ -379,6 +402,12 @@ function BackupWorkspace({
       const value = await request((signal) =>
         recovery.task(gate, (id) => runtime.tasks.get(id, signal)),
       );
+      const latest = recovery.read();
+      if (
+        latest?.requestId !== gate.requestId ||
+        latest?.taskId !== gate.taskId
+      )
+        throw new ApiError('CANCELLED', '原操作保护已改变');
       setTask(value);
       setNotice(
         value
@@ -402,7 +431,9 @@ function BackupWorkspace({
             loadFiles,
             current,
           )
-        : await recovery.clearDamagedVerified(loadFiles, current);
+        : await recovery.clearDamagedVerified(loadFiles, current, (id) =>
+            request((signal) => runtime.tasks.get(id, signal)),
+          );
       if (!cleared)
         throw new ApiError('INVALID_INPUT', '原保护已改变，请重新核实');
       readGuard();
@@ -471,6 +502,11 @@ function BackupWorkspace({
           <CardHeader title="备份操作保护" />
           <CardContent>
             <p>原操作尚需核实；刷新页面不会自动重复提交。</p>
+            {refreshRequired && (
+              <p role="alert" className="mt-3">
+                其他窗口已解除原保护或本次操作需要重读。必须成功重读备份列表才能继续操作；读取失败时请使用“仅重读备份列表”重试。
+              </p>
+            )}
             {!recovery && (
               <p role="alert">
                 当前浏览器无法提供持久存储和 Web

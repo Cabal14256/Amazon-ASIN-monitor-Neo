@@ -44,7 +44,9 @@ describe('Neo backup typed transport and artifact model', () => {
     f.fetcher.mockResolvedValueOnce(
       jsonResponse({ success: true, data: [fileFixture()] }),
     );
-    expect(await f.api.list()).toEqual([fileFixture()]);
+    expect(await f.api.list()).toEqual([
+      { ...fileFixture(), description: undefined, execution: undefined },
+    ]);
     expect(f.fetcher.mock.calls[0][0]).toBe(
       'https://api.test/gateway/api/v1/backup',
     );
@@ -57,6 +59,15 @@ describe('Neo backup typed transport and artifact model', () => {
     expect(f.api.downloadURL(fileFixture().filename)).not.toContain(
       '/api/api/',
     );
+  });
+  it('rejects duplicate archive identities instead of rendering ambiguous actions', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: true, data: [fileFixture(), fileFixture()] }),
+    );
+    await expect(f.api.list()).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
   });
   it.each([
     { filename: 'legacy.sql' },

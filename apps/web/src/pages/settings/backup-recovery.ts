@@ -66,7 +66,8 @@ export class BackupRecovery {
     private readonly storage: StoragePort,
     private readonly locks: Locks,
     private readonly clock = Date.now,
-    private readonly uuid = () => crypto.randomUUID(),
+    private readonly uuid: () => string = () => crypto.randomUUID(),
+    private readonly session: StoragePort | null = null,
   ) {
     this.key = backupGateKey(owner);
   }
@@ -74,7 +75,30 @@ export class BackupRecovery {
   read(): BackupGate | null {
     const raw = this.storage.getItem(this.key);
     // Malformed/unreadable records must never be erased to reopen submission.
-    return raw === null ? null : decode(raw);
+    const local = raw === null ? null : decode(raw);
+    let fallback: BackupGate | null = null;
+    try {
+      const saved = this.session?.getItem(this.key);
+      fallback = saved ? decode(saved) : null;
+    } catch (error) {
+      // A damaged session-only receipt is still an outstanding operation.
+      if (!local) throw error;
+    }
+    return fallback &&
+      (!local || (fallback.requestId === local.requestId && !local.taskId))
+      ? fallback
+      : local;
+  }
+
+  private remember(gate: BackupGate): boolean {
+    const saved = this.persist(gate, gate.requestId);
+    try {
+      if (saved) this.session?.removeItem(this.key);
+      else this.session?.setItem(this.key, JSON.stringify(gate));
+    } catch {
+      /* Keep the original local guard and mounted lookup ID. */
+    }
+    return saved;
   }
 
   private persist(gate: BackupGate, expected?: string): boolean {
@@ -117,7 +141,7 @@ export class BackupRecovery {
         return {
           kind: 'task' as const,
           gate: next,
-          persisted: this.persist(next, gate.requestId),
+          persisted: this.remember(next),
         };
       } catch (error) {
         const accepted = uncertainBackupSubmission(error);
@@ -126,7 +150,7 @@ export class BackupRecovery {
           return {
             kind: 'task' as const,
             gate: next,
-            persisted: this.persist(next, gate.requestId),
+            persisted: this.remember(next),
           };
         }
         if (definiteBackupRejection(error) && this.erase(gate))
@@ -136,7 +160,7 @@ export class BackupRecovery {
           kind: 'unknown' as const,
           gate: next,
           error,
-          persisted: this.persist(next, gate.requestId),
+          persisted: this.remember(next),
         };
       }
     });
@@ -151,6 +175,19 @@ export class BackupRecovery {
         (current.taskId && current.taskId !== expected.taskId)
       )
         return false;
+      const fallback = this.session?.getItem(this.key);
+      if (fallback) {
+        let sessionGate: BackupGate | null = null;
+        try {
+          sessionGate = decode(fallback);
+        } catch {
+          /* Explicit verification can clear damaged fallback. */
+        }
+        if (sessionGate && sessionGate.requestId !== expected.requestId)
+          return false;
+      }
+      this.session?.removeItem(this.key);
+      if (this.session?.getItem(this.key)) return false;
       this.storage.removeItem(this.key);
       return this.storage.getItem(this.key) === null;
     } catch {
@@ -214,19 +251,51 @@ export class BackupRecovery {
   async clearDamagedVerified(
     refresh: () => Promise<void>,
     current: () => boolean,
+    readTask?: (id: string) => Promise<TaskInfo>,
   ): Promise<boolean> {
     return this.locks.request(this.key, async () => {
       if (!current()) return false;
       const raw = this.storage.getItem(this.key);
-      if (raw === null) return true;
-      try {
-        decode(raw);
-        return false;
-      } catch {
-        /* Only damaged records take this path. */
+      const fallback = this.session?.getItem(this.key) ?? null;
+      if (raw === null && fallback === null) return true;
+      if (raw !== null) {
+        try {
+          decode(raw);
+          return false;
+        } catch {
+          /* Only damaged records take this path. */
+        }
+      }
+      if (fallback) {
+        let saved: BackupGate | null = null;
+        try {
+          saved = decode(fallback);
+        } catch {
+          /* Explicitly verified damaged fallback. */
+        }
+        if (raw === null && saved) return false;
+        if (saved?.taskId) {
+          if (!readTask) return false;
+          const task = await this.task(saved, readTask);
+          if (
+            task &&
+            !['completed', 'failed', 'cancelled'].includes(task.status)
+          )
+            throw new ApiError(
+              'INVALID_INPUT',
+              '任务仍在执行，请等待终态后核实',
+            );
+        }
       }
       await refresh();
-      if (!current() || this.storage.getItem(this.key) !== raw) return false;
+      if (
+        !current() ||
+        this.storage.getItem(this.key) !== raw ||
+        (this.session?.getItem(this.key) ?? null) !== fallback
+      )
+        return false;
+      this.session?.removeItem(this.key);
+      if (this.session?.getItem(this.key)) return false;
       this.storage.removeItem(this.key);
       return this.storage.getItem(this.key) === null;
     });

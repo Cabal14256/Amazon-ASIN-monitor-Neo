@@ -36,7 +36,13 @@ export class BackupApi {
         'INVALID_RESPONSE',
         '备份列表超过有界展示范围，请联系运维整理归档',
       );
-    return rows.map(parseBackupFile);
+    const files = rows.map(parseBackupFile);
+    if (new Set(files.map((file) => file.filename)).size !== files.length)
+      throw new ApiError(
+        'INVALID_RESPONSE',
+        '备份列表含重复文件身份，请重新读取',
+      );
+    return files;
   }
 
   async config(signal?: AbortSignal): Promise<BackupConfig> {

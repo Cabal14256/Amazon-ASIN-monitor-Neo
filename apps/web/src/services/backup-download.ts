@@ -21,6 +21,7 @@ export type BackupDownloadDestination =
   | { kind: 'blob'; filename: string };
 
 export function backupSavePicker(): BackupSavePicker | undefined {
+  if (typeof window === 'undefined') return undefined;
   const browser = window as unknown as {
     isSecureContext?: boolean;
     showSaveFilePicker?: BackupSavePicker;
@@ -153,7 +154,7 @@ export async function downloadBackup(
         'INVALID_INPUT',
         '此备份需要直接写入文件，不能使用内存回退',
       );
-    let parts: Uint8Array[] = [],
+    let parts: Uint8Array<ArrayBuffer>[] = [],
       bytes = 0;
     sink = {
       async write(chunk) {
@@ -173,19 +174,38 @@ export async function downloadBackup(
       },
     };
   }
+  const guarded: DownloadSink = {
+    async write(chunk) {
+      check();
+      await sink.write(chunk);
+      check();
+    },
+    async close() {
+      check();
+      await sink.close();
+      check();
+    },
+    async abort(reason) {
+      await sink.abort(reason);
+    },
+  };
   try {
-    const bytes = await http.downloadTo(api.downloadPath(file.filename), sink, {
-      signal,
-      timeoutMs: BACKUP_TRANSFER_TIMEOUT_MS,
-      maxBytes: backupArchiveMaxBytes(file),
-      minBytes: Math.ceil(file.size / 512) * 512 + 2048,
-      expectedType: 'application/x-tar',
-      prefixBytes: 512,
-      validatePrefix: (prefix) => validateBackupTarPrefix(prefix, file),
-      onProgress: (bytes) => {
-        if (current() && !signal.aborted) progress(bytes);
+    const bytes = await http.downloadTo(
+      api.downloadPath(file.filename),
+      guarded,
+      {
+        signal,
+        timeoutMs: BACKUP_TRANSFER_TIMEOUT_MS,
+        maxBytes: backupArchiveMaxBytes(file),
+        minBytes: Math.ceil(file.size / 512) * 512 + 2048,
+        expectedType: 'application/x-tar',
+        prefixBytes: 512,
+        validatePrefix: (prefix) => validateBackupTarPrefix(prefix, file),
+        onProgress: (bytes) => {
+          if (current() && !signal.aborted) progress(bytes);
+        },
       },
-    });
+    );
     check();
     return bytes;
   } catch (error) {

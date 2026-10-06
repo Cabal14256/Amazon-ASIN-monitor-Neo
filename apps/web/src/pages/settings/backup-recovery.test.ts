@@ -5,7 +5,7 @@ import { BackupRecovery } from './backup-recovery';
 
 const taskId = '10000000-0000-4000-8000-000000000221';
 const operation = { operation: 'create' as const, target: 'primary' as const };
-function fixture() {
+function fixture(withSession = false) {
   const values = new Map<string, string>();
   const storage = {
     getItem: vi.fn((key: string) => values.get(key) ?? null),
@@ -14,6 +14,16 @@ function fixture() {
     }),
     removeItem: vi.fn((key: string) => {
       values.delete(key);
+    }),
+  };
+  const sessionValues = new Map<string, string>();
+  const session = {
+    getItem: vi.fn((key: string) => sessionValues.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      sessionValues.set(key, value);
+    }),
+    removeItem: vi.fn((key: string) => {
+      sessionValues.delete(key);
     }),
   };
   let tail = Promise.resolve(),
@@ -40,8 +50,16 @@ function fixture() {
       locks,
       () => 1000,
       () => `request-${++index}`,
+      withSession ? session : null,
     );
-  return { values, storage, create, recovery: create() };
+  return {
+    values,
+    storage,
+    sessionValues,
+    session,
+    create,
+    recovery: create(),
+  };
 }
 const accepted = async () => ({ taskId, status: 'pending' as const });
 const current = () => true;
@@ -207,5 +225,92 @@ describe('backup durable submission and GET-only recovery', () => {
     expect(
       await f.recovery.clearDamagedVerified(async () => undefined, current),
     ).toBe(true);
+  });
+  it('retains a task ID in the session fallback when only the later local write fails', async () => {
+    const f = fixture(true);
+    f.storage.setItem.mockImplementation((key, value) => {
+      if (f.values.has(key)) throw new Error('quota');
+      f.values.set(key, value);
+    });
+    const send = vi.fn(accepted);
+    const result = await f.recovery.submit(operation, send, current);
+    expect(result).toMatchObject({ kind: 'task', persisted: false });
+    expect(f.create().read()).toMatchObject({ taskId, state: 'task' });
+    expect((await f.create().submit(operation, send, current)).kind).toBe(
+      'blocked',
+    );
+    expect(send).toHaveBeenCalledOnce();
+    const lookup = async () =>
+      taskFixture({
+        taskId,
+        taskType: 'backup',
+        taskSubType: 'create',
+        status: 'completed',
+      });
+    expect(
+      await f.recovery.clearVerified(
+        f.recovery.read()!,
+        lookup,
+        async () => undefined,
+        current,
+      ),
+    ).toBe(true);
+    expect(f.create().read()).toBeNull();
+    expect(f.sessionValues.size).toBe(0);
+  });
+  it('fails closed for a damaged session-only receipt and requires a successful fresh GET to clear it', async () => {
+    const f = fixture(true);
+    f.sessionValues.set(f.recovery.key, '{broken-session');
+    const send = vi.fn(accepted);
+    expect(() => f.create().read()).toThrow();
+    await expect(f.recovery.submit(operation, send, current)).rejects.toThrow();
+    expect(send).not.toHaveBeenCalled();
+    await expect(
+      f.recovery.clearDamagedVerified(async () => {
+        throw new Error('GET failed');
+      }, current),
+    ).rejects.toThrow('GET failed');
+    expect(f.sessionValues.get(f.recovery.key)).toBe('{broken-session');
+    expect(
+      await f.recovery.clearDamagedVerified(async () => undefined, current),
+    ).toBe(true);
+    expect(f.create().read()).toBeNull();
+  });
+  it('cannot clear a session receipt replaced while verifying a damaged local guard', async () => {
+    const f = fixture(true);
+    f.values.set(f.recovery.key, '{broken-local');
+    f.sessionValues.set(f.recovery.key, '{broken-session');
+    expect(
+      await f.recovery.clearDamagedVerified(async () => {
+        f.sessionValues.set(f.recovery.key, '{replacement-session');
+      }, current),
+    ).toBe(false);
+    expect(f.values.get(f.recovery.key)).toBe('{broken-local');
+    expect(f.sessionValues.get(f.recovery.key)).toBe('{replacement-session');
+  });
+  it('keeps the durable local guard if session receipt cleanup fails', async () => {
+    const f = fixture(true);
+    await f.recovery.submit(operation, accepted, current);
+    const gate = f.recovery.read()!;
+    f.sessionValues.set(f.recovery.key, JSON.stringify(gate));
+    f.session.removeItem.mockImplementation(() => {
+      throw new Error('storage blocked');
+    });
+    expect(
+      await f.recovery.clearVerified(
+        gate,
+        async () =>
+          taskFixture({
+            taskId,
+            taskType: 'backup',
+            taskSubType: 'create',
+            status: 'completed',
+          }),
+        async () => undefined,
+        current,
+      ),
+    ).toBe(false);
+    expect(f.create().read()).toMatchObject({ taskId });
+    expect(f.storage.removeItem).not.toHaveBeenCalled();
   });
 });
