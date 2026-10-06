@@ -134,6 +134,12 @@ PG 数据库使用 UTF-8，覆盖 MySQL `utf8mb4` 的字符集合。没有全局
 
 ASIN、国家、权限代码和内部 ID 仍应在应用入口规范化；Legacy 的大小写不敏感搜索在 Neo 查询层必须显式使用 `ILIKE` 或 `lower(...)`。重音折叠不作为当前业务标识符语义，不能依赖数据库隐式处理。
 
+## 定时监控私有账本基础（Issue #204）
+
+`0016_scheduled_monitor_primary.sql` 与 `0016_scheduled_monitor_competitor.sql` 在各自逻辑库建立独立 system actor 账本；主营先应用 `0012`，竞品先应用 `0015`。这些升级不进入空卷初始化，在最终导入及对应手动监控升级完成后显式运行 `corepack pnpm db:upgrade:scheduled-monitor:primary` / `corepack pnpm db:upgrade:scheduled-monitor:competitor`。
+
+重复升级在 DDL 前后验证迁移版本与 catalog 指纹，拒绝无标记预存表及列、约束、索引或 RLS 等结构漂移。两份独立 rollback 仅删除对应私有 ledger 和凭据，不删除业务历史；必须先停用相关生产者/消费者、备份并核对未完成任务与未确认发送，丢弃凭据后不能盲目重跑。部署、真实 PG/MySQL 测试和后续 #188/#189 的执行边界见 [`定时监控基础运行说明`](../../docs/refactor/neo-scheduled-monitor-runbook.md)。
+
 ## 校验与回滚
 
 ```bash
