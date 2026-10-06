@@ -9,6 +9,7 @@ import type { PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPgPool } from '../src/client';
 import {
+  parseScheduledMonitorJob,
   scheduledMonitorJobDigest,
   scheduledMonitorTaskId,
 } from '../src/domain/scheduled-monitor-policy';
@@ -46,6 +47,11 @@ suite.each(domains)(
         ),
         'utf8',
       ).replaceAll('public.', `${qualified}.`);
+    const oldV1Sql = () =>
+      readFileSync(
+        resolve(__dirname, `fixtures/scheduled-monitor-v1-${domain}.sql`),
+        'utf8',
+      ).replaceAll('public.', `${qualified}.`);
     const plan: ScheduledMonitorPlan = {
       domain,
       country: 'US',
@@ -66,6 +72,38 @@ suite.each(domains)(
       expiresAt: '2026-10-10T12:30:02.000Z',
     };
     const digest = scheduledMonitorJobDigest(job);
+    const childPlan = { ...plan, domain: 'competitor' as const };
+    const child = {
+      ...job,
+      ...childPlan,
+      taskId: scheduledMonitorTaskId(childPlan),
+      jobId: buildScheduledMonitorJobId(childPlan),
+      requestedAt: '2026-10-03T12:34:00.000Z',
+      createdAt: '2026-10-03T12:34:00.000Z',
+    };
+    const business = (value: unknown = child) => ({
+      state: 'business-completed',
+      business_completed_at: child.createdAt,
+      follow_up_job: JSON.stringify(value),
+      follow_up_digest: scheduledMonitorJobDigest(child),
+      follow_up_requested_at: child.requestedAt,
+    });
+    const ledgerCatalog = async () =>
+      (
+        await connection().query(
+          `SELECT c.relname,obj_description(c.oid,'pg_class') AS marker,
+       (SELECT jsonb_agg(jsonb_build_array(k.conname,k.convalidated,pg_get_constraintdef(k.oid)) ORDER BY k.conname) FROM pg_constraint k WHERE k.conrelid=c.oid) AS constraints
+       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=ANY($2::text[]) ORDER BY c.relname`,
+          [
+            schema,
+            [
+              `${prefix}_runs`,
+              `${prefix}_notifications`,
+              `${prefix}_group_receipts`,
+            ],
+          ],
+        )
+      ).rows;
     const run = (change: Record<string, unknown> = {}) => ({
       task_id: job.taskId,
       job_id: job.jobId,
@@ -153,7 +191,7 @@ suite.each(domains)(
       const url = process.env[env];
       if (!url) throw new Error(`Scheduled fixture requires ${env}`);
       pool = createPgPool(url, {
-        max: 1,
+        max: 3,
         connectionTimeoutMillis: 5000,
         idleTimeoutMillis: 1000,
       });
@@ -503,6 +541,190 @@ suite.each(domains)(
           'session_id',
         );
       }));
+    it('tightens already owned historical v1 checks, preserves valid data and repeats with a stable new fingerprint', async () => {
+      await connection().query(sqlFile('.rollback'));
+      try {
+        await connection().query(oldV1Sql());
+        await insert('runs', run(domain === 'primary' ? business() : {}));
+        const before = await ledgerCatalog();
+        await connection().query(sqlFile(''));
+        const after = await ledgerCatalog();
+        expect(
+          after.find((row) => row.relname === `${prefix}_runs`)?.marker,
+        ).not.toBe(
+          before.find((row) => row.relname === `${prefix}_runs`)?.marker,
+        );
+        const persisted = (
+          await connection().query(
+            `SELECT job,follow_up_job FROM ${prefix}_runs`,
+          )
+        ).rows[0];
+        expect(parseScheduledMonitorJob(persisted.job)).toEqual(job);
+        expect(persisted.follow_up_job).toEqual(
+          domain === 'primary' ? child : null,
+        );
+        if (persisted.follow_up_job)
+          expect(parseScheduledMonitorJob(persisted.follow_up_job)).toEqual(
+            child,
+          );
+        await connection().query(sqlFile(''));
+        expect(await ledgerCatalog()).toEqual(after);
+      } finally {
+        await connection().query('ROLLBACK');
+        await connection().query(sqlFile('.rollback'));
+        await connection().query(sqlFile(''));
+      }
+    });
+    it.each([
+      { label: 'root session', changes: { sessionId: 'borrowed-session' } },
+      {
+        label: 'nested actor user',
+        changes: { actor: { ...job.actor, userId: 'borrowed-user' } },
+      },
+      {
+        label: 'nested actor session',
+        changes: { actor: { ...job.actor, sessionId: 'borrowed-session' } },
+      },
+    ])(
+      'refuses tightening historical v1 polluted by $label and preserves its original constraints, marker and data',
+      async ({ changes }) => {
+        await connection().query(sqlFile('.rollback'));
+        try {
+          await connection().query(oldV1Sql());
+          const polluted = { ...job, ...changes };
+          await insert('runs', run({ job: JSON.stringify(polluted) }));
+          const before = await ledgerCatalog();
+          try {
+            await expect(connection().query(sqlFile(''))).rejects.toMatchObject(
+              { code: '23514' },
+            );
+          } finally {
+            await connection().query('ROLLBACK');
+          }
+          expect(await ledgerCatalog()).toEqual(before);
+          expect(
+            (await connection().query(`SELECT job FROM ${prefix}_runs`)).rows,
+          ).toEqual([{ job: polluted }]);
+        } finally {
+          await connection().query('ROLLBACK');
+          await connection().query(sqlFile('.rollback'));
+          await connection().query(sqlFile(''));
+        }
+      },
+    );
+    if (domain === 'primary')
+      it.each(['taskId', 'jobId', 'createdAt', 'expiresAt'])(
+        'refuses a historical v1 child missing %s and rolls back every new check/marker',
+        async (field) => {
+          await connection().query(sqlFile('.rollback'));
+          try {
+            await connection().query(oldV1Sql());
+            const polluted: Record<string, unknown> = { ...child };
+            delete polluted[field];
+            await insert('runs', run(business(polluted)));
+            const before = await ledgerCatalog();
+            try {
+              await expect(
+                connection().query(sqlFile('')),
+              ).rejects.toMatchObject({ code: '23514' });
+            } finally {
+              await connection().query('ROLLBACK');
+            }
+            expect(await ledgerCatalog()).toEqual(before);
+            expect(
+              (
+                await connection().query(
+                  `SELECT follow_up_job FROM ${prefix}_runs`,
+                )
+              ).rows,
+            ).toEqual([{ follow_up_job: polluted }]);
+          } finally {
+            await connection().query('ROLLBACK');
+            await connection().query(sqlFile('.rollback'));
+            await connection().query(sqlFile(''));
+          }
+        },
+      );
+    it.each([...ledgerNames, `idx_${prefix}_expiry`])(
+      'refuses concurrent post-preflight creation of %s without stamping or deleting the foreign relation',
+      async (name) => {
+        await connection().query(sqlFile('.rollback'));
+        if (!pool) throw new Error('Fixture pool missing');
+        const peer = await pool.connect();
+        const index = name.startsWith('idx_');
+        const pauseKey = `neo-scheduled-race:${schema}:${name}`;
+        let pending: Promise<unknown> | undefined,
+          refused: Promise<void> | undefined;
+        try {
+          await peer.query('SELECT pg_advisory_lock(hashtextextended($1,0))', [
+            pauseKey,
+          ]);
+          const pid = (
+            await connection().query<{ pid: number }>(
+              'SELECT pg_backend_pid() AS pid',
+            )
+          ).rows[0].pid;
+          const migration = sqlFile('').replace(
+            '  -- preflight complete:',
+            `  PERFORM pg_advisory_xact_lock(hashtextextended('${pauseKey}',0));\n  -- preflight complete:`,
+          );
+          pending = connection().query(migration);
+          refused = expect(pending).rejects.toMatchObject({ code: '42P07' });
+          let waiting = false;
+          for (let attempt = 0; attempt < 100; attempt++) {
+            const activity = await peer.query<{ wait_event: string }>(
+              'SELECT wait_event FROM pg_stat_activity WHERE pid=$1',
+              [pid],
+            );
+            if (activity.rows[0]?.wait_event === 'advisory') {
+              waiting = true;
+              break;
+            }
+            await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          }
+          expect(waiting).toBe(true);
+          const table = index ? 'foreign_index_owner' : name;
+          await peer.query(
+            `CREATE TABLE ${qualified}.${table}(sentinel text PRIMARY KEY); INSERT INTO ${qualified}.${table} VALUES ('foreign-race-data')`,
+          );
+          if (index)
+            await peer.query(
+              `CREATE INDEX ${name} ON ${qualified}.${table}(sentinel)`,
+            );
+          await peer.query(
+            'SELECT pg_advisory_unlock(hashtextextended($1,0))',
+            [pauseKey],
+          );
+          await refused;
+          await connection().query('ROLLBACK');
+          expect(
+            (await peer.query(`SELECT sentinel FROM ${qualified}.${table}`))
+              .rows,
+          ).toEqual([{ sentinel: 'foreign-race-data' }]);
+          expect(
+            (
+              await peer.query<{ marker: string | null }>(
+                "SELECT obj_description($1::regclass,'pg_class') AS marker",
+                [`${qualified}.${name}`],
+              )
+            ).rows[0].marker,
+          ).toBeNull();
+          expect(await presentLedgers()).toEqual(index ? [] : [name]);
+        } finally {
+          await peer.query('SELECT pg_advisory_unlock_all()');
+          await pending?.catch(() => undefined);
+          await refused?.catch(() => undefined);
+          await connection().query('ROLLBACK');
+          await peer.query(
+            `DROP TABLE IF EXISTS ${qualified}.${
+              index ? 'foreign_index_owner' : name
+            }`,
+          );
+          peer.release();
+          await connection().query(sqlFile(''));
+        }
+      },
+    );
     it.each([
       `COMMENT ON TABLE ${prefix}_runs IS NULL`,
       `ALTER TABLE ${prefix}_runs ADD COLUMN unexpected text`,
@@ -546,6 +768,32 @@ suite.each(domains)(
           { actor_purpose: 'manual-monitor' },
           { domain: domain === 'primary' ? 'competitor' : 'primary' },
           { job: JSON.stringify({ ...job, userId: 'borrowed-user' }) },
+          { job: JSON.stringify({ ...job, sessionId: 'borrowed-session' }) },
+          {
+            job: JSON.stringify({
+              ...job,
+              actor: { ...job.actor, userId: 'borrowed-user' },
+            }),
+          },
+          {
+            job: JSON.stringify({
+              ...job,
+              actor: { ...job.actor, sessionId: 'borrowed-session' },
+            }),
+          },
+          {
+            job: JSON.stringify({
+              ...job,
+              actor: { ...job.actor, unknown: null },
+            }),
+          },
+          {
+            job: JSON.stringify({
+              ...job,
+              batchConfig: { ...job.batchConfig, unknown: null },
+            }),
+          },
+          { job: JSON.stringify({ ...job, unknown: null }) },
           { job: JSON.stringify({ ...job, country: 'DE' }) },
           {
             job: JSON.stringify({
@@ -672,15 +920,6 @@ suite.each(domains)(
             ),
           '23514',
         );
-        const childPlan = { ...plan, domain: 'competitor' as const };
-        const child = {
-          ...job,
-          ...childPlan,
-          taskId: scheduledMonitorTaskId(childPlan),
-          jobId: buildScheduledMonitorJobId(childPlan),
-          requestedAt: '2026-10-03T12:35:00.000Z',
-          createdAt: '2026-10-03T12:35:00.000Z',
-        };
         const completed = {
           state: 'business-completed',
           business_completed_at: '2026-10-03T12:34:00.000Z',
@@ -713,6 +952,54 @@ suite.each(domains)(
             ).rows[0].follow_up_job,
           ).toEqual(child);
         }
+      }));
+    it.each([
+      'version',
+      'source',
+      'taskType',
+      'actor',
+      'taskId',
+      'jobId',
+      'domain',
+      'country',
+      'plannedSlot',
+      'intervalMinutes',
+      'batchConfig',
+      'requestedAt',
+      'createdAt',
+      'expiresAt',
+    ])('rejects follow-up missing or JSON-null %s in either domain', (key) =>
+      transaction(async () => {
+        const missing: Record<string, unknown> = { ...child };
+        delete missing[key];
+        for (const value of [missing, { ...child, [key]: null }])
+          await reject(() => insert('runs', run(business(value))), '23514');
+      }),
+    );
+    it('rejects child borrowed identities, unknown nested keys, malformed UUID/job ID and changed completion clock/retention', () =>
+      transaction(async () => {
+        for (const changes of [
+          { userId: 'borrowed-user' },
+          { sessionId: 'borrowed-session' },
+          { actor: { ...child.actor, userId: 'borrowed-user' } },
+          { actor: { ...child.actor, sessionId: 'borrowed-session' } },
+          { actor: { ...child.actor, unknown: null } },
+          { batchConfig: { ...child.batchConfig, unknown: null } },
+          { unknown: null },
+          { taskId: job.taskId },
+          { taskId: 'invalid' },
+          { jobId: 'replacement' },
+          {
+            requestedAt: '2026-10-03T12:34:00.001Z',
+            createdAt: '2026-10-03T12:34:00.001Z',
+          },
+          { createdAt: '2026-10-03T12:34:00.001Z' },
+          { expiresAt: '2026-10-10T12:30:02.001Z' },
+        ])
+          await reject(
+            () => insert('runs', run(business({ ...child, ...changes }))),
+            '23514',
+          );
       }));
     it('binds notification claims to the original digest/country and preserves unknown sends as claimed', () =>
       transaction(async () => {

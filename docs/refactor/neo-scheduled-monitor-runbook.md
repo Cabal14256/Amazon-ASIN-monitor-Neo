@@ -36,6 +36,12 @@ SQL 在单个事务内执行，锁等待 5 秒、statement timeout 30 秒；同�
 
 首次创建记录 `amazon-asin-monitor:scheduled-ledger:v1` 版本与 catalog 指纹；重复执行在 DDL 前后核对列类型/空值/default/collation、约束与验证状态、索引及有效性、用户 trigger、内部外键 trigger 的启用状态、rule 和 RLS。内部 trigger 使用逻辑约束与函数身份，排除会因恢复而变化的 OID 名称。ACL 与 ownership 可按部署授权调整，不进入结构摘要。无标记的预存表、未知标记、首次索引命名冲突或任何结构漂移均拒绝且回滚，不能依靠 `IF NOT EXISTS` 静默沿用或修补。该标记属于迁移事实源，不能手工重写以掩盖漂移；修复应先在隔离副本确认原因，再走独立迁移。
 
+升级记录 preflight 已有的普通表 OID，并锁定、验证其旧 marker 与完整 catalog；记录为缺失的表和对应 expiry index 使用普通 CREATE，不能在后续通过 IF NOT EXISTS 跳过。其他会话抢先创建同名对象会使整个迁移失败；外部表/索引不会被盖上自有 marker，已创建的其他迁移对象一起回滚。postflight 仅更新这次已校验或事务内创建并锁定的 relation OID。
+
+历史合法 v1 表的 job/follow-up CHECK 在同一升级事务内收紧并验证全部已有记录，随后更新 v1 catalog 指纹；版本仍表示本迁移所有权，而非放宽旧结构。严格 JSON 根键白名单、actor/batchConfig 白名单、必需字段与字符串类型、规范 UTC 毫秒时间和整体 IS TRUE 校验拒绝缺失/JSON null/借用 user/session。US child 必须提供完整 taskId/jobId/createdAt/expiresAt，jobId 绑定父 slot/batch，createdAt/requestedAt 精确等于原 business_completed_at，TTL 保留父 expires_at。UUIDv5 与完整内容 digest 仍由运行时重新解析/核对，不以数据库接受代表调用授权。
+
+已有结构漂移先拒绝，不能重盖 marker 修补；合法自有旧结构若包含上述污染记录，新 CHECK 验证失败会回滚整个事务，保留原弱约束、原 marker 和全部数据。必须先在隔离副本调查并明确处理这些记录，不能删除、改写任务或伪造合法身份来完成升级。重复合法升级保持约束与更新后的指纹稳定；历史 a56e89d SQL fixture 只供隔离兼容性测试，不是部署入口。
+
 ## 回滚与后续存储纪律
 
 回滚前停止对应 system producer/consumer，核对 pending run 和 claimed 通知，并独立备份私有账本。回滚会删除未完成任务、通知声明和组凭据；业务历史与手动任务身份保留。不能据此重新执行已经提交过的业务或重新发送未确认通知。
@@ -59,7 +65,7 @@ docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /op
 
 真实服务测试要求显式 `RUN_NEO_SCHEDULED_MONITOR_INTEGRATION=1`：
 
-- PG 使用 `DATABASE_URL` / `COMPETITOR_DATABASE_URL`，在两个不同 database 的随机私有 schema 中重复升级/回滚、验证 actor/digest/country/ordinal/follow-up/claim、主动制造 catalog 漂移后确认升级拒绝；还覆盖三种同名 foreign 表升级失败后回滚拒绝并保留原数据、foreign 子表不能连带删除自有父表、错误 domain/table/version/hash 标记、非表对象、错误逻辑库、部分缺失和全缺失幂等。结束时清理自有 schema。
+- PG 使用 `DATABASE_URL` / `COMPETITOR_DATABASE_URL`，在两个不同 database 的随机私有 schema 中重复升级/回滚、验证 actor/digest/country/ordinal/follow-up/claim、主动制造 catalog 漂移后确认升级拒绝；还覆盖三种同名 foreign 表升级失败后回滚拒绝并保留原数据、foreign 子表不能连带删除自有父表、错误 domain/table/version/hash 标记、非表对象、错误逻辑库、部分缺失和全缺失幂等。新增双 session 在 preflight 后抢表/expiry index，旧 v1 合法记录升级与污染升级完整回滚，以及 root/actor/batch/child 必需字段缺失和 JSON null 对称双域回归。结束时清理自有 schema。
 - MySQL 使用 `INTEGRATION_MYSQL_HOST` / `INTEGRATION_MYSQL_PORT` / `INTEGRATION_MYSQL_USER` / `INTEGRATION_MYSQL_PASSWORD`，仅执行只读 SELECT；真实 `CRC32` 与 modulo 对照全部 UTF-8 golden，`DATETIME(6)` / binary ID 排序对照固定目录。
 - 不加载部署 `.env`，缺少配置或连接失败会使已启用测试失败；没有 opt-in 时明确 skip。Integration workflow 显式启用并运行两份测试，不能把本地 skip 当成服务验收。
 
