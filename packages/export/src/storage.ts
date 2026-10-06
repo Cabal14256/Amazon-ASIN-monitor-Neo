@@ -14,12 +14,14 @@ import {
   open,
   write,
   writev,
+  type Dir,
   type WriteStream,
 } from 'node:fs';
 import {
   link,
   lstat,
   mkdir,
+  opendir as openDirectory,
   open as openFile,
   readdir,
   unlink,
@@ -32,6 +34,8 @@ const taskIdPattern =
 const partialPattern = /^export-([0-9a-f-]{36})\.([0-9a-f-]{36})\.part$/;
 const finalPattern = /^export-([0-9a-f-]{36})\.xlsx$/;
 const rejectionPattern = /^export-rejected-([0-9a-f-]{36})\.json$/;
+const rejectionPartialPattern =
+  /^export-rejected-([0-9a-f-]{36})\.([0-9a-f-]{36})\.journal$/;
 const rejectionIdentitySchema = asinExportJobDataSchema
   .pick({
     taskId: true,
@@ -58,6 +62,10 @@ export class ExportArtifactError extends Error {
 /** Only deterministic task-owned names cross the API/Worker boundary. */
 export class ExportArtifactStore {
   readonly directory: string;
+  private rejectionDirectory: Dir | undefined;
+  private rejectionSweep: Promise<void> | undefined;
+  private rejectionClosing = false;
+  private rejectionClose: Promise<void> | undefined;
   constructor(directory: string, private readonly maxBytes = MAX_EXPORT_BYTES) {
     if (
       !isAbsolute(directory) ||
@@ -153,7 +161,10 @@ export class ExportArtifactStore {
     const target = resolve(path);
     if (
       !target.startsWith(`${this.directory}${sep}`) ||
-      !partialPattern.test(target.slice(this.directory.length + 1))
+      !(
+        partialPattern.test(target.slice(this.directory.length + 1)) ||
+        rejectionPartialPattern.test(target.slice(this.directory.length + 1))
+      )
     )
       throw new ExportArtifactError('invalid');
     await unlink(target).catch((error: unknown) => {
@@ -174,7 +185,11 @@ export class ExportArtifactStore {
   async recordRejectedSubmission(identity: ExportRejectionIdentity) {
     const data = rejectionIdentitySchema.parse(identity);
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const partial = this.partialPath(data.taskId);
+    // Workbook partial cleanup must never remove a journal still being fsynced.
+    const partial = join(
+      this.directory,
+      `export-rejected-${data.taskId}.${randomUUID()}.journal`,
+    );
     const handle = await openFile(partial, 'wx', 0o600);
     try {
       await handle.writeFile(JSON.stringify(data), 'utf8');
@@ -238,21 +253,65 @@ export class ExportArtifactStore {
   ) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new ExportArtifactError('invalid');
-    const entries = await readdir(this.directory, {
-      withFileTypes: true,
-    }).catch((error: unknown) => {
-      if (!missing(error)) throw error;
-      return [];
+    if (this.rejectionClosing) return;
+    // A native directory cursor advances even for retained receipts, malformed
+    // entries or a failing callback. Keep one bounded walk, not a whole readdir
+    // array or a fresh first hundred on every interval.
+    this.rejectionSweep ??= this.sweepRejectedSubmissions(
+      limit,
+      settle,
+    ).finally(() => {
+      this.rejectionSweep = undefined;
     });
-    let inspected = 0;
-    for (const entry of entries) {
+    return this.rejectionSweep;
+  }
+  private async sweepRejectedSubmissions(
+    limit: number,
+    settle: (identity: ExportRejectionIdentity) => Promise<boolean>,
+  ): Promise<void> {
+    if (!this.rejectionDirectory) {
+      const directory = await openDirectory(this.directory, {
+        bufferSize: 32,
+      }).catch((error: unknown) => {
+        if (!missing(error)) throw error;
+        return undefined;
+      });
+      if (!directory) return;
+      this.rejectionDirectory = directory;
+    }
+    const directory = this.rejectionDirectory;
+    for (
+      let inspected = 0;
+      inspected < limit && !this.rejectionClosing;
+      inspected++
+    ) {
+      const entry = await directory.read();
+      if (!entry) {
+        await directory.close();
+        this.rejectionDirectory = undefined;
+        return;
+      }
+      if (this.rejectionClosing) return;
       const match = rejectionPattern.exec(entry.name);
       if (!entry.isFile() || !match || !taskIdPattern.test(match[1]!)) continue;
-      if (inspected++ >= limit) break;
       const identity = await this.readRejectedSubmission(match[1]!);
       if (identity && (await settle(identity)))
         await this.discardRejectedSubmission(identity.taskId);
     }
+  }
+  /** Retain the native cursor while a sweep settles, and never reopen it after
+   * shutdown. Callers can stop waiting; this promise still owns the descriptor. */
+  closeRejectionCursor(): Promise<void> {
+    this.rejectionClosing = true;
+    this.rejectionClose ??= (async () => {
+      await this.rejectionSweep?.catch(() => {});
+      const directory = this.rejectionDirectory;
+      if (directory) {
+        await directory.close();
+        this.rejectionDirectory = undefined;
+      }
+    })();
+    return this.rejectionClose;
   }
   private async inspectFile(
     path: string,

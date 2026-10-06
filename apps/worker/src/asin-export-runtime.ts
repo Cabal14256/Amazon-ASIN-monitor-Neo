@@ -228,6 +228,11 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
         closing = true;
         shutdown.abort();
         if (cleanupTimer) clearInterval(cleanupTimer);
+        void artifacts.closeRejectionCursor().catch(() => {
+          logger.warn('ASIN 导出目录游标关闭未确认', {
+            reason: 'export_rejection_cursor_close_failed',
+          });
+        });
         closed ??= (async () => {
           await activeWorker.close();
           await Promise.allSettled([queue.close(), pool.end()]);

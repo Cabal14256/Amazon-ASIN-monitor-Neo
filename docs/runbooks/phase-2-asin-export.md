@@ -33,7 +33,8 @@ ExcelJS 4.4.0 默认的 worksheet StreamBuf 不提供可靠的写入背压。本
 - 新增真实 Redis 创建提交后注入丢失响应／3.1 秒迟到响应的 HTTP → 新 API runtime／编译 Worker 恢复场景；本机 opt-in 未执行，须以最新 Integration 运行结果验收。Worker 文件夹具验证首次元数据缺失保留拒绝证据、迟到元数据在下一轮失败并释放名额。
 
 - 明确在 `queue.add` 调用前拒绝时，API 将不可变 task/owner/createdAt/type 身份写入私有共享卷 `export-rejected-<taskId>.json`。即使 Redis 终态写入失败，响应仍为 503，并附任务 ID 与 `status=rejected`；不会改报为提交结果未知。任务中心的已授权详情/列表和 Worker 启动及每分钟巡检按这份回执恢复失败状态、释放名额；同一 ID 的身份发生变化时不能修改替代任务。Redis 恢复前保留回执，明确取消仍优先。仅队列无作业、任务年龄或通用入队 ACK 丢失均不能产生这种回执。共享卷写入也失败时会记录固定错误原因，需运维核对该任务；不能靠猜测队列缺席将其它任务标为失败。
-- 文件清理与拒绝回执恢复共用单轮执行门：文件系统阻塞期间不会每分钟叠加新的目录读取/删除；只有原轮实际结束后才允许下一轮。每轮拒绝回执最多检查 100 项，恢复保留当前不可变身份和终态边界。
+- 文件清理与拒绝回执恢复共用单轮执行门：文件系统阻塞期间不会每分钟叠加新的目录读取/删除；只有原轮实际结束后才允许下一轮。拒绝回执使用单个原生目录游标，每轮最多推进 100 个目录项；暂留回执、损坏项或对账失败仍推进游标，后续任务不会永久排在最初 100 项之后。目录读完后下一轮重新开始。Worker 关闭先停止新增巡检，在原轮实际结束后关闭游标。
+- 拒绝回执写入使用 `export-rejected-<taskId>.<随机 UUID>.journal`，与工作簿 `.part` 分开；45 分钟工作簿清理不会删除尚未完成 fsync 的拒绝证据。写入正常收尾会删除本次 journal；进程崩溃遗留 journal 需结合任务身份人工核对，不能仅凭文件年龄自动删除或作为已提交的拒绝回执使用。
 - API 回执读取/删除与任务查询共用剩余 3 秒截止。底层 lstat/open/unlink 不能直接取消时，响应到期即返回，迟到读取不能修改任务；同一任务共用未结束读取，每实例最多 8 个底层文件操作，预算直到实际结束才释放。真实 Service 夹具验证 8 个请求到期释放查询槽、随后终态查询可用，且迟到 proof 不改变任务。
 - Neo 任务中心仅对已完成且 artifact 标识、SHA-256、大小和文件名均符合契约的 ASIN 导出提供下载按钮。下载通过当前认证请求取得 XLSX，撤销 `asin:read`、更换用户/会话、强制改密或离开页面均中止下载并禁止迟到保存；采用服务端校验后的 `ASIN数据_YYYY-MM-DD.xlsx` 文件名。ASIN 导出客户端下载与 API 校验/传输均使用 30 分钟截止，支持原 256 MiB 文件上限内的慢速传输；其它客户端任务下载仍使用原 125 秒截止。
 - 下载期限回归：`corepack pnpm --filter web exec vitest run src/lib/http.test.ts src/services/tasks.test.ts src/pages/tasks/task-display.test.ts src/pages/tasks/task-download.test.tsx --maxWorkers=1 --no-file-parallelism` 通过 113 项。覆盖实际流式响应在 126 秒完成、30 分钟截止、普通下载 125 秒截止、慢传期间会话重置立即取消、256 MiB 限制及任务中心 owner/session/撤权/强制改密/离页边界。Web strict、lint 和涉及文件格式检查也通过；本轮未重复 Web full/build（独立导出重检查窗口占用），未执行真实浏览器操作。
