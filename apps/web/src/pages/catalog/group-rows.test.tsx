@@ -23,7 +23,12 @@ describe('ASIN table', () => {
     const runtime = {
       http: { request: () => undefined },
     } as unknown as ReturnType<typeof createTransportRuntime>;
-    const render = (canWrite: boolean, canDelete: boolean) =>
+    const render = (
+      canWrite: boolean,
+      canDelete: boolean,
+      canCheck = false,
+      checkBusy = false,
+    ) =>
       renderToStaticMarkup(
         <AuthContext.Provider
           value={{
@@ -40,6 +45,8 @@ describe('ASIN table', () => {
               onSelect={() => undefined}
               canWrite={canWrite}
               canDelete={canDelete}
+              canCheck={canCheck}
+              checkBusy={checkBusy}
             />
           </QueryClientProvider>
         </AuthContext.Provider>,
@@ -53,6 +60,21 @@ describe('ASIN table', () => {
     expect(deleter).toContain('删除变体组');
     expect(deleter).toContain('删除');
     expect(deleter).not.toContain('编辑变体组');
+
+    const reader = render(false, false, true);
+    expect(reader.match(/立即检查/g)).toHaveLength(4);
+    expect(reader).not.toContain('编辑变体组');
+    expect(reader).not.toContain('删除变体组');
+    expect(render(false, false)).not.toContain('立即检查');
+
+    const busy = render(false, false, true, true);
+    const checkButtons = busy.match(
+      /<button\b(?:(?!<\/button>)[\s\S])*?立即检查<\/button>/g,
+    );
+    expect(checkButtons).toHaveLength(4);
+    expect(
+      checkButtons?.every((button) => button.includes('disabled=""')),
+    ).toBe(true);
   });
   it('renders every server page row without local pagination or filtering', () => {
     const html = renderToStaticMarkup(
@@ -115,5 +137,41 @@ describe('ASIN table', () => {
     expect(html).toContain('正常');
     expect(html).not.toContain('must-not-render');
     expect(html).not.toContain('人工标记');
+  });
+
+  it('does not offer the primary immediate check on competitor rows', () => {
+    const group = {
+      id: 'competitor-1',
+      name: 'Rival group',
+      country: 'DE',
+      brand: 'Rival',
+      children: [{ id: 'rival-child', asin: 'B00RIVAL00', country: 'DE' }],
+    };
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(['competitor', 'group', group.id], group);
+    const runtime = {
+      http: { request: () => undefined },
+    } as unknown as ReturnType<typeof createTransportRuntime>;
+    const html = renderToStaticMarkup(
+      <AuthContext.Provider
+        value={{
+          runtime,
+          identity: {} as IdentityStore,
+          announce: () => undefined,
+        }}
+      >
+        <QueryClientProvider client={queryClient}>
+          <GroupRows
+            config={COMPETITOR_CATALOG}
+            groups={[group]}
+            selectedId={group.id}
+            onSelect={() => undefined}
+            canCheck={Boolean(COMPETITOR_CATALOG.checks)}
+          />
+        </QueryClientProvider>
+      </AuthContext.Provider>,
+    );
+    expect(html).toContain('Rival group');
+    expect(html).not.toContain('立即检查');
   });
 });

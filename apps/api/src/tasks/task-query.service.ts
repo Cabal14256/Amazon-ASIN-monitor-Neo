@@ -26,6 +26,8 @@ function fail(status: number, message: string): never {
 }
 const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
+const cancellationSensitiveTask = (task: { taskType: string }) =>
+  checkTask(task) || ['monitor', 'competitor-monitor'].includes(task.taskType);
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed');
@@ -83,11 +85,14 @@ export class TaskQueryService {
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
     const queued = await port.findJob(task.taskId, task.taskType);
+    // Cleanup, retention limits, or a lost completion acknowledgement can erase
+    // the job after a business commit. Without its immutable request digest,
+    // absence proves neither non-execution nor a result that we can recover.
     if (!queued) return task;
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (checkTask(task)) {
+    if (cancellationSensitiveTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -99,17 +104,24 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(checkTask(task) ? { taskSubType: task.taskSubType } : {}),
+      ...(cancellationSensitiveTask(task)
+        ? { taskSubType: task.taskSubType }
+        : {}),
     };
     if (
-      checkTask(task) &&
+      cancellationSensitiveTask(task) &&
       (queued.status === 'cancelled' ||
         ((task.cancelRequestedAt || task.status === 'cancelling') &&
           isTerminalTaskStatus(queued.status)))
     ) {
       current = await port.store.mutate(
         task.taskId,
-        { kind: 'cancelled', message: '检查任务已取消，已提交的检查结果保留' },
+        {
+          kind: 'cancelled',
+          message: ['monitor', 'competitor-monitor'].includes(task.taskType)
+            ? '监控任务已取消，已提交的结果保留'
+            : '检查任务已取消，已提交的检查结果保留',
+        },
         identity,
       );
       if (!current) fail(404, '任务不存在');
@@ -152,6 +164,18 @@ export class TaskQueryService {
           result: queued.result ?? task.result,
           message: queued.message || task.message || '任务已完成',
         },
+        identity,
+      );
+    // Cancellation may win the CAS between the initial task read and the
+    // completion mutation; monitor completion deliberately leaves it pending.
+    if (
+      ['monitor', 'competitor-monitor'].includes(task.taskType) &&
+      current?.cancelRequestedAt &&
+      queued.status === 'completed'
+    )
+      current = await port.store.mutate(
+        task.taskId,
+        { kind: 'cancelled', message: '监控任务已取消，已提交的结果保留' },
         identity,
       );
     if (queued.status === 'failed')

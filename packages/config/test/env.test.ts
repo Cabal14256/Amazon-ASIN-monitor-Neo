@@ -5,6 +5,7 @@ import {
   EnvValidationError,
   getDefaultEnvironmentFiles,
   getImportStorageDirectory,
+  getQueuePolicy,
   LEGACY_RECOMMENDED_ENV_VARS,
   LEGACY_REQUIRED_ENV_VARS,
   loadEnv,
@@ -21,6 +22,26 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('keeps competitor manual monitoring default compatible while retaining terminal jobs for metadata lifetime', () => {
+    const env = loadEnv({
+      ...validEnv,
+      TASK_META_TTL_SECONDS: '864000',
+      COMPETITOR_QUEUE_WORKER_CONCURRENCY: '2',
+    });
+    expect(env.COMPETITOR_MONITOR_ENABLED).toBe(true);
+    expect(
+      loadEnv({ ...validEnv, COMPETITOR_MONITOR_ENABLED: 'false' })
+        .COMPETITOR_MONITOR_ENABLED,
+    ).toBe(false);
+    expect(() =>
+      loadEnv({ ...validEnv, COMPETITOR_MONITOR_ENABLED: 'invalid' }),
+    ).toThrow(EnvValidationError);
+    const policy = getQueuePolicy('competitor-monitor', env);
+    expect(policy.concurrency).toBe(2);
+    expect(policy.defaultJobOptions.attempts).toBe(3);
+    expect(policy.defaultJobOptions.removeOnComplete).toEqual({ age: 864000 });
+    expect(policy.defaultJobOptions.removeOnFail).toEqual({ age: 864000 });
+  });
   it('preserves public announcement text and Legacy empty-type fallback', () => {
     expect(loadEnv(validEnv)).toMatchObject({
       GLOBAL_ALERT_MESSAGE: '',
@@ -151,6 +172,16 @@ describe('loadEnv', () => {
       ).toBe(expected);
     expect(() =>
       loadEnv({ ...validEnv, MONITOR_BATCH_ASIN_THRESHOLD: '5001' }),
+    ).toThrow(EnvValidationError);
+  });
+  it('shares the Legacy deployment cap for monitor concurrency writes', () => {
+    expect(loadEnv(validEnv).MAX_ALLOWED_CONCURRENT_GROUP_CHECKS).toBe(10);
+    expect(
+      loadEnv({ ...validEnv, MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: '3' })
+        .MAX_ALLOWED_CONCURRENT_GROUP_CHECKS,
+    ).toBe(3);
+    expect(() =>
+      loadEnv({ ...validEnv, MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: '2.5' }),
     ).toThrow(EnvValidationError);
   });
   it('uses one persistent import directory for API/Worker and rejects relative configuration', () => {

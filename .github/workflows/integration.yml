@@ -20,7 +20,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     services:
       redis:
@@ -227,8 +227,29 @@ jobs:
       - name: Run Neo SP-API configuration authorization and committed credential rotation
         run: pnpm --filter @asin-monitor/api exec vitest run test/sp-api-config.integration.test.ts
 
+      - name: Apply Feishu revision upgrade twice after final snapshot migration
+        run: |
+          docker cp packages/db/docker/apply-feishu-revision.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-feishu-revision.sh"
+          docker cp packages/db/migrations/0013_feishu_revision.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0013_feishu_revision.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "INSERT INTO public.feishu_config(country,webhook_url) VALUES ('CAS164','https://example.invalid/cas-164')"
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.sql
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.sql
+          revision_before="$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT revision FROM public.feishu_config WHERE country='CAS164'")"
+          test -n "$revision_before"
+
       - name: Run Feishu configuration Legacy SQL equivalence and authorized transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/feishu-config.integration.test.ts
+
+      - name: Verify Feishu revision rollback and reapply
+        run: |
+          docker cp packages/db/migrations/0013_feishu_revision.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0013_feishu_revision.rollback.sql"
+          revision_before="$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT revision FROM public.feishu_config WHERE country='CAS164'")"
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.rollback.sql
+          docker exec -e POSTGRES_DB=amazon_asin_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-feishu-revision.sh /tmp/0013_feishu_revision.sql
+          revision_after="$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT revision FROM public.feishu_config WHERE country='CAS164' AND webhook_url='https://example.invalid/cas-164'")"
+          test -n "$revision_after"
+          test "$revision_before" != "$revision_after"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "DELETE FROM public.feishu_config WHERE country='CAS164'"
 
       - name: Apply notification country collation twice to both databases
         run: |
@@ -265,8 +286,29 @@ jobs:
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.sql
 
+      - name: Apply competitor immediate-check receipts to the competitor database twice
+        run: |
+          docker cp packages/db/docker/apply-competitor-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-check-receipts.sh"
+          docker cp packages/db/migrations/0014_competitor_check_receipts.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0014_competitor_check_receipts.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT 1 FROM public.competitor_variant_check_receipts LIMIT 1"
+          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_variant_check_receipts') IS NULL")" = t
+
+      - name: Upgrade competitor manual monitor storage twice before competitor schema consumers
+        run: |
+          docker cp packages/db/docker/apply-competitor-monitor.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-monitor.sh"
+          docker cp packages/db/migrations/0015_competitor_monitor.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0015_competitor_monitor.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
+          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='competitor_monitor_history' AND column_name='monitor_task_id')")" = t
+          test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_monitor_runs') IS NULL")" = t
+
       - name: Compare competitor writes with Legacy MySQL and verify dual-database transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-write.integration.test.ts
+
+      - name: Verify competitor immediate-check transactions and receipts in isolated PostgreSQL databases
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-check.integration.test.ts
 
       - name: Compare competitor batch creation with Legacy MySQL and verify savepoint recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-create.integration.test.ts
@@ -306,6 +348,12 @@ jobs:
       - name: Run ASIN deletion, notification and history preservation transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-lifecycle.integration.test.ts
 
+      - name: Upgrade primary monitor storage twice
+        run: |
+          docker cp packages/db/migrations/0012_primary_monitor.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0012_primary_monitor.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.sql
+
       - name: Run ASIN manual actions and atomic monitor history transactions
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-manual.integration.test.ts
 
@@ -338,6 +386,12 @@ jobs:
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
 
+      - name: Run compiled primary monitor consumer with owned tasks and PostgreSQL history
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/primary-monitor-entry.integration.test.ts
+
+      - name: Run compiled competitor monitor with isolated dual databases and loopback TLS notifications
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/competitor-monitor-entry.integration.test.ts --maxWorkers=1
+
       - name: Run variant check HTTP, full results, retry recovery and two API gateways
         run: pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts
 
@@ -367,6 +421,19 @@ jobs:
       - name: Run Neo audit query PostgreSQL and HTTP integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
 
+      - name: Smoke test primary monitor storage rollback twice
+        run: |
+          docker cp packages/db/migrations/0012_primary_monitor.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0012_primary_monitor.rollback.sql"
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
+          docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
+
+      - name: Smoke test competitor monitor storage rollback twice and reapply
+        run: |
+          docker cp packages/db/migrations/0015_competitor_monitor.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0015_competitor_monitor.rollback.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-monitor.sh /tmp/0015_competitor_monitor.sql
       - name: Smoke test status interval maintenance rollback twice
         run: |
           docker cp packages/db/migrations/0008_monitor_interval_projection.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0008_monitor_interval_projection.rollback.sql"
@@ -389,6 +456,15 @@ jobs:
           docker cp packages/db/migrations/0011_competitor_write_policy.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0011_competitor_write_policy.rollback.sql"
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.rollback.sql
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-write-policy.sh /tmp/0011_competitor_write_policy.rollback.sql
+
+      - name: Smoke test competitor immediate-check receipt rollback and reapply
+        run: |
+          docker cp packages/db/migrations/0014_competitor_check_receipts.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0014_competitor_check_receipts.rollback.sql"
+          docker cp packages/db/docker/apply-competitor-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-check-receipts.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
 
       - name: Smoke test competitor query rollback twice
         run: |
@@ -413,5 +489,7 @@ jobs:
             echo "## Integration CI"
             echo "- Result: ${{ job.status }}"
             echo "- Test-step duration after services became ready: ${duration_seconds}s"
-            echo "- Promotion threshold: 10 consecutive successful runs whose total startedAt-to-updatedAt duration is under 600s"
+            echo "- Infrastructure timeout: 15m; this only bounds the job and does not change test assertions or the promotion target"
+            echo "- Promotion threshold: 10 consecutive successful runs whose total Actions startedAt-to-updatedAt duration is under 600s"
+            echo "- The test-step duration above excludes service setup and teardown; use the Actions run timestamps for total duration"
           } >> "$GITHUB_STEP_SUMMARY"

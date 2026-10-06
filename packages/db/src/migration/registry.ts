@@ -506,7 +506,16 @@ function targetHypertableDimensions(
 
 function tableSpec(table: PgTable): TableMigrationSpec {
   const tableName = getTableName(table);
-  const columns = Object.values(getTableColumns(table));
+  // The frozen snapshot target predates Neo-only monitor and Feishu upgrades.
+  // Neither the monitor task link nor the Feishu revision exists in MySQL or
+  // in the pre-upgrade PostgreSQL baseline.
+  const columns = Object.values(getTableColumns(table)).filter(
+    (column) =>
+      (tableName !== 'monitor_history' || column.name !== 'monitor_task_id') &&
+      (tableName !== 'competitor_monitor_history' ||
+        column.name !== 'monitor_task_id') &&
+      (tableName !== 'feishu_config' || column.name !== 'revision'),
+  );
   // Snapshot import validates Legacy and the frozen 0000/0001 target BEFORE
   // runtime upgrades. 0008 widens ID# keys only after this final import gate;
   // the current application's Drizzle length must not rewrite that contract.
@@ -650,39 +659,57 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     );
   }
   const targetIndexSignatures = [
-    ...tableConfig.indexes.map((index) => {
-      const expressions = index.config.columns.map((column) => {
-        if ('name' in column && typeof column.name === 'string') {
-          const indexConfig = column.indexConfig ?? {
-            order: 'asc',
-            nulls: 'last',
-            opClass: undefined,
-          };
-          const order = indexConfig.order === 'desc' ? ' desc' : '';
-          const defaultNulls = indexConfig.order === 'desc' ? 'first' : 'last';
-          const nulls =
-            indexConfig.nulls !== defaultNulls
-              ? ` nulls ${indexConfig.nulls}`
+    ...tableConfig.indexes
+      .filter(
+        (index) =>
+          (tableName !== 'monitor_history' ||
+            index.config.name !== 'idx_monitor_history_monitor_task_country') &&
+          (tableName !== 'competitor_monitor_history' ||
+            index.config.name !==
+              'idx_competitor_monitor_history_task_country'),
+      )
+      .map((index) => {
+        const expressions = index.config.columns.map((column) => {
+          if ('name' in column && typeof column.name === 'string') {
+            const indexConfig = column.indexConfig ?? {
+              order: 'asc',
+              nulls: 'last',
+              opClass: undefined,
+            };
+            const order = indexConfig.order === 'desc' ? ' desc' : '';
+            const defaultNulls =
+              indexConfig.order === 'desc' ? 'first' : 'last';
+            const nulls =
+              indexConfig.nulls !== defaultNulls
+                ? ` nulls ${indexConfig.nulls}`
+                : '';
+            const opClass = indexConfig.opClass
+              ? ` ${indexConfig.opClass}`
               : '';
-          const opClass = indexConfig.opClass ? ` ${indexConfig.opClass}` : '';
+            return normalizePostgresExpression(
+              `${column.name}${opClass}${order}${nulls}`,
+              tableName,
+            );
+          }
           return normalizePostgresExpression(
-            `${column.name}${opClass}${order}${nulls}`,
+            renderSql(column as SQL),
             tableName,
           );
-        }
-        return normalizePostgresExpression(renderSql(column as SQL), tableName);
-      });
-      const predicate = index.config.where
-        ? normalizePostgresExpression(renderSql(index.config.where), tableName)
-        : '';
-      return indexSignature(
-        requiredConstraintName(index.config.name, tableName),
-        index.config.unique,
-        index.config.method ?? 'btree',
-        expressions,
-        predicate,
-      );
-    }),
+        });
+        const predicate = index.config.where
+          ? normalizePostgresExpression(
+              renderSql(index.config.where),
+              tableName,
+            )
+          : '';
+        return indexSignature(
+          requiredConstraintName(index.config.name, tableName),
+          index.config.unique,
+          index.config.method ?? 'btree',
+          expressions,
+          predicate,
+        );
+      }),
     ...constraintIndexSignatures,
   ];
   const updatedTimestampColumns = columns.filter(({ name }) =>

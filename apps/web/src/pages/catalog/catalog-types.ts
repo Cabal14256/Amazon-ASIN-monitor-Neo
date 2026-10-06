@@ -1,4 +1,11 @@
 import type {
+  CompetitorAsinSource,
+  CompetitorCreateAsinRequest,
+  CompetitorGroupSource,
+  CompetitorGroupUpsertRequest,
+  CompetitorGuardedUpdateAsinRequest,
+  CompetitorMoveAsinRequest,
+  CompetitorUpdateGroupRequest,
   CreateAsinRequest,
   MoveAsinRequest,
   UpdateAsinRequest,
@@ -21,6 +28,7 @@ export interface CatalogChild {
   autoIsBroken?: Flag;
   statusSource?: string;
   lastCheckTime?: string | null;
+  updateTime?: string | null;
   feishuNotifyEnabled?: Flag;
   manualBrokenReason?: string | null;
   manualBroken?: Flag;
@@ -41,6 +49,7 @@ export interface CatalogGroup {
   is_broken?: Flag;
   statusSource?: string;
   lastCheckTime?: string | null;
+  updateTime?: string | null;
   last_check_time?: string | null;
   feishuNotifyEnabled?: Flag;
   manualBrokenReason?: string | null;
@@ -92,8 +101,7 @@ export type CatalogAction =
       child: CatalogChild;
     };
 
-export interface CatalogConfig {
-  id: 'asin' | 'competitor';
+interface CatalogConfigBase {
   title: string;
   label: string;
   heading: string;
@@ -111,8 +119,32 @@ export interface CatalogConfig {
     id: string,
     signal?: AbortSignal,
   ) => Promise<CatalogGroup>;
-  writes?: CatalogWrites;
+  checks?: {
+    group: (
+      http: Pick<HttpClient, 'request'>,
+      id: string,
+      options: { forceRefresh: boolean },
+      signal?: AbortSignal,
+    ) => Promise<CatalogCheckResult>;
+    asin: (
+      http: Pick<HttpClient, 'request'>,
+      id: string,
+      options: { forceRefresh: boolean },
+      signal?: AbortSignal,
+    ) => Promise<CatalogCheckResult>;
+  };
 }
+
+export type CatalogConfig =
+  | (CatalogConfigBase & { id: 'asin'; writes?: CatalogWrites })
+  | (CatalogConfigBase & {
+      id: 'competitor';
+      writes?: CompetitorCatalogWrites;
+    });
+
+export type CatalogCheckResult =
+  | { kind: 'task'; taskId: string; status: 'pending' | 'unknown' }
+  | { kind: 'result'; result: unknown };
 
 export interface CatalogWrites {
   createGroup: (
@@ -186,5 +218,42 @@ export interface CatalogWrites {
         parentManualBroken: boolean;
       };
     },
+  ) => Promise<unknown>;
+}
+
+export interface CompetitorCatalogWrites {
+  createGroup: (
+    http: Pick<HttpClient, 'request'>,
+    input: CompetitorGroupUpsertRequest,
+  ) => Promise<unknown>;
+  updateGroup: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: CompetitorUpdateGroupRequest,
+  ) => Promise<unknown>;
+  deleteGroup: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    expectedChildIds: string[],
+    expectedSource?: CompetitorGroupSource,
+  ) => Promise<unknown>;
+  createAsin: (
+    http: Pick<HttpClient, 'request'>,
+    input: CompetitorCreateAsinRequest,
+  ) => Promise<unknown>;
+  updateAsin: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: CompetitorGuardedUpdateAsinRequest,
+  ) => Promise<unknown>;
+  moveAsin: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    input: CompetitorMoveAsinRequest,
+  ) => Promise<unknown>;
+  deleteAsin: (
+    http: Pick<HttpClient, 'request'>,
+    id: string,
+    expectedSource?: CompetitorAsinSource,
   ) => Promise<unknown>;
 }

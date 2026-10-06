@@ -63,13 +63,30 @@ const POLICIES: Record<QueueName, QueuePolicy> = {
 
 export function getQueuePolicy(name: QueueName, env: Env) {
   const policy = POLICIES[name];
+  // Keep the original request identity available while metadata can be read.
+  // Explicit job removal can still erase it; absence is never non-execution proof.
+  const checkRetention =
+    name === 'variant-check' || name === 'batch-check'
+      ? env.TASK_META_TTL_SECONDS
+      : 0;
   const defaultJobOptions = {
     attempts: policy.attempts,
     ...(policy.attempts > 1
       ? { backoff: { type: 'exponential' as const, delay: 5000 } }
       : {}),
-    removeOnComplete: { age: policy.completeAge },
-    removeOnFail: { age: policy.failureAge },
+    // Terminal monitor jobs serve as recovery receipts after lost acknowledgements.
+    removeOnComplete: {
+      age:
+        name === 'monitor' || name === 'competitor-monitor'
+          ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
+          : Math.max(policy.completeAge, checkRetention),
+    },
+    removeOnFail: {
+      age:
+        name === 'monitor' || name === 'competitor-monitor'
+          ? Math.max(604_800, env.TASK_META_TTL_SECONDS)
+          : Math.max(policy.failureAge, checkRetention),
+    },
   };
   const limiter =
     name === 'monitor'

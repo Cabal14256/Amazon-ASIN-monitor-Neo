@@ -95,11 +95,76 @@ describe('Legacy to BullMQ queue policy parity', () => {
         const policy = getQueuePolicy(name, loadEnv(raw));
         expect(policy.physicalName).toBe(baseline.physicalName);
         expect(policy.defaultJobOptions).toEqual(
-          baseline.options.defaultJobOptions,
+          name === 'monitor' ||
+            name === 'competitor-monitor' ||
+            name === 'variant-check' ||
+            name === 'batch-check'
+            ? {
+                ...(baseline.options.defaultJobOptions as object),
+                removeOnComplete: { age: 604800 },
+                removeOnFail: { age: 604800 },
+              }
+            : baseline.options.defaultJobOptions,
         );
         expect(policy.limiter).toEqual(baseline.options.limiter);
         expect(policy.concurrency).toBe(baseline.concurrency);
       }
+    },
+  );
+
+  it.each(['variant-check', 'batch-check'] as const)(
+    '%s retains terminal evidence for at least the configured metadata lifetime',
+    (name) => {
+      for (const ttl of [60, 604800, 1209600]) {
+        const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: String(ttl) });
+        expect(getQueuePolicy(name, env).defaultJobOptions).toMatchObject({
+          removeOnComplete: { age: Math.max(3600, ttl) },
+          removeOnFail: { age: Math.max(86400, ttl) },
+        });
+        expect(
+          getQueueOptions(name, env, { host: 'localhost' }).defaultJobOptions,
+        ).toEqual(getQueuePolicy(name, env).defaultJobOptions);
+      }
+    },
+  );
+
+  it.each([
+    ['3600', 604_800],
+    ['604800', 604_800],
+    ['1209600', 1_209_600],
+    ['31536000', 31_536_000],
+  ])(
+    'retains monitor success and failure for the bounded metadata lifetime %s',
+    (ttl, expectedAge) => {
+      const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: ttl });
+      const policy = getQueuePolicy('monitor', env);
+      expect(policy.defaultJobOptions.removeOnComplete).toEqual({
+        age: expectedAge,
+      });
+      expect(policy.defaultJobOptions.removeOnFail).toEqual({
+        age: expectedAge,
+      });
+      expect(
+        getQueueOptions('monitor', env, { host: 'localhost' }).defaultJobOptions
+          ?.removeOnComplete,
+      ).toEqual({ age: expectedAge });
+      expect(
+        getQueueOptions('monitor', env, { host: 'localhost' }).defaultJobOptions
+          ?.removeOnFail,
+      ).toEqual({ age: expectedAge });
+      expect(
+        getQueuePolicy('competitor-monitor', env).defaultJobOptions,
+      ).toMatchObject({
+        removeOnComplete: { age: expectedAge },
+        removeOnFail: { age: expectedAge },
+      });
+      expect(
+        getQueueOptions('competitor-monitor', env, { host: 'localhost' })
+          .defaultJobOptions,
+      ).toMatchObject({
+        removeOnComplete: { age: expectedAge },
+        removeOnFail: { age: expectedAge },
+      });
     },
   );
 

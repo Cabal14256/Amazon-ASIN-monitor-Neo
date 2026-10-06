@@ -31,6 +31,41 @@ const countryNames: Record<string, string> = {
 };
 const regionFor = (country: string) =>
   ['UK', 'DE', 'FR', 'IT', 'ES'].includes(country) ? 'EU' : country;
+function countryData(
+  country: string,
+  data: NotificationData,
+): NotificationData {
+  const name = Object.hasOwn(countryNames, country)
+    ? countryNames[country]
+    : country;
+  return {
+    ...data,
+    country,
+    countryDisplay: `${name}(${country})`,
+    region: regionFor(country),
+  };
+}
+function notificationCard(domain: NotificationDomain, data: NotificationData) {
+  const card =
+    domain === 'primary'
+      ? buildFeishuCard(data)
+      : buildCompetitorFeishuCard(data);
+  if (Buffer.byteLength(JSON.stringify(card)) > 1024 * 1024)
+    throw new NotificationError('invalid-input');
+  return card;
+}
+/** Same country decoration and final card boundary used by sendCountry, without
+ * reading configuration or performing I/O. Call before claiming a delivery. */
+export function validateCountryNotification(
+  domain: NotificationDomain,
+  country: string,
+  data: NotificationData,
+): void {
+  notificationCard(
+    notificationDomain(domain),
+    countryData(notificationCountry(country), snapshotNotification(data)),
+  );
+}
 const codeValue = (code: unknown) =>
   typeof code === 'number' && Number.isFinite(code)
     ? code
@@ -147,7 +182,10 @@ export class FeishuNotifications {
     region: string,
     data: NotificationData,
     signal: AbortSignal,
-  ): Promise<NotificationResult> {
+    beforeSend?: () => Promise<void>,
+  ): Promise<NotificationResult & { unconfirmed?: true }> {
+    let guardFailed = false;
+    let postStarted = false;
     try {
       const config = await this.dependency(
         signal,
@@ -166,13 +204,18 @@ export class FeishuNotifications {
         /[\r\n\0]/.test(config.webhookUrl)
       )
         throw new NotificationError('invalid-config');
-      const card =
-        domain === 'primary'
-          ? buildFeishuCard(data)
-          : buildCompetitorFeishuCard(data);
-      if (Buffer.byteLength(JSON.stringify(card)) > 1024 * 1024)
-        throw new NotificationError('invalid-input');
+      const card = notificationCard(domain, data);
+      if (beforeSend) {
+        try {
+          await beforeSend();
+        } catch (error) {
+          guardFailed = true;
+          throw error;
+        }
+        ensureActive(signal);
+      }
       this.stats.attempts++;
+      postStarted = true;
       const response = await this.dependency(
         signal,
         this.options.requestTimeoutMs ?? 10_000,
@@ -202,6 +245,7 @@ export class FeishuNotifications {
         errorCode: codeValue(response.code) || response.statusCode,
       };
     } catch (error) {
+      if (guardFailed) throw error;
       ensureActive(signal);
       this.stats.failed++;
       this.options.logger.error('飞书通知发送失败', {
@@ -209,7 +253,11 @@ export class FeishuNotifications {
         reason:
           error instanceof NotificationError ? error.reason : 'dependency',
       });
-      return { success: false, errorCode: undefined };
+      return {
+        success: false,
+        errorCode: undefined,
+        ...(beforeSend && postStarted ? { unconfirmed: true as const } : {}),
+      };
     }
   }
   private async retry(
@@ -217,9 +265,16 @@ export class FeishuNotifications {
     region: string,
     data: NotificationData,
     signal: AbortSignal,
+    beforeSend?: () => Promise<void>,
   ) {
     for (let attempt = 1; ; attempt++) {
-      const result = await this.attempt(domain, region, data, signal);
+      const result = await this.attempt(
+        domain,
+        region,
+        data,
+        signal,
+        beforeSend,
+      );
       if (result.success || Number(result.errorCode) !== 11232 || attempt === 3)
         return result;
       const random = (this.options.random ?? Math.random)();
@@ -266,7 +321,7 @@ export class FeishuNotifications {
       const result = await this.retry(
         domain,
         regionFor(country),
-        this.countryData(country, snapshotNotification(data)),
+        countryData(country, snapshotNotification(data)),
         child,
       );
       return result.success
@@ -274,19 +329,114 @@ export class FeishuNotifications {
         : { success: false, skipped: false, errorCode: result.errorCode };
     });
   }
-  private countryData(
+  /** Reserve shared host capacity before a durable delivery claim. A caller
+   * rejected by admission has not claimed or attempted an external send. */
+  withCountryDelivery<T>(
+    domain: NotificationDomain,
     country: string,
     data: NotificationData,
-  ): NotificationData {
-    const name = Object.hasOwn(countryNames, country)
-      ? countryNames[country]
-      : country;
-    return {
-      ...data,
-      country,
-      countryDisplay: `${name}(${country})`,
-      region: regionFor(country),
-    };
+    run: (send: () => Promise<CountryNotificationResult>) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.operation(signal, async (child) => {
+      const target = notificationDomain(domain);
+      const selected = notificationCountry(country);
+      const snapshot = countryData(selected, snapshotNotification(data));
+      notificationCard(target, snapshot);
+      let sent = false;
+      let admitted = true;
+      try {
+        return await run(async () => {
+          ensureActive(child);
+          if (!admitted) throw new NotificationError('closed');
+          if (sent) throw new NotificationError('invalid-input');
+          sent = true;
+          const result = await this.retry(
+            target,
+            regionFor(selected),
+            snapshot,
+            child,
+          );
+          return result.success
+            ? { success: true, skipped: false }
+            : { success: false, skipped: false, errorCode: result.errorCode };
+        });
+      } finally {
+        admitted = false;
+      }
+    });
+  }
+  /** Competitor monitoring must not create a durable claim for an absent or
+   * disabled current configuration. Admission is shared with primary delivery;
+   * permission/control guards run outside the external HTTP operation. */
+  withCompetitorCountryDelivery<T>(
+    country: string,
+    data: NotificationData,
+    run: (send: () => Promise<CountryNotificationResult>) => Promise<T>,
+    beforeSend: () => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    return this.operation(signal, async (child) => {
+      const selected = notificationCountry(country);
+      const snapshot = countryData(selected, snapshotNotification(data));
+      notificationCard('competitor', snapshot);
+      await beforeSend();
+      const config = await this.dependency(
+        child,
+        this.options.configTimeoutMs ?? 2000,
+        (nested) =>
+          this.options.source.read('competitor', regionFor(selected), nested),
+      );
+      ensureActive(child);
+      if (!config?.webhookUrl) return undefined;
+      if (
+        typeof config.webhookUrl !== 'string' ||
+        config.webhookUrl.length > 1000 ||
+        [...config.webhookUrl].length > 500 ||
+        /[\r\n\0]/.test(config.webhookUrl)
+      )
+        throw new NotificationError('invalid-config');
+      let url: URL;
+      try {
+        url = new URL(config.webhookUrl);
+      } catch {
+        throw new NotificationError('invalid-config');
+      }
+      if (
+        url.protocol !== 'https:' ||
+        !url.hostname ||
+        url.username ||
+        url.password
+      )
+        throw new NotificationError('invalid-config');
+      let sent = false,
+        admitted = true;
+      try {
+        return await run(async () => {
+          ensureActive(child);
+          if (!admitted) throw new NotificationError('closed');
+          if (sent) throw new NotificationError('invalid-input');
+          sent = true;
+          const result = await this.retry(
+            'competitor',
+            regionFor(selected),
+            snapshot,
+            child,
+            beforeSend,
+          );
+          return result.success
+            ? { success: true, skipped: false }
+            : {
+                success: false,
+                skipped: false,
+                errorCode: result.errorCode,
+                ...(result.unconfirmed ? { unconfirmed: true as const } : {}),
+              };
+        });
+      } finally {
+        admitted = false;
+      }
+    });
   }
   sendBatch(
     domain: NotificationDomain,
@@ -307,7 +457,7 @@ export class FeishuNotifications {
         throw new NotificationError('invalid-input');
       let bytes = 0;
       const entries = countries.map((country) => {
-        const data = this.countryData(
+        const data = countryData(
           notificationCountry(country),
           snapshotNotification(input[country]),
         );

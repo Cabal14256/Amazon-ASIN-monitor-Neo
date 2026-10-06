@@ -25,6 +25,22 @@
 - 缓存上限 2 MiB。Redis 在同一 Lua 命令内先检查 `STRLEN` 再读取，过大内容不传回 API。缓存载荷还校验键、版本、期限、来源及完整结果契约。
 - 大于缓存限制的有效结果仍完整返回。原有顶层 `meta` 字段及 `cache+raw` / `cache+agg` 来源格式保留；命中保留原生成时间。限流和超时返回固定失败响应，`busyFallback` 不伪装为成功的其他时间范围数据。
 
+### 缓存指标
+
+`/metrics` 的 `amazon_asin_monitor_cache_hits_total` 与 `amazon_asin_monitor_cache_misses_total` 接入实际分析缓存读取，沿用 `cache_key_prefix` 标签。通过全部载荷校验才计命中；已启用缓存的空值、过期、损坏、超限、Redis 异常、500 毫秒超时及四命令容量保护都恰好计一次未命中。写入不计访问，迟到的 Redis 结果不重复计数。未启用缓存、明确绕过缓存和鉴权拒绝均不产生缓存访问指标。
+
+| 分析入口                             | 固定缓存族标签               |
+| ------------------------------------ | ---------------------------- |
+| by-time、analytics-monthly-breakdown | statisticsByTime             |
+| all-countries-summary                | allCountriesSummary          |
+| region-summary                       | regionSummary                |
+| period-summary                       | periodSummary                |
+| period-summary/details               | periodSummaryDetails         |
+| asin-by-country                      | asinStatisticsByCountry      |
+| asin-by-variant-group                | asinStatisticsByVariantGroup |
+
+标签使用 Legacy 统计缓存类型名称；不包含物理 Redis 前缀/键/摘要、用户、ASIN、国家或筛选值。指标表示此 API 进程的缓存访问，不能据此推断数据库查询次数或 Worker 全局运行状态。未命中率包含依赖降级：Redis 异常、500 毫秒超时和四命令容量保护均发出固定原因码 `analytics_cache_unavailable` 的 warn；JSON 解析、结构、版本、键、来源或期限元数据无效均使用 `analytics_cache_invalid`。普通冷缓存或元数据有效的过期值不发这些降级告警；已过期但元数据无效的值仍告警。日志不包含原始缓存键、载荷或查询数据。
+
 ## 资源边界和错误
 
 API 每进程最多同时接纳两次统计查询，在鉴权开始前占用名额，鉴权、数据读取和响应共享同一名额。即使客户端断开，也要等未结束的鉴权或数据库操作完成才释放；慢客户端 60 秒后断开。会话活跃时间仍由原鉴权流程更新，超过并发限制的请求直接返回 429，不会先等待会话写锁。数据库仓库另限制四个事务，排队获取连接也计入限额；整个查询事务 10 秒，数据语句 5 秒、锁等待 1.5 秒。

@@ -2,7 +2,11 @@ import {
   competitorAsinRecordResultSchema,
   competitorGroupResultSchema,
 } from '@asin-monitor/contracts';
-import { createPgPool, PgCompetitorWriteRepository } from '@asin-monitor/db';
+import {
+  createPgPool,
+  formatShanghaiTimestamp,
+  PgCompetitorWriteRepository,
+} from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
@@ -69,6 +73,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     };
     beforeAll(async () => {
       f = await competitorWriteApp();
+      await f.pools.primaryPool.query(
+        "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id IN (SELECT id FROM permissions WHERE code='asin:delete')",
+      );
       legacy = await legacyCompetitorQueryFixture();
     });
     afterAll(async () => {
@@ -250,7 +257,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const response = await request(
           value.method,
           value.path,
-          value.method === 'PUT' ? { enabled: true } : undefined,
+          value.method === 'PUT'
+            ? { enabled: true }
+            : value.path.startsWith('variant-groups/')
+            ? { expectedChildIds: [] }
+            : undefined,
         );
         const source = await value.source();
         expect(response.statusCode).toBe(404);
@@ -274,7 +285,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             await request(
               value.method,
               value.path,
-              value.method === 'PUT' ? { enabled: true } : undefined,
+              value.method === 'PUT'
+                ? { enabled: true }
+                : value.path.startsWith('variant-groups/')
+                ? { expectedChildIds: ['a1'] }
+                : undefined,
             )
           ).statusCode,
         ).toBe(403);
@@ -314,6 +329,32 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).rows,
       ).toEqual([{ id: 'g1', name: 'wrong-primary-data' }]);
     });
+    it.each(actionCases.filter((value) => value.method === 'DELETE'))(
+      'rejects a delete-only grant after the Legacy write grant is revoked for $path',
+      async (value) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot();
+        expect((await read()).statusCode).toBe(200);
+        await f.pools.primaryPool.query(
+          "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id IN (SELECT id FROM permissions WHERE code='asin:write')",
+        );
+        await f.pools.primaryPool.query(
+          "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code='asin:delete' ON CONFLICT DO NOTHING",
+        );
+        try {
+          expect((await request('DELETE', value.path)).statusCode).toBe(403);
+          expect(await snapshot()).toEqual(before);
+        } finally {
+          await f.pools.primaryPool.query(
+            "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id IN (SELECT id FROM permissions WHERE code='asin:delete')",
+          );
+          await f.pools.primaryPool.query(
+            "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code='asin:write' ON CONFLICT DO NOTHING",
+          );
+        }
+      },
+    );
     it('deletes only the target ASIN, touches its parent and preserves historical records', async () => {
       await group('g1');
       await asin('a1');
@@ -417,7 +458,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await legacy.updateAsinNotify('ASIN', { enabled: true }),
       );
       expect(response.json().data.variantGroupId).toBe('Gróup ');
-      const deleted = await request('DELETE', 'variant-groups/GROUP');
+      const deleted = await request('DELETE', 'variant-groups/GROUP', {
+        expectedChildIds: ['Ásin '],
+      });
       expect(deleted.statusCode).toBe(200);
       complete(deleted.json(), (await legacy.deleteGroup('GROUP')).body);
       expect(await snapshot()).toEqual({ groups: [], asins: [] });
@@ -457,9 +500,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "CREATE FUNCTION fail_competitor_child_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.id='a2' THEN RAISE EXCEPTION 'private-child-delete'; END IF; RETURN OLD; END $$; CREATE TRIGGER fail_competitor_child_delete AFTER DELETE ON competitor_asins FOR EACH ROW EXECUTE FUNCTION fail_competitor_child_delete()",
       );
       try {
-        expect((await request('DELETE', 'variant-groups/g1')).statusCode).toBe(
-          500,
-        );
+        expect(
+          (
+            await request('DELETE', 'variant-groups/g1', {
+              expectedChildIds: ['a1', 'a2'],
+            })
+          ).statusCode,
+        ).toBe(500);
         expect(await snapshot()).toEqual(before);
         expect(await histories()).toEqual(savedHistory);
       } finally {
@@ -467,10 +514,147 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           'DROP TRIGGER fail_competitor_child_delete ON competitor_asins; DROP FUNCTION fail_competitor_child_delete()',
         );
       }
-      expect((await request('DELETE', 'variant-groups/g1')).statusCode).toBe(
-        200,
-      );
+      expect(
+        (
+          await request('DELETE', 'variant-groups/g1', {
+            expectedChildIds: ['a1', 'a2'],
+          })
+        ).statusCode,
+      ).toBe(200);
     });
+    it('rejects deletion when a child is added after confirmation but before the group lock', async () => {
+      await group('g1');
+      await asin('a1');
+      const blocker = await f.pools.competitorPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+        );
+        pending = Promise.resolve(
+          request('DELETE', 'variant-groups/g1', {
+            expectedChildIds: ['a1'],
+          }),
+        );
+        await blocked(blocker);
+        await blocker.query(
+          "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES('a2','B0000000A2','US','Own brand','g1')",
+        );
+        await blocker.query('COMMIT');
+        const response = await pending;
+        expect(response.statusCode).toBe(409);
+        expect(response.json().errorMessage).toBe(
+          '竞品组成员已变化，请刷新后重新确认删除',
+        );
+        expect((await snapshot()).groups).toEqual([
+          expect.objectContaining({ id: 'g1' }),
+        ]);
+        expect((await snapshot()).asins).toEqual([
+          expect.objectContaining({ id: 'a1' }),
+          expect.objectContaining({ id: 'a2' }),
+        ]);
+        expect(
+          (
+            await request('DELETE', 'variant-groups/g1', {
+              expectedChildIds: ['a1', 'a2'],
+            })
+          ).statusCode,
+        ).toBe(200);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        await pending?.catch(() => {});
+      }
+    });
+    it.each([
+      ["name='Concurrent rename'", 'name', 'Concurrent rename'],
+      ["country='DE'", 'country', 'DE'],
+      ["brand='Concurrent brand'", 'brand', 'Concurrent brand'],
+      [
+        "update_time='2020-01-01 08:00:01'",
+        'update_time',
+        new Date('2020-01-01T00:00:01.000Z'),
+      ],
+    ] as const)(
+      'rejects stale group deletion after a locked %s change with unchanged children',
+      async (assignment, field, value) => {
+        await group('g1');
+        await asin('a1');
+        const before = await snapshot();
+        const detail = competitorGroupResultSchema.parse(
+          (
+            await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/competitor/variant-groups/g1',
+              headers,
+            })
+          ).json(),
+        ).data!;
+        const expectedSource = {
+          name: detail.name,
+          country: detail.country,
+          brand: detail.brand,
+          updateTime: detail.updateTime,
+        };
+        const blocker = await f.pools.competitorPool.connect();
+        let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+          );
+          pending = Promise.resolve(
+            request('DELETE', 'variant-groups/g1', {
+              expectedChildIds: ['a1'],
+              expectedSource,
+            }),
+          );
+          await blocked(blocker);
+          await blocker.query(
+            `UPDATE competitor_variant_groups SET ${assignment} WHERE id='g1'`,
+          );
+          await blocker.query('COMMIT');
+          const response = await pending;
+          expect(response.statusCode).toBe(409);
+          expect(response.json().errorMessage).toBe(
+            '竞品记录已变化，请刷新后重试',
+          );
+          const after = await snapshot();
+          expect(after.groups).toHaveLength(1);
+          expect(after.groups[0][field]).toEqual(value);
+          expect(after.asins).toEqual(before.asins);
+          const current = competitorGroupResultSchema.parse(
+            (
+              await f.http.inject({
+                method: 'GET',
+                url: '/api/v1/competitor/variant-groups/g1',
+                headers,
+              })
+            ).json(),
+          ).data!;
+          expect(
+            (
+              await request('DELETE', 'variant-groups/g1', {
+                expectedChildIds: ['a1'],
+                expectedSource: {
+                  name: current.name,
+                  country: current.country,
+                  brand: current.brand,
+                  updateTime: current.updateTime,
+                },
+              })
+            ).statusCode,
+          ).toBe(200);
+          expect((await snapshot()).groups).toEqual([]);
+          expect((await snapshot()).asins).toEqual([]);
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await pending?.catch(() => {});
+        }
+      },
+    );
     it('does not delete a child moved while waiting for the original parent lock', async () => {
       await group('g1');
       await group('g2');
@@ -534,6 +718,127 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).rows,
       ).toEqual([{ id: 'g1', name: 'wrong-primary-data' }]);
     });
+    it.each([
+      ['repair', ' '],
+      ['delete', ' '],
+      ['repair', '\n\t\r'],
+      ['delete', '\n\t\r'],
+    ])(
+      'can %s a migrated group whose actual Legacy controller persisted whitespace %j',
+      async (action, oldText) => {
+        const source = await legacy.createGroup({
+          name: oldText,
+          country: oldText,
+          brand: oldText,
+        });
+        expect(source.statusCode).toBe(200);
+        const old = competitorGroupResultSchema.parse(source.body).data!;
+        expect(old).toMatchObject({
+          name: oldText,
+          country: '',
+          brand: oldText,
+        });
+        await f.pools.competitorPool.query(
+          'INSERT INTO competitor_variant_groups(id,name,country,brand,create_time,update_time) VALUES($1,$2,$3,$4,$5,$6)',
+          [
+            old.id,
+            old.name,
+            old.country,
+            old.brand,
+            old.createTime
+              ? formatShanghaiTimestamp(new Date(old.createTime))
+              : null,
+            old.updateTime
+              ? formatShanghaiTimestamp(new Date(old.updateTime))
+              : null,
+          ],
+        );
+        const expectedSource = {
+          name: old.name,
+          country: old.country,
+          brand: old.brand,
+          updateTime: old.updateTime,
+        };
+        if (action === 'repair') {
+          await compare(
+            await request('PUT', `variant-groups/${old.id}`, {
+              ...groupBody,
+              expectedSource,
+            }),
+            await legacy.updateGroup(old.id, groupBody),
+            true,
+          );
+          expect((await snapshot()).groups[0]).toMatchObject({
+            name: groupBody.name,
+            country: 'US',
+            brand: groupBody.brand,
+          });
+        } else {
+          const response = await request('DELETE', `variant-groups/${old.id}`, {
+            expectedSource,
+            expectedChildIds: [],
+          });
+          const legacyResponse = await legacy.deleteGroup(old.id);
+          expect(response.statusCode).toBe(legacyResponse.statusCode);
+          expect(response.json()).toEqual(legacyResponse.body);
+          expect((await snapshot()).groups).toEqual([]);
+        }
+      },
+    );
+    it.each([
+      "name='Concurrent parent rename'",
+      "country='DE'",
+      "brand='Concurrent parent brand'",
+      "update_time='2020-01-01 08:00:01'",
+    ])(
+      'rejects ASIN creation when the confirmed parent changes while waiting for its lock: %s',
+      async (change) => {
+        await group('g1');
+        const old = competitorGroupResultSchema.parse(
+          (
+            await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/competitor/variant-groups/g1',
+              headers,
+            })
+          ).json(),
+        ).data!;
+        const expectedParent = {
+          name: old.name,
+          country: old.country,
+          brand: old.brand,
+          updateTime: old.updateTime,
+        };
+        const blocker = await f.pools.competitorPool.connect();
+        let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+          );
+          pending = Promise.resolve(
+            request('POST', 'asins', { ...asinBody, expectedParent }),
+          );
+          await blocked(blocker);
+          await blocker.query(
+            `UPDATE competitor_variant_groups SET ${change} WHERE id='g1'`,
+          );
+          await blocker.query('COMMIT');
+          const concurrentState = await snapshot();
+          const response = await pending;
+          expect(response.statusCode).toBe(409);
+          expect(response.json().errorMessage).toBe(
+            '竞品记录已变化，请刷新后重试',
+          );
+          expect(await snapshot()).toEqual(concurrentState);
+          expect(concurrentState.asins).toEqual([]);
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await pending?.catch(() => {});
+        }
+      },
+    );
     it.each([undefined, null, '', 0, false, 1, 2, '1', '2'])(
       'creates the full standalone ASIN with Legacy type input %s',
       async (asinType) => {
@@ -596,6 +901,49 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       expect((await snapshot()).asins).toEqual(before.asins);
     });
+    it('rejects a group edit if its source changes while waiting for the write lock', async () => {
+      await group('g1');
+      const old = competitorGroupResultSchema.parse(
+        (
+          await f.http.inject({
+            method: 'GET',
+            url: '/api/v1/competitor/variant-groups/g1',
+            headers,
+          })
+        ).json(),
+      ).data!;
+      const expectedSource = {
+        name: old.name,
+        country: old.country,
+        brand: old.brand,
+        updateTime: old.updateTime,
+      };
+      const blocker = await f.pools.competitorPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+        );
+        pending = Promise.resolve(
+          request('PUT', 'variant-groups/g1', {
+            ...groupBody,
+            expectedSource,
+          }),
+        );
+        await blocked(blocker);
+        await blocker.query(
+          "UPDATE competitor_variant_groups SET name='Concurrent edit' WHERE id='g1'",
+        );
+        await blocker.query('COMMIT');
+        expect((await pending).statusCode).toBe(409);
+        expect((await snapshot()).groups[0].name).toBe('Concurrent edit');
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        await pending?.catch(() => {});
+      }
+    });
     it('rejects country changes with an existing equivalent ASIN and preserves every original row', async () => {
       await group('g1');
       await group('g2', 'UK');
@@ -637,6 +985,101 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).json(),
         (await legacy.detail('g1')).body,
       );
+    });
+    it('rejects an ASIN edit after its inspected fields change', async () => {
+      await group('g1');
+      await asin('a1');
+      const old = competitorGroupResultSchema.parse(
+        (
+          await f.http.inject({
+            method: 'GET',
+            url: '/api/v1/competitor/variant-groups/g1',
+            headers,
+          })
+        ).json(),
+      ).data!;
+      const child = old.children![0];
+      const expectedSource = {
+        variantGroupId: old.id,
+        asin: child.asin,
+        name: child.name ?? null,
+        country: child.country,
+        brand: child.brand ?? null,
+        asinType: child.asinType == null ? null : String(child.asinType),
+        updateTime: child.updateTime,
+      };
+      await f.pools.competitorPool.query(
+        "UPDATE competitor_asins SET brand='Concurrent edit' WHERE id='a1'",
+      );
+      const { parentId: _parent, ...body } = asinBody;
+      expect(
+        (await request('PUT', 'asins/a1', { ...body, expectedSource }))
+          .statusCode,
+      ).toBe(409);
+      expect((await snapshot()).asins[0].brand).toBe('Concurrent edit');
+    });
+    it('accepts the displayed ASIN type when a migrated row stores a Legacy type', async () => {
+      await group('g1');
+      await asin('a1');
+      await f.pools.competitorPool.query(
+        "UPDATE competitor_asins SET asin_type='MAIN_LINK' WHERE id='a1'",
+      );
+      const old = competitorGroupResultSchema.parse(
+        (
+          await f.http.inject({
+            method: 'GET',
+            url: '/api/v1/competitor/variant-groups/g1',
+            headers,
+          })
+        ).json(),
+      ).data!;
+      const child = old.children![0];
+      expect(child.asinType).toBe('1');
+      const { parentId: _parent, ...body } = asinBody;
+      const response = await request('PUT', 'asins/a1', {
+        ...body,
+        expectedSource: {
+          variantGroupId: old.id,
+          asin: child.asin,
+          name: child.name ?? null,
+          country: child.country,
+          brand: child.brand ?? null,
+          asinType: child.asinType,
+          updateTime: child.updateTime,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+    });
+    it('rejects ASIN deletion after the inspected child moves to another group', async () => {
+      await group('g1');
+      await group('g2');
+      await asin('a1');
+      const old = competitorGroupResultSchema.parse(
+        (
+          await f.http.inject({
+            method: 'GET',
+            url: '/api/v1/competitor/variant-groups/g1',
+            headers,
+          })
+        ).json(),
+      ).data!;
+      const child = old.children![0];
+      const expectedSource = {
+        variantGroupId: old.id,
+        asin: child.asin,
+        name: child.name ?? null,
+        country: child.country,
+        brand: child.brand ?? null,
+        asinType: child.asinType == null ? null : String(child.asinType),
+        updateTime: child.updateTime,
+      };
+      await f.pools.competitorPool.query(
+        "UPDATE competitor_asins SET variant_group_id='g2' WHERE id='a1'",
+      );
+      expect(
+        (await request('DELETE', 'asins/a1', { expectedSource })).statusCode,
+      ).toBe(409);
+      expect((await snapshot()).asins[0].variant_group_id).toBe('g2');
     });
     it.each(['create', 'update'])(
       'rejects a %s country mismatch with the original source message',
@@ -691,6 +1134,173 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ).json(),
           (await legacy.detail(id)).body,
         );
+    });
+    it('rejects a move already stale before the transaction starts, including a stale same-target move', async () => {
+      await group('g1');
+      await group('g2');
+      await group('g3');
+      await asin('a1');
+      expect(
+        (await request('POST', 'asins/a1/move', { targetGroupId: 'g2' }))
+          .statusCode,
+      ).toBe(200);
+      const before = await snapshot();
+      for (const targetGroupId of ['g2', 'g3']) {
+        const response = await request('POST', 'asins/a1/move', {
+          targetGroupId,
+          expectedSourceGroup: 'g1',
+        });
+        expect(response.statusCode).toBe(409);
+        expect(await snapshot()).toEqual(before);
+      }
+      expect(
+        (
+          await request('POST', 'asins/a1/move', {
+            targetGroupId: 'g3',
+            expectedSourceGroup: 'g2',
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect((await snapshot()).asins[0].variant_group_id).toBe('g3');
+    });
+    it('rechecks the confirmed move parent after waiting for its row lock', async () => {
+      await group('g1');
+      await group('g2');
+      await group('g3');
+      await asin('a1');
+      const client = await f.pools.competitorPool.connect();
+      let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
+        );
+        pending = Promise.resolve(
+          request('POST', 'asins/a1/move', {
+            targetGroupId: 'g3',
+            expectedSourceGroup: 'g1',
+          }),
+        );
+        await blocked(client);
+        await client.query(
+          "UPDATE competitor_asins SET variant_group_id='g2' WHERE id='a1'",
+        );
+        await client.query('COMMIT');
+        expect((await pending).statusCode).toBe(409);
+        expect((await snapshot()).asins[0].variant_group_id).toBe('g2');
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+        await pending?.catch(() => {});
+      }
+    });
+    it.each([
+      "name='Concurrent target rename'",
+      "country='DE'",
+      "brand='Concurrent target brand'",
+      "update_time='2020-01-01 08:00:01'",
+    ])(
+      'rejects a move when the confirmed target changes while waiting for its group lock: %s',
+      async (change) => {
+        await group('g1');
+        await group('g2');
+        await asin('a1');
+        const old = competitorGroupResultSchema.parse(
+          (
+            await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/competitor/variant-groups/g2',
+              headers,
+            })
+          ).json(),
+        ).data!;
+        const expectedTargetSnapshot = {
+          id: old.id,
+          name: old.name,
+          country: old.country,
+          brand: old.brand,
+          updateTime: old.updateTime,
+        };
+        const blocker = await f.pools.competitorPool.connect();
+        let pending: Promise<Awaited<ReturnType<typeof request>>> | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            "SELECT id FROM competitor_variant_groups WHERE id='g2' FOR UPDATE",
+          );
+          pending = Promise.resolve(
+            request('POST', 'asins/a1/move', {
+              targetGroupId: 'g2',
+              expectedSourceGroup: 'g1',
+              expectedTargetSnapshot,
+            }),
+          );
+          await blocked(blocker);
+          await blocker.query(
+            `UPDATE competitor_variant_groups SET ${change} WHERE id='g2'`,
+          );
+          await blocker.query('COMMIT');
+          const concurrentState = await snapshot();
+          const response = await pending;
+          expect(response.statusCode).toBe(409);
+          expect(response.json().errorMessage).toBe(
+            '竞品记录已变化，请刷新后重试',
+          );
+          expect(await snapshot()).toEqual(concurrentState);
+          expect(concurrentState.asins[0].variant_group_id).toBe('g1');
+        } finally {
+          await blocker.query('ROLLBACK');
+          blocker.release();
+          await pending?.catch(() => {});
+        }
+      },
+    );
+    it('checks a guarded same-group target before its otherwise successful no-op', async () => {
+      await group('g1');
+      await asin('a1');
+      const old = competitorGroupResultSchema.parse(
+        (
+          await f.http.inject({
+            method: 'GET',
+            url: '/api/v1/competitor/variant-groups/g1',
+            headers,
+          })
+        ).json(),
+      ).data!;
+      const before = await snapshot();
+      const expectedTargetSnapshot = {
+        id: old.id,
+        name: old.name,
+        country: old.country,
+        brand: old.brand,
+        updateTime: old.updateTime,
+      };
+      const body = {
+        targetGroupId: 'g1',
+        expectedSourceGroup: 'g1',
+        expectedTargetSnapshot,
+      };
+      expect((await request('POST', 'asins/a1/move', body)).statusCode).toBe(
+        200,
+      );
+      expect(await snapshot()).toEqual(before);
+      for (const patch of [
+        { id: 'other-id' },
+        { name: 'Changed target' },
+        { country: 'DE' },
+        { brand: 'Changed brand' },
+        { updateTime: '2020-01-01T00:00:01.000Z' },
+      ]) {
+        expect(
+          (
+            await request('POST', 'asins/a1/move', {
+              ...body,
+              expectedTargetSnapshot: { ...expectedTargetSnapshot, ...patch },
+            })
+          ).statusCode,
+        ).toBe(409);
+        expect(await snapshot()).toEqual(before);
+      }
     });
     it('keeps same-group moves as true no-ops', async () => {
       await group('g1');
@@ -1085,7 +1695,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               await request(
                 value.method,
                 value.path,
-                value.method === 'PUT' ? { enabled: true } : undefined,
+                value.method === 'PUT'
+                  ? { enabled: true }
+                  : value.path.startsWith('variant-groups/')
+                  ? { expectedChildIds: [] }
+                  : undefined,
               )
             ).statusCode,
           ).toBe(503);

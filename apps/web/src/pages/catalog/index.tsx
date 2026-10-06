@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { tableFeatures, useTable, type ColumnDef } from '@tanstack/react-table';
 import {
   ChevronDown,
@@ -11,10 +12,12 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
@@ -23,6 +26,7 @@ import { Button } from '../../components/ui/button';
 import {
   EmptyState,
   FilterChip,
+  Progress,
   Skeleton,
   StatusBadge,
 } from '../../components/ui/feedback';
@@ -33,7 +37,17 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
+import { useTaskQuery } from '../../hooks/tasks';
+import { ApiError } from '../../lib/http';
+import { isTerminalTask } from '../../services/tasks';
 import { CatalogActionPanel } from './catalog-actions';
+import { summarizeCheckResult } from './catalog-check-feedback';
+import {
+  browserCheckRecovery,
+  catalogCheckGateKey,
+  type CatalogCheckGate,
+  type CheckTarget,
+} from './catalog-check-recovery';
 import {
   asinGroupManualAction,
   asinManualAction,
@@ -47,6 +61,13 @@ import {
   statusOf,
   statusSource,
 } from './catalog-data';
+import {
+  catalogSafetyKey,
+  catalogSafetyStorage,
+  readCatalogSafetyGate,
+  writeCatalogSafetyGate,
+  type CatalogSafetyGate,
+} from './catalog-safety-gate';
 import type {
   CatalogAction,
   CatalogConfig,
@@ -58,8 +79,21 @@ const PAGE_SIZES = [10, 20, 50, 100] as const;
 const CHILD_PAGE_SIZE = 50;
 const TABLE_FEATURES = tableFeatures({});
 type StatusFilter = 'ALL' | 'BROKEN' | 'NORMAL';
+type CheckState = {
+  target: CheckTarget;
+  phase:
+    | 'submitting'
+    | 'task'
+    | 'unknown'
+    | 'refreshing'
+    | 'completed'
+    | 'error';
+  gate?: CatalogCheckGate;
+  taskId?: string;
+  uncertain?: boolean;
+  message?: string;
+};
 const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
-
 function Notice({
   title,
   error,
@@ -88,11 +122,13 @@ function GroupCard({
   config,
   selected,
   onSelect,
+  disabled,
 }: {
   group: CatalogGroup;
   config: CatalogConfig;
   selected: boolean;
   onSelect: () => void;
+  disabled?: boolean;
 }) {
   return (
     <li className="rounded-control border border-border bg-card p-4 sm:p-5">
@@ -115,6 +151,7 @@ function GroupCard({
           variant="secondary"
           size="small"
           aria-expanded={selected}
+          disabled={disabled}
           onClick={onSelect}
         >
           {selected ? '收起详情' : '查看 ASIN'}
@@ -160,8 +197,11 @@ function GroupDetail({
   onChildPageChange,
   canWrite,
   canDelete,
+  canCheck,
+  checkBusy,
   actionsDisabled,
   onAction,
+  onCheck,
   onDenied,
 }: {
   id: string;
@@ -171,8 +211,11 @@ function GroupDetail({
   onChildPageChange: (page: number) => void;
   canWrite?: boolean;
   canDelete?: boolean;
+  canCheck?: boolean;
+  checkBusy?: boolean;
   actionsDisabled?: boolean;
   onAction?: (action: CatalogAction) => void;
+  onCheck?: (target: CheckTarget) => void;
   onDenied?: () => void;
 }) {
   const { runtime } = useAuth();
@@ -190,6 +233,9 @@ function GroupDetail({
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  useEffect(() => {
+    if (detail.isError && catalogAccessDenied(detail.error)) onDenied?.();
+  }, [detail.error, detail.isError, onDenied]);
   const group = detail.data;
   const children = group?.children ?? [];
   const childPages = Math.max(1, Math.ceil(children.length / CHILD_PAGE_SIZE));
@@ -334,8 +380,25 @@ function GroupDetail({
                 人工标记原因：{group.manualBrokenReason}
               </p>
             )}
-            {(canWrite || canDelete) && (
+            {(canWrite || canDelete || canCheck) && (
               <div className="flex flex-wrap gap-2">
+                {canCheck && (
+                  <Button
+                    variant="secondary"
+                    size="small"
+                    disabled={checkBusy}
+                    onClick={() =>
+                      onCheck?.({
+                        kind: 'group',
+                        id: group.id,
+                        label: group.name || group.id,
+                      })
+                    }
+                  >
+                    <RefreshCw aria-hidden="true" />
+                    立即检查
+                  </Button>
+                )}
                 {canWrite && (
                   <>
                     <Button
@@ -355,24 +418,28 @@ function GroupDetail({
                     >
                       添加 ASIN
                     </Button>
-                    <Button
-                      variant="secondary"
-                      size="small"
-                      disabled={preparingAction || actionsDisabled}
-                      onClick={() => void prepareAction('group-notify')}
-                    >
-                      {group.feishuNotifyEnabled
-                        ? '关闭飞书通知'
-                        : '开启飞书通知'}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="small"
-                      disabled={preparingAction || actionsDisabled}
-                      onClick={() => void prepareAction('group-manual')}
-                    >
-                      {group.manualBroken ? '清除人工标记' : '标记人工异常'}
-                    </Button>
+                    {config.id === 'asin' && (
+                      <>
+                        <Button
+                          variant="secondary"
+                          size="small"
+                          disabled={preparingAction || actionsDisabled}
+                          onClick={() => void prepareAction('group-notify')}
+                        >
+                          {group.feishuNotifyEnabled
+                            ? '关闭飞书通知'
+                            : '开启飞书通知'}
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="small"
+                          disabled={preparingAction || actionsDisabled}
+                          onClick={() => void prepareAction('group-manual')}
+                        >
+                          {group.manualBroken ? '清除人工标记' : '标记人工异常'}
+                        </Button>
+                      </>
+                    )}
                   </>
                 )}
                 {canDelete && (
@@ -450,8 +517,25 @@ function GroupDetail({
                             ` · 排除原因：${child.manualExcludedReason}`}
                         </p>
                       )}
-                      {(canWrite || canDelete) && (
+                      {(canWrite || canDelete || canCheck) && (
                         <div className="mt-3 flex flex-wrap gap-2">
+                          {canCheck && (
+                            <Button
+                              variant="secondary"
+                              size="small"
+                              disabled={checkBusy}
+                              onClick={() =>
+                                onCheck?.({
+                                  kind: 'asin',
+                                  id: child.id,
+                                  label: child.asin,
+                                })
+                              }
+                            >
+                              <RefreshCw aria-hidden="true" />
+                              立即检查
+                            </Button>
+                          )}
                           {canWrite && (
                             <>
                               <Button
@@ -474,48 +558,64 @@ function GroupDetail({
                               >
                                 移动
                               </Button>
-                              <Button
-                                variant="secondary"
-                                size="small"
-                                disabled={preparingAction || actionsDisabled}
-                                onClick={() =>
-                                  void prepareAction('asin-notify', child.id)
-                                }
-                              >
-                                {child.feishuNotifyEnabled
-                                  ? '关闭通知'
-                                  : '开启通知'}
-                              </Button>
-                              <Button
-                                variant="secondary"
-                                size="small"
-                                disabled={preparingAction || actionsDisabled}
-                                onClick={() =>
-                                  void prepareAction('asin-manual', child.id)
-                                }
-                              >
-                                {asinManualAction(child) === 'MARK_BROKEN'
-                                  ? '标记异常'
-                                  : '清除自身标记'}
-                              </Button>
-                              {asinGroupManualAction(child) && (
-                                <Button
-                                  variant="secondary"
-                                  size="small"
-                                  disabled={preparingAction || actionsDisabled}
-                                  onClick={() =>
-                                    void prepareAction(
-                                      'asin-manual',
-                                      child.id,
-                                      'group',
-                                    )
-                                  }
-                                >
-                                  {asinGroupManualAction(child) ===
-                                  'EXCLUDE_GROUP_MANUAL'
-                                    ? '排除组标记'
-                                    : '恢复组标记'}
-                                </Button>
+                              {config.id === 'asin' && (
+                                <>
+                                  <Button
+                                    variant="secondary"
+                                    size="small"
+                                    disabled={
+                                      preparingAction || actionsDisabled
+                                    }
+                                    onClick={() =>
+                                      void prepareAction(
+                                        'asin-notify',
+                                        child.id,
+                                      )
+                                    }
+                                  >
+                                    {child.feishuNotifyEnabled
+                                      ? '关闭通知'
+                                      : '开启通知'}
+                                  </Button>
+                                  <Button
+                                    variant="secondary"
+                                    size="small"
+                                    disabled={
+                                      preparingAction || actionsDisabled
+                                    }
+                                    onClick={() =>
+                                      void prepareAction(
+                                        'asin-manual',
+                                        child.id,
+                                      )
+                                    }
+                                  >
+                                    {asinManualAction(child) === 'MARK_BROKEN'
+                                      ? '标记异常'
+                                      : '清除自身标记'}
+                                  </Button>
+                                  {asinGroupManualAction(child) && (
+                                    <Button
+                                      variant="secondary"
+                                      size="small"
+                                      disabled={
+                                        preparingAction || actionsDisabled
+                                      }
+                                      onClick={() =>
+                                        void prepareAction(
+                                          'asin-manual',
+                                          child.id,
+                                          'group',
+                                        )
+                                      }
+                                    >
+                                      {asinGroupManualAction(child) ===
+                                      'EXCLUDE_GROUP_MANUAL'
+                                        ? '排除组标记'
+                                        : '恢复组标记'}
+                                    </Button>
+                                  )}
+                                </>
                               )}
                             </>
                           )}
@@ -580,8 +680,11 @@ export function GroupRows({
   onSelect,
   canWrite,
   canDelete,
+  canCheck,
+  checkBusy,
   actionsDisabled,
   onAction,
+  onCheck,
   onDenied,
 }: {
   groups: CatalogGroup[];
@@ -590,8 +693,11 @@ export function GroupRows({
   onSelect: (id: string) => void;
   canWrite?: boolean;
   canDelete?: boolean;
+  canCheck?: boolean;
+  checkBusy?: boolean;
   actionsDisabled?: boolean;
   onAction?: (action: CatalogAction) => void;
+  onCheck?: (target: CheckTarget) => void;
   onDenied?: () => void;
 }) {
   // Both CSS layouts stay mounted; one parent page keeps rotation/resize stable.
@@ -672,6 +778,7 @@ export function GroupRows({
             variant="secondary"
             size="small"
             aria-expanded={selectedId === row.original.id}
+            disabled={actionsDisabled}
             onClick={() => toggleGroup(row.original.id)}
           >
             {selectedId === row.original.id ? '收起' : '查看'}
@@ -679,7 +786,7 @@ export function GroupRows({
         ),
       },
     ],
-    [config, selectedId, toggleGroup],
+    [actionsDisabled, config, selectedId, toggleGroup],
   );
   const table = useTable({
     features: TABLE_FEATURES,
@@ -698,6 +805,7 @@ export function GroupRows({
               config={config}
               selected={selectedId === row.id}
               onSelect={() => toggleGroup(row.id)}
+              disabled={actionsDisabled}
             />
             {selectedId === row.id && (
               <li>
@@ -709,8 +817,11 @@ export function GroupRows({
                   onChildPageChange={setChildPage}
                   canWrite={canWrite}
                   canDelete={canDelete}
+                  canCheck={canCheck}
+                  checkBusy={checkBusy}
                   actionsDisabled={actionsDisabled}
                   onAction={onAction}
+                  onCheck={onCheck}
                   onDenied={onDenied}
                 />
               </li>
@@ -768,8 +879,11 @@ export function GroupRows({
                         onChildPageChange={setChildPage}
                         canWrite={canWrite}
                         canDelete={canDelete}
+                        canCheck={canCheck}
+                        checkBusy={checkBusy}
                         actionsDisabled={actionsDisabled}
                         onAction={onAction}
+                        onCheck={onCheck}
                         onDenied={onDenied}
                       />
                     </td>
@@ -784,14 +898,137 @@ export function GroupRows({
   );
 }
 
-export function CatalogPage({ config }: { config: CatalogConfig }) {
+export function CatalogPage({
+  config,
+  extra,
+}: {
+  config: CatalogConfig;
+  extra?: ReactNode;
+}) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
+  const ownerId = auth.status === 'authenticated' ? auth.identity.user.id : '';
+  const safetyKey = useMemo(
+    () => ['catalog-write-safety', ownerId, config.id] as const,
+    [config.id, ownerId],
+  );
+  const [hydratedSafetyKey, setHydratedSafetyKey] = useState<
+    typeof safetyKey | null
+  >(null);
+  const safetyHydrated = !config.writes || hydratedSafetyKey === safetyKey;
+  const [storageUnavailable, setStorageUnavailable] = useState(() =>
+    Boolean(ownerId && config.writes && !catalogSafetyStorage()),
+  );
+  const [storageRecoveryError, setStorageRecoveryError] = useState<
+    string | null
+  >(null);
+  const [recoveringStorage, setRecoveringStorage] = useState(false);
+  const safety = useQuery<CatalogSafetyGate | null>({
+    queryKey: safetyKey,
+    queryFn: () => null,
+    enabled: false,
+    initialData: () => {
+      if (!ownerId || !config.writes) return null;
+      const stored = catalogSafetyStorage();
+      return stored ? readCatalogSafetyGate(stored, ownerId, config.id) : null;
+    },
+    gcTime: Infinity,
+  }).data;
+  const setSafety = (
+    next: CatalogSafetyGate | null,
+    expected?: CatalogSafetyGate,
+  ): boolean => {
+    const stored = catalogSafetyStorage();
+    if (!stored) {
+      setStorageUnavailable(true);
+      runtime.queryClient.setQueryData(
+        safetyKey,
+        expected ?? next ?? safety ?? null,
+      );
+      return false;
+    }
+    const current = stored
+      ? readCatalogSafetyGate(stored, ownerId, config.id)
+      : null;
+    if (expected && JSON.stringify(current) !== JSON.stringify(expected)) {
+      runtime.queryClient.setQueryData(
+        safetyKey,
+        current ?? { phase: 'inspection' },
+      );
+      return false;
+    }
+    const saved =
+      stored && writeCatalogSafetyGate(stored, ownerId, config.id, next);
+    if (!saved) setStorageUnavailable(true);
+    runtime.queryClient.setQueryData(
+      safetyKey,
+      saved ? next : current ?? expected ?? next,
+    );
+    return Boolean(saved);
+  };
+  const runWithCatalogLock = async (work: () => Promise<void>) => {
+    if (!navigator.locks)
+      throw new ApiError(
+        'INVALID_INPUT',
+        '浏览器不支持安全的跨标签写入锁，请使用支持 Web Locks 的浏览器。',
+      );
+    await navigator.locks.request(catalogSafetyKey(ownerId, config.id), work);
+  };
+  const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {
+    const stored = catalogSafetyStorage();
+    if (!stored) {
+      setStorageUnavailable(true);
+      throw new ApiError(
+        'INVALID_INPUT',
+        '浏览器本地存储不可用，无法安全提交。',
+      );
+    }
+    const existing = readCatalogSafetyGate(stored, ownerId, config.id);
+    if (existing) {
+      runtime.queryClient.setQueryData(safetyKey, existing);
+      throw new ApiError('INVALID_INPUT', '已有写入结果待核实，请先重读目录。');
+    }
+    const gate: CatalogSafetyGate = {
+      phase: 'refresh',
+      message: null,
+      detailId:
+        candidate.type === 'delete-group' || candidate.type === 'create-group'
+          ? null
+          : candidate.group.id,
+      createUncertain:
+        candidate.type === 'create-group' || candidate.type === 'create-asin',
+      operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    };
+    if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {
+      setStorageUnavailable(true);
+      throw new ApiError(
+        'INVALID_INPUT',
+        '无法保存写入状态，请检查浏览器本地存储权限。',
+      );
+    }
+    return gate;
+  };
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
-  const canWrite = Boolean(config.writes && access.canWriteASIN);
-  const canDelete = Boolean(config.writes && access.canDeleteASIN);
+  const canWrite = Boolean(
+    config.writes &&
+      safetyHydrated &&
+      access.canWriteASIN &&
+      !safety &&
+      !storageUnavailable,
+  );
+  const canDelete = Boolean(
+    config.writes &&
+      safetyHydrated &&
+      (config.id === 'competitor'
+        ? access.canWriteASIN
+        : access.canDeleteASIN) &&
+      !safety &&
+      !storageUnavailable,
+  );
+  const canCheck = Boolean(config.checks && access.canReadASIN);
+  const userId = auth.status === 'authenticated' ? auth.identity.user.id : '';
   const [action, setAction] = useState<CatalogAction | null>(null);
   const [actionSerial, setActionSerial] = useState(0);
   const [writing, setWriting] = useState(false);
@@ -807,12 +1044,169 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const [status, setStatus] = useState<StatusFilter>('ALL');
   const [query, setQuery] = useState<CatalogQuery>(INITIAL_QUERY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const crossTabSafetyRevision = useRef(0);
+  const clearCatalogCache = useCallback(async () => {
+    await runtime.queryClient
+      .cancelQueries({ queryKey: [config.id] })
+      .catch(() => undefined);
+    runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
+    runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+  }, [config.id, runtime.queryClient]);
+  const [forceRefresh, setForceRefresh] = useState(true);
+  const [checkState, setCheckState] = useState<CheckState | null>(null);
+  const checkBusyRef = useRef(false);
+  const mounted = useRef(true);
+  const checkOwner = useRef(userId);
+  checkOwner.current = userId;
+  const checkRequest = useRef<AbortController | null>(null);
+  const recovery = useMemo(() => {
+    try {
+      return config.checks && userId
+        ? browserCheckRecovery(config.id, userId)
+        : null;
+    } catch {
+      return null;
+    }
+  }, [config.checks, config.id, userId]);
+  const handledTasks = useRef(new Set<string>());
+  const handlingTasks = useRef(new Set<string>());
+  const checkBusy =
+    checkState?.phase === 'submitting' ||
+    checkState?.phase === 'task' ||
+    checkState?.phase === 'unknown' ||
+    checkState?.phase === 'refreshing';
+  const restoreCheck = useCallback(() => {
+    if (!recovery || !canCheck) return;
+    try {
+      const gate = recovery.read();
+      if (gate) {
+        checkBusyRef.current = true;
+        setCheckState({
+          target: gate.target,
+          gate,
+          phase: gate.taskId ? 'task' : 'unknown',
+          taskId: gate.taskId,
+          uncertain: true,
+          message: '上次提交结果待核实，请先查看任务中心；核实前不会重复提交。',
+        });
+      } else if (!checkRequest.current) {
+        checkBusyRef.current = false;
+        setCheckState(null);
+      }
+    } catch {
+      setNotice(
+        '无法读取浏览器中的检查记录，请恢复本地存储后重试；尚未发送新请求。',
+      );
+    }
+  }, [canCheck, recovery]);
+  const restoreCurrentCheck = useRef(restoreCheck);
+  restoreCurrentCheck.current = restoreCheck;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      checkRequest.current?.abort();
+    };
+  }, []);
+  useEffect(() => {
+    restoreCheck();
+    const sync = (event: StorageEvent) => {
+      if (event.key === catalogCheckGateKey(config.id, userId)) restoreCheck();
+    };
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
+  }, [config.id, restoreCheck, userId]);
+  const checkTask = useTaskQuery(
+    runtime,
+    checkState?.phase === 'task' ? checkState.taskId : undefined,
+    checkState?.phase === 'task' && !accessDenied,
+  );
   const groups = useQuery({
     queryKey: [config.id, 'groups', query],
     queryFn: ({ signal }) => config.list(runtime.http, query, signal),
+    enabled: () =>
+      safetyHydrated &&
+      runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey)
+        ?.phase !== 'refresh',
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  useLayoutEffect(() => {
+    if (!ownerId || !config.writes) return;
+    let active = true;
+    const syncSafety = (event?: StorageEvent) => {
+      // The writable-storage probe broadcasts its own set/remove events to
+      // other tabs. Ignore unrelated keys before any probe can broadcast again.
+      if (event && event.key !== catalogSafetyKey(ownerId, config.id)) return;
+      const stored = catalogSafetyStorage();
+      if (!stored) {
+        setStorageUnavailable(true);
+        return;
+      }
+      if (event && event.storageArea !== stored) return;
+      const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
+      const revision = ++crossTabSafetyRevision.current;
+      if (incoming) {
+        runtime.queryClient.setQueryData(safetyKey, incoming);
+        if (incoming.phase === 'refresh') {
+          setAction(null);
+          setSelectedId(null);
+          setNotice(null);
+          void clearCatalogCache();
+        }
+        return;
+      }
+      const currentSafety =
+        runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+      if (
+        currentSafety?.phase !== 'refresh' &&
+        currentSafety?.phase !== 'inspection'
+      ) {
+        runtime.queryClient.setQueryData(safetyKey, null);
+        return;
+      }
+      void (async () => {
+        try {
+          await clearCatalogCache();
+          const firstPage = await config.list(runtime.http, query);
+          const lastPage = Math.max(
+            1,
+            Math.ceil(firstPage.total / firstPage.pageSize),
+          );
+          const correctedQuery =
+            firstPage.current > lastPage
+              ? { ...query, current: lastPage }
+              : query;
+          const fresh =
+            correctedQuery === query
+              ? firstPage
+              : await config.list(runtime.http, correctedQuery);
+          if (
+            !active ||
+            revision !== crossTabSafetyRevision.current ||
+            readCatalogSafetyGate(stored, ownerId, config.id)
+          )
+            return;
+          runtime.queryClient.setQueryData(
+            [config.id, 'groups', correctedQuery],
+            fresh,
+          );
+          if (correctedQuery !== query) setQuery(correctedQuery);
+          runtime.queryClient.setQueryData(safetyKey, null);
+        } catch {
+          // Keep the safety gate until this tab can reread the catalog.
+        }
+      })();
+    };
+    // The disabled query may cache null while the page misses storage events.
+    syncSafety();
+    setHydratedSafetyKey(safetyKey);
+    window.addEventListener('storage', syncSafety);
+    return () => {
+      active = false;
+      window.removeEventListener('storage', syncSafety);
+    };
+  }, [clearCatalogCache, config, ownerId, query, runtime, safetyKey]);
   useEffect(() => {
     if (!action) return;
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -823,45 +1217,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
 
-  function openAction(next: CatalogAction) {
-    if (writingRef.current) return;
-    setActionSerial((previous) => previous + 1);
-    setAction(next);
-  }
-
-  function writingChange(next: boolean) {
-    writingRef.current = next;
-    setWriting(next);
-  }
-
-  function applyFilters(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAction(null);
-    setSelectedId(null);
-    setQuery({
-      keyword: keyword.trim() || undefined,
-      country: country.trim().toUpperCase() || undefined,
-      variantStatus: status === 'ALL' ? undefined : status,
-      current: 1,
-      pageSize: query.pageSize,
-    });
-  }
-  function changePage(next: number) {
-    setAction(null);
-    setSelectedId(null);
-    setQuery((previous) => ({ ...previous, current: next }));
-  }
-
-  function reportAccessDenied() {
-    setAccessDenied(true);
-    setAction(null);
-    setNotice(null);
-    if (recheckActive.current) return;
-    runtime.clearUserWork();
-    void recheckAccess();
-  }
-
-  async function recheckAccess() {
+  const recheckAccess = useCallback(async () => {
     if (recheckActive.current) return;
     recheckActive.current = true;
     setRechecking(true);
@@ -884,35 +1240,568 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
       recheckActive.current = false;
       setRechecking(false);
     }
-  }
+  }, [config, identity, query, runtime]);
 
-  async function afterWrite(message: string, savedAction: CatalogAction) {
-    if (savedAction.type === 'delete-group') setSelectedId(null);
-    setNotice(message);
-    announce(message);
+  const reportAccessDenied = useCallback(() => {
+    setAccessDenied(true);
+    setAction(null);
+    setSelectedId(null);
+    setNotice(null);
+    setCheckState(null);
+    checkBusyRef.current = false;
+    if (recheckActive.current) return;
+    const outstanding =
+      runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+    runtime.clearUserWork();
+    if (outstanding) runtime.queryClient.setQueryData(safetyKey, outstanding);
+    void recheckAccess();
+  }, [recheckAccess, runtime, safetyKey]);
+
+  const refreshCheckedCatalog = useCallback(async () => {
+    const guard = () => {
+      if (!mounted.current || checkOwner.current !== userId)
+        throw new ApiError('CANCELLED', '身份或页面已变化');
+    };
+    guard();
     await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+    guard();
     await runtime.queryClient.invalidateQueries({
       queryKey: [config.id],
       refetchType: 'none',
     });
+    guard();
+    const fresh = await config.list(runtime.http, query);
+    guard();
+    runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
+    if (selectedId) {
+      const detail = await config.detail(runtime.http, selectedId);
+      guard();
+      runtime.queryClient.setQueryData(
+        [config.id, 'group', selectedId],
+        detail,
+      );
+    }
+  }, [config, query, runtime, selectedId, userId]);
+
+  useEffect(() => {
+    if (
+      checkState?.phase === 'task' &&
+      checkTask.isError &&
+      catalogAccessDenied(checkTask.error)
+    )
+      reportAccessDenied();
+  }, [
+    checkState?.phase,
+    checkTask.error,
+    checkTask.isError,
+    reportAccessDenied,
+  ]);
+
+  useEffect(() => {
+    const task = checkTask.data;
+    if (
+      checkState?.phase !== 'task' ||
+      !checkState.taskId ||
+      task?.taskId !== checkState.taskId ||
+      !isTerminalTask(task.status) ||
+      handledTasks.current.has(task.taskId) ||
+      handlingTasks.current.has(task.taskId)
+    )
+      return;
+    handlingTasks.current.add(task.taskId);
+    setCheckState((current) =>
+      current?.taskId === task.taskId
+        ? { ...current, phase: 'refreshing' }
+        : current,
+    );
+    const gate = checkState.gate;
+    void (async () => {
+      let message =
+        task.status === 'completed'
+          ? summarizeCheckResult(task.result)
+          : task.error || task.message || '检查任务未完成。';
+      try {
+        await refreshCheckedCatalog();
+      } catch (error) {
+        if (catalogAccessDenied(error)) {
+          reportAccessDenied();
+          return;
+        }
+        message += '，目录刷新失败，请手动刷新。';
+      }
+      const cleared = !gate || Boolean(await recovery?.clear(gate));
+      if (!mounted.current || checkOwner.current !== userId) return;
+      if (cleared) handledTasks.current.add(task.taskId);
+      checkBusyRef.current = !cleared;
+      setCheckState((current) =>
+        current?.taskId === task.taskId
+          ? {
+              ...current,
+              phase: cleared
+                ? task.status === 'completed'
+                  ? 'completed'
+                  : 'error'
+                : 'unknown',
+              message: cleared
+                ? message
+                : '任务已结束，但无法清除浏览器检查记录，请恢复存储后重新核实。',
+            }
+          : current,
+      );
+    })()
+      .catch(() => {
+        if (mounted.current && checkOwner.current === userId)
+          setCheckState((current) =>
+            current?.taskId === task.taskId
+              ? {
+                  ...current,
+                  phase: 'unknown',
+                  message: '无法保存任务核实结果，请恢复浏览器存储后重试。',
+                }
+              : current,
+          );
+      })
+      .finally(() => handlingTasks.current.delete(task.taskId));
+  }, [
+    checkState,
+    checkTask.data,
+    refreshCheckedCatalog,
+    reportAccessDenied,
+    recovery,
+    userId,
+  ]);
+
+  async function runCheck(target: CheckTarget) {
+    if (!config.checks || !canCheck || checkBusyRef.current || checkBusy)
+      return;
+    checkBusyRef.current = true;
+    setNotice(null);
+    setCheckState({ target, phase: 'submitting' });
+    const current = () => mounted.current && checkOwner.current === userId;
+    const controller = new AbortController();
+    checkRequest.current = controller;
+    let staleSubmission = false;
     try {
-      const fresh = await config.list(runtime.http, query);
-      runtime.queryClient.setQueryData([config.id, 'groups', query], fresh);
-      if (selectedId && savedAction.type !== 'delete-group') {
-        const detail = await config.detail(runtime.http, selectedId);
-        runtime.queryClient.setQueryData(
-          [config.id, 'group', selectedId],
-          detail,
+      if (!recovery) throw new Error('CHECK_GATE_UNAVAILABLE');
+      const result = await recovery.submit(
+        target,
+        () =>
+          config.checks![target.kind](
+            runtime.http,
+            target.id,
+            { forceRefresh },
+            controller.signal,
+          ),
+        current,
+      );
+      if (!current() || result.kind === 'stale') {
+        staleSubmission = true;
+        return;
+      }
+      if (result.kind === 'task' || result.kind === 'blocked') {
+        const gate = result.gate;
+        setCheckState({
+          target: gate.target,
+          gate,
+          phase: gate.taskId ? 'task' : 'unknown',
+          taskId: gate.taskId,
+          uncertain: result.kind === 'blocked' || result.uncertain,
+          message: '已有提交待核实，请先查看任务中心。',
+        });
+        if (result.kind === 'task' && !result.persisted)
+          setNotice(
+            `浏览器未能保存最新任务编号，请记录 ${gate.taskId} 并到任务中心核实；原防重记录仍保留。`,
+          );
+        void runtime.queryClient.invalidateQueries({
+          queryKey: ['tasks', 'list'],
+        });
+        return;
+      }
+      if (result.kind === 'unknown' || result.kind === 'rejected') {
+        const uncertain = result.kind === 'unknown';
+        checkBusyRef.current = uncertain;
+        setCheckState({
+          target,
+          gate: uncertain ? result.gate : undefined,
+          phase: uncertain ? 'unknown' : 'error',
+          message: uncertain
+            ? '提交结果未确认，请按提交时间和目标到任务中心核实，避免重复检查。'
+            : catalogError(result.error),
+        });
+        if (catalogAccessDenied(result.error)) reportAccessDenied();
+        return;
+      }
+      if (!result.cleared) {
+        setCheckState({
+          target,
+          gate: result.gate,
+          phase: 'unknown',
+          message:
+            '检查已完成，但无法清除本地记录；请核实目录并恢复存储后解锁。',
+        });
+        return;
+      }
+      setCheckState({ target, phase: 'refreshing' });
+      try {
+        await refreshCheckedCatalog();
+        if (!current()) return;
+        setCheckState({
+          target,
+          phase: 'completed',
+          message: summarizeCheckResult(result.result),
+        });
+      } catch (error) {
+        if (!current()) return;
+        if (catalogAccessDenied(error)) {
+          reportAccessDenied();
+          return;
+        }
+        setCheckState({
+          target,
+          phase: 'completed',
+          message: '检查完成，目录刷新失败，请手动刷新。',
+        });
+      } finally {
+        checkBusyRef.current = false;
+      }
+    } catch (error) {
+      if (!current()) return;
+      checkBusyRef.current = false;
+      if (catalogAccessDenied(error)) {
+        reportAccessDenied();
+        return;
+      }
+      setCheckState({
+        target,
+        phase: 'error',
+        message:
+          error instanceof ApiError
+            ? catalogError(error)
+            : '无法安全保存检查记录，请恢复浏览器本地存储和跨标签锁后重试；尚未发送新请求。',
+      });
+    } finally {
+      if (checkRequest.current === controller) {
+        checkRequest.current = null;
+        // The new owner's effect may have run while this old request was set.
+        // Restore that owner's persisted gate, rather than clearing shared state.
+        if (mounted.current && (staleSubmission || !current()))
+          restoreCurrentCheck.current();
+      }
+    }
+  }
+
+  async function reconcileCheck() {
+    const gate = checkState?.gate;
+    if (!gate || !recovery || checkRequest.current) return;
+    try {
+      const outcome = await recovery.reconcile(
+        gate,
+        (id) => runtime.tasks.get(id),
+        refreshCheckedCatalog,
+      );
+      if (!mounted.current || checkOwner.current !== userId) return;
+      if (outcome === 'active') {
+        setCheckState({
+          target: gate.target,
+          gate,
+          taskId: gate.taskId,
+          phase: 'task',
+        });
+        setNotice('该任务仍在排队或执行，请等待终态或到任务中心核实。');
+        return;
+      }
+      if (outcome !== 'cleared') {
+        restoreCheck();
+        setNotice('检查记录已变化或存储不可用，请重新核实。');
+        return;
+      }
+      checkBusyRef.current = false;
+      setCheckState(null);
+      setNotice('已核实原任务，可以重新提交检查。');
+    } catch (error) {
+      if (!mounted.current || checkOwner.current !== userId) return;
+      if (catalogAccessDenied(error)) reportAccessDenied();
+      else
+        setNotice(
+          '任务核实或目录重读未完成，防重记录继续保留。请到任务中心核实后重试读取。',
         );
+    }
+  }
+
+  function openAction(next: CatalogAction) {
+    if (writingRef.current || runtime.queryClient.getQueryData(safetyKey))
+      return;
+    setActionSerial((previous) => previous + 1);
+    setAction(next);
+  }
+
+  function writingChange(next: boolean) {
+    writingRef.current = next;
+    setWriting(next);
+  }
+
+  function applyFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (writingRef.current) return;
+    setAction(null);
+    setSelectedId(null);
+    setQuery({
+      keyword: keyword.trim() || undefined,
+      country: country.trim().toUpperCase() || undefined,
+      variantStatus: status === 'ALL' ? undefined : status,
+      current: 1,
+      pageSize: query.pageSize,
+    });
+  }
+  function changePage(next: number) {
+    if (writingRef.current) return;
+    setAction(null);
+    setSelectedId(null);
+    setQuery((previous) => ({ ...previous, current: next }));
+  }
+
+  async function reportUncertainWrite(
+    uncertainAction: CatalogAction,
+    claim: CatalogSafetyGate,
+  ) {
+    setSelectedId(null);
+    setAction(null);
+    setNotice(null);
+    setSafety(
+      {
+        phase: 'refresh',
+        message: null,
+        detailId:
+          uncertainAction.type === 'delete-group' ||
+          uncertainAction.type === 'create-group'
+            ? null
+            : uncertainAction.group.id,
+        createUncertain:
+          uncertainAction.type === 'create-group' ||
+          uncertainAction.type === 'create-asin',
+        operationId: claim.operationId,
+      },
+      claim,
+    );
+    await clearCatalogCache();
+  }
+
+  useEffect(() => {
+    if (groups.isError && catalogAccessDenied(groups.error))
+      reportAccessDenied();
+  }, [groups.error, groups.isError, reportAccessDenied]);
+
+  async function readAfterWrite(detailId: string | null) {
+    const detailRequest = detailId
+      ? config.detail(runtime.http, detailId).then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+      : Promise.resolve(null);
+    const [firstPage, detailResult] = await Promise.all([
+      config.list(runtime.http, query),
+      detailRequest,
+    ]);
+    const lastPage = Math.max(
+      1,
+      Math.ceil(firstPage.total / firstPage.pageSize),
+    );
+    const correctedQuery =
+      firstPage.current > lastPage ? { ...query, current: lastPage } : query;
+    const fresh =
+      correctedQuery === query
+        ? firstPage
+        : await config.list(runtime.http, correctedQuery);
+    const stillListed = Boolean(
+      detailId && fresh.list.some((item) => item.id === detailId),
+    );
+    if (
+      detailResult &&
+      !detailResult.ok &&
+      !(
+        !stillListed &&
+        detailResult.error instanceof ApiError &&
+        detailResult.error.status === 404
+      )
+    )
+      throw detailResult.error;
+    runtime.queryClient.setQueryData(
+      [config.id, 'groups', correctedQuery],
+      fresh,
+    );
+    if (correctedQuery !== query) setQuery(correctedQuery);
+    if (detailId && stillListed && detailResult?.ok)
+      runtime.queryClient.setQueryData(
+        [config.id, 'group', detailId],
+        detailResult.value,
+      );
+    else if (detailId && !stillListed) setSelectedId(null);
+  }
+
+  async function afterWrite(
+    message: string,
+    savedAction: CatalogAction,
+    claim: CatalogSafetyGate,
+  ) {
+    if (savedAction.type === 'delete-group') setSelectedId(null);
+    const detailId = savedAction.type === 'delete-group' ? null : selectedId;
+    setNotice(null);
+    const refreshedGate: CatalogSafetyGate = {
+      phase: 'refresh',
+      message,
+      detailId,
+      createUncertain: false,
+      operationId: claim.operationId,
+    };
+    if (!setSafety(refreshedGate, claim)) return;
+    try {
+      await clearCatalogCache();
+      await readAfterWrite(detailId);
+      setSafety(null, refreshedGate);
+      if (message) {
+        setNotice(message);
+        announce(message);
       }
     } catch (cause) {
       if (catalogAccessDenied(cause)) {
         reportAccessDenied();
-      } else {
-        setNotice(`${message}目录刷新失败，请手动重试。`);
       }
     }
   }
+
+  async function retryAfterWrite() {
+    if (safety?.phase !== 'refresh') return;
+    const { message, detailId, createUncertain } = safety;
+    let refreshed = false;
+    try {
+      await runWithCatalogLock(async () => {
+        const stored = catalogSafetyStorage();
+        const current = stored
+          ? readCatalogSafetyGate(stored, ownerId, config.id)
+          : null;
+        if (!stored) {
+          setStorageUnavailable(true);
+          return;
+        }
+        if (!current) {
+          await readAfterWrite(detailId);
+          const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+          runtime.queryClient.setQueryData(safetyKey, latest);
+          refreshed = !latest;
+          return;
+        }
+        if (JSON.stringify(current) !== JSON.stringify(safety)) {
+          runtime.queryClient.setQueryData(safetyKey, current);
+          return;
+        }
+        await readAfterWrite(detailId);
+        refreshed = setSafety(
+          createUncertain
+            ? { phase: 'inspection', operationId: safety.operationId }
+            : null,
+          safety,
+        );
+      });
+      if (!refreshed) return;
+      if (message) {
+        setNotice(message);
+        announce(message);
+      }
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) reportAccessDenied();
+    }
+  }
+
+  async function reconcileCreate() {
+    if (safety?.phase !== 'inspection') return;
+    let reconciled = false;
+    try {
+      await runWithCatalogLock(async () => {
+        const stored = catalogSafetyStorage();
+        const current = stored
+          ? readCatalogSafetyGate(stored, ownerId, config.id)
+          : null;
+        if (!stored) {
+          setStorageUnavailable(true);
+          return;
+        }
+        if (!current) {
+          await readAfterWrite(null);
+          const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+          runtime.queryClient.setQueryData(safetyKey, latest);
+          reconciled = !latest;
+          return;
+        }
+        if (JSON.stringify(current) !== JSON.stringify(safety)) {
+          runtime.queryClient.setQueryData(safetyKey, current);
+          return;
+        }
+        await readAfterWrite(null);
+        reconciled = setSafety(null, safety);
+      });
+      if (!reconciled) return;
+      setNotice('目录已重新读取，请仅在确认原新建记录后继续写入。');
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) reportAccessDenied();
+      else setNotice('目录重读失败，写入仍暂停，请稍后重试。');
+    }
+  }
+
+  async function recoverStorage() {
+    if (recoveringStorage) return;
+    setRecoveringStorage(true);
+    setStorageRecoveryError(null);
+    try {
+      await runWithCatalogLock(async () => {
+        const stored = catalogSafetyStorage();
+        if (!stored) {
+          setStorageRecoveryError(
+            '本地存储仍不可用，请允许此站点保存数据后重试。',
+          );
+          return;
+        }
+        const outstanding =
+          readCatalogSafetyGate(stored, ownerId, config.id) ??
+          runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+        if (outstanding) {
+          // Storage recovery must never acknowledge an unconfirmed mutation.
+          runtime.queryClient.setQueryData(safetyKey, outstanding);
+        } else {
+          await readAfterWrite(null);
+          runtime.queryClient.setQueryData(
+            safetyKey,
+            readCatalogSafetyGate(stored, ownerId, config.id),
+          );
+        }
+        setStorageUnavailable(false);
+      });
+    } catch (cause) {
+      if (catalogAccessDenied(cause)) reportAccessDenied();
+      else
+        setStorageRecoveryError(
+          '恢复检查未完成，请确认本地存储及跨标签锁可用，并重试读取目录。',
+        );
+    } finally {
+      setRecoveringStorage(false);
+    }
+  }
+
+  const storageWarning = storageUnavailable && (
+    <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
+      <p role="alert">
+        浏览器本地存储不可用，写入已暂停。可继续查看目录；请允许此站点保存数据后检查恢复。已有待核实操作会继续保留。
+      </p>
+      {storageRecoveryError && <p role="status">{storageRecoveryError}</p>}
+      <Button
+        variant="secondary"
+        size="small"
+        pending={recoveringStorage}
+        onClick={() => void recoverStorage()}
+      >
+        检查存储并恢复
+      </Button>
+    </div>
+  );
 
   if (accessDenied)
     return (
@@ -929,6 +1818,27 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
               重新验证
             </Button>
           )}
+        </div>
+      </AppShell>
+    );
+
+  if (safety?.phase === 'refresh')
+    return (
+      <AppShell title={config.title}>
+        {storageWarning}
+        <div className="space-y-3 rounded-control bg-status-warning-soft p-5 text-sm text-status-warning">
+          <p role="alert">
+            {safety.message
+              ? '写入请求已完成，但目录或详情刷新失败。旧数据已隐藏，请重新读取后继续操作。'
+              : '写入结果未确认。旧数据已隐藏，请重新读取核实后再操作，勿直接重试。'}
+          </p>
+          <Button
+            variant="secondary"
+            disabled={storageUnavailable}
+            onClick={() => void retryAfterWrite()}
+          >
+            重新读取目录
+          </Button>
         </div>
       </AppShell>
     );
@@ -953,6 +1863,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
               variant="secondary"
               size="small"
               pending={groups.isFetching}
+              disabled={writing}
               onClick={() => {
                 void groups.refetch();
               }}
@@ -963,6 +1874,24 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           </div>
         </section>
 
+        {storageWarning}
+        {safety?.phase === 'inspection' && (
+          <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
+            <p role="alert">
+              新建操作的结果仍未确认。可继续筛选和查看目录；写入已暂停，浏览器刷新后仍会保留此状态。请先核实新记录。
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              disabled={storageUnavailable}
+              onClick={() => void reconcileCreate()}
+            >
+              已核实原操作，重读目录并恢复写入
+            </Button>
+          </div>
+        )}
+        {extra}
+
         {notice && (
           <p
             role="status"
@@ -970,6 +1899,127 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
           >
             {notice}
           </p>
+        )}
+        {checkState && (
+          <section
+            aria-label="即时检查状态"
+            className={
+              'rounded-control border p-4 text-sm ' +
+              (checkState.phase === 'error'
+                ? 'border-status-danger/25 bg-status-danger-soft'
+                : checkState.phase === 'completed'
+                ? 'border-status-success/25 bg-status-success-soft'
+                : 'border-border bg-muted/55')
+            }
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 space-y-1">
+                <p className="break-words font-semibold">
+                  {checkState.target.label} · 即时检查
+                </p>
+                <p role="status" className="break-words text-muted-foreground">
+                  {checkState.phase === 'submitting'
+                    ? '正在提交检查任务…'
+                    : checkState.phase === 'refreshing'
+                    ? '正在更新目录…'
+                    : checkState.phase === 'task'
+                    ? checkTask.data?.message ||
+                      (checkState.uncertain && !checkTask.data
+                        ? '提交状态待确认，正在查询任务。'
+                        : checkTask.data?.status === 'processing'
+                        ? '正在检查…'
+                        : '任务已入队，等待处理。')
+                    : checkState.message}
+                </p>
+                {checkState.taskId && (
+                  <p className="neo-mono break-all text-xs text-muted-foreground">
+                    {checkState.taskId}
+                  </p>
+                )}
+                {checkState.gate && (
+                  <p className="text-xs text-muted-foreground">
+                    提交时间：
+                    {new Date(checkState.gate.submittedAt).toLocaleString(
+                      'zh-CN',
+                    )}
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                {(checkState.taskId || checkState.gate) && (
+                  <Link
+                    to="/tasks"
+                    className="inline-flex min-h-9 items-center rounded-control px-2 text-xs font-semibold text-primary underline underline-offset-4"
+                  >
+                    任务中心
+                  </Link>
+                )}
+                {!checkBusy && (
+                  <Button
+                    variant="ghost"
+                    size="small"
+                    onClick={() => setCheckState(null)}
+                  >
+                    关闭
+                  </Button>
+                )}
+              </div>
+            </div>
+            {checkState.phase === 'task' && (
+              <div className="mt-4">
+                <Progress value={checkTask.data?.progress} label="检查进度" />
+                {checkTask.isError && (
+                  <div
+                    role="alert"
+                    className="mt-3 flex flex-wrap items-center gap-3"
+                  >
+                    <span>
+                      任务状态读取失败：{catalogError(checkTask.error)}
+                    </span>
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      onClick={() => void checkTask.refetch()}
+                    >
+                      重试读取
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="small"
+                      onClick={() => {
+                        setCheckState((current) =>
+                          current?.taskId
+                            ? {
+                                ...current,
+                                phase: 'unknown',
+                                message:
+                                  '已停止本页跟踪，防重记录仍保留；请到任务中心核实后恢复。',
+                              }
+                            : current,
+                        );
+                      }}
+                    >
+                      停止跟踪
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+            {checkState.phase === 'unknown' && checkState.gate && (
+              <div className="mt-3 space-y-3">
+                <p>
+                  请先核对任务中心中的提交时间、检查目标和结果，确认原任务不会继续执行。刷新页面不会解除防重记录。
+                </p>
+                <Button
+                  variant="secondary"
+                  size="small"
+                  onClick={() => void reconcileCheck()}
+                >
+                  已核实原任务，恢复检查
+                </Button>
+              </div>
+            )}
+          </section>
         )}
         {action &&
           config.writes &&
@@ -985,7 +2035,13 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                 }
                 saved={afterWrite}
                 denied={reportAccessDenied}
+                uncertain={reportUncertainWrite}
                 writingChange={writingChange}
+                runExclusive={runWithCatalogLock}
+                beginWrite={beginWrite}
+                releaseWrite={(claim) => {
+                  setSafety(null, claim);
+                }}
               />
             </div>
           )}
@@ -1005,6 +2061,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                   <Input
                     {...control}
                     value={keyword}
+                    disabled={writing}
                     maxLength={200}
                     onChange={(event) => setKeyword(event.target.value)}
                     placeholder="变体组名称、编号或 ASIN"
@@ -1016,13 +2073,18 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                   <Input
                     {...control}
                     value={country}
+                    disabled={writing}
                     maxLength={10}
                     onChange={(event) => setCountry(event.target.value)}
                     placeholder="例如 US"
                   />
                 )}
               </Field>
-              <Button type="submit" className="w-full md:w-auto">
+              <Button
+                type="submit"
+                disabled={writing}
+                className="w-full md:w-auto"
+              >
                 <Search aria-hidden="true" />
                 查询
               </Button>
@@ -1039,7 +2101,9 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     <FilterChip
                       key={value}
                       selected={status === value}
+                      disabled={writing}
                       onClick={() => {
+                        if (writingRef.current) return;
                         setStatus(value);
                         setAction(null);
                         setSelectedId(null);
@@ -1073,6 +2137,19 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
             }
             action={
               <div className="flex flex-wrap items-center gap-2">
+                {canCheck && (
+                  <label className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={forceRefresh}
+                      disabled={checkBusy}
+                      onChange={(event) =>
+                        setForceRefresh(event.target.checked)
+                      }
+                    />
+                    强制刷新
+                  </label>
+                )}
                 {canWrite && (
                   <Button
                     size="small"
@@ -1086,9 +2163,11 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                   每页{' '}
                   <select
                     aria-label="每页数量"
+                    disabled={writing}
                     className="rounded-control border border-input bg-card px-3 py-2"
                     value={query.pageSize ?? 10}
                     onChange={(event) => {
+                      if (writingRef.current) return;
                       setAction(null);
                       setSelectedId(null);
                       setQuery((previous) => ({
@@ -1150,13 +2229,17 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     config={config}
                     selectedId={selectedId}
                     onSelect={(id) => {
+                      if (writingRef.current) return;
                       setAction(null);
                       setSelectedId(selectedId === id ? null : id);
                     }}
                     canWrite={canWrite}
                     canDelete={canDelete}
+                    canCheck={canCheck}
+                    checkBusy={checkBusy}
                     actionsDisabled={writing}
                     onAction={openAction}
+                    onCheck={(target) => void runCheck(target)}
                     onDenied={reportAccessDenied}
                   />
                 )}
@@ -1168,7 +2251,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     <Button
                       variant="secondary"
                       size="small"
-                      disabled={current <= 1}
+                      disabled={writing || current <= 1}
                       onClick={() => changePage(current - 1)}
                     >
                       <ChevronLeft aria-hidden="true" />
@@ -1177,7 +2260,7 @@ export function CatalogPage({ config }: { config: CatalogConfig }) {
                     <Button
                       variant="secondary"
                       size="small"
-                      disabled={current >= pages}
+                      disabled={writing || current >= pages}
                       onClick={() => changePage(current + 1)}
                     >
                       下一页

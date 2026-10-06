@@ -5,10 +5,15 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  competitorMonitorJobSchema,
   taskInfoResultSchema,
   taskListResultSchema,
 } from '@asin-monitor/contracts';
-import { RedisTaskRepository, type TaskState } from '@asin-monitor/db';
+import {
+  competitorMonitorJobDigest,
+  RedisTaskRepository,
+  type TaskState,
+} from '@asin-monitor/db';
 import { parseVariantCheckJob } from '@asin-monitor/variant-check';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -214,6 +219,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           removeOnFail: false,
         });
       }
+      if (type === 'monitor' || type === 'competitor-monitor') {
+        if (!userId) throw new Error('Monitor fixture requires an owner');
+        const createdAt = new Date().toISOString();
+        return (await queueFor(type)).add(
+          type === 'monitor' ? 'primary-monitor' : 'competitor-monitor',
+          {
+            taskId: id,
+            userId,
+            taskType: type,
+            taskSubType: type === 'monitor' ? 'primary' : 'competitor',
+            createdAt,
+            expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+            countries: ['US'],
+          },
+          { jobId: id, removeOnComplete: false, removeOnFail: false },
+        );
+      }
       return (await queueFor(type)).add(
         'fixture',
         {
@@ -251,6 +273,57 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await worker.close(true);
       }
     }
+    it('admits only one final monitor slot across independent API runtimes', async () => {
+      const queue = await queueFor('monitor');
+      const createdAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 7 * 86400_000).toISOString();
+      const data = (taskId: string) => ({
+        taskId,
+        taskType: 'monitor' as const,
+        taskSubType: 'primary' as const,
+        userId: owner.userId,
+        createdAt,
+        expiresAt,
+        countries: ['US' as const],
+      });
+      await queue.addBulk(
+        Array.from({ length: 49 }, () => {
+          const taskId = randomUUID();
+          return {
+            name: 'primary-monitor',
+            data: data(taskId),
+            opts: { jobId: taskId },
+          };
+        }),
+      );
+      await redis.set(
+        `${getNeoQueuePrefix(env)}:monitor:consumer:ready`,
+        '1',
+        'EX',
+        30,
+      );
+      const other = new TaskQueryRuntime(env, f.logger as unknown as AppLogger);
+      try {
+        const attempts = await Promise.allSettled(
+          Array.from({ length: 8 }, (_, index) =>
+            (index % 2 ? other : runtime)
+              .openMonitor(() => undefined)
+              .enqueue(data(randomUUID())),
+          ),
+        );
+        expect(
+          attempts.filter((item) => item.status === 'fulfilled'),
+        ).toHaveLength(1);
+        expect(
+          attempts
+            .filter((item) => item.status === 'rejected')
+            .map((item) => (item as PromiseRejectedResult).reason?.message),
+        ).toEqual(Array(7).fill('MONITOR_QUEUE_FULL'));
+        expect((await queue.getJobCounts('waiting')).waiting).toBe(50);
+      } finally {
+        await other.onModuleDestroy();
+      }
+    });
     it('returns only current owner and filters the complete index before limit', async () => {
       await create('active-old');
       await create('foreign', 'export', (await login()).userId);
@@ -300,7 +373,89 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(await store.read(id)).toBeNull();
       },
     );
-    it.each(['variant-check', 'batch-check'] as const)(
+    it('recovers an actual competitor completion after registry ACK loss and never exposes its private proof', async () => {
+      const task = await store.create({
+        taskId: randomUUID(),
+        taskType: 'competitor-monitor',
+        taskSubType: 'competitor',
+        userId: owner.userId,
+      });
+      const data = competitorMonitorJobSchema.parse({
+        taskId: task.taskId,
+        userId: task.userId,
+        taskType: task.taskType,
+        taskSubType: task.taskSubType,
+        createdAt: task.createdAt,
+        expiresAt: new Date(
+          Date.parse(task.createdAt) + 604800000,
+        ).toISOString(),
+        countries: ['US'],
+      });
+      const queue = await queueFor('competitor-monitor');
+      await queue.add('competitor-monitor', data, {
+        jobId: task.taskId,
+        removeOnComplete: false,
+      });
+      const worker = new Worker(queue.name, undefined, {
+        autorun: false,
+        prefix: getNeoQueuePrefix(env),
+        connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+      });
+      worker.on('error', () => {});
+      try {
+        await worker.waitUntilReady();
+        const active = await worker.getNextJob('fixture-comp187', {
+          block: false,
+        });
+        expect(active?.id).toBe(task.taskId);
+        const result = {
+          success: true,
+          totalChecked: 1,
+          totalBroken: 1,
+          totalNormal: 0,
+          countryResults: {
+            US: {
+              totalGroups: 1,
+              brokenGroups: 1,
+              checkTime: data.createdAt,
+              brokenByType: { SP_API_ERROR: 0, NOT_FOUND: 0, NO_VARIANTS: 1 },
+            },
+          },
+          notificationResults: { US: 'unconfirmed' },
+          _competitorMonitorCommit: {
+            version: 1,
+            requestHash: competitorMonitorJobDigest(data),
+          },
+        };
+        await active!.moveToCompleted(result, 'fixture-comp187', false);
+        const response = await get(task.taskId);
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data).toMatchObject({
+          status: 'completed',
+          result: {
+            totalChecked: 1,
+            notificationResults: { US: 'unconfirmed' },
+          },
+        });
+        expect(response.body).not.toContain('_competitorMonitorCommit');
+        expect(response.body).not.toContain(
+          result._competitorMonitorCommit.requestHash,
+        );
+        expect((await store.read(task.taskId))?.result).toEqual(result);
+        await active!.updateData({ ...data, countries: ['DE'] });
+        await redis.del(metaKey(task.taskId));
+        expect((await get(task.taskId)).statusCode).toBe(500);
+        expect(await store.read(task.taskId)).toBeNull();
+      } finally {
+        await worker.close(true);
+      }
+    });
+    it.each([
+      'variant-check',
+      'batch-check',
+      'monitor',
+      'competitor-monitor',
+    ] as const)(
       'rejects an incomplete %s queue payload without recreating metadata',
       async (type) => {
         const id = randomUUID();

@@ -1,6 +1,6 @@
 # /api/v1 端点清单（契约冻结基线 v1）
 
-> 来源：`server/src/routes/*.js`（18 个路由文件）+ `server/src/index.js` 挂载表，2026-08-24 实读。共 **117 个端点**，与《重构总体计划》§1 口径一致。本清单是重构前后共同验收基线；任何字段/行为变化必须走 contracts 变更流程。
+> 来源：`server/src/routes/*.js`（18 个路由文件）+ `server/src/index.js` 挂载表，2026-08-24 实读；另含 Neo 新增状态区间查询。Legacy 基线 **117 个端点**，Neo 注册表 **118 个端点**。本清单是重构前后共同验收基线；任何字段/行为变化必须走 contracts 变更流程。
 
 ## 0. 全局行为（index.js）
 
@@ -75,7 +75,9 @@
 | POST | /variant-groups/batch-check | 是 | asin:read | batchCheckVariantGroups |  |
 | POST | /variant-check/batch-query-parent-asin | 是 | asin:read | batchQueryParentAsin | 超时 300s |
 
-## 6. monitor（17，**全部路由层未挂认证**）
+## 6. monitor（Legacy 17 + Neo 状态区间查询）
+
+Neo 新增只读端点 `GET /monitor-history/status-intervals`，要求 `monitor:read`；Legacy 17 个监控端点保持原样。
 
 | 方法 | 路径 | 控制器 | 特殊 |
 | --- | --- | --- | --- |
@@ -210,13 +212,15 @@
 | GET  | /audit-logs/statistics/actions   | getActionStatistics   |
 | GET  | /audit-logs/statistics/resources | getResourceStatistics |
 
-## 17. ops（3，router 级认证）
+## 17. ops（3；Legacy router 级认证，Neo 加当前权限复核）
 
-| 方法 | 路径                       | 控制器              |
-| ---- | -------------------------- | ------------------- |
-| GET  | /ops/overview              | getOpsOverview      |
-| POST | /ops/analytics/cache/clear | clearAnalyticsCache |
-| POST | /ops/analytics/refresh     | refreshAnalyticsAgg |
+| 方法 | 路径                       | Neo 权限       | 控制器              |
+| ---- | -------------------------- | -------------- | ------------------- |
+| GET  | /ops/overview              | settings:read  | getOpsOverview      |
+| POST | /ops/analytics/cache/clear | settings:write | clearAnalyticsCache |
+| POST | /ops/analytics/refresh     | settings:write | refreshAnalyticsAgg |
+
+Neo 服务端重新读取当前会话和权限；Legacy 仅有登录检查，权限收紧为有意迁移差异。
 
 ## 18. system（1）与偏差登记
 
@@ -226,7 +230,7 @@
 
 **偏差与安全发现（契约冻结如实记录，P2-T1 auth 模块平移时统一处置）：**
 
-1. **43 个端点路由层未挂认证**：asin 域 11 个、variant-check 域 2 个、monitor 域 17 个、feishu 域 6 个、sp-api-config 域 5 个、system 域 1 个、auth 域 1 个（login 为设计预期）（控制器内以 `req.user?.` 兜底，实际可匿名访问）。
+1. **Legacy 43 个端点路由层未挂认证**：asin 域 11 个、variant-check 域 2 个、monitor 域 17 个、feishu 域 6 个、sp-api-config 域 5 个、system 域 1 个、auth 域 1 个（login 为设计预期）（控制器内以 `req.user?.` 兜底，实际可匿名访问）。Neo 状态区间端点要求当前会话和 `monitor:read`。
 2. `strictLimiter`（20 次/15min）已定义导出但从未挂载（死代码）。
 3. `/api/v1/analytics` 120s 超时配置无对应路由（遗留）。
 4. 竞品删除/更新语义混用 `asin:write`（见 §7 DELETE/PUT），与主域 `asin:delete` 不一致——契约保留原样，P2 平移时确认。

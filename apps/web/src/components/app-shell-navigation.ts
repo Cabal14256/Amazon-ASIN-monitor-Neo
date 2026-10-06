@@ -96,7 +96,7 @@ const SECTIONS: { label: string; items: NavItem[] }[] = [
         label: '系统设置',
         access: 'canReadSettings',
         icon: Settings2,
-        available: false,
+        available: true,
       },
       {
         path: '/ops',

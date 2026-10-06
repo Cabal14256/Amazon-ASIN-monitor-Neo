@@ -167,6 +167,12 @@ const envObjectSchema = z.object({
     .string()
     .default('info')
     .transform((value) => value || 'info'),
+  // Match the Legacy monitor loader's deployment cap when saving the shared
+  // database setting through Neo. API and Legacy server must use one value.
+  MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: z.preprocess(
+    (value) => Number(value) || 10,
+    z.number().int().positive(),
+  ),
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),
@@ -344,6 +350,7 @@ const envObjectSchema = z.object({
   WORKER_ENABLED_QUEUES: z.string().optional(),
   MONITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   COMPETITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  COMPETITOR_MONITOR_ENABLED: booleanFlagSchema(true),
   EXPORT_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   BATCH_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   BATCH_DELETE_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,

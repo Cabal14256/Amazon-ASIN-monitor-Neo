@@ -61,6 +61,18 @@ describe('monitor analytics / all fourteen HTTP routes and current authorization
         }),
       headers: auth,
     });
+  async function cacheCount(outcome: 'hits' | 'misses', prefix: string) {
+    const response = await app.http.inject({ method: 'GET', url: '/metrics' });
+    expect(response.statusCode).toBe(200);
+    const line = response.body
+      .split('\n')
+      .find((value) =>
+        value.startsWith(
+          `amazon_asin_monitor_cache_${outcome}_total{cache_key_prefix="${prefix}"} `,
+        ),
+      );
+    return line ? Number(line.slice(line.lastIndexOf(' ') + 1)) : 0;
+  }
   beforeEach(async () => {
     f = monitorAnalyticsFixture();
     await start();
@@ -138,6 +150,82 @@ describe('monitor analytics / all fourteen HTTP routes and current authorization
     expect((await get()).statusCode).toBe(403);
     expect(f.redis.eval).toHaveBeenCalledTimes(calls);
   });
+  it.each([
+    ['by-time', 'statisticsByTime'],
+    ['analytics-monthly-breakdown', 'statisticsByTime'],
+    ['all-countries-summary', 'allCountriesSummary'],
+    ['region-summary', 'regionSummary'],
+    ['period-summary', 'periodSummary'],
+    ['period-summary/details', 'periodSummaryDetails'],
+    ['asin-by-country', 'asinStatisticsByCountry'],
+    ['asin-by-variant-group', 'asinStatisticsByVariantGroup'],
+  ] as const)(
+    'exposes actual %s cache access under the fixed Legacy family %s',
+    async (operation, prefix) => {
+      expect((await get(operation)).statusCode).toBe(200);
+      expect(await cacheCount('misses', prefix)).toBe(1);
+      expect(await cacheCount('hits', prefix)).toBe(0);
+      expect((await get(operation)).statusCode).toBe(200);
+      expect(await cacheCount('misses', prefix)).toBe(1);
+      expect(await cacheCount('hits', prefix)).toBe(1);
+      const metrics = await app.http.inject({ method: 'GET', url: '/metrics' });
+      const cacheLines = metrics.body
+        .split('\n')
+        .filter((line) =>
+          /^amazon_asin_monitor_cache_(hits|misses)_total/.test(line),
+        );
+      expect(cacheLines.join('\n')).not.toContain(f.user.id);
+      expect(cacheLines.join('\n')).not.toContain('2024-02');
+      expect(cacheLines.join('\n')).not.toContain(':neo:');
+      expect(cacheLines.join('\n')).not.toMatch(/[a-f0-9]{64}/);
+    },
+  );
+  it('records nothing for rejected, uncached, disabled or explicitly bypassed access', async () => {
+    f.permissions.length = 0;
+    expect((await get()).statusCode).toBe(403);
+    expect(await cacheCount('misses', 'statisticsByTime')).toBe(0);
+    f.permissions.push('analytics:read', 'monitor:read');
+    expect((await get('statistics')).statusCode).toBe(200);
+    expect(await cacheCount('misses', 'statisticsByTime')).toBe(0);
+    await app.app.close();
+    await start({
+      ANALYTICS_STATISTICS_BY_TIME_TTL_MS: '0',
+      ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED: '1',
+    });
+    expect((await get()).statusCode).toBe(200);
+    expect(await cacheCount('misses', 'statisticsByTime')).toBe(0);
+    const bypass = { ...headers, 'x-analytics-cache-bypass': '1' };
+    expect((await get('all-countries-summary', {}, bypass)).statusCode).toBe(
+      200,
+    );
+    expect(await cacheCount('misses', 'allCountriesSummary')).toBe(0);
+    expect(await cacheCount('hits', 'allCountriesSummary')).toBe(0);
+    expect(f.redis.eval).not.toHaveBeenCalled();
+  });
+  it.each(['malformed', 'expired', 'incomplete', 'oversized', 'redis-error'])(
+    'counts one miss for %s and no second miss from a cache write',
+    async (condition) => {
+      expect((await get()).statusCode).toBe(200);
+      const key = f.values.keys().next().value!;
+      const valid = JSON.parse(f.values.get(key)!);
+      if (condition === 'malformed') f.values.set(key, '{');
+      if (condition === 'expired')
+        f.values.set(key, JSON.stringify({ ...valid, expiresAt: 0 }));
+      if (condition === 'incomplete')
+        f.values.set(key, JSON.stringify({ ...valid, data: [{}] }));
+      if (condition === 'oversized')
+        f.values.set(key, 'x'.repeat(2 * 1024 * 1024 + 1));
+      if (condition === 'redis-error')
+        f.redis.eval.mockRejectedValue(
+          new Error('secret-redis-auth-diagnostic'),
+        );
+      expect((await get()).statusCode).toBe(200);
+      expect(await cacheCount('misses', 'statisticsByTime')).toBe(2);
+      expect(await cacheCount('hits', 'statisticsByTime')).toBe(0);
+      const metrics = await app.http.inject({ method: 'GET', url: '/metrics' });
+      expect(metrics.body).not.toContain('secret-redis-auth-diagnostic');
+    },
+  );
   it.each([
     'account',
     'password',

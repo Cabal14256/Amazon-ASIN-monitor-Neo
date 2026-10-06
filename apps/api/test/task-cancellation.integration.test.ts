@@ -224,19 +224,35 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       options: JobsOptions = {},
     ) {
       const task = await store.create({
-        taskId: `job97-${randomUUID()}`,
+        taskId:
+          type === 'competitor-monitor'
+            ? randomUUID()
+            : `job97-${randomUUID()}`,
         userId: owner.userId,
         taskType: type,
+        ...(type === 'competitor-monitor' ? { taskSubType: 'competitor' } : {}),
       });
       const queue = await queueFor(type);
       const job = await queue.add(
-        'fixture',
-        {
-          userId: task.userId,
-          createdAt: task.createdAt,
-          groups: [],
-          nested: { ids: ['id-a'] },
-        },
+        type === 'competitor-monitor' ? 'competitor-monitor' : 'fixture',
+        type === 'competitor-monitor'
+          ? {
+              taskId: task.taskId,
+              userId: task.userId,
+              taskType: type,
+              taskSubType: 'competitor',
+              createdAt: task.createdAt,
+              expiresAt: new Date(
+                Date.parse(task.createdAt) + 604800000,
+              ).toISOString(),
+              countries: ['US'],
+            }
+          : {
+              userId: task.userId,
+              createdAt: task.createdAt,
+              groups: [],
+              nested: { ids: ['id-a'] },
+            },
         {
           attempts: 1,
           removeOnComplete: false,
@@ -364,34 +380,69 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         }
       },
     );
-    it('requests running cancellation without overwriting payload, keeps progress sticky and accepts Worker acknowledgement', async () => {
-      const { task, queue } = await enqueued();
-      const job = await activate(queue, task.taskId),
-        data = await redis.hget(queue.toKey(task.taskId), 'data');
-      await store.mutate(task.taskId, { kind: 'processing' });
-      const first = await cancel(task.taskId),
-        second = await cancel(task.taskId);
-      expect(first.statusCode).toBe(200);
-      expect(first.json().data.status).toBe('cancelling');
-      expect(second.json().data.cancelRequestedAt).toBe(
-        first.json().data.cancelRequestedAt,
-      );
-      expect(await job.getState()).toBe('active');
-      expect(await redis.hget(queue.toKey(task.taskId), 'data')).toBe(data);
-      expect(
-        (await store.mutate(task.taskId, { kind: 'progress', progress: 20 }))
-          ?.status,
-      ).toBe('cancelling');
-      expect(events).toEqual([]);
-      await store.mutate(task.taskId, { kind: 'cancelled' });
-      await job.moveToCompleted({ cancelled: true }, 'fixture-lock-97', false);
-      const detail = await f.http.inject({
-        method: 'GET',
-        url: `/api/v1/tasks/${task.taskId}`,
-        headers: owner.headers,
-      });
-      expect(detail.json().data.status).toBe('cancelled');
-    });
+    it.each(['taskId', 'taskType', 'taskSubType', 'name'] as const)(
+      'does not atomically remove a competitor job with replaced %s identity',
+      async (field) => {
+        const { task, queue, job } = await enqueued('competitor-monitor');
+        beforeAtomic(async () => {
+          if (field === 'name')
+            await redis.hset(
+              queue.toKey(task.taskId),
+              'name',
+              'primary-monitor',
+            );
+          else
+            await job.updateData({
+              ...job.data,
+              [field]:
+                field === 'taskId'
+                  ? randomUUID()
+                  : field === 'taskType'
+                  ? 'monitor'
+                  : 'primary',
+            });
+        });
+        expect((await cancel(task.taskId)).statusCode).toBe(409);
+        expect(await queue.getJob(task.taskId)).toBeDefined();
+        expect((await store.read(task.taskId))?.status).toBe('pending');
+        expect(events).toEqual([]);
+      },
+    );
+    it.each(['export', 'variant-check'] as const)(
+      'requests running %s cancellation without overwriting payload, keeps progress sticky and accepts Worker acknowledgement',
+      async (type) => {
+        const { task, queue } = await enqueued(type);
+        const job = await activate(queue, task.taskId),
+          data = await redis.hget(queue.toKey(task.taskId), 'data');
+        await store.mutate(task.taskId, { kind: 'processing' });
+        const first = await cancel(task.taskId),
+          second = await cancel(task.taskId);
+        expect(first.statusCode).toBe(200);
+        expect(first.json().data.status).toBe('cancelling');
+        expect(second.json().data.cancelRequestedAt).toBe(
+          first.json().data.cancelRequestedAt,
+        );
+        expect(await job.getState()).toBe('active');
+        expect(await redis.hget(queue.toKey(task.taskId), 'data')).toBe(data);
+        expect(
+          (await store.mutate(task.taskId, { kind: 'progress', progress: 20 }))
+            ?.status,
+        ).toBe('cancelling');
+        expect(events).toEqual([]);
+        await store.mutate(task.taskId, { kind: 'cancelled' });
+        await job.moveToCompleted(
+          { cancelled: true },
+          'fixture-lock-97',
+          false,
+        );
+        const detail = await f.http.inject({
+          method: 'GET',
+          url: `/api/v1/tasks/${task.taskId}`,
+          headers: owner.headers,
+        });
+        expect(detail.json().data.status).toBe('cancelled');
+      },
+    );
     it.each(['completed', 'failed'] as const)(
       'preserves a %s result when execution wins after the HTTP metadata read',
       async (state) => {

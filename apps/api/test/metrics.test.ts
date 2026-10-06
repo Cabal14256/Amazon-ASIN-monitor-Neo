@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { configureHttpApp } from '../src/http-app';
 import { MetricsController } from '../src/metrics/metrics.controller';
+import type { AnalyticsCachePrefix } from '../src/metrics/metrics.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 
 @Controller('metric-probe')
@@ -124,5 +125,22 @@ describe('Fastify HTTP metrics hook', () => {
     expect(rendered).toContain(
       'amazon_asin_monitor_http_rate_limit_backend_active{backend="redis"} 1',
     );
+  });
+  it('拒绝动态缓存键作为标签并保持 Legacy 指标与标签名', async () => {
+    metrics.recordAnalyticsCacheAccess(
+      'private-user:neo:analytics:v1:secret-hash' as AnalyticsCachePrefix,
+      true,
+    );
+    metrics.recordAnalyticsCacheAccess('statisticsByTime', false);
+    metrics.recordAnalyticsCacheAccess('statisticsByTime', true);
+    const rendered = await metrics.render();
+    expect(rendered).toContain(
+      'amazon_asin_monitor_cache_misses_total{cache_key_prefix="statisticsByTime"} 1',
+    );
+    expect(rendered).toContain(
+      'amazon_asin_monitor_cache_hits_total{cache_key_prefix="statisticsByTime"} 1',
+    );
+    expect(rendered).not.toContain('private-user');
+    expect(rendered).not.toContain('secret-hash');
   });
 });

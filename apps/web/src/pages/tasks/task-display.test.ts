@@ -44,9 +44,27 @@ const report = {
 };
 
 describe('task center display boundaries', () => {
+  it.each(['pending', 'processing'] as const)(
+    'allows the owned %s monitor task cancellation advertised by the API',
+    (status) => {
+      const monitor = task({
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        status,
+      });
+      expect(canCancelTask(monitor)).toBe(true);
+      expect(canCancelTask({ ...monitor, canCancel: false })).toBe(false);
+    },
+  );
+  it.each(['cancelling', 'cancelled', 'completed', 'failed'] as const)(
+    'does not offer cancellation for a %s monitor task',
+    (status) => {
+      expect(canCancelTask(task({ taskType: 'monitor', status }))).toBe(false);
+    },
+  );
   it('shows cancel only for active supported jobs and downloads only from supported completed results', () => {
     expect(canCancelTask(task())).toBe(true);
-    expect(canCancelTask(task({ taskType: 'variant-check' }))).toBe(false);
+    expect(canCancelTask(task({ taskType: 'unsupported' }))).toBe(false);
     expect(canCancelTask(task({ status: 'cancelling' }))).toBe(false);
     expect(canCancelTask(task({ canCancel: false }))).toBe(false);
     expect(
@@ -168,6 +186,29 @@ describe('task center display boundaries', () => {
       '暂无完整结果下载入口',
     );
   });
+
+  it.each(['competitor-asin-check', 'competitor-variant-group-check'])(
+    'allows cancellation of active %s tasks only when the API permits it',
+    (taskSubType) => {
+      for (const status of ['pending', 'processing'] as const) {
+        const active = task({ taskType: 'variant-check', taskSubType, status });
+        expect(canCancelTask(active)).toBe(true);
+        expect(canCancelTask({ ...active, canCancel: false })).toBe(false);
+      }
+      for (const status of [
+        'cancelling',
+        'completed',
+        'failed',
+        'cancelled',
+      ] as const) {
+        expect(
+          canCancelTask(
+            task({ taskType: 'variant-check', taskSubType, status }),
+          ),
+        ).toBe(false);
+      }
+    },
+  );
 
   it('uses a bounded structured summary without dumping arbitrary result payloads', () => {
     const result = task({

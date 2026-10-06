@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuthPrincipal } from '../src/auth/auth.types';
 import type { AppLogger } from '../src/logger/app-logger.service';
+import { MetricsService } from '../src/metrics/metrics.service';
 import { MonitorAnalyticsCache } from '../src/monitor/monitor-analytics-cache';
 import { assertMonitorJsonBounds } from '../src/monitor/monitor-analytics-result';
 import { MonitorAnalyticsService } from '../src/monitor/monitor-analytics.service';
@@ -29,16 +30,21 @@ const logger = {
   error: vi.fn(),
 } as unknown as AppLogger;
 const query = parseMonitorAnalyticsQuery('by-time', {});
+const metricRegistries: MetricsService[] = [];
 function fixture() {
   const f = monitorAnalyticsFixture();
+  const metrics = new MetricsService();
+  metricRegistries.push(metrics);
   const cache = new MonitorAnalyticsCache(
     env,
     f.redis as unknown as ApplicationRedisClient,
     logger,
+    metrics,
   );
   return {
     ...f,
     cache,
+    metrics,
     service: new MonitorAnalyticsService(env, f.repository, cache, logger),
     principal: { userId: f.user.id, sessionId: f.session.id } as AuthPrincipal,
   };
@@ -57,6 +63,7 @@ function response() {
   return { raw } as unknown as FastifyReply;
 }
 afterEach(() => {
+  for (const metrics of metricRegistries.splice(0)) metrics.onModuleDestroy();
   for (const raw of responses.splice(0)) raw.emit('close');
   vi.useRealTimers();
 });
@@ -175,6 +182,123 @@ describe('monitor analytics response/cache resource bounds', () => {
     expect(await f.cache.get(query)).toBeNull();
     expect(f.redis.eval).toHaveBeenCalledTimes(5);
   });
+  it('counts each timeout and capacity fallback once and ignores late valid Redis responses', async () => {
+    const f = fixture();
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
+    const encoded = f.values.get(f.cache.key(query))!;
+    let release!: (value: string) => void;
+    const gate = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    f.redis.eval.mockImplementation(() => gate);
+    vi.useFakeTimers();
+    const pending = Promise.all(
+      Array.from({ length: 4 }, () => f.cache.get(query)),
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await pending).toEqual([null, null, null, null]);
+    expect(await f.cache.get(query)).toBeNull();
+    expect(f.redis.eval).toHaveBeenCalledTimes(5); // One set plus four reads.
+    expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual(
+      Array.from({ length: 5 }, () => [
+        '统计缓存暂不可用',
+        'MonitorAnalyticsCache',
+        { reason: 'analytics_cache_unavailable' },
+      ]),
+    );
+    expect(await f.metrics.cacheMissesTotal.get()).toMatchObject({
+      values: [{ value: 5, labels: { cache_key_prefix: 'statisticsByTime' } }],
+    });
+    expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
+    release(encoded);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(5);
+    expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
+    expect(await f.cache.get(query)).toMatchObject({ data: [] });
+    expect((await f.metrics.cacheHitsTotal.get()).values[0]!.value).toBe(1);
+  });
+  it('does not report a normal cold miss as unavailable cache', async () => {
+    const f = fixture();
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.length).toBe(warningsBefore);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
+  });
+  it.each([
+    { version: 0 },
+    { key: 'private-cache-key-197' },
+    { key: null },
+    { source: 'private-source-197' },
+    { source: { secret: 'private-envelope-197' } },
+    { generatedAt: null },
+    { generatedAt: 'private-time-197' },
+    { generatedAt: Number.MAX_SAFE_INTEGER },
+    { expiresAt: null },
+    { expiresAt: Number.MAX_SAFE_INTEGER },
+  ])('logs a fixed reason once for invalid metadata %j', async (change) => {
+    const f = fixture();
+    await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
+    const key = f.cache.key(query);
+    const payload = JSON.parse(f.values.get(key)!) as Record<string, unknown>;
+    f.values.set(key, JSON.stringify({ ...payload, ...change }));
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual([
+      [
+        '统计缓存内容无效',
+        'MonitorAnalyticsCache',
+        { reason: 'analytics_cache_invalid' },
+      ],
+    ]);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
+    expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
+  });
+  it.each(['[]', 'null', '42', '"private-envelope-197"'])(
+    'logs a fixed reason for a non-object envelope %s',
+    async (raw) => {
+      const f = fixture();
+      f.values.set(f.cache.key(query), raw);
+      const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+      expect(await f.cache.get(query)).toBeNull();
+      expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual([
+        [
+          '统计缓存内容无效',
+          'MonitorAnalyticsCache',
+          { reason: 'analytics_cache_invalid' },
+        ],
+      ]);
+      expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(1);
+    },
+  );
+  it('keeps valid expired envelopes silent while invalid expired metadata still warns', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const born = Date.now() - f.cache.ttl(query.operation) - 1;
+    const key = f.cache.key(query);
+    const payload = {
+      version: 1,
+      key,
+      source: 'raw',
+      data: [],
+      generatedAt: born,
+      expiresAt: born + f.cache.ttl(query.operation),
+    };
+    const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
+    f.values.set(key, JSON.stringify(payload));
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.length).toBe(warningsBefore);
+    f.values.set(key, JSON.stringify({ ...payload, version: 0 }));
+    expect(await f.cache.get(query)).toBeNull();
+    expect(vi.mocked(logger.warn).mock.calls.slice(warningsBefore)).toEqual([
+      [
+        '统计缓存内容无效',
+        'MonitorAnalyticsCache',
+        { reason: 'analytics_cache_invalid' },
+      ],
+    ]);
+    expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(2);
+  });
   it('skips oversized writes and rejects a cache value copied from a different query', async () => {
     const f = fixture();
     await f.cache.set(
@@ -199,6 +323,7 @@ describe('monitor analytics response/cache resource bounds', () => {
       },
       f.redis as unknown as ApplicationRedisClient,
       logger,
+      f.metrics,
     );
     expect(disabled.key(query)).not.toBe(f.cache.key(query));
     await disabled.set(query, { data: [], source: 'raw' }, Date.now());

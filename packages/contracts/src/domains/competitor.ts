@@ -109,6 +109,40 @@ export type CompetitorGroupUpsertRequest = z.infer<
   typeof competitorGroupUpsertRequestSchema
 >;
 
+export const competitorGroupSourceSchema = z
+  .object({
+    name: z.string(),
+    country: z.string(),
+    brand: z.string(),
+    updateTime: dateTimeString.nullable().optional(),
+  })
+  .strict();
+export type CompetitorGroupSource = z.infer<typeof competitorGroupSourceSchema>;
+export const competitorMoveTargetSnapshotSchema = competitorGroupSourceSchema
+  .extend({ id: z.string().min(1) })
+  .strict();
+export type CompetitorMoveTargetSnapshot = z.infer<
+  typeof competitorMoveTargetSnapshotSchema
+>;
+export const competitorUpdateGroupRequestSchema =
+  competitorGroupUpsertRequestSchema.extend({
+    expectedSource: competitorGroupSourceSchema.optional(),
+  });
+export type CompetitorUpdateGroupRequest = z.infer<
+  typeof competitorUpdateGroupRequestSchema
+>;
+
+/** Legacy callers may omit snapshots; Neo confirms source and children under the delete lock. */
+export const competitorDeleteGroupRequestSchema = z
+  .object({
+    expectedChildIds: z.array(z.string()).max(5000).optional(),
+    expectedSource: competitorGroupSourceSchema.optional(),
+  })
+  .strict();
+export type CompetitorDeleteGroupRequest = z.infer<
+  typeof competitorDeleteGroupRequestSchema
+>;
+
 // The Legacy controller treats these falsy values as an unspecified type.
 const competitorAsinTypeInputSchema = z
   .union([
@@ -130,6 +164,7 @@ export const competitorCreateAsinRequestSchema = z.object({
   brand: z.string().min(1, 'brand 为必填项'),
   parentId: z.string().min(1, 'parentId 为必填项'),
   asinType: competitorAsinTypeInputSchema,
+  expectedParent: competitorGroupSourceSchema.optional(),
 });
 export type CompetitorCreateAsinRequest = z.infer<
   typeof competitorCreateAsinRequestSchema
@@ -146,8 +181,33 @@ export type CompetitorUpdateAsinRequest = z.infer<
   typeof competitorUpdateAsinRequestSchema
 >;
 
+export const competitorAsinSourceSchema = z
+  .object({
+    variantGroupId: z.string(),
+    asin: z.string(),
+    name: z.string().nullable(),
+    country: z.string(),
+    brand: z.string().nullable(),
+    asinType: z.string().nullable(),
+    updateTime: dateTimeString.nullable().optional(),
+  })
+  .strict();
+export type CompetitorAsinSource = z.infer<typeof competitorAsinSourceSchema>;
+export const competitorGuardedUpdateAsinRequestSchema =
+  competitorUpdateAsinRequestSchema.extend({
+    expectedSource: competitorAsinSourceSchema.optional(),
+  });
+export type CompetitorGuardedUpdateAsinRequest = z.infer<
+  typeof competitorGuardedUpdateAsinRequestSchema
+>;
+export const competitorDeleteAsinRequestSchema = z
+  .object({ expectedSource: competitorAsinSourceSchema.optional() })
+  .strict();
+
 export const competitorMoveAsinRequestSchema = z.object({
   targetGroupId: z.string().min(1, '目标变体组ID为必填项'),
+  expectedSourceGroup: z.string().min(1).optional(),
+  expectedTargetSnapshot: competitorMoveTargetSnapshotSchema.optional(),
 });
 export type CompetitorMoveAsinRequest = z.infer<
   typeof competitorMoveAsinRequestSchema
@@ -320,7 +380,7 @@ export const competitorCheckDataSchema = z
   })
   .passthrough();
 export const competitorCheckResultSchema = resultSchema(
-  competitorCheckDataSchema,
+  z.union([competitorCheckDataSchema, variantCheckTaskDataSchema]),
 );
 
 /** 竞对批量检查：同步结果或异步受理 */

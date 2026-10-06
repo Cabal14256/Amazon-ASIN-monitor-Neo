@@ -64,12 +64,13 @@ export class CompetitorWriteController {
   async deleteGroup(
     @Req() request: FastifyRequest,
     @Param('groupId') id: string,
+    @Body() body: unknown,
   ) {
     this.assertOrigin(request);
     return {
       success: true,
       errorCode: 0,
-      data: await this.service.deleteGroup(request.auth!, id),
+      data: await this.service.deleteGroup(request.auth!, id, body),
     };
   }
   @Delete('asins/:asinId')
@@ -77,12 +78,13 @@ export class CompetitorWriteController {
   async deleteAsin(
     @Req() request: FastifyRequest,
     @Param('asinId') id: string,
+    @Body() body: unknown,
   ) {
     this.assertOrigin(request);
     return {
       success: true,
       errorCode: 0,
-      data: await this.service.deleteAsin(request.auth!, id),
+      data: await this.service.deleteAsin(request.auth!, id, body),
     };
   }
   @Put('variant-groups/:groupId/feishu-notify')

@@ -8,6 +8,7 @@ import type { FastifyReply } from 'fastify';
 
 import type { HealthErrorStatsService } from '../health/health.service';
 import type { AppLogger } from '../logger/app-logger.service';
+import { RecoverableQueryException } from './recoverable-query.exception';
 
 interface ErrorEnvelope {
   success: false;
@@ -111,7 +112,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const status = getStatus(exception);
     this.errorStats?.recordStatus(status);
-    if (status >= 500) {
+    if (exception instanceof RecoverableQueryException) {
+      this.logger.warn('API 查询暂不可用', 'ApiExceptionFilter', {
+        status,
+        reason: exception.reason,
+      });
+    } else if (status >= 500) {
       this.logger.error(
         'API 请求处理失败',
         'ApiExceptionFilter',
@@ -122,6 +128,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
       .switchToHttp()
       .getResponse<FastifyReply>()
       .status(status)
-      .send(toEnvelope(getExceptionResponse(exception), status));
+      .send(
+        exception instanceof RecoverableQueryException
+          ? exception.getResponse()
+          : toEnvelope(getExceptionResponse(exception), status),
+      );
   }
 }

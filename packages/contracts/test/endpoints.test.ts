@@ -14,7 +14,7 @@ const EXPECTED_DOMAIN_COUNTS: Record<string, number> = {
   roles: 4,
   asin: 16,
   'variant-check': 4,
-  monitor: 17,
+  monitor: 18,
   'competitor-asin': 14,
   'competitor-monitor': 3,
   'competitor-variant-check': 3,
@@ -30,8 +30,8 @@ const EXPECTED_DOMAIN_COUNTS: Record<string, number> = {
 };
 
 describe('端点注册表（契约冻结基线）', () => {
-  it('恰好 117 个端点', () => {
-    expect(ENDPOINTS).toHaveLength(117);
+  it('恰好 118 个端点（含 Neo 状态区间查询）', () => {
+    expect(ENDPOINTS).toHaveLength(118);
   });
 
   it('域划分与计划口径一致（18 域）', () => {
@@ -102,7 +102,7 @@ describe('端点注册表（契约冻结基线）', () => {
     expect(idIndex).toBeGreaterThan(statsIndex);
   });
 
-  it('认证标记分布快照（契约冻结如实记录，含 43 个未挂认证端点）', () => {
+  it('认证标记分布快照（含 Legacy 43 个未挂认证端点）', () => {
     const unauthenticated = ENDPOINTS.filter((e) => !e.auth);
     expect(unauthenticated).toHaveLength(43);
     const byDomain = unauthenticated.reduce<Record<string, number>>(
