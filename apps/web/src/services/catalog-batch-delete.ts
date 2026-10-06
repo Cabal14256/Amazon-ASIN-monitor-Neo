@@ -21,7 +21,10 @@ export function isBulkDeleteId(id: string): boolean {
     !!id &&
     id === id.trim() &&
     [...id].length <= 50 &&
-    !/[\x00-\x1f\x7f]/.test(id)
+    ![...id].some(
+      (character) =>
+        character.charCodeAt(0) <= 31 || character.charCodeAt(0) === 127,
+    )
   );
 }
 

@@ -48,6 +48,16 @@ export function useCatalogBatchDelete(options: {
     revision,
     sessionId,
     access.canDeleteASIN,
+    access.mustChangePassword,
+  ]);
+  const authScope = JSON.stringify([
+    owner,
+    options.config.id,
+    revision,
+    sessionId,
+    access.canReadASIN,
+    access.canDeleteASIN,
+    access.mustChangePassword,
   ]);
   const [selectionState, setSelection] = useState<{
     scope: string;
@@ -59,7 +69,8 @@ export function useCatalogBatchDelete(options: {
     ids: string[];
   } | null>(null);
   const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
+  const busyRef = useRef<symbol | null>(null);
+  const scopeEpoch = useRef(0);
   const [message, setMessage] = useState<string | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const mounted = useRef(true);
@@ -67,21 +78,40 @@ export function useCatalogBatchDelete(options: {
   latest.current = options;
   const recovery = useMemo(() => {
     try {
-      return browserBatchDeleteRecovery(owner, options.config.id);
+      return browserBatchDeleteRecovery(owner, options.config.id, sessionId);
     } catch {
       return null;
     }
-  }, [owner, options.config.id]);
+  }, [owner, options.config.id, sessionId]);
   const gate = options.safety?.phase === 'batch-delete' ? options.safety : null;
+  const receiptOwner = JSON.stringify([
+    options.config.id,
+    owner,
+    sessionId ?? null,
+  ]);
+  const [restoredReceipt, setRestoredReceipt] = useState<{
+    owner: string;
+    operationId: string;
+  } | null>(null);
+  const priorSession = Boolean(
+    gate?.ownerScope && gate.ownerScope !== receiptOwner,
+  );
+  const receiptVisible =
+    !priorSession ||
+    (restoredReceipt?.owner === receiptOwner &&
+      restoredReceipt.operationId === gate?.operationId &&
+      access.canDeleteASIN &&
+      !access.mustChangePassword);
   const task = useTaskQuery(
     runtime,
-    gate?.state === 'task' ? gate.taskId : undefined,
-    access.canReadASIN,
+    gate?.state === 'task' && receiptVisible ? gate.taskId : undefined,
+    access.canReadASIN && !access.mustChangePassword,
   );
   const enabled = Boolean(
     options.config.batchDelete &&
       options.enabled &&
       access.canDeleteASIN &&
+      !access.mustChangePassword &&
       !options.safety &&
       recovery &&
       !busy,
@@ -95,7 +125,8 @@ export function useCatalogBatchDelete(options: {
       state.identity.user.id === owner &&
       state.identity.sessionId === sessionId &&
       (write
-        ? createAccess(state.identity).canDeleteASIN
+        ? createAccess(state.identity).canDeleteASIN &&
+          !createAccess(state.identity).mustChangePassword
         : createAccess(state.identity).canReadASIN)
     );
   };
@@ -112,6 +143,12 @@ export function useCatalogBatchDelete(options: {
       mounted.current = false;
     };
   }, []);
+  useLayoutEffect(() => {
+    scopeEpoch.current++;
+    busyRef.current = null;
+    setBusy(false);
+    setRestoredReceipt(null);
+  }, [authScope]);
   useLayoutEffect(() => {
     setSelection({ scope, ids: [] });
     setConfirmation(null);
@@ -156,7 +193,7 @@ export function useCatalogBatchDelete(options: {
     };
     window.addEventListener('storage', sync);
     return () => window.removeEventListener('storage', sync);
-  }, [owner, recovery, runtime.queryClient, revision]);
+  }, [owner, recovery, runtime.queryClient, revision, sessionId]);
 
   async function refresh() {
     if (!current(false)) throw new Error('当前会话已变化，请在原账号下核实。');
@@ -176,12 +213,70 @@ export function useCatalogBatchDelete(options: {
     runtime.queryClient.setQueryData([config.id, 'groups', corrected], fresh);
     if (corrected !== query) latest.current.onQuery(corrected);
   }
+  async function restoreOriginalReceipt() {
+    if (
+      !gate?.ownerScope ||
+      !priorSession ||
+      !recovery ||
+      !current(true) ||
+      busyRef.current
+    )
+      return;
+    const busyToken = Symbol();
+    const epoch = scopeEpoch.current;
+    const active = () => current(true) && scopeEpoch.current === epoch;
+    busyRef.current = busyToken;
+    setBusy(true);
+    try {
+      await navigator.locks.request(recovery.key, async () => {
+        if (!active()) return;
+        const stored = recovery.read();
+        if (
+          stored?.phase !== 'batch-delete' ||
+          stored.ownerScope !== gate.ownerScope ||
+          stored.operationId !== gate.operationId ||
+          stored.submittedAt !== gate.submittedAt ||
+          JSON.stringify(stored.groupIds) !== JSON.stringify(gate.groupIds)
+        )
+          throw new Error('原会话回执绑定已变化，删除保护仍保留。');
+        if (!active()) return;
+        setRestoredReceipt({
+          owner: receiptOwner,
+          operationId: stored.operationId,
+        });
+        publish(stored);
+        setMessage(
+          '已显式恢复同一用户原会话的删除回执；请核实任务与目录，未重新提交删除。',
+        );
+      });
+    } catch (error) {
+      if (active()) setMessage(catalogError(error));
+    } finally {
+      if (busyRef.current === busyToken) {
+        busyRef.current = null;
+        if (active()) setBusy(false);
+      }
+    }
+  }
   async function reconcile(
     expected: CatalogBatchDeleteGate,
     acknowledgeUnknown = false,
   ) {
-    if (!recovery || !current(false) || busyRef.current) return;
-    busyRef.current = true;
+    if (
+      !recovery ||
+      !current(false) ||
+      busyRef.current ||
+      !receiptVisible ||
+      (priorSession && !current(true))
+    )
+      return;
+    const busyToken = Symbol();
+    const epoch = scopeEpoch.current;
+    const active = () =>
+      current(false) &&
+      scopeEpoch.current === epoch &&
+      (!priorSession || current(true));
+    busyRef.current = busyToken;
     setBusy(true);
     setMessage(null);
     try {
@@ -189,10 +284,10 @@ export function useCatalogBatchDelete(options: {
         expected,
         (id) => runtime.tasks.get(id),
         refresh,
-        () => current(false),
+        active,
         acknowledgeUnknown,
       );
-      if (!current(false)) return;
+      if (!active()) return;
       publish(recovery.read());
       if (result.kind === 'cleared') {
         setMessage(result.message);
@@ -209,15 +304,25 @@ export function useCatalogBatchDelete(options: {
         );
       else if (result.kind === 'changed')
         setMessage('删除恢复记录已变化，请核对最新回执。');
+      else if (result.kind === 'unsaved')
+        setMessage(
+          '已知删除回执无法保存到本地，写入保护仍保留；请保留页面并恢复存储后再次核实，勿重发删除。',
+        );
     } catch (error) {
-      if (current(false)) {
-        publish(recovery.read());
+      if (active()) {
+        try {
+          publish(recovery.read());
+        } catch {
+          // Preserve the mounted guard/known receipt while storage is unreadable.
+        }
         setMessage(`核实失败，删除保护仍保留：${catalogError(error)}`);
         if (catalogAccessDenied(error)) latest.current.onDenied();
       }
     } finally {
-      busyRef.current = false;
-      if (mounted.current) setBusy(false);
+      if (busyRef.current === busyToken) {
+        busyRef.current = null;
+        if (active()) setBusy(false);
+      }
     }
   }
   async function submit() {
@@ -231,7 +336,11 @@ export function useCatalogBatchDelete(options: {
       busyRef.current
     )
       return;
-    busyRef.current = true;
+    const busyToken = Symbol();
+    const epoch = scopeEpoch.current;
+    const active = (write: boolean) =>
+      current(write) && scopeEpoch.current === epoch;
+    busyRef.current = busyToken;
     setBusy(true);
     setConfirmation(null);
     setSelection({ scope, ids: [] });
@@ -245,10 +354,12 @@ export function useCatalogBatchDelete(options: {
             groupIds: confirmed.ids,
             useAsync: true,
           }),
-        () => current(true),
-        publish,
+        () => active(true),
+        (value) => {
+          if (active(false)) publish(value);
+        },
       );
-      if (!current(false)) return;
+      if (!active(false)) return;
       if (result.kind === 'accepted') {
         accepted = result.gate;
         if (!result.persisted)
@@ -264,10 +375,12 @@ export function useCatalogBatchDelete(options: {
           '删除提交结果未知；不会自动重试。请核对任务中心与目录后再解除保护。',
         );
     } catch (error) {
-      if (current(false)) setMessage(catalogError(error));
+      if (active(false)) setMessage(catalogError(error));
     } finally {
-      busyRef.current = false;
-      if (mounted.current) setBusy(false);
+      if (busyRef.current === busyToken) {
+        busyRef.current = null;
+        if (active(false)) setBusy(false);
+      }
     }
     if (accepted?.state === 'refresh') await reconcile(accepted);
   }
@@ -275,18 +388,21 @@ export function useCatalogBatchDelete(options: {
   reconcileCurrent.current = reconcile;
   const terminalAttempts = useRef(new Set<string>());
   useEffect(() => {
+    const receipt = task.data;
     if (
       !gate ||
+      !receiptVisible ||
       gate.state !== 'task' ||
-      task.data?.taskId !== gate.taskId ||
-      !isTerminalTask(task.data.status)
+      !receipt ||
+      receipt.taskId !== gate.taskId ||
+      !isTerminalTask(receipt.status)
     )
       return;
-    const key = `${owner}:${revision}:${gate.operationId}:${task.data.status}`;
+    const key = `${receiptOwner}:${revision}:${gate.operationId}:${receipt.status}`;
     if (terminalAttempts.current.has(key) || busyRef.current) return;
     terminalAttempts.current.add(key);
     void reconcileCurrent.current(gate);
-  }, [gate, task.data, owner, revision, busy]);
+  }, [gate, task.data, receiptVisible, receiptOwner, revision, busy]);
   const selection: CatalogSelection | undefined =
     options.config.batchDelete && access.canDeleteASIN
       ? {
@@ -400,44 +516,71 @@ export function useCatalogBatchDelete(options: {
           className="rounded-control border border-status-warning p-4"
         >
           <h3 className="font-semibold">
-            {gate.state === 'task'
+            {!receiptVisible
+              ? '原会话批量删除结果待核实'
+              : gate.state === 'task'
               ? '批量删除任务已受理，等待核实结果'
               : gate.state === 'refresh'
               ? '删除已结束，等待重读目录'
               : '批量删除提交结果未知'}
           </h3>
           <p className="mt-2 text-sm">
-            {gate.message ||
-              '请求可能已经受理。保护期间不能再次写入；不会自动重试删除。'}
+            {!receiptVisible
+              ? '原操作属于你之前的登录会话，写入保护仍保留。请显式读取绑定的回执再核实，勿重发删除。'
+              : gate.message ||
+                '请求可能已经受理。保护期间不能再次写入；不会自动重试删除。'}
           </p>
-          {gate.taskId && (
+          {!receiptVisible && (
+            <Button
+              variant="secondary"
+              disabled={
+                busy || !access.canDeleteASIN || access.mustChangePassword
+              }
+              onClick={() => void restoreOriginalReceipt()}
+            >
+              恢复原会话删除回执（不提交）
+            </Button>
+          )}
+          {receiptVisible && gate.taskId && (
             <p className="neo-mono my-2 break-all text-xs">
               任务 ID：{gate.taskId}
             </p>
           )}
-          {gate.state === 'task' && task.data && (
+          {receiptVisible && (
+            <div className="my-2 text-xs">
+              <p className="neo-mono break-all">原操作：{gate.operationId}</p>
+              <ul className="max-h-32 overflow-auto break-all">
+                {gate.groupIds.map((id) => (
+                  <li key={id}>原始组 ID：{JSON.stringify(id)}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {receiptVisible && gate.state === 'task' && task.data && (
             <p className="my-2 text-sm">
               任务状态：{task.data.status} · 进度{' '}
               {Math.max(0, Math.min(100, task.data.progress))}%
             </p>
           )}
-          {gate.state === 'task' && task.isError && (
+          {receiptVisible && gate.state === 'task' && task.isError && (
             <p className="my-2 text-sm">
               任务查询失败，保护仍保留：{catalogError(task.error)}
             </p>
           )}
-          <Button
-            variant="secondary"
-            disabled={busy || !access.canReadASIN}
-            onClick={() => void reconcile(gate)}
-          >
-            {busy
-              ? '正在核实…'
-              : gate.taskId
-              ? '查询任务并重读目录'
-              : '重读目录核对结果'}
-          </Button>
-          {gate.state === 'unknown' && (
+          {receiptVisible && (
+            <Button
+              variant="secondary"
+              disabled={busy || !access.canReadASIN}
+              onClick={() => void reconcile(gate)}
+            >
+              {busy
+                ? '正在核实…'
+                : gate.taskId
+                ? '查询任务并重读目录'
+                : '重读目录核对结果'}
+            </Button>
+          )}
+          {receiptVisible && gate.state === 'unknown' && (
             <div className="mt-3 space-y-2 text-sm">
               <p>
                 请在任务中心或由管理员核实本次操作，确认不存在待执行或延迟删除任务。仅重读目录不足以解除保护。

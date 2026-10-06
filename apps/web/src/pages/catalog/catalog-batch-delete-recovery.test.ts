@@ -84,6 +84,182 @@ async function accepted(
 }
 
 describe('catalog batch deletion durable recovery', () => {
+  it('preserves known terminal counts through session fallback and refuses to clear while durable receipt writes fail', async () => {
+    const f = fixture();
+    const gate = await accepted(f);
+    const write = f.local.setItem;
+    f.local.setItem = () => {
+      throw new Error('quota denied');
+    };
+    const refresh = vi.fn(async () => undefined);
+    expect(
+      await f.recovery.reconcile(
+        gate,
+        async () => task('completed'),
+        refresh,
+        f.current,
+      ),
+    ).toMatchObject({ kind: 'unsaved' });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(f.recovery.read()).toMatchObject({
+      state: 'refresh',
+      message: expect.stringContaining('实际删除变体组 1 个'),
+    });
+    expect(f.local.entries.get(f.recovery.key)).toContain('task-1');
+    const restored = new CatalogBatchDeleteRecovery(
+      'owner',
+      'asin',
+      f.local,
+      f.session,
+      f.locks,
+    );
+    const known = restored.read() as CatalogBatchDeleteGate;
+    expect(known.state).toBe('refresh');
+    f.local.setItem = write;
+    expect(
+      await restored.reconcile(known, vi.fn(), refresh, f.current),
+    ).toMatchObject({ kind: 'cleared' });
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(restored.read()).toBeNull();
+  });
+  it.each([
+    { ownerScope: ['competitor', 'owner', 'session-1'] },
+    { ownerScope: ['asin', 'other', 'session-1'] },
+  ])(
+    'retains protection for a forged original-session scope $ownerScope',
+    ({ ownerScope }) => {
+      const f = fixture();
+      f.local.setItem(
+        f.recovery.key,
+        JSON.stringify({
+          phase: 'batch-delete',
+          operationId: 'original',
+          groupIds: ['group-1'],
+          state: 'task',
+          taskId: 'task-1',
+          submittedAt: 1,
+          ownerScope: JSON.stringify(ownerScope),
+        }),
+      );
+      expect(f.recovery.read()).toMatchObject({
+        operationId: 'invalid-record',
+        state: 'unknown',
+      });
+      expect(f.local.getItem(f.recovery.key)).not.toBeNull();
+    },
+  );
+
+  it('rejects a session fallback whose original selected groups were coherently changed', async () => {
+    const f = fixture();
+    const original = await accepted(f);
+    const unknown = {
+      ...original,
+      state: 'unknown',
+      taskId: undefined,
+      message: undefined,
+    };
+    f.local.setItem(f.recovery.key, JSON.stringify(unknown));
+    f.session.setItem(
+      f.recovery.fallbackKey,
+      JSON.stringify({ ...original, groupIds: ['other-group'] }),
+    );
+    expect(f.recovery.read()).toEqual(unknown);
+  });
+
+  it('never removes the durable guard when session receipt cleanup fails during reconciliation', async () => {
+    const f = fixture();
+    const gate = await accepted(f, 'sync');
+    f.session.removeItem = () => {
+      throw new Error('cleanup denied');
+    };
+    expect(
+      await f.recovery.reconcile(
+        gate,
+        vi.fn(),
+        async () => undefined,
+        f.current,
+      ),
+    ).toMatchObject({ kind: 'changed' });
+    expect(f.recovery.read()).toEqual(gate);
+  });
+  it.each(['unreadable', 'invalid-json'] as const)(
+    'never dispatches or removes the guard when local recovery storage is %s',
+    async (mode) => {
+      const f = fixture();
+      f.local.setItem(f.recovery.key, '{broken');
+      if (mode === 'unreadable')
+        f.local.getItem = () => {
+          throw new Error('read denied');
+        };
+      const send = vi.fn(async () => counts);
+      if (mode === 'unreadable')
+        await expect(
+          f.recovery.submit(['group-1'], send, f.current, f.publish),
+        ).rejects.toThrow();
+      else
+        expect(
+          await f.recovery.submit(['group-1'], send, f.current, f.publish),
+        ).toMatchObject({ kind: 'blocked' });
+      expect(send).not.toHaveBeenCalled();
+      expect(f.local.entries.get(f.recovery.key)).toBe('{broken');
+    },
+  );
+
+  it('keeps a known accepted receipt in fallback and mounted UI when reading local storage fails after POST', async () => {
+    const f = fixture();
+    const send = vi.fn(async () => {
+      f.local.getItem = () => {
+        throw new Error('read denied');
+      };
+      return {
+        mode: 'async' as const,
+        taskId: 'task-1',
+        status: 'pending' as const,
+      };
+    });
+    const outcome = await f.recovery.submit(
+      ['group-1'],
+      send,
+      f.current,
+      f.publish,
+    );
+    expect(outcome).toMatchObject({
+      kind: 'accepted',
+      persisted: false,
+      gate: { taskId: 'task-1' },
+    });
+    expect(f.publish).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: 'task', taskId: 'task-1' }),
+    );
+    expect(f.session.getItem(f.recovery.fallbackKey)).toContain('task-1');
+    const readTask = vi.fn();
+    const refresh = vi.fn();
+    if (outcome.kind !== 'accepted')
+      throw new Error('fixture acceptance failed');
+    await expect(
+      f.recovery.reconcile(outcome.gate, readTask, refresh, f.current),
+    ).rejects.toThrow('read denied');
+    expect(readTask).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(f.local.entries.get(f.recovery.key)).toContain('unknown');
+  });
+
+  it('cannot overwrite a replacement cross-tab claim with a late accepted receipt', async () => {
+    const f = fixture();
+    const response = deferred<typeof counts>();
+    const pending = f.recovery.submit(
+      ['group-1'],
+      () => response.promise,
+      f.current,
+      f.publish,
+    );
+    await Promise.resolve();
+    const replacement = { phase: 'inspection', operationId: 'replacement' };
+    f.local.setItem(f.recovery.key, JSON.stringify(replacement));
+    response.resolve(counts);
+    expect(await pending).toMatchObject({ kind: 'accepted', persisted: false });
+    expect(f.recovery.read()).toEqual(replacement);
+  });
   it.each(['asin', 'competitor'] as const)(
     'guards %s before dispatch and clears sync only after a successful reread',
     async (domain) => {

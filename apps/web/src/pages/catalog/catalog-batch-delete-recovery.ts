@@ -26,13 +26,22 @@ export class CatalogBatchDeleteRecovery {
     private readonly local: StoragePort,
     private readonly session: StoragePort | null,
     private readonly locks: Locks,
-    private readonly uuid = () => crypto.randomUUID(),
+    private readonly uuid: () => string = () => crypto.randomUUID(),
+    private readonly ownerScope?: string,
   ) {
     this.key = catalogSafetyKey(owner, domain);
     this.fallbackKey = `${this.key}:batch-receipt`;
   }
   read(): CatalogSafetyGate | null {
-    const local = readCatalogSafetyGate(this.local, this.owner, this.domain);
+    // Preserve the guard if storage cannot be read or its JSON cannot be verified.
+    const raw = this.local.getItem(this.key);
+    const local = readCatalogSafetyGate(
+      { getItem: () => raw, removeItem: () => undefined },
+      this.owner,
+      this.domain,
+    );
+    if (raw !== null && !local)
+      throw new Error('无法验证原删除记录，删除保护仍保留。');
     try {
       const fallbackStorage = {
         getItem: () => this.session?.getItem(this.fallbackKey) ?? null,
@@ -47,7 +56,11 @@ export class CatalogBatchDeleteRecovery {
         local?.phase === 'batch-delete' &&
         fallback?.phase === 'batch-delete' &&
         local.operationId === fallback.operationId &&
-        local.state === 'unknown'
+        local.ownerScope === fallback.ownerScope &&
+        local.submittedAt === fallback.submittedAt &&
+        JSON.stringify(local.groupIds) === JSON.stringify(fallback.groupIds) &&
+        { unknown: 0, task: 1, refresh: 2 }[fallback.state] >=
+          { unknown: 0, task: 1, refresh: 2 }[local.state]
       )
         return fallback;
     } catch {
@@ -55,12 +68,21 @@ export class CatalogBatchDeleteRecovery {
     }
     return local;
   }
-  private remember(gate: CatalogBatchDeleteGate): boolean {
-    const saved =
-      writeCatalogSafetyGate(this.local, this.owner, this.domain, gate) &&
-      JSON.stringify(
-        readCatalogSafetyGate(this.local, this.owner, this.domain),
-      ) === JSON.stringify(gate);
+  private remember(
+    gate: CatalogBatchDeleteGate,
+    expected?: CatalogBatchDeleteGate,
+  ): boolean {
+    let saved = false;
+    try {
+      const current = this.read();
+      if (expected && JSON.stringify(current) !== JSON.stringify(expected))
+        return false;
+      saved =
+        writeCatalogSafetyGate(this.local, this.owner, this.domain, gate) &&
+        JSON.stringify(this.read()) === JSON.stringify(gate);
+    } catch {
+      // Keep a validated known receipt in the session fallback and mounted UI.
+    }
     try {
       if (saved) this.session?.removeItem(this.fallbackKey);
       else this.session?.setItem(this.fallbackKey, JSON.stringify(gate));
@@ -78,13 +100,14 @@ export class CatalogBatchDeleteRecovery {
       current.state !== expected.state
     )
       return false;
-    if (!writeCatalogSafetyGate(this.local, this.owner, this.domain, null))
-      return false;
     try {
       this.session?.removeItem(this.fallbackKey);
+      if (this.session?.getItem(this.fallbackKey)) return false;
     } catch {
       return false;
     }
+    if (!writeCatalogSafetyGate(this.local, this.owner, this.domain, null))
+      return false;
     return this.read() === null;
   }
   submit(
@@ -103,6 +126,7 @@ export class CatalogBatchDeleteRecovery {
         groupIds: [...groupIds],
         submittedAt: Date.now(),
         state: 'unknown',
+        ...(this.ownerScope ? { ownerScope: this.ownerScope } : {}),
       };
       if (!this.remember(claim))
         throw new Error('无法保存删除状态，尚未发送请求。');
@@ -129,8 +153,17 @@ export class CatalogBatchDeleteRecovery {
                 state: 'refresh',
                 message: summarizeBatchDelete(result),
               };
-        const persisted = this.remember(gate);
-        if (current()) publish(gate);
+        const persisted = this.remember(gate, claim);
+        let matching = true;
+        try {
+          const stored = this.read();
+          matching =
+            stored?.phase === 'batch-delete' &&
+            stored.operationId === claim.operationId;
+        } catch {
+          // The mounted accepted receipt remains visible while the durable guard is unreadable.
+        }
+        if (current() && matching) publish(gate);
         return { kind: 'accepted' as const, gate, persisted };
       } catch (error) {
         const rejected =
@@ -195,9 +228,10 @@ export class CatalogBatchDeleteRecovery {
               : '请核对目录与任务详情。'
           }`.slice(0, 500),
         };
-        this.remember(gate);
       }
       if (!current()) return { kind: 'stale' as const };
+      if (gate.state !== 'unknown' && !this.remember(gate, expected))
+        return { kind: 'unsaved' as const };
       await refresh();
       if (!current()) return { kind: 'stale' as const };
       if (gate.state === 'unknown' && !acknowledgeUnknown)
@@ -216,6 +250,7 @@ export class CatalogBatchDeleteRecovery {
 export function browserBatchDeleteRecovery(
   owner: string,
   domain: 'asin' | 'competitor',
+  sessionId: string | undefined,
 ): CatalogBatchDeleteRecovery {
   if (!owner || !navigator.locks)
     throw new Error('浏览器不支持安全的跨标签写入锁。');
@@ -231,5 +266,7 @@ export function browserBatchDeleteRecovery(
     window.localStorage,
     session,
     navigator.locks,
+    undefined,
+    JSON.stringify([domain, owner, sessionId ?? null]),
   );
 }

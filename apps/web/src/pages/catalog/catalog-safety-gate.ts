@@ -8,6 +8,7 @@ export interface CatalogBatchDeleteGate {
   state: 'unknown' | 'task' | 'refresh';
   taskId?: string;
   message?: string;
+  ownerScope?: string;
 }
 
 export type CatalogSafetyGate =
@@ -46,15 +47,45 @@ export function readCatalogSafetyGate(
 ): CatalogSafetyGate | null {
   if (!owner) return null;
   const key = catalogSafetyKey(owner, source);
+  let raw: string | null;
   try {
-    const raw = storage.getItem(key);
-    if (!raw) return null;
-    const value: unknown = JSON.parse(raw);
+    raw = storage.getItem(key);
+  } catch {
+    // Read failure cannot prove that a destructive operation has no guard.
+    return { phase: 'inspection', operationId: 'storage-unreadable' };
+  }
+  if (!raw) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { phase: 'inspection', operationId: 'invalid-record' };
+  }
+  try {
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('invalid');
     const gate = value as Record<string, unknown>;
     if (gate.phase === 'batch-delete') {
+      let scopeValid = true;
+      if (gate.ownerScope !== undefined) {
+        try {
+          const scope: unknown =
+            typeof gate.ownerScope === 'string' &&
+            gate.ownerScope.length <= 1000
+              ? JSON.parse(gate.ownerScope)
+              : null;
+          scopeValid =
+            Array.isArray(scope) &&
+            scope.length === 3 &&
+            scope[0] === source &&
+            scope[1] === owner &&
+            (scope[2] === null || typeof scope[2] === 'string');
+        } catch {
+          scopeValid = false;
+        }
+      }
       if (
+        !scopeValid ||
         typeof gate.operationId !== 'string' ||
         !/^[a-z0-9-]{1,80}$/i.test(gate.operationId) ||
         !Array.isArray(gate.groupIds) ||
@@ -64,7 +95,11 @@ export function readCatalogSafetyGate(
             typeof id !== 'string' ||
             !id ||
             [...id].length > 50 ||
-            /[\x00-\x1f\x7f]/.test(id),
+            [...id].some(
+              (character) =>
+                character.charCodeAt(0) <= 31 ||
+                character.charCodeAt(0) === 127,
+            ),
         ) ||
         !Number.isSafeInteger(gate.submittedAt) ||
         (gate.submittedAt as number) < 0 ||

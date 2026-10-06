@@ -14,7 +14,10 @@ import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
 import { ApiError } from '../../lib/http';
 import { sessionFixture } from '../../lib/transport-fixtures';
-import type { createTransportRuntime } from '../../services/runtime';
+import type {
+  createTransportRuntime,
+  SessionEvent,
+} from '../../services/runtime';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { catalogSafetyKey } from './catalog-safety-gate';
 import type { CatalogConfig } from './catalog-types';
@@ -108,6 +111,7 @@ function fixture(
     }),
   } as unknown as IdentityStore;
   const clearUserWork = vi.fn(() => queryClient.clear());
+  const sessionListeners = new Set<(event: SessionEvent) => void>();
   const runtime = {
     http: { request: vi.fn() },
     queryClient,
@@ -115,6 +119,10 @@ function fixture(
     tasks: { get: vi.fn() },
     ws: { onMessage: vi.fn(() => () => undefined) },
     clearUserWork,
+    subscribeSession: (listener: (event: SessionEvent) => void) => {
+      sessionListeners.add(listener);
+      return () => sessionListeners.delete(listener);
+    },
   } as unknown as ReturnType<typeof createTransportRuntime>;
   const detail = vi.fn(async () => original);
   const config = {

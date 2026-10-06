@@ -18,10 +18,20 @@
 
 ## 浏览器与跨标签保护
 
-提交前必须能持久化恢复记录，并使用与现有单项写入/导入相同的 owner/domain Web Lock。写入保护存于 `neo:catalog-write-safety:<owner>:<domain>`；不要人工删除这个键来解决未知结果。首次存储失败时不发送请求。回执更新失败时保留原始持久化 claim、当前页面 ID 和可用的 sessionStorage 收据后备，并提示保存失败；重新进入会合并同一 operation 的后备收据。记录损坏时保守保持批量删除保护。
+提交前必须能持久化恢复记录，并使用与现有单项写入/导入相同的 owner/domain Web Lock。写入保护存于 `neo:catalog-write-safety:<owner>:<domain>`；不要人工删除这个键来解决未知结果。首次存储失败时不发送请求；读取失败和 JSON 不能解析时保留核实保护，不能当作没有旧操作。回执更新或读取失败时保留原始持久化 claim、当前页面已知 ID/统计和可用的 sessionStorage 收据后备，并提示保存失败；重新进入只合并同一 operation、原始组列表、提交时刻、原 owner/session 的后备收据。后备清理失败不能先删除持久保护；迟到回执不能覆盖替换后的跨标签 claim。
 
-账号和会话变化只清除可操作 UI；已受理工作仍可能继续执行，原账号下保留回执。迟到回执不得展示到另一账号，也不得污染新会话目录缓存。
+账号和会话变化只清除可操作 UI；已受理工作仍可能继续执行，原账号下保留回执。同一已验证用户重新登录时不自动展示原会话统计或查询旧任务，须以当前 `asin:delete` 且已完成强制改密，显式点击“恢复原会话删除回执（不提交）”。恢复只读取该用户 gate 已绑定的原 session/operationId/原始组列表/提交时刻，锁内复查所有字段；恢复后仍需任务与目录核实，无 ID 未知结果仍须人工审计确认。恢复不枚举历史用户或自动重 POST。排队和响应期间换用户、session、权限或改密策略使旧请求失效；迟到回执只保存到原归属，不更新新会话界面、busy 状态或目录缓存。
 
 ## 隔离验收
 
-新增 mounted tests 使用真实 HttpClient/typed service/TaskApi，合成 fetch 响应而不连接生产数据库；覆盖两域、`/api/` 与 gateway base、不重复 `/api`、当前页选择、原始 Unicode、padded ID 零提交、权限撤回/会话变化、未知恢复、终态与重读失败。独立 recovery tests 覆盖跨标签串行、先存后发、迟到回执、损坏记录、localStorage 失败后备、404/错误 subtype、替换 claim 与刷新期间身份变化。本任务不改变数据库/API/Worker；真实 bulk 执行沿用对应已存在 Integration CI，原始 ID 对拍由 #212 完成。
+新增 mounted tests 使用真实 HttpClient/typed service/TaskApi，合成 fetch 响应而不连接生产数据库；覆盖两域、`/api/` 与 gateway base、不重复 `/api`、当前页选择、原始 Unicode、padded ID 零提交、权限撤回/会话变化、强制改密、原会话显式恢复、未知恢复、终态与重读失败。独立 recovery tests 覆盖跨标签串行、先存后发、迟到回执、损坏/篡改记录、localStorage 读写失败后备、404/错误 subtype、替换 claim、后备清理失败与刷新期间身份变化。本任务不改变数据库/API/Worker；真实 bulk 执行沿用对应已存在 Integration CI，原始 ID 对拍由 #212 完成。
+
+2026-10-07 最新配额保护修复后的本地验证（`NODE_OPTIONS=--max-old-space-size=1536`，Vitest 单 worker）：
+
+- 定向 service/recovery/mounted：63 项 / 3 文件 / 零跳过。
+- 完整 Web：827 项 / 62 文件 / 零跳过；Web strict、lint、build 通过。Vite 仍报告现有入口与 ECharts chunk 超过 500 kB，未放宽阈值。
+- `corepack pnpm exec max setup` 补齐 fresh ignore-scripts install 未生成的 Legacy `.umi` 后，根 `tsc --noEmit --pretty false` 通过；未更改 Legacy tsconfig。
+- 根 `test:contracts`：40 项；contracts：168 项 / 14 文件；请求/导出 URL 与 changed-format 回归：8 项，均通过。对全部本次变更文件执行 Prettier 与 `git diff --check`。
+- 同一分支较早的 826 项全量结果属于配额修复之前的历史验证，不代表最新提交。
+
+本地未重复运行 Legacy server unit / Legacy `npm run build`、config/db/api/worker 全套及 `build:api`、`build:worker`、`build:db`：本次只改 Web 和操作文档，后端和数据库没有变更，由 PR CI 执行对应基线。未连接真实数据库、生产环境或人工浏览器截图验收；mounted synthetic transport 不冒称真实数据库执行证明。

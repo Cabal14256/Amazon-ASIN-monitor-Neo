@@ -186,7 +186,12 @@ function fixture(
     recoverList: () => {
       listFailure = false;
     },
-    setIdentity: (permissions: string[], owner = 'operator') => {
+    setIdentity: (
+      permissions: string[],
+      owner = 'operator',
+      sessionId = 'session-1',
+      mustChangePassword = false,
+    ) => {
       if (state.status !== 'authenticated') throw new Error('fixture');
       state = {
         ...state,
@@ -194,6 +199,8 @@ function fixture(
           ...state.identity,
           user: { ...state.identity.user, id: owner },
           permissions,
+          sessionId,
+          mustChangePassword,
         },
       };
       for (const listener of listeners) listener();
@@ -205,9 +212,11 @@ function fixture(
   };
 }
 async function selectAll() {
-  fireEvent.click(
-    await screen.findByRole('button', { name: '选择本页可删除组' }),
-  );
+  const select = await screen.findByRole('button', {
+    name: '选择本页可删除组',
+  });
+  await waitFor(() => expect(select).toHaveProperty('disabled', false));
+  fireEvent.click(select);
 }
 async function confirm() {
   await selectAll();
@@ -218,6 +227,160 @@ const mutations = (f: ReturnType<typeof fixture>) =>
   f.fetcher.mock.calls.filter((call) => call[1]?.method === 'POST');
 
 describe('mounted primary and competitor bulk-delete real HTTP transport', () => {
+  it('retains original-session unknown deletion protection after explicit GET-only recovery until manual audit', async () => {
+    const f = fixture('asin', {
+      response: async () => {
+        throw new Error('response lost');
+      },
+    });
+    await confirm();
+    await screen.findByRole('heading', { name: '批量删除提交结果未知' });
+    act(() =>
+      f.setIdentity(['asin:read', 'asin:delete'], 'operator', 'session-2'),
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: '恢复原会话删除回执（不提交）' }),
+    );
+    await screen.findByRole('heading', { name: '批量删除提交结果未知' });
+    fireEvent.click(screen.getByRole('button', { name: '重读目录核对结果' }));
+    await screen.findByText(/读取目录不能证明/);
+    expect(
+      localStorage.getItem(catalogSafetyKey('operator', 'asin')),
+    ).toContain('unknown');
+    expect(mutations(f)).toHaveLength(1);
+  });
+  it.each(['asin', 'competitor'] as const)(
+    'requires explicit same-user original-session %s task recovery and never republishes a late original receipt',
+    async (domain) => {
+      const response = deferred<Response>();
+      const f = fixture(domain, { response: () => response.promise });
+      await confirm();
+      await waitFor(() => expect(mutations(f)).toHaveLength(1));
+      act(() =>
+        f.setIdentity(['asin:read', 'asin:delete'], 'operator', 'session-2'),
+      );
+      await act(async () =>
+        response.resolve(
+          jsonResponse({
+            success: true,
+            data: {
+              mode: 'async',
+              taskId: 'task-1',
+              status: 'pending',
+              totalRequested: 2,
+            },
+          }),
+        ),
+      );
+      expect(screen.queryByText('任务 ID：task-1')).toBeNull();
+      expect(
+        f.fetcher.mock.calls.some(([url]) =>
+          String(url).includes('/tasks/task-1'),
+        ),
+      ).toBe(false);
+      fireEvent.click(
+        screen.getByRole('button', { name: '恢复原会话删除回执（不提交）' }),
+      );
+      await screen.findByText('任务 ID：task-1');
+      expect(screen.getByText(/已显式恢复同一用户原会话/)).toBeTruthy();
+      expect(
+        localStorage.getItem(catalogSafetyKey('operator', domain)),
+      ).toContain('task-1');
+      f.setTaskStatus('completed');
+      fireEvent.click(
+        screen.getByRole('button', { name: '查询任务并重读目录' }),
+      );
+      await waitFor(() =>
+        expect(
+          localStorage.getItem(catalogSafetyKey('operator', domain)),
+        ).toBeNull(),
+      );
+      expect(mutations(f)).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { permissions: ['asin:read'], mustChangePassword: false },
+    { permissions: ['asin:read', 'asin:delete'], mustChangePassword: true },
+  ])(
+    'keeps original-session deletion receipt recovery disabled without delete permission or completed password policy ($mustChangePassword)',
+    async ({ permissions, mustChangePassword }) => {
+      const f = fixture('asin', { listFailureAfterDelete: true });
+      await confirm();
+      await screen.findByText(/核实失败，删除保护仍保留/);
+      act(() =>
+        f.setIdentity(permissions, 'operator', 'session-2', mustChangePassword),
+      );
+      const button = screen.getByRole('button', {
+        name: '恢复原会话删除回执（不提交）',
+      });
+      expect(button).toHaveProperty('disabled', true);
+      fireEvent.click(button);
+      expect(screen.queryByText(/实际删除变体组 1 个/)).toBeNull();
+      expect(mutations(f)).toHaveLength(1);
+      expect(
+        localStorage.getItem(catalogSafetyKey('operator', 'asin')),
+      ).not.toBeNull();
+    },
+  );
+
+  it('cancels a queued original-session receipt recovery when the current login session changes', async () => {
+    const f = fixture('asin', { listFailureAfterDelete: true });
+    await confirm();
+    await screen.findByText(/核实失败，删除保护仍保留/);
+    act(() =>
+      f.setIdentity(['asin:read', 'asin:delete'], 'operator', 'session-2'),
+    );
+    const lock = deferred<void>();
+    let queued = false;
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: async (_key: string, work: () => unknown) => {
+          queued = true;
+          await lock.promise;
+          return work();
+        },
+      },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: '恢复原会话删除回执（不提交）' }),
+    );
+    await waitFor(() => expect(queued).toBe(true));
+    act(() =>
+      f.setIdentity(['asin:read', 'asin:delete'], 'operator', 'session-3'),
+    );
+    await act(async () => lock.resolve());
+    expect(screen.queryByText(/已显式恢复同一用户原会话/)).toBeNull();
+    expect(screen.queryByText(/实际删除变体组 1 个/)).toBeNull();
+    expect(
+      screen.getByRole('button', { name: '恢复原会话删除回执（不提交）' }),
+    ).toHaveProperty('disabled', false);
+    expect(mutations(f)).toHaveLength(1);
+  });
+
+  it.each(['asin', 'competitor'] as const)(
+    'cannot dispatch any %s bulk deletion when shared guard storage cannot be read',
+    async (domain) => {
+      const original = Storage.prototype.getItem;
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (
+        this: Storage,
+        key,
+      ) {
+        if (key === catalogSafetyKey('operator', domain))
+          throw new Error('storage read denied');
+        return original.call(this, key);
+      });
+      const f = fixture(domain);
+      await screen.findAllByText('Group Grüp-1');
+      const select = screen.getByRole('button', { name: '选择本页可删除组' });
+      expect(select).toHaveProperty('disabled', true);
+      fireEvent.click(select);
+      fireEvent.click(screen.getByRole('button', { name: '批量删除所选组' }));
+      expect(screen.queryByRole('button', { name: '确认批量删除' })).toBeNull();
+      expect(mutations(f)).toHaveLength(0);
+    },
+  );
   it.each([
     ['asin', '/api/'],
     ['asin', 'https://app.test/gateway/api/'],
