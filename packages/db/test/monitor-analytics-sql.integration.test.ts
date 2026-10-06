@@ -78,11 +78,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       endTime = '1997-10-31 23:59:59';
     const range = { startTime, endTime };
     const granularities: MonitorSourceGranularity[] = ['hour', 'day', 'month'];
-    async function refreshAll() {
+    async function refreshAll(from = startTime) {
       for (const item of timescaleAggregateEvidenceManifest)
         await pool.query(
           'CALL public.refresh_continuous_aggregate($1::regclass,$2::timestamp,$3::timestamp,force=>true)',
-          [`public.${item.caggRelation}`, startTime, '1997-11-01 00:00:00'],
+          [`public.${item.caggRelation}`, from, '1997-11-01 00:00:00'],
         );
     }
     async function clean() {
@@ -921,17 +921,22 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             { aggregateEnabled: true, onAggregateFallback() {} },
           );
           expect(result.source).toBe('agg');
-          const old = await legacy.aggregate(
-            operation === 'analytics-monthly-breakdown'
-              ? 'getStatisticsByTime'
-              : method,
-            {
-              ...fastQuery,
-              ...(operation === 'analytics-monthly-breakdown'
-                ? { groupBy: 'day', sourceGranularityOverride: 'day' }
-                : {}),
-            },
-          );
+          const oracleParams = {
+            ...fastQuery,
+            ...(operation === 'analytics-monthly-breakdown'
+              ? { groupBy: 'day', sourceGranularityOverride: 'day' }
+              : {}),
+          };
+          const old =
+            operation === 'all-countries-summary' ||
+            operation === 'region-summary'
+              ? await legacy.model[method](oracleParams)
+              : await legacy.aggregate(
+                  operation === 'analytics-monthly-breakdown'
+                    ? 'getStatisticsByTime'
+                    : method,
+                  oracleParams,
+                );
           if (operation === 'asin-by-country') {
             // Legacy SQL specifies only these two rank keys. Countries with
             // identical scores have no defined relative order across engines.
@@ -968,6 +973,197 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         client.release();
       }
     }, 20_000);
+
+    it('keeps guarded CAGG summaries exactly equal to Legacy raw for 24 clipped ASINs, month ratios and dimension splits', async () => {
+      const countries = ['US', 'UK', 'DE', 'FR', 'ES', 'IT'];
+      type Seed = {
+        asin_code: string;
+        country: string;
+        is_broken: boolean;
+        check_time: string;
+        site_snapshot: string;
+        brand_snapshot: string;
+      };
+      const seed = async (rows: Seed[]) => {
+        await legacy.query(
+          'INSERT INTO monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id) VALUES ?',
+          [
+            rows.map((row) => [
+              row.asin_code,
+              row.country,
+              Number(row.is_broken),
+              'ASIN',
+              row.check_time,
+              row.site_snapshot,
+              row.brand_snapshot,
+              'analytics-109-a',
+            ]),
+          ],
+        );
+        await pool.query(
+          `INSERT INTO public.monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id)
+          SELECT asin_code,country,is_broken,'ASIN',check_time,site_snapshot,brand_snapshot,'analytics-109-a'
+          FROM jsonb_to_recordset($1::jsonb) AS seed(asin_code text,country text,is_broken boolean,check_time timestamp,site_snapshot text,brand_snapshot text)`,
+          [JSON.stringify(rows)],
+        );
+      };
+      const rows: Seed[] = [];
+      for (let asin = 0; asin < 24; asin++) {
+        const country = countries[asin % countries.length];
+        for (const time of [
+          country === 'UK' ? '01 15:15:' : '01 18:15:',
+          '31 23:45:',
+        ]) {
+          for (let check = 0; check < 11; check++)
+            rows.push({
+              asin_code: `B226${String(asin).padStart(6, '0')}`,
+              country,
+              is_broken: check < (asin % 4) + 1,
+              check_time: `1997-10-${time}${String(check).padStart(2, '0')}`,
+              site_snapshot: 'precision-site',
+              brand_snapshot: 'precision-brand',
+            });
+        }
+      }
+      const [{ mode }] = await legacy.query(
+        'SELECT @@SESSION.sql_mode AS mode',
+      );
+      try {
+        // The unchanged Legacy raw month SQL is already known to reject
+        // ONLY_FULL_GROUP_BY. Restrict the same existing oracle waiver to this
+        // disposable MySQL session, restore it below, and never alter its SQL.
+        await legacy.query(
+          "SET SESSION sql_mode=REPLACE(@@SESSION.sql_mode,'ONLY_FULL_GROUP_BY','')",
+        );
+        await seed(rows);
+        await refreshAll();
+        const read = async (
+          query: Parameters<typeof readMonitorDurationQuery>[1],
+          onAggregateFallback: Parameters<
+            typeof readMonitorDurationQuery
+          >[3]['onAggregateFallback'] = () => {
+            throw new Error('Unexpected precision fixture fallback');
+          },
+        ) => {
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            const result = await readMonitorDurationQuery(
+              createDb(client),
+              query,
+              () => {},
+              { aggregateEnabled: true, onAggregateFallback },
+            );
+            await client.query('COMMIT');
+            return result;
+          } finally {
+            await client.query('ROLLBACK');
+            client.release();
+          }
+        };
+        const compareSummaries = async (bounds: typeof range) => {
+          for (const timeSlotGranularity of granularities) {
+            for (const [operation, method] of [
+              ['all-countries-summary', 'getAllCountriesSummary'],
+              ['region-summary', 'getRegionSummary'],
+            ] as const) {
+              const query = parseMonitorAnalyticsQuery(operation, {
+                ...bounds,
+                timeSlotGranularity,
+              });
+              const actual = await read(query);
+              const expected = await legacy.model[method](query);
+              expect(actual.source, `${operation}/${timeSlotGranularity}`).toBe(
+                'agg',
+              );
+              expect(
+                actual.data,
+                `${operation}/${timeSlotGranularity}`,
+              ).toEqual(expected);
+            }
+          }
+        };
+        await compareSummaries(range);
+        const hour = parseMonitorAnalyticsQuery('all-countries-summary', {
+          ...range,
+          timeSlotGranularity: 'hour',
+        });
+        const legacyAggregate = await createDb(pool).execute(
+          monitorAggregateDurationSelect(hour, 'hour'),
+        );
+        const raw = await legacy.model.getAllCountriesSummary(hour);
+        // Twenty-four final low buckets lose (3599/3600 - .9997) each under
+        // the prior DECIMAL protocol. This is the observed HTTP gate defect.
+        expect(
+          Number(
+            (
+              Number(
+                (raw as unknown as Record<string, unknown>).lowDurationHours,
+              ) - Number(legacyAggregate.rows[0].lowDurationHours)
+            ).toFixed(4),
+          ),
+        ).toBe(0.0005);
+
+        await seed([
+          { ...rows[0], site_snapshot: 'second-site', is_broken: true },
+          {
+            ...rows[0],
+            country: 'DE',
+            site_snapshot: 'third-site',
+            is_broken: false,
+          },
+          {
+            ...rows[0],
+            asin_code: rows[0].asin_code.toLowerCase(),
+            country: 'FR',
+            site_snapshot: 'fourth-site',
+            is_broken: true,
+          },
+        ]);
+        await refreshAll();
+        await compareSummaries(range);
+        await compareSummaries({
+          startTime: '1997-10-01 00:00:00.123',
+          endTime: '1997-10-31 23:59:59.900',
+        });
+        // More than 31 days selects the actual native daily source, while
+        // hour/month targets still retain their separate source semantics.
+        await refreshAll('1997-09-01 00:00:00');
+        await compareSummaries({ startTime: '1997-09-01 00:00:00', endTime });
+        for (const [operation, method] of [
+          ['all-countries-summary', 'getAllCountriesSummary'],
+          ['region-summary', 'getRegionSummary'],
+        ] as const) {
+          const query = parseMonitorAnalyticsQuery(operation, {
+            startTime: '1997-10-31 23:45:05',
+            endTime,
+            timeSlotGranularity: 'hour',
+          });
+          const reasons: string[] = [];
+          const actual = await read(query, (reason) => {
+            reasons.push(reason);
+          });
+          expect(actual.source).toBe('raw');
+          expect(reasons).toEqual(['coverage']);
+          expect(actual.data).toEqual(await legacy.model[method](query));
+        }
+      } finally {
+        await legacy.query('SET SESSION sql_mode=?', [mode]);
+        const codes = [
+          ...new Set(rows.map((row) => row.asin_code)),
+          rows[0].asin_code.toLowerCase(),
+        ];
+        await legacy.query(
+          "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code IN (?)",
+          [codes],
+        );
+        await pool.query(
+          "DELETE FROM public.monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code=ANY($1::text[])",
+          [codes],
+        );
+        await refreshAll();
+      }
+    }, 30_000);
 
     it('preserves COUNT/SUM JSON types and complete peak metrics on raw and guarded aggregate paths', async () => {
       const client = await pool.connect();
