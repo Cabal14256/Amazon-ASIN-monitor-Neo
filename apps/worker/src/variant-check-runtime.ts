@@ -6,6 +6,7 @@ import {
 import {
   createPgPool,
   PgCompetitorCheckRepository,
+  PgCompetitorMonitorRepository,
   PgPrimaryMonitorRepository,
   PgSpApiConfigurationRepository,
   PgVariantCheckRepository,
@@ -27,6 +28,7 @@ import {
 } from '@asin-monitor/variant-check';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
+import { createCompetitorMonitorProcessor } from './competitor-monitor-processor';
 import { logger } from './logger';
 import { MonitorConsumerHeartbeat } from './monitor-consumer-heartbeat';
 import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
@@ -35,7 +37,11 @@ import { parseRedisUrl } from './redis-options';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantCheckProcessor } from './variant-check-processor';
 
-type CheckQueue = 'variant-check' | 'batch-check' | 'monitor';
+type CheckQueue =
+  | 'variant-check'
+  | 'batch-check'
+  | 'monitor'
+  | 'competitor-monitor';
 /** Actual BullMQ consumers. All catalog/quota/task commands use a fail-fast
  * non-replaying connection; BullMQ alone owns its blocking/retry connections. */
 export async function startVariantCheckRuntime(
@@ -48,7 +54,13 @@ export async function startVariantCheckRuntime(
     env.AUTH_DATA_AUTHORITY !== 'postgresql' ||
     !selected.length ||
     selected.some(
-      (name) => !['variant-check', 'batch-check', 'monitor'].includes(name),
+      (name) =>
+        ![
+          'variant-check',
+          'batch-check',
+          'monitor',
+          'competitor-monitor',
+        ].includes(name),
     )
   )
     throw new Error(
@@ -76,7 +88,9 @@ export async function startVariantCheckRuntime(
     ),
     statement_timeout: 1500,
   });
-  const competitorChecks = selected.includes('variant-check');
+  const competitorChecks =
+    selected.includes('variant-check') ||
+    selected.includes('competitor-monitor');
   const competitorPool =
     competitorChecks || selected.includes('monitor')
       ? createPgPool(env.COMPETITOR_DATABASE_URL, {
@@ -113,6 +127,8 @@ export async function startVariantCheckRuntime(
     competitorRuntime: CompetitorCheckRuntime | undefined;
   let notifications: FeishuNotifications | undefined;
   let monitorHeartbeat: MonitorConsumerHeartbeat | undefined;
+  let competitorMonitorHeartbeat: MonitorConsumerHeartbeat | undefined;
+  let competitorMonitorRepository: PgCompetitorMonitorRepository | undefined;
   let transport: NodeHttpTransport | undefined,
     htmlTransport: NodeHttpTransport | undefined;
   let closing = false,
@@ -127,6 +143,8 @@ export async function startVariantCheckRuntime(
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
     void monitorHeartbeat?.stop();
+    void competitorMonitorHeartbeat?.stop();
+    competitorMonitorRepository?.close();
     runtime?.close();
     notifications?.close();
     competitorRuntime?.close();
@@ -140,13 +158,22 @@ export async function startVariantCheckRuntime(
     const monitorRepository = selected.includes('monitor')
       ? new PgPrimaryMonitorRepository(pool)
       : undefined;
-    if (selected.includes('monitor') && competitorPool)
+    if (
+      (selected.includes('monitor') ||
+        selected.includes('competitor-monitor')) &&
+      competitorPool
+    )
       notifications = createFeishuNotifications({
         primaryPool: pool,
         competitorPool,
         authority: () => env.AUTH_DATA_AUTHORITY,
         logger,
       });
+    if (selected.includes('competitor-monitor') && competitorPool)
+      competitorMonitorRepository = new PgCompetitorMonitorRepository(
+        pool,
+        competitorPool,
+      );
     const configRepository = new PgSpApiConfigurationRepository(pool);
     source = new DatabaseConfigSource(environment, async (signal) =>
       Object.fromEntries(
@@ -221,6 +248,8 @@ export async function startVariantCheckRuntime(
       // Require the primary completion-table upgrade before registering consumers.
       await repository.transaction((unit) => unit.purgeExpiredReceipts());
       if (monitorRepository) await monitorRepository.assertReady();
+      if (competitorMonitorRepository)
+        await competitorMonitorRepository.assertReady();
       if (competitorRepository)
         await competitorRepository.transaction((unit) =>
           unit.purgeExpiredReceipts(),
@@ -262,7 +291,18 @@ export async function startVariantCheckRuntime(
           await current.updateProgress(value);
         };
         const processor =
-          name === 'monitor'
+          name === 'competitor-monitor'
+            ? createCompetitorMonitorProcessor({
+                pipeline: competitorRuntime!.pipeline,
+                repository: competitorMonitorRepository!,
+                store,
+                notifications: notifications!,
+                defaultEnabled: env.COMPETITOR_MONITOR_ENABLED,
+                shutdownSignal: shutdown.signal,
+                assertJobLock,
+                updateProgress,
+              })
+            : name === 'monitor'
             ? createPrimaryMonitorProcessor({
                 pipeline: business.pipeline,
                 repository: monitorRepository!,
@@ -330,6 +370,14 @@ export async function startVariantCheckRuntime(
       await monitorHeartbeat.start();
       ensureOpen();
     }
+    if (selected.includes('competitor-monitor')) {
+      competitorMonitorHeartbeat = new MonitorConsumerHeartbeat(
+        control,
+        `${getNeoQueuePrefix(env)}:competitor-monitor:consumer:ready`,
+      );
+      await competitorMonitorHeartbeat.start();
+      ensureOpen();
+    }
     const cleanup = async () => {
       if (closing || cleanupRunning) return;
       cleanupRunning = true;
@@ -346,6 +394,10 @@ export async function startVariantCheckRuntime(
         if (monitorRepository) {
           const runs = await monitorRepository.purgeExpiredRuns();
           if (runs) logger.info('过期监控快照已清理', { runs });
+        }
+        if (competitorMonitorRepository) {
+          const runs = await competitorMonitorRepository.purgeExpiredRuns();
+          if (runs) logger.info('过期竞品监控快照已清理', { runs });
         }
         if (competitorRemoved)
           logger.info('过期竞品检查结果已清理', {
@@ -373,6 +425,7 @@ export async function startVariantCheckRuntime(
         closed ??= (async () => {
           try {
             await monitorHeartbeat?.stop();
+            await competitorMonitorHeartbeat?.stop();
             await Promise.all(workers.map((worker) => worker.close()));
           } finally {
             await Promise.allSettled([
@@ -389,6 +442,7 @@ export async function startVariantCheckRuntime(
   } catch {
     stopBusiness();
     await monitorHeartbeat?.stop();
+    await competitorMonitorHeartbeat?.stop();
     control.disconnect(false);
     await Promise.allSettled([
       ...workers.map((worker) => worker.close(true)),
