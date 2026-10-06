@@ -8,16 +8,17 @@ import { Card, CardContent, CardHeader } from '../../components/ui/surfaces';
 import { useTaskQuery } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
 import {
-  submitAsinImport,
+  submitVariantGroupImport,
   uncertainAsinImportTaskId,
   validateAsinImportFile,
+  type ImportDomain,
 } from '../../services/asin-import';
 import { isActiveTask, isTerminalTask } from '../../services/tasks';
 import {
-  asinImportGateKey,
-  claimAsinImportGate,
-  readAsinImportGate,
-  writeAsinImportGate,
+  claimImportGate,
+  importGateKey,
+  readImportGate,
+  writeImportGate,
   type AsinImportGate,
 } from './asin-import-gate';
 
@@ -30,15 +31,19 @@ function storage(kind: 'local' | 'session' = 'local'): Storage | null {
   }
 }
 
-function restoredGate(stored: Storage, userId: string): AsinImportGate | null {
-  const persisted = readAsinImportGate(stored, userId);
+function restoredGate(
+  stored: Storage,
+  domain: ImportDomain,
+  userId: string,
+): AsinImportGate | null {
+  const persisted = readImportGate(stored, domain, userId);
   if (
     persisted &&
     (persisted.phase !== 'uncertain' || persisted.taskId !== null)
   )
     return persisted;
   const session = storage('session');
-  const fallback = session ? readAsinImportGate(session, userId) : null;
+  const fallback = session ? readImportGate(session, domain, userId) : null;
   return fallback?.phase === 'uncertain' &&
     fallback.taskId &&
     (!persisted || fallback.savedAt === persisted.savedAt)
@@ -62,14 +67,35 @@ function definiteRejection(error: unknown): boolean {
   );
 }
 
-export function AsinImportPanel() {
+export function AsinImportPanel({
+  domain = 'asin',
+}: {
+  domain?: ImportDomain;
+}) {
+  const verified = useIdentity();
+  const current =
+    verified.status === 'authenticated' ? verified.identity : undefined;
+  const access = createAccess(current);
+  if (!access.canWriteASIN || access.mustChangePassword) return null;
+  // A new owner/session or domain must not reuse files, task snapshots or in-flight UI.
+  // Persisted gates remain owner/domain scoped so refresh can recover the same task.
+  return (
+    <ImportPanel
+      key={JSON.stringify([domain, current?.user.id, current?.sessionId])}
+      domain={domain}
+    />
+  );
+}
+
+function ImportPanel({ domain }: { domain: ImportDomain }) {
   const { runtime, identity, announce } = useAuth();
   const verified = useIdentity();
   const current =
     verified.status === 'authenticated' ? verified.identity : undefined;
   const userId = current?.user.id ?? '';
   const access = createAccess(current);
-  const canImport = access.canWriteASIN;
+  const canImport = access.canWriteASIN && !access.mustChangePassword;
+  const domainLabel = domain === 'competitor' ? '竞品 ASIN' : '主营 ASIN';
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [gate, setGate] = useState<AsinImportGate | null>(null);
@@ -92,7 +118,7 @@ export function AsinImportPanel() {
   const task = useTaskQuery(
     runtime,
     taskId,
-    Boolean(userId && taskId && access.canReadASIN),
+    Boolean(canImport && userId && taskId && access.canReadASIN),
   );
   const latestTask = useRef(task.data);
   latestTask.current = task.data;
@@ -136,10 +162,10 @@ export function AsinImportPanel() {
       return;
     }
     const stored = storage();
-    const restored = stored ? restoredGate(stored, userId) : null;
+    const restored = stored ? restoredGate(stored, domain, userId) : null;
     setGate(restored);
     if (restored) setOpen(true);
-  }, [canImport, userId]);
+  }, [canImport, domain, userId]);
 
   useEffect(() => {
     if (!canImport || !userId) return;
@@ -148,16 +174,16 @@ export function AsinImportPanel() {
       if (
         !stored ||
         event.storageArea !== stored ||
-        event.key !== asinImportGateKey(userId)
+        event.key !== importGateKey(domain, userId)
       )
         return;
-      const restored = restoredGate(stored, userId);
+      const restored = restoredGate(stored, domain, userId);
       if (request.current && !restored) return;
       if (!restored) {
         if (gateRef.current?.taskId) setLastTaskId(gateRef.current.taskId);
       }
       if (!restored || restored.phase === 'settled') {
-        void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
+        void runtime.queryClient.invalidateQueries({ queryKey: [domain] });
       }
       gateRef.current = restored;
       setGate(restored);
@@ -165,7 +191,7 @@ export function AsinImportPanel() {
     };
     window.addEventListener('storage', syncGate);
     return () => window.removeEventListener('storage', syncGate);
-  }, [canImport, runtime.queryClient, userId]);
+  }, [canImport, domain, runtime.queryClient, userId]);
 
   useEffect(() => {
     const result = task.data;
@@ -194,10 +220,10 @@ export function AsinImportPanel() {
         ? '导入任务已取消，可能已有部分行提交；请核对后再决定是否重试。'
         : '导入任务失败，可能已有部分行提交；请核对后再决定是否重试。';
     void locks
-      .request(asinImportGateKey(userId), () => {
+      .request(importGateKey(domain, userId), () => {
         // Do not interpret temporarily inaccessible storage as an absent gate.
-        stored.getItem(asinImportGateKey(userId));
-        const persisted = restoredGate(stored, userId);
+        stored.getItem(importGateKey(domain, userId));
+        const persisted = restoredGate(stored, domain, userId);
         // A failed write may leave only the original sending claim, while the
         // current tab still knows the authoritative task ID.
         const matchesSendingClaim =
@@ -212,13 +238,13 @@ export function AsinImportPanel() {
             ? null
             : { phase: 'settled', taskId, savedAt: gate.savedAt };
         const session = storage('session');
-        const sessionRaw = session?.getItem(asinImportGateKey(userId));
-        if (!writeAsinImportGate(stored, userId, nextGate))
+        const sessionRaw = session?.getItem(importGateKey(domain, userId));
+        if (!writeImportGate(stored, domain, userId, nextGate))
           return { kind: 'unavailable' as const };
         if (
           session &&
           sessionRaw &&
-          !writeAsinImportGate(session, userId, null)
+          !writeImportGate(session, domain, userId, null)
         )
           return { kind: 'unavailable' as const };
         return { kind: 'settled' as const, gate: nextGate };
@@ -230,7 +256,7 @@ export function AsinImportPanel() {
           if (transition.gate) setOpen(true);
           // Another tab may already have settled this authoritative terminal
           // result while this effect was waiting for the same Web Lock.
-          void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
+          void runtime.queryClient.invalidateQueries({ queryKey: [domain] });
           return;
         }
         if (transition.kind === 'unavailable') {
@@ -242,7 +268,7 @@ export function AsinImportPanel() {
         setGate(transition.gate);
         setNotice(message);
         announce(message);
-        void runtime.queryClient.invalidateQueries({ queryKey: ['asin'] });
+        void runtime.queryClient.invalidateQueries({ queryKey: [domain] });
       })
       .catch(() => {
         if (active && owner.current === userId && mounted.current) {
@@ -255,6 +281,7 @@ export function AsinImportPanel() {
     };
   }, [
     announce,
+    domain,
     gate?.phase,
     gate?.taskId,
     gate?.savedAt,
@@ -292,14 +319,14 @@ export function AsinImportPanel() {
     setBusy(true);
     setNotice(null);
     try {
-      await locks.request(asinImportGateKey(userId), async () => {
+      await locks.request(importGateKey(domain, userId), async () => {
         if (
           owner.current !== userId ||
           !importAllowed.current ||
           !mounted.current
         )
           return;
-        const claim = claimAsinImportGate(stored, userId);
+        const claim = claimImportGate(stored, domain, userId);
         if (claim.kind !== 'claimed') {
           if (claim.kind === 'blocked') {
             setGate(claim.gate);
@@ -313,9 +340,10 @@ export function AsinImportPanel() {
         setLastTaskId(null);
         setGate(claim.gate);
         try {
-          const result = await submitAsinImport(
+          const result = await submitVariantGroupImport(
             runtime.http,
             file,
+            domain,
             controller.signal,
           );
           const accepted: AsinImportGate = {
@@ -323,7 +351,7 @@ export function AsinImportPanel() {
             taskId: result.taskId,
             savedAt: Date.now(),
           };
-          const persisted = writeAsinImportGate(stored, userId, accepted);
+          const persisted = writeImportGate(stored, domain, userId, accepted);
           const session = storage('session');
           const fallback: AsinImportGate = {
             ...accepted,
@@ -331,7 +359,12 @@ export function AsinImportPanel() {
             savedAt: claim.gate.savedAt,
           };
           if (session)
-            writeAsinImportGate(session, userId, persisted ? null : fallback);
+            writeImportGate(
+              session,
+              domain,
+              userId,
+              persisted ? null : fallback,
+            );
           if (owner.current !== userId || !mounted.current) return;
           setGate(persisted ? accepted : fallback);
           setLastTaskId(result.taskId);
@@ -348,7 +381,7 @@ export function AsinImportPanel() {
           const nextGate: AsinImportGate | null = uncertain
             ? { phase: 'uncertain', taskId: unknownId, savedAt: Date.now() }
             : null;
-          const persisted = writeAsinImportGate(stored, userId, nextGate);
+          const persisted = writeImportGate(stored, domain, userId, nextGate);
           const fallback: AsinImportGate | null =
             uncertain && !persisted
               ? {
@@ -359,8 +392,9 @@ export function AsinImportPanel() {
               : nextGate;
           const session = storage('session');
           if (session)
-            writeAsinImportGate(
+            writeImportGate(
               session,
+              domain,
               userId,
               !persisted && unknownId ? fallback : null,
             );
@@ -369,7 +403,7 @@ export function AsinImportPanel() {
             persisted
               ? nextGate
               : fallback ??
-                  restoredGate(stored, userId) ?? {
+                  restoredGate(stored, domain, userId) ?? {
                     phase: 'uncertain',
                     taskId: null,
                     savedAt: claim.gate.savedAt,
@@ -419,7 +453,7 @@ export function AsinImportPanel() {
     const expected = gate;
     let result: 'changed' | 'cleared' | 'unavailable' | 'active';
     try {
-      const key = asinImportGateKey(userId);
+      const key = importGateKey(domain, userId);
       const previousRaw = stored.getItem(key);
       result = await locks.request(key, () => {
         if (
@@ -433,10 +467,10 @@ export function AsinImportPanel() {
           expected.phase !== 'settled'
         )
           return 'changed' as const;
-        const current = readAsinImportGate(stored, userId);
+        const current = readImportGate(stored, domain, userId);
         const session = storage('session');
         const sessionGate = session
-          ? readAsinImportGate(session, userId)
+          ? readImportGate(session, domain, userId)
           : null;
         const matchesUnsavedGate =
           expected.phase === 'uncertain' &&
@@ -452,7 +486,7 @@ export function AsinImportPanel() {
             !matchesUnsavedGate)
         )
           return 'changed' as const;
-        return writeAsinImportGate(stored, userId, null)
+        return writeImportGate(stored, domain, userId, null)
           ? ('cleared' as const)
           : ('unavailable' as const);
       });
@@ -465,7 +499,7 @@ export function AsinImportPanel() {
       return;
     }
     if (result !== 'cleared') {
-      setGate(restoredGate(stored, userId));
+      setGate(restoredGate(stored, domain, userId));
       setNotice(
         result === 'changed'
           ? '原任务状态已变化，请重新核实后再解锁。'
@@ -474,7 +508,7 @@ export function AsinImportPanel() {
       return;
     }
     const session = storage('session');
-    if (session && !writeAsinImportGate(session, userId, null)) {
+    if (session && !writeImportGate(session, domain, userId, null)) {
       setNotice('无法清除导入锁，请检查浏览器会话存储权限。');
       return;
     }
@@ -486,17 +520,21 @@ export function AsinImportPanel() {
   }
 
   function downloadTemplate() {
-    const header = '\uFEFF变体组名称,国家,站点,品牌,ASIN,ASIN类型,ASIN名称\r\n';
+    const header =
+      domain === 'competitor'
+        ? '\uFEFF变体组名称,国家,品牌,ASIN,ASIN类型,ASIN名称\r\n'
+        : '\uFEFF变体组名称,国家,站点,品牌,ASIN,ASIN类型,ASIN名称\r\n';
     const url = URL.createObjectURL(new Blob([header], { type: 'text/csv' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'ASIN导入模板.csv';
+    link.download =
+      domain === 'competitor' ? '竞品ASIN导入模板.csv' : 'ASIN导入模板.csv';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }
 
   return (
-    <section aria-label="主营 ASIN 导入">
+    <section aria-label={`${domainLabel} 导入`}>
       <Button
         variant="secondary"
         aria-expanded={open}
@@ -509,14 +547,18 @@ export function AsinImportPanel() {
       {open && (
         <Card className="mt-3">
           <CardHeader
-            title="批量导入主营 ASIN"
+            title={`批量导入${domainLabel}`}
             description="上传单个 CSV 或 XLSX 文件，最多 10 MiB。服务端异步处理后可在任务中心核对逐行结果。"
           />
           <CardContent className="space-y-4">
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>
-                首行列名：变体组名称、国家、站点、品牌、ASIN、ASIN类型；可选
-                ASIN名称放在类型之后。ASIN类型可填 1（主链）或 2（副评）。
+                首行列名：
+                {domain === 'competitor'
+                  ? '变体组名称、国家、品牌、ASIN、ASIN类型'
+                  : '变体组名称、国家、站点、品牌、ASIN、ASIN类型'}
+                ；可选 ASIN名称放在类型之后。ASIN类型可填 1（主链）或
+                2（副评）。
               </p>
               <Button variant="ghost" size="small" onClick={downloadTemplate}>
                 下载 CSV 模板
@@ -528,13 +570,13 @@ export function AsinImportPanel() {
             >
               <label
                 className="block text-sm font-medium"
-                htmlFor="asin-import-file"
+                htmlFor={`${domain}-import-file`}
               >
                 选择文件
               </label>
               <input
                 ref={fileInput}
-                id="asin-import-file"
+                id={`${domain}-import-file`}
                 type="file"
                 accept=".csv,.xlsx"
                 disabled={Boolean(gate) || busy}

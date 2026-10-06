@@ -112,7 +112,7 @@ describe.each([
     });
     const request = (
       body: Record<string, unknown> = {
-        groupIds: [' g ', 'g'],
+        groupIds: ['g', 'g'],
         asinIds: ['missing'],
       },
       authHeaders = headers,
@@ -168,6 +168,39 @@ describe.each([
       });
       expect(unit.execute).not.toHaveBeenCalled();
     });
+    it.each([false, true])(
+      'preserves literal group/ASIN keys through HTTP acceptance (async=%s)',
+      async (useAsync) => {
+        const targets = {
+          groupIds: [
+            ' Source Ś ',
+            'Source Ś',
+            ' Source Ś ',
+            '   ',
+            'Case',
+            'case',
+          ],
+          asinIds: [' Child Ś ', 'Child Ś'],
+        };
+        const expected = {
+          groupIds: [' Source Ś ', 'Source Ś', '   ', 'Case', 'case'],
+          asinIds: [' Child Ś ', 'Child Ś'],
+        };
+        unit.analyze.mockResolvedValue(
+          buildBatchDeleteAnalysis(expected, expected.groupIds, [], 0, domain),
+        );
+        const response = await request({ ...targets, useAsync });
+        expect(response.statusCode).toBe(200);
+        expect(unit.analyze).toHaveBeenCalledWith({ ...expected, useAsync });
+        if (useAsync) {
+          expect(enqueue).toHaveBeenCalledWith(
+            expect.objectContaining(expected),
+          );
+          expect(unit.execute).not.toHaveBeenCalled();
+        } else
+          expect(unit.execute).toHaveBeenCalledWith({ ...expected, useAsync });
+      },
+    );
     it('automatically uses the asynchronous path for a large nested group', async () => {
       unit.analyze.mockResolvedValue({ ...analysis, estimatedAsinCount: 501 });
       expect((await request()).json().data.mode).toBe('async');
@@ -185,6 +218,10 @@ describe.each([
       { groupIds: [] },
       { groupIds: ['g'], unexpected: true },
       { groupIds: ['x'.repeat(51)] },
+      { groupIds: [''] },
+      { groupIds: ['\ud800'] },
+      { asinIds: [1] },
+      { groupIds: ['g\u0085'] },
     ])('rejects malformed targets %j', async (body) => {
       expect((await request(body)).statusCode).toBe(400);
       expect(unit.analyze).not.toHaveBeenCalled();
@@ -275,7 +312,7 @@ describe.each([
     });
     if (domain === 'competitor') {
       it('retains the actual empty-target message', async () => {
-        const response = await request({ groupIds: ['', ' '], asinIds: [] });
+        const response = await request({ groupIds: [], asinIds: [] });
         expect(response.statusCode).toBe(400);
         expect(response.json().errorMessage).toBe(
           '请提供变体组ID或ASIN ID列表',
