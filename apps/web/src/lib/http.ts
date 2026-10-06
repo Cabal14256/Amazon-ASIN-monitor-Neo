@@ -1,4 +1,10 @@
 import { buildApiURL } from './api-url';
+import {
+  validStreamOptions,
+  writeDownloadStream,
+  type DownloadSink,
+  type DownloadStreamOptions,
+} from './download-stream';
 import type { SessionStore } from './session';
 
 export type ApiFailure =
@@ -50,6 +56,8 @@ export interface RequestOptions {
 export interface DownloadOptions {
   /** File transfers may opt into the API's bounded 30 minute export window. */
   timeoutMs?: number;
+  /** Endpoint callers can lower, never raise, the existing 256 MiB bound. */
+  maxBytes?: number;
 }
 export interface ResponseSchema<T> {
   parse(value: unknown): T;
@@ -406,6 +414,13 @@ export class HttpClient {
     const timeout = options.timeoutMs ?? 125_000;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 30 * 60_000)
       throw new ApiError('INVALID_INPUT', '下载期限无效');
+    const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1 ||
+      maxBytes > 256 * 1024 * 1024
+    )
+      throw new ApiError('INVALID_INPUT', '下载大小上限无效');
     const url = this.url(path);
     const headers = new Headers({ accept: 'application/json' });
     const token = this.options.session.getLegacyToken();
@@ -461,7 +476,7 @@ export class HttpClient {
             : '任务下载失败';
         throw new ApiError('HTTP', message, response.status);
       }
-      return readBlob(response, 256 * 1024 * 1024);
+      return readBlob(response, maxBytes);
     })()
       .catch((error: unknown) => {
         if (requestSignal.aborted) throw requestSignal.reason;
@@ -480,6 +495,124 @@ export class HttpClient {
       work
         .then(resolve, reject)
         .finally(() => requestSignal.removeEventListener('abort', cancelled));
+    });
+  }
+  /** Bounded authenticated file writes share the ordinary session cleanup. */
+  async downloadTo(
+    path: string,
+    sink: DownloadSink,
+    options: DownloadStreamOptions,
+  ): Promise<number> {
+    if (this.closed) throw new ApiError('CLOSED', '请求客户端已关闭');
+    if (this.active.size >= 64)
+      throw new ApiError('CAPACITY', '请求过多，请稍后重试');
+    if (!validStreamOptions(options))
+      throw new ApiError('INVALID_INPUT', '流式下载限制无效');
+    const url = this.url(path);
+    const deadline = performance.now() + options.timeoutMs;
+    const controller = new AbortController(),
+      signal = controller.signal;
+    const revision = this.options.session.revision;
+    const abort = () =>
+      controller.abort(new ApiError('CANCELLED', '下载已取消'));
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(
+      () => controller.abort(new ApiError('TIMEOUT', '下载超时')),
+      options.timeoutMs,
+    );
+    const headers = new Headers({ accept: options.expectedType });
+    const token = this.options.session.getLegacyToken();
+    if (token) headers.set('authorization', `Bearer ${token}`);
+    this.active.add(controller);
+    let sinkAborted = false,
+      received: Response | undefined;
+    const abortSink = (reason: unknown) => {
+      if (sinkAborted) return;
+      sinkAborted = true;
+      void sink.abort(reason).catch(() => undefined);
+    };
+    const onAbort = () => abortSink(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    const work = (async () => {
+      if (signal.aborted) throw signal.reason;
+      const response = await (this.options.fetch ?? fetch)(url, {
+        method: 'GET',
+        headers,
+        credentials: 'include',
+        redirect: 'error',
+        signal,
+      });
+      received = response;
+      if (signal.aborted) {
+        void response.body?.cancel().catch(() => undefined);
+        throw signal.reason;
+      }
+      if (!response.ok) {
+        let envelope: Record<string, unknown> | undefined;
+        try {
+          const value = await readJson(response, 8192);
+          if (value && typeof value === 'object' && !Array.isArray(value))
+            envelope = value as Record<string, unknown>;
+        } catch {
+          /* HTTP status is authoritative. */
+        }
+        if (response.status === 401) {
+          if (revision === this.options.session.revision) {
+            this.active.delete(controller);
+            try {
+              this.options.onUnauthorized?.();
+            } catch {
+              /* Preserve authentication failure. */
+            }
+          }
+          throw new ApiError('AUTH', '未认证或认证已过期', 401, 401);
+        }
+        throw new ApiError(
+          'HTTP',
+          typeof envelope?.errorMessage === 'string' &&
+          envelope.errorMessage.length <= 500
+            ? envelope.errorMessage
+            : '文件下载失败',
+          response.status,
+        );
+      }
+      return await writeDownloadStream(
+        response,
+        sink,
+        options,
+        signal,
+        deadline,
+      );
+    })()
+      .catch((error: unknown) => {
+        void received?.body?.cancel(error).catch(() => undefined);
+        const failure = signal.aborted
+          ? signal.reason
+          : error instanceof ApiError
+          ? error
+          : new ApiError('NETWORK', '网络或保存文件失败，下载未完成');
+        abortSink(failure);
+        if (!signal.aborted) controller.abort(failure);
+        throw failure;
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        options.signal?.removeEventListener('abort', abort);
+        signal.removeEventListener('abort', onAbort);
+        this.active.delete(controller);
+      });
+    // Uncooperative fetch/disk work keeps its admission slot until it settles.
+    return new Promise<number>((resolve, reject) => {
+      const cancelled = () => {
+        abortSink(signal.reason);
+        reject(signal.reason);
+      };
+      if (signal.aborted) cancelled();
+      else signal.addEventListener('abort', cancelled, { once: true });
+      work
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener('abort', cancelled));
     });
   }
   cancelAll(): void {

@@ -25,7 +25,9 @@ import {
   useTaskListQuery,
   useTaskQuery,
 } from '../../hooks/tasks';
+import { chooseFileSave, saveToFile } from '../../lib/file-save';
 import { ApiError } from '../../lib/http';
+import { asinExportDownloadFilename } from '../../services/tasks';
 import {
   canCancelTask,
   canOpenTaskDetail,
@@ -228,7 +230,7 @@ function TaskDetails({
 }
 
 export default function TaskCenterPage() {
-  const { runtime } = useAuth();
+  const { runtime, identity: identityStore } = useAuth();
   const identity = useIdentity();
   const access = createAccess(
     identity.status === 'authenticated' ? identity.identity : undefined,
@@ -345,7 +347,57 @@ export default function TaskCenterPage() {
     downloadRequest.current = controller;
     setDownloadId(task.taskId);
     setDownloadError(null);
+    const revision = runtime.session.revision;
+    const owner = identity.identity.user.id;
+    const sessionId = identity.identity.sessionId;
+    const currentDownload = () => {
+      const state = identityStore.getSnapshot();
+      const policy = createAccess(
+        state.status === 'authenticated' ? state.identity : undefined,
+      );
+      return (
+        !controller.signal.aborted &&
+        mounted.current &&
+        downloadScope.current === scope &&
+        runtime.session.revision === revision &&
+        state.status === 'authenticated' &&
+        state.identity.user.id === owner &&
+        state.identity.sessionId === sessionId &&
+        !policy.mustChangePassword &&
+        hasTaskDownload(task, policy.canReadASIN)
+      );
+    };
     try {
+      if (task.taskType === 'export') {
+        const filename = asinExportDownloadFilename(task);
+        if (!filename)
+          throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
+        // Native picker must run in this gesture, before the first await/GET.
+        const selected = chooseFileSave(
+          filename,
+          (task.result as { fileSizeBytes: number }).fileSizeBytes,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          '.xlsx',
+        );
+        const destination = await selected;
+        if (!currentDownload()) throw new ApiError('CANCELLED', '下载已取消');
+        if (destination.kind === 'file') {
+          await saveToFile(
+            destination.handle,
+            controller.signal,
+            currentDownload,
+            async (sink) =>
+              (
+                await runtime.tasks.downloadAsinExportTo(
+                  task,
+                  sink,
+                  controller.signal,
+                )
+              ).bytes,
+          );
+          return;
+        }
+      }
       const { blob, filename } =
         task.taskType === 'export'
           ? await runtime.tasks.downloadAsinExport(task, controller.signal)
@@ -358,12 +410,7 @@ export default function TaskCenterPage() {
                 task.taskType === 'import' ? 'import' : 'check'
               }-result-${task.taskId}.json`,
             };
-      if (
-        controller.signal.aborted ||
-        !mounted.current ||
-        downloadScope.current !== scope
-      )
-        return;
+      if (!currentDownload()) return;
       const objectURL = URL.createObjectURL(blob);
       try {
         const link = document.createElement('a');
@@ -378,6 +425,8 @@ export default function TaskCenterPage() {
         setTimeout(() => revoke(objectURL), 30_000);
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof ApiError && error.kind === 'CANCELLED') return;
       if (
         mounted.current &&
         downloadScope.current === scope &&
@@ -441,6 +490,15 @@ export default function TaskCenterPage() {
           >
             下载失败：{downloadError}
           </p>
+        )}
+        {downloadId && (
+          <Button
+            variant="secondary"
+            size="small"
+            onClick={() => downloadRequest.current?.abort()}
+          >
+            取消文件下载
+          </Button>
         )}
 
         <Card>
