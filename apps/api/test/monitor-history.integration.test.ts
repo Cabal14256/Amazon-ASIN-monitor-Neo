@@ -401,11 +401,29 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await f.pools.primaryPool.query(
         "INSERT INTO monitor_history(country,check_time,check_result) SELECT 'US','2026-09-13 09:00:00',check_result FROM monitor_history CROSS JOIN generate_series(1,30)",
       );
+      expect(
+        (
+          await f.pools.primaryPool.query(
+            'SELECT count(*)::text AS total FROM monitor_history',
+          )
+        ).rows[0].total,
+      ).toBe('31');
+      const started = Date.now();
       const oversized = await get({ pageSize: '100' });
       expect(oversized.statusCode).toBe(413);
+      expect(Date.now() - started).toBeLessThan(2000);
       expect(oversized.json().data).toBeUndefined();
       expect(oversized.body.length).toBeLessThan(1000);
-      expect((await get({ pageSize: '1' })).statusCode).toBe(200);
+      expect(oversized.json().errorMessage).toContain('缩小查询范围');
+      const one = await get({ pageSize: '1' });
+      expect(one.statusCode).toBe(200);
+      expect(one.json().data.total).toBe(31);
+      expect(JSON.parse(one.json().data.list[0].checkResult).content).toBe(
+        content,
+      );
+      expect(one.json().data.list[0].check_result).toBe(
+        one.json().data.list[0].checkResult,
+      );
     });
     it('matches MySQL per-character LIKE for accents, escapes, spaces and expansion boundaries', async () => {
       const cases = [
