@@ -15,7 +15,7 @@ import {
 import type { VariantCheckContext } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createPrimaryMonitorProcessor,
   monitorGroupOperation,
@@ -150,6 +150,40 @@ function fixture(
 }
 
 describe('primary monitor BullMQ processor', () => {
+  beforeEach(() => {
+    // Keep notification delays real while fixing the job's fixture clock.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T00:30:00.000Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  it('accepts a job one millisecond before its expiry', async () => {
+    const f = fixture();
+    f.data.countries = ['US'];
+    f.groups.mockResolvedValueOnce([{ country: 'US', groupId: 'g1' }]);
+    vi.setSystemTime(new Date(Date.parse(f.data.expiresAt) - 1));
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+      totalChecked: 1,
+      totalBroken: 0,
+    });
+    expect(f.state.status).toBe('completed');
+    expect(f.checkGroup).toHaveBeenCalledOnce();
+    expect(f.sendCountry).toHaveBeenCalledOnce();
+  });
+  it('rejects a job at its exact expiry before database or upstream work', async () => {
+    const f = fixture();
+    vi.setSystemTime(new Date(f.data.expiresAt));
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow(
+      '监控任务未完成',
+    );
+    expect(f.state.status).toBe('pending');
+    expect(f.store.mutate).not.toHaveBeenCalled();
+    expect(f.groups).not.toHaveBeenCalled();
+    expect(f.checkGroup).not.toHaveBeenCalled();
+    expect(f.claimNotification).not.toHaveBeenCalled();
+    expect(f.sendCountry).not.toHaveBeenCalled();
+  });
   it('checks each country before claiming country notifications and completes the owned task', async () => {
     const f = fixture();
     const output = await f.processor(f.job, 'fixture-lock');
@@ -380,20 +414,14 @@ describe('primary monitor BullMQ processor', () => {
       { country: 'US' as const, groupId: 'g1' },
     ]);
     const finishedAt = new Date('2026-09-27T01:00:00.000Z');
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date('2026-09-27T00:30:00.000Z'));
-      f.checkGroup.mockImplementationOnce(async () => {
-        vi.setSystemTime(finishedAt);
-        return result('g1', false);
-      });
-      await f.processor(f.job, 'fixture-lock');
-      expect(f.sendCountry.mock.calls[0][2].checkTime).toBe(
-        finishedAt.toISOString(),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
+    f.checkGroup.mockImplementationOnce(async () => {
+      vi.setSystemTime(finishedAt);
+      return result('g1', false);
+    });
+    await f.processor(f.job, 'fixture-lock');
+    expect(f.sendCountry.mock.calls[0][2].checkTime).toBe(
+      finishedAt.toISOString(),
+    );
   });
   it('rejects a substituted job before database or upstream work', async () => {
     const f = fixture();
