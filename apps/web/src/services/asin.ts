@@ -79,17 +79,17 @@ function checkBody(input: CheckVariantGroupRequest): CheckVariantGroupRequest {
 
 function segment(id: string): string {
   if (
-    !id ||
+    !id.trim() ||
     id === '.' ||
     id === '..' ||
-    id.trim() !== id ||
     [...id].length > 50 ||
     /[\\/?#]/.test(id) ||
     [...id].some(
-      (char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127,
+      (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
     )
   )
     throw new ApiError('INVALID_INPUT', 'ASIN 或变体组 ID 无效');
+  // Migrated record IDs retain case, Unicode and leading/trailing ordinary spaces.
   return encodeURIComponent(id);
 }
 

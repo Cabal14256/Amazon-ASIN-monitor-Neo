@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Activity, ArrowUpRight, CircleAlert, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { useAuth } from '../../auth/context';
+import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
 import {
@@ -14,6 +14,8 @@ import { ModuleLabel } from '../../components/ui/surfaces';
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 import { getDashboard } from '../../services/dashboard';
+import { CountryStatusChart } from './country-status-chart';
+import { countryStatusData } from './country-status-data';
 import {
   COUNTRIES,
   DASHBOARD_QUERY_KEY,
@@ -27,8 +29,6 @@ import {
   type DashboardCountry,
 } from './dashboard-data';
 
-const percent = (broken: number, total: number) =>
-  total > 0 ? Math.min(100, Math.round((broken / total) * 100)) : 0;
 const errorText = (error: unknown) =>
   error instanceof ApiError ? error.message : '暂时无法读取仪表盘，请稍后重试';
 
@@ -52,38 +52,40 @@ function LoadingDashboard() {
 
 export default function HomePage() {
   const { runtime } = useAuth();
+  const auth = useIdentity();
+  const owner =
+    auth.status === 'authenticated'
+      ? JSON.stringify([auth.identity.user.id, auth.identity.sessionId ?? null])
+      : null;
   const [country, setCountry] = useState<DashboardCountry>('ALL');
   const dashboard = useQuery({
-    queryKey: DASHBOARD_QUERY_KEY,
+    queryKey: [...DASHBOARD_QUERY_KEY, owner],
+    enabled: owner !== null,
     queryFn: ({ signal }) => getDashboard(runtime.http, signal),
     staleTime: 30_000,
     refetchOnWindowFocus: true,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   });
-  useEffect(
-    () =>
-      subscribeDashboardChanges(
-        runtime.ws.onMessage.bind(runtime.ws),
-        (phase) => {
-          return refreshDashboardQuery(
-            runtime.queryClient,
-            phase,
-            document.visibilityState === 'visible',
-          );
-        },
-      ),
-    [runtime],
-  );
-  const data = dashboard.data;
+  useEffect(() => {
+    if (owner === null) return;
+    return subscribeDashboardChanges(
+      runtime.ws.onMessage.bind(runtime.ws),
+      (phase) => {
+        return refreshDashboardQuery(
+          runtime.queryClient,
+          phase,
+          document.visibilityState === 'visible',
+        );
+      },
+    );
+  }, [runtime, owner]);
+  const data = owner === null ? undefined : dashboard.data;
   const overview = data && countryOverview(data, country);
   const alerts = data ? alertsForCountry(data, country) : [];
   const activities = data ? activitiesForCountry(data, country) : [];
-  const countryRows = data
-    ? data.distribution.byCountry.filter(
-        (row) => country === 'ALL' || row.country === country,
-      )
-    : [];
+  const countryStatus =
+    data && countryStatusData(data.distribution.byCountry, country);
   return (
     <AppShell title="监控总览">
       <div className="space-y-6 lg:space-y-7">
@@ -122,6 +124,7 @@ export default function HomePage() {
                 variant="secondary"
                 size="small"
                 pending={dashboard.isFetching}
+                disabled={owner === null}
                 onClick={() => {
                   void dashboard.refetch();
                 }}
@@ -132,7 +135,7 @@ export default function HomePage() {
           </div>
         </section>
 
-        {dashboard.isPending && <LoadingDashboard />}
+        {owner !== null && dashboard.isPending && <LoadingDashboard />}
         {!data && dashboard.isError && (
           <section
             role="alert"
@@ -274,59 +277,7 @@ export default function HomePage() {
                     {countryLabel(country)}
                   </span>
                 </div>
-                {countryRows.length === 0 ? (
-                  <div className="mt-6">
-                    <EmptyState
-                      title="暂无站点数据"
-                      description="当前站点范围没有可展示的变体组状态。"
-                    />
-                  </div>
-                ) : (
-                  <div className="mt-6 divide-y divide-border">
-                    {countryRows.map((row) => {
-                      const broken = Number(row.broken);
-                      const ratio = percent(broken, row.total);
-                      return (
-                        <div
-                          key={row.country}
-                          className="grid grid-cols-[minmax(90px,1fr)_minmax(100px,2fr)_auto] items-center gap-3 py-4 first:pt-0 last:pb-0 sm:gap-5"
-                        >
-                          <div>
-                            <p className="font-semibold">
-                              {countryLabel(row.country)}
-                            </p>
-                            <p className="neo-mono mt-1 text-xs text-muted-foreground">
-                              {row.country}
-                            </p>
-                          </div>
-                          <div>
-                            <div
-                              className="h-2 overflow-hidden rounded-pill bg-muted"
-                              role="meter"
-                              aria-label={
-                                countryLabel(row.country) + '异常比例'
-                              }
-                              aria-valuemin={0}
-                              aria-valuemax={100}
-                              aria-valuenow={ratio}
-                            >
-                              <div
-                                className="h-full rounded-pill bg-status-danger"
-                                style={{ width: ratio + '%' }}
-                              />
-                            </div>
-                            <p className="mt-2 text-xs text-muted-foreground">
-                              正常 {row.normal} · 异常 {broken}
-                            </p>
-                          </div>
-                          <span className="neo-mono text-sm font-semibold">
-                            {row.total}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                {countryStatus && <CountryStatusChart data={countryStatus} />}
               </section>
 
               <section

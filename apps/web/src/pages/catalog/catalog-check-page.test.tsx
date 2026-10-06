@@ -418,6 +418,8 @@ describe('mounted immediate-check recovery', () => {
     await waitFor(() => expect(f.identity.refresh).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(f.list).toHaveBeenCalledTimes(3));
     expect(window.localStorage.getItem(key)).not.toBeNull();
+    // Authorization recovery collapses the previously selected detail.
+    await openDetails();
     await waitFor(() => {
       expect(
         (

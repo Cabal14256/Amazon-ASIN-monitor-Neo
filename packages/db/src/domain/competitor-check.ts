@@ -4,6 +4,7 @@ import type {
   CompetitorAsin,
   CompetitorVariantGroup,
 } from '../schema-competitor';
+import type { CompetitorMonitorControlUnit } from './competitor-monitor';
 import type { VariantCheckOperation } from './variant-check-receipt';
 
 export interface CompetitorGroupCheckSnapshot {
@@ -38,6 +39,7 @@ export type CompetitorCheckAuthorization = Pick<
   'lockOperator' | 'lockSession' | 'operatorPermissionCodes'
 >;
 export interface CompetitorCheckUnit extends CompetitorCheckAuthorization {
+  competitorMonitorConfiguration?: CompetitorMonitorControlUnit['competitorMonitorConfiguration'];
   readReceipt(
     operation: VariantCheckOperation,
     lock?: boolean,
@@ -50,6 +52,7 @@ export interface CompetitorCheckUnit extends CompetitorCheckAuthorization {
     expected: CompetitorGroupCheckSnapshot,
     observations: CompetitorCheckObservation[],
     guard: () => Promise<void>,
+    monitor?: { operation: VariantCheckOperation; snapshotDigest: string },
   ): Promise<CommittedCompetitorGroupCheck>;
   commitSingle(
     expected: CompetitorSingleCheckSnapshot,

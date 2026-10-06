@@ -1,10 +1,15 @@
 import {
   batchCreateAsinsRequestSchema,
+  competitorAsinSourceSchema,
   competitorCreateAsinRequestSchema,
+  competitorDeleteAsinRequestSchema,
+  competitorDeleteGroupRequestSchema,
   competitorFeishuNotifyRequestSchema,
+  competitorGroupSourceSchema,
   competitorGroupUpsertRequestSchema,
+  competitorGuardedUpdateAsinRequestSchema,
   competitorMoveAsinRequestSchema,
-  competitorUpdateAsinRequestSchema,
+  competitorUpdateGroupRequestSchema,
 } from '@asin-monitor/contracts';
 import { MAX_ASIN_BATCH_CREATE_ITEMS } from '@asin-monitor/db';
 import { z } from 'zod';
@@ -21,6 +26,22 @@ const text = (max: number) =>
     .refine((value) => [...value].length <= max)
     .refine((value) => !/[\x00-\x1f\x7f]/.test(value));
 const required = (max: number) => text(max).refine((value) => !!value.trim());
+// Snapshots describe persisted Legacy values, including empty or control
+// whitespace. PostgreSQL varchar limits count characters and cannot store NUL.
+const persistedText = (max: number) =>
+  z
+    .string()
+    .max(max * 2)
+    .refine((value) => [...value].length <= max)
+    .refine((value) => !value.includes('\u0000'));
+const groupSource = competitorGroupSourceSchema
+  .extend({
+    name: persistedText(255),
+    country: persistedText(10),
+    brand: persistedText(100),
+    updateTime: z.string().max(50).nullable().optional(),
+  })
+  .strict();
 const normalizedCode = (max: number) =>
   z
     .string()
@@ -44,13 +65,51 @@ const groupSchema = competitorGroupUpsertRequestSchema
   .extend({ ...common, name: required(255) })
   .strict();
 const createSchema = competitorCreateAsinRequestSchema
-  .extend({ ...asinFields, parentId: id })
+  .extend({
+    ...asinFields,
+    parentId: id,
+    expectedParent: groupSource.optional(),
+  })
   .strict();
-const updateSchema = competitorUpdateAsinRequestSchema
-  .extend(asinFields)
+const updateSchema = competitorGuardedUpdateAsinRequestSchema
+  .extend({
+    ...asinFields,
+    expectedSource: competitorAsinSourceSchema
+      .extend({
+        variantGroupId: id,
+        asin: persistedText(20),
+        name: persistedText(500).nullable(),
+        country: persistedText(10),
+        brand: persistedText(100).nullable(),
+        asinType: z.enum(['1', '2']).nullable(),
+        updateTime: z.string().max(50).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  })
   .strict();
+const updateGroupSchema = competitorUpdateGroupRequestSchema
+  .extend({
+    ...common,
+    name: required(255),
+    expectedSource: groupSource.optional(),
+  })
+  .strict();
+const deleteAsinSchema = competitorDeleteAsinRequestSchema.extend({
+  expectedSource: updateSchema.shape.expectedSource,
+});
 const moveSchema = competitorMoveAsinRequestSchema
-  .extend({ targetGroupId: id })
+  .extend({
+    targetGroupId: id,
+    expectedSourceGroup: id.optional(),
+    expectedTargetSnapshot: groupSource.extend({ id }).strict().optional(),
+  })
+  .strict();
+const deleteGroupSchema = competitorDeleteGroupRequestSchema
+  .extend({
+    expectedChildIds: z.array(id).max(5000).optional(),
+    expectedSource: updateGroupSchema.shape.expectedSource,
+  })
   .strict();
 function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.infer<T> {
   if (
@@ -69,12 +128,26 @@ function normalizeName<T extends { name?: string | null }>(value: T) {
 }
 export const parseCompetitorGroupWrite = (value: unknown) =>
   parse(groupSchema, value);
+export const parseCompetitorGroupUpdate = (value: unknown) =>
+  parse(updateGroupSchema, value);
 export const parseCompetitorAsinCreate = (value: unknown) =>
   normalizeName(parse(createSchema, value));
 export const parseCompetitorAsinUpdate = (value: unknown) =>
   normalizeName(parse(updateSchema, value));
+export const parseCompetitorAsinDelete = (value: unknown) =>
+  parse(deleteAsinSchema, value ?? {});
 export const parseCompetitorAsinMove = (value: unknown) =>
   parse(moveSchema, value);
+export function parseCompetitorGroupDelete(value: unknown) {
+  const result = parse(deleteGroupSchema, value ?? {});
+  const { expectedChildIds } = result;
+  if (
+    expectedChildIds &&
+    new Set(expectedChildIds).size !== expectedChildIds.length
+  )
+    throw new CompetitorWriteInputError();
+  return result;
+}
 export function parseCompetitorBatchCreate(value: unknown): unknown[] {
   const items = (value as { items?: unknown } | null)?.items;
   if (!Array.isArray(items) || !items.length)

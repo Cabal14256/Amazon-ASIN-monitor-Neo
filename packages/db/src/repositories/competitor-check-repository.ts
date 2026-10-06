@@ -15,8 +15,13 @@ import {
   type CompetitorGroupCheckSnapshot,
   type CompetitorSingleCheckSnapshot,
 } from '../domain/competitor-check';
+import { competitorMonitorSnapshotDigest } from '../domain/competitor-monitor';
 import { VariantCheckError } from '../domain/variant-check';
 import type { VariantCheckOperation } from '../domain/variant-check-receipt';
+import {
+  assertVariantCheckOperationRequest,
+  parseVariantCheckOperation,
+} from '../domain/variant-check-receipt';
 import {
   competitorAsins,
   competitorMonitorHistory,
@@ -48,6 +53,9 @@ function sameGroup(a: CompetitorVariantGroup, b: CompetitorVariantGroup) {
   return (
     a.id === b.id &&
     a.country === b.country &&
+    a.name === b.name &&
+    a.brand === b.brand &&
+    a.feishuNotifyEnabled === b.feishuNotifyEnabled &&
     sameTime(a.createTime, b.createTime) &&
     sameTime(a.updateTime, b.updateTime) &&
     sameTime(a.lastCheckTime, b.lastCheckTime)
@@ -59,6 +67,10 @@ function sameAsin(a: CompetitorAsin, b: CompetitorAsin) {
     a.asin === b.asin &&
     a.country === b.country &&
     a.variantGroupId === b.variantGroupId &&
+    a.name === b.name &&
+    a.brand === b.brand &&
+    a.asinType === b.asinType &&
+    a.feishuNotifyEnabled === b.feishuNotifyEnabled &&
     sameTime(a.createTime, b.createTime) &&
     sameTime(a.updateTime, b.updateTime) &&
     sameTime(a.lastCheckTime, b.lastCheckTime)
@@ -69,7 +81,7 @@ const broken = (result: CatalogVariantResult) =>
 const errorType = (result: CatalogVariantResult) =>
   result.errorType || (broken(result) ? 'NO_VARIANTS' : undefined);
 const observationBroken = (observation: CompetitorCheckObservation) =>
-  observation.kind === 'failed' || broken(observation.result);
+  observation.kind !== 'checked' || broken(observation.result);
 
 /** SQL is confined to the competitor connection. Primary authorization is
  * supplied separately by PgCompetitorTransactions in the same operation. */
@@ -251,7 +263,21 @@ class DrizzleCompetitorCheckUnit {
     expected: CompetitorGroupCheckSnapshot,
     observations: CompetitorCheckObservation[],
     guard: () => Promise<void>,
+    monitor?: { operation: VariantCheckOperation; snapshotDigest: string },
   ): Promise<CommittedCompetitorGroupCheck> {
+    if (monitor) {
+      const operation = parseVariantCheckOperation(monitor.operation);
+      if (
+        operation.taskType !== 'competitor-monitor' ||
+        competitorMonitorSnapshotDigest(expected) !== monitor.snapshotDigest
+      )
+        throw new VariantCheckError('snapshot-changed');
+      assertVariantCheckOperationRequest(operation, {
+        groupId: expected.group.id,
+        forceRefresh: false,
+        snapshotDigest: monitor.snapshotDigest,
+      });
+    }
     if (
       observations.length !== expected.asins.length ||
       observations.length > MAX_CHILDREN ||
@@ -264,7 +290,9 @@ class DrizzleCompetitorCheckUnit {
       (row) => {
         const item = byId.get(row.id);
         if (!item) throw new VariantCheckError('invalid-input');
-        if (item.kind === 'failed') return item;
+        if (item.kind !== 'checked' && item.kind !== 'failed')
+          throw new VariantCheckError('invalid-input');
+        if (item.kind !== 'checked') return item;
         return {
           asinId: row.id,
           kind: 'checked' as const,
@@ -298,8 +326,31 @@ class DrizzleCompetitorCheckUnit {
     await guard();
     this.ensureOpen();
     // Legacy leaves an empty group untouched and emits no fabricated history.
-    if (!current.length) return { group, asins: [], observations: [] };
-    const checkedAt = await this.timestamp();
+    if (!current.length) {
+      if (monitor)
+        await this.query(() =>
+          this.db.insert(competitorMonitorHistory).values({
+            variantGroupId: group.id,
+            variantGroupName: group.name,
+            checkType: 'GROUP',
+            country: group.country,
+            isBroken: true,
+            checkTime: new Date(monitor.operation.taskCreatedAt),
+            monitorTaskId: monitor.operation.taskId,
+            checkResult: {
+              totalASINs: 0,
+              brokenCount: 0,
+              results: [],
+              message: '竞品变体组中没有ASIN',
+            },
+          }),
+        );
+      await guard();
+      return { group, asins: [], observations: [] };
+    }
+    const checkedAt = monitor
+      ? new Date(monitor.operation.taskCreatedAt)
+      : await this.timestamp();
     const state = validated.map(
       (item) =>
         sql`(${item.asinId}::varchar,${observationBroken(item)}::boolean)`,
@@ -340,7 +391,7 @@ class DrizzleCompetitorCheckUnit {
     );
     const results = validated.map((item) => {
       const row = locked.get(item.asinId)!;
-      const failed = item.kind === 'failed';
+      const failed = item.kind !== 'checked';
       const result = failed ? undefined : item.result;
       const type = failed ? 'SP_API_ERROR' : errorType(item.result);
       return {
@@ -355,6 +406,9 @@ class DrizzleCompetitorCheckUnit {
         ...(failed ? { error: item.error } : {}),
       };
     });
+    const resultById = new Map(
+      validated.map((item, index) => [item.asinId, results[index]]),
+    );
     const brokenCount = validated.filter(observationBroken).length;
     await this.query(() =>
       this.db.insert(competitorMonitorHistory).values({
@@ -364,6 +418,7 @@ class DrizzleCompetitorCheckUnit {
         country: group.country,
         isBroken: groupBroken,
         checkTime: checkedAt,
+        monitorTaskId: monitor?.operation.taskId,
         checkResult: {
           totalASINs: current.length,
           brokenCount,
@@ -376,18 +431,36 @@ class DrizzleCompetitorCheckUnit {
       const rows = updatedRows.slice(offset, offset + 1000);
       await this.query(() =>
         this.db.insert(competitorMonitorHistory).values(
-          rows.map((row) => ({
-            asinId: row.id,
-            variantGroupId: group.id,
-            variantGroupName: group.name,
-            asinCode: row.asin,
-            asinName: row.name,
-            checkType: 'ASIN',
-            country: row.country,
-            checkTime: checkedAt,
-            isBroken: row.isBroken === true,
-            checkResult: { asin: row.asin, isBroken: row.isBroken === true },
-          })),
+          rows.map((row) => {
+            const observation = byId.get(row.id)!;
+            const kind =
+              observation.kind !== 'checked'
+                ? 'SP_API_ERROR'
+                : errorType(observation.result);
+            return {
+              asinId: row.id,
+              variantGroupId: group.id,
+              variantGroupName: group.name,
+              asinCode: row.asin,
+              asinName: row.name,
+              checkType: 'ASIN',
+              country: row.country,
+              checkTime: checkedAt,
+              monitorTaskId: monitor?.operation.taskId,
+              isBroken: row.isBroken === true,
+              checkResult: {
+                asin: row.asin,
+                isBroken: row.isBroken === true,
+                ...(monitor
+                  ? {
+                      errorType: kind ?? null,
+                      isDeferred: false,
+                      currentResult: resultById.get(row.id) ?? null,
+                    }
+                  : {}),
+              },
+            };
+          }),
         ),
       );
     }
@@ -432,9 +505,9 @@ export class PgCompetitorCheckRepository
             business().then((unit) => unit.purgeExpiredReceipts()),
           loadGroup: (id) => business().then((unit) => unit.loadGroup(id)),
           loadSingle: (id) => business().then((unit) => unit.loadSingle(id)),
-          commitGroup: (snapshot, values, guard) =>
+          commitGroup: (snapshot, values, guard, monitor) =>
             business().then((unit) =>
-              unit.commitGroup(snapshot, values, guard),
+              unit.commitGroup(snapshot, values, guard, monitor),
             ),
           commitSingle: (snapshot, value, guard) =>
             business().then((unit) =>

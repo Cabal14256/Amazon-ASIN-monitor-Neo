@@ -41,17 +41,34 @@ export class PgCompetitorWriteRepository
             ...authorization,
             createGroup: async (fields) =>
               (await business()).createGroup(fields),
-            updateGroup: async (id, fields) =>
-              (await business()).updateGroup(id, fields),
-            createAsin: async (fields) => (await business()).createAsin(fields),
+            updateGroup: async (id, fields, expectedSource) =>
+              (await business()).updateGroup(id, fields, expectedSource),
+            createAsin: async (fields, expectedParent) =>
+              (await business()).createAsin(fields, expectedParent),
             batchCreateAsins: async (items) =>
               (await business()).batchCreateAsins(items),
-            updateAsin: async (id, fields) =>
-              (await business()).updateAsin(id, fields),
-            moveAsin: async (id, target) =>
-              (await business()).moveAsin(id, target),
-            deleteGroup: async (id) => (await business()).deleteGroup(id),
-            deleteAsin: async (id) => (await business()).deleteAsin(id),
+            updateAsin: async (id, fields, expectedSource) =>
+              (await business()).updateAsin(id, fields, expectedSource),
+            moveAsin: async (
+              id,
+              target,
+              expectedSourceGroup,
+              expectedTargetSnapshot,
+            ) =>
+              (await business()).moveAsin(
+                id,
+                target,
+                expectedSourceGroup,
+                expectedTargetSnapshot,
+              ),
+            deleteGroup: async (id, expectedChildIds, expectedSource) =>
+              (await business()).deleteGroup(
+                id,
+                expectedChildIds,
+                expectedSource,
+              ),
+            deleteAsin: async (id, expectedSource) =>
+              (await business()).deleteAsin(id, expectedSource),
             updateGroupNotify: async (id, enabled) =>
               (await business()).updateGroupNotify(id, enabled),
             updateAsinNotify: async (id, enabled) =>
