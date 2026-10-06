@@ -30,12 +30,12 @@
 
 新增 mounted tests 使用真实 HttpClient/typed service/TaskApi，合成 fetch 响应而不连接生产数据库；覆盖两域、`/api/` 与 gateway base、不重复 `/api`、当前页选择、原始 Unicode、padded ID 零提交、权限撤回/会话变化、强制改密、原会话显式恢复、未知恢复、终态与重读失败。独立 recovery tests 覆盖跨标签串行、先存后发、迟到回执、损坏/篡改记录、localStorage 读写失败后备、404/错误 subtype、替换 claim、后备清理失败与刷新期间身份变化。本任务不改变数据库/API/Worker；真实 bulk 执行沿用对应已存在 Integration CI，原始 ID 对拍由 #212 完成。
 
-2026-10-07 合并 main 197925d、修复 peer 刷新与双版本互斥后的本地验证（`NODE_OPTIONS=--max-old-space-size=1536`，Vitest 单 worker）：
+2026-10-07 正常合并 main cdfd47e、修复 peer 刷新与双版本互斥后的本地验证（`NODE_OPTIONS=--max-old-space-size=1536`，Vitest 单 worker）：
 
 - 定向 service/recovery/mounted、两域 import 与冻结 main reader/claim：145 项 / 8 文件 / 零跳过。新增场景验证实际读取新目录后才解锁、失败保留保护、两域双方排队、accepted/unknown/remount、旧 import 锁与真实旧 parser 的保留/阻断、旧标签仅清原键时 known receipt 恢复。
-- 完整 Web、strict、lint、build 的最新结果以 PR `验证` 为准；827 项 / 62 文件属于兼容修复前的历史记录。Vite 保留现有入口与 ECharts chunk 超过 500 kB 的提示，未放宽阈值。
+- 完整 Web：875 项 / 64 文件 / 零跳过；Web strict、lint（零警告）与 build 通过。Vite 保留现有入口与 ECharts chunk 超过 500 kB 的提示，未放宽阈值。
 - `corepack pnpm exec max setup` 补齐 fresh ignore-scripts install 未生成的 Legacy `.umi` 后，根 `tsc --noEmit --pretty false` 通过；未更改 Legacy tsconfig。
-- 根 `test:contracts`：40 项；contracts：168 项 / 14 文件；请求/导出 URL 与 changed-format 回归：8 项，均通过。对全部本次变更文件执行 Prettier 与 `git diff --check`。
+- 根 `test:contracts`：40 项；contracts：196 项 / 15 文件；请求/导出 URL 与 changed-format 回归：8 项，均通过。对全部 27 个本次变更文件执行 Prettier 与 `git diff --check`。
 - 较早 826 / 827 以及仅合并主线后 847 项全量结果均属后续审查修复前的历史验证，不代表最新提交。
 
 本地未重复运行 Legacy server unit / Legacy `npm run build`、config/db/api/worker 全套及 `build:api`、`build:worker`、`build:db`：本次只改 Web 和操作文档，后端和数据库没有变更，由 PR CI 执行对应基线。未连接真实数据库、生产环境或人工浏览器截图验收；mounted synthetic transport 不冒称真实数据库执行证明。
