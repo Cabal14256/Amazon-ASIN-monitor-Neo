@@ -512,6 +512,8 @@ function tableSpec(table: PgTable): TableMigrationSpec {
   const columns = Object.values(getTableColumns(table)).filter(
     (column) =>
       (tableName !== 'monitor_history' || column.name !== 'monitor_task_id') &&
+      (tableName !== 'competitor_monitor_history' ||
+        column.name !== 'monitor_task_id') &&
       (tableName !== 'feishu_config' || column.name !== 'revision'),
   );
   // Snapshot import validates Legacy and the frozen 0000/0001 target BEFORE
@@ -660,8 +662,11 @@ function tableSpec(table: PgTable): TableMigrationSpec {
     ...tableConfig.indexes
       .filter(
         (index) =>
-          tableName !== 'monitor_history' ||
-          index.config.name !== 'idx_monitor_history_monitor_task_country',
+          (tableName !== 'monitor_history' ||
+            index.config.name !== 'idx_monitor_history_monitor_task_country') &&
+          (tableName !== 'competitor_monitor_history' ||
+            index.config.name !==
+              'idx_competitor_monitor_history_task_country'),
       )
       .map((index) => {
         const expressions = index.config.columns.map((column) => {

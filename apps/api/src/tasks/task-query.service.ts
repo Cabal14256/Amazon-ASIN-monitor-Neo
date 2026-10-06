@@ -27,7 +27,7 @@ function fail(status: number, message: string): never {
 const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
 const cancellationSensitiveTask = (task: { taskType: string }) =>
-  checkTask(task) || task.taskType === 'monitor';
+  checkTask(task) || ['monitor', 'competitor-monitor'].includes(task.taskType);
 const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
   cancellationSensitiveTask(task) ||
   (task.taskType === 'export' && task.taskSubType === 'asin');
@@ -119,10 +119,9 @@ export class TaskQueryService {
         task.taskId,
         {
           kind: 'cancelled',
-          message:
-            task.taskType === 'monitor'
-              ? '监控任务已取消，已提交的结果保留'
-              : '检查任务已取消，已提交的检查结果保留',
+          message: ['monitor', 'competitor-monitor'].includes(task.taskType)
+            ? '监控任务已取消，已提交的结果保留'
+            : '检查任务已取消，已提交的检查结果保留',
         },
         identity,
       );
@@ -171,7 +170,7 @@ export class TaskQueryService {
     // Cancellation may win the CAS between the initial task read and the
     // completion mutation; monitor completion deliberately leaves it pending.
     if (
-      task.taskType === 'monitor' &&
+      ['monitor', 'competitor-monitor'].includes(task.taskType) &&
       current?.cancelRequestedAt &&
       queued.status === 'completed'
     )

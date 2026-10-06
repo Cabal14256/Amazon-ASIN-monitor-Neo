@@ -6,6 +6,11 @@ import type {
   CompetitorVariantGroup,
 } from '@asin-monitor/db';
 import {
+  competitorMonitorSnapshotDigest,
+  createVariantCheckOperation,
+} from '@asin-monitor/db';
+import {
+  CatalogDeferredError,
   catalogNotFoundResult,
   SpApiError,
   type CatalogVariantResult,
@@ -160,8 +165,156 @@ function fixture() {
     context,
   };
 }
+function monitorContext(f: ReturnType<typeof fixture>): CompetitorCheckContext {
+  const snapshotDigest = competitorMonitorSnapshotDigest(f.snapshot);
+  return {
+    ...f.context,
+    forceRefresh: false,
+    snapshotDigest,
+    operation: createVariantCheckOperation(
+      {
+        taskId: '9e3376d4-f99c-4e61-8765-b81f045c3f6a',
+        userId: 'owner',
+        taskType: 'competitor-monitor',
+        taskSubType: 'competitor',
+        taskCreatedAt: '2026-10-02T00:00:00.000Z',
+        expiresAt: '2026-10-10T00:00:00.000Z',
+        step: 'monitor-1234567890abcdef12345678',
+        resultKind: 'competitor-group',
+      },
+      { groupId: 'cg1', forceRefresh: false, snapshotDigest },
+    ),
+  };
+}
 
 describe('competitor check pipeline', () => {
+  it('clears only the old deferred item after a normal force-refresh recovery without invalidating its successful cache', async () => {
+    const f = fixture(),
+      context = monitorContext(f);
+    f.checker.check.mockImplementation(
+      async (
+        code: string,
+        _country: string,
+        options: { forceRefresh: boolean },
+      ) => {
+        if (code === 'B000000001' && !options.forceRefresh)
+          throw new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
+        return catalogResult(code, true);
+      },
+    );
+    const result = await f.pipeline.checkGroup('cg1', context);
+    expect(result).toMatchObject({
+      isBroken: false,
+      brokenASINs: [],
+      brokenByType: { SP_API_ERROR: 0, NOT_FOUND: 0, NO_VARIANTS: 0 },
+      groupSnapshot: {
+        isBroken: 0,
+        children: [
+          { id: 'ca1', isBroken: 0 },
+          { id: 'ca2', isBroken: 0 },
+          { id: 'ca3', isBroken: 0 },
+        ],
+      },
+    });
+    expect(
+      f.unit.commitGroup.mock.calls[0][1].every(
+        (item) => item.kind === 'checked' && item.result.hasVariants,
+      ),
+    ).toBe(true);
+    expect(f.unit.commitGroup.mock.calls[0][3]).toEqual({
+      operation: context.operation,
+      snapshotDigest: context.snapshotDigest,
+    });
+    expect(f.cache.clearDeferred).toHaveBeenCalledOnce();
+    expect(f.cache.clearDeferred).toHaveBeenCalledWith(
+      { asin: 'B000000001', country: 'US', owner: 'competitor' },
+      expect.any(AbortSignal),
+    );
+    expect(f.cache.invalidate).not.toHaveBeenCalled();
+  });
+  it('rechecks shared deferred inputs once before an atomic monitor receipt and keeps confirmed NOT_FOUND distinct', async () => {
+    const f = fixture(),
+      context = monitorContext(f);
+    const trace: { force: boolean; time: number }[] = [];
+    f.checker.check.mockImplementation(
+      async (
+        code: string,
+        _country: string,
+        options: { forceRefresh: boolean },
+      ) => {
+        if (code === 'B000000001') {
+          trace.push({ force: options.forceRefresh, time: Date.now() });
+          if (!options.forceRefresh)
+            throw new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
+          return catalogNotFoundResult(code, 'US');
+        }
+        return catalogResult(code, code === 'B000000003');
+      },
+    );
+    const output = await f.pipeline.checkGroup('cg1', context);
+    expect(trace.map((item) => item.force)).toEqual([false, true]);
+    expect(trace[1].time - trace[0].time).toBeGreaterThanOrEqual(1900);
+    expect(output.brokenByType).toEqual({
+      SP_API_ERROR: 0,
+      NOT_FOUND: 1,
+      NO_VARIANTS: 1,
+    });
+    expect(f.unit.commitGroup).toHaveBeenCalledWith(
+      f.snapshot,
+      expect.any(Array),
+      expect.any(Function),
+      { operation: context.operation, snapshotDigest: context.snapshotDigest },
+    );
+    expect(vi.mocked(f.unit.saveReceipt)).toHaveBeenCalledOnce();
+    expect(f.cache.clearDeferred).toHaveBeenCalledWith(
+      { asin: 'B000000001', country: 'US', owner: 'competitor' },
+      expect.any(AbortSignal),
+    );
+  });
+  it('commits a final deferred upstream failure only after its bounded second check', async () => {
+    const f = fixture(),
+      context = monitorContext(f);
+    f.snapshot.asins = [f.snapshot.asins[0]];
+    context.snapshotDigest = competitorMonitorSnapshotDigest(f.snapshot);
+    context.operation = createVariantCheckOperation(
+      { ...context.operation! },
+      {
+        groupId: 'cg1',
+        forceRefresh: false,
+        snapshotDigest: context.snapshotDigest,
+      },
+    );
+    f.checker.check.mockRejectedValue(
+      new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503)),
+    );
+    const output = await f.pipeline.checkGroup('cg1', context);
+    expect(f.checker.check).toHaveBeenCalledTimes(2);
+    expect(output.brokenByType.SP_API_ERROR).toBe(1);
+    expect(f.unit.commitGroup.mock.calls[0][1]).toEqual([
+      { asinId: 'ca1', kind: 'failed', error: 'SP-API延后复核失败' },
+    ]);
+  });
+  it('rejects changed fixed inputs before upstream work and replays a committed receipt without rechecking new members', async () => {
+    const f = fixture(),
+      context = monitorContext(f);
+    f.snapshot.asins.push(asin(4));
+    await expect(f.pipeline.checkGroup('cg1', context)).rejects.toMatchObject({
+      code: 'snapshot-changed',
+    });
+    expect(f.checker.check).not.toHaveBeenCalled();
+    expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    f.snapshot.asins.pop();
+    f.checker.check.mockImplementation(async (code: string) =>
+      catalogResult(code, true),
+    );
+    const output = await f.pipeline.checkGroup('cg1', context);
+    const count = f.checker.check.mock.calls.length;
+    vi.mocked(f.unit.readReceipt).mockResolvedValue(output);
+    f.snapshot.asins.push(asin(4));
+    expect(await f.pipeline.checkGroup('cg1', context)).toEqual(output);
+    expect(f.checker.check).toHaveBeenCalledTimes(count);
+    expect(f.unit.commitGroup).toHaveBeenCalledOnce();
+  });
   it.each(['failed', 'not-found'])(
     'bounds cleanup for 5000 %s observations even if the cache ignores abort',
     async (kind) => {

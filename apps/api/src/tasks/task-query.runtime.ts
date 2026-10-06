@@ -7,14 +7,17 @@ import {
 } from '@asin-monitor/config';
 import {
   asinExportJobDataSchema,
+  competitorMonitorJobSchema,
   primaryMonitorJobSchema,
   type AsinExportJobData,
+  type CompetitorMonitorJob,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
 } from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
+  parseCompetitorMonitorCompletion,
   type BatchDeleteTaskData,
   type TaskRedisPort,
   type TaskState,
@@ -38,6 +41,7 @@ import type { QueueTaskSnapshot } from './task-query-values';
 
 export const TASK_QUERY_QUEUES = [
   'monitor',
+  'competitor-monitor',
   'export',
   'batch-check',
   'batch-delete',
@@ -80,6 +84,10 @@ export interface MonitorProducerPort {
   assertConsumer(): Promise<void>;
   enqueue(data: PrimaryMonitorJob): Promise<void>;
 }
+export interface CompetitorMonitorProducerPort
+  extends Omit<MonitorProducerPort, 'enqueue'> {
+  enqueue(data: CompetitorMonitorJob): Promise<void>;
+}
 const text = (value: unknown, max: number) =>
   typeof value === 'string' ? value.slice(0, max) : null;
 function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
@@ -90,8 +98,9 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       : {};
   const status =
     state === 'completed' &&
-    (['variant-check', 'batch-check', 'monitor'].includes(type) ||
-      (type === 'export' && job.name === 'asin')) &&
+    (['variant-check', 'batch-check', 'monitor', 'competitor-monitor'].includes(
+      type,
+    ) || (type === 'export' && job.name === 'asin')) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
@@ -121,6 +130,17 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       job.name !== 'primary-monitor'
     )
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+  }
+  if (type === 'competitor-monitor') {
+    const parsed = competitorMonitorJobSchema.safeParse(job.data);
+    if (
+      !parsed.success ||
+      parsed.data.taskId !== job.id ||
+      job.name !== 'competitor-monitor'
+    )
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+    if (state === 'completed' && resultObject.cancelled !== true)
+      parseCompetitorMonitorCompletion(parsed.data, result);
   }
   return {
     ...(checkOperation ? { checkOperation } : {}),
@@ -163,6 +183,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private importQueue?: Queue;
   private exportQueue?: Queue;
   private monitorQueue?: Queue;
+  private competitorMonitorQueue?: Queue;
   private readonly checkQueues = new Map<
     'variant-check' | 'batch-check',
     Queue
@@ -469,27 +490,38 @@ export class TaskQueryRuntime implements OnModuleDestroy {
     };
   }
   openMonitor(ensureOpen: () => void): MonitorProducerPort {
+    return this.openMonitoring(ensureOpen, false);
+  }
+  openCompetitorMonitor(ensureOpen: () => void): CompetitorMonitorProducerPort {
+    return this.openMonitoring(ensureOpen, true);
+  }
+  private openMonitoring(ensureOpen: () => void, competitor: boolean) {
+    const type = competitor ? 'competitor-monitor' : 'monitor';
+    const name = competitor ? 'competitor-monitor' : 'primary-monitor';
     const command = this.command(ensureOpen);
     const readyQueue = async () => {
-      let queue = this.monitorQueue;
+      let queue = competitor ? this.competitorMonitorQueue : this.monitorQueue;
       if (!queue) {
-        queue = new Queue(getPhysicalQueueName('monitor'), {
+        queue = new Queue(getPhysicalQueueName(type), {
           connection: this.redis as unknown as ConnectionOptions,
           prefix: getNeoQueuePrefix(this.env),
-          defaultJobOptions: getQueuePolicy('monitor', this.env)
-            .defaultJobOptions,
+          defaultJobOptions: getQueuePolicy(type, this.env).defaultJobOptions,
         });
         queue.on('error', () =>
           this.logger.warn('监控队列连接异常', 'TaskQueryRuntime', {
             reason: 'monitor_queue_error',
           }),
         );
-        this.monitorQueue = queue;
+        if (competitor) this.competitorMonitorQueue = queue;
+        else this.monitorQueue = queue;
       }
       try {
         await queue.waitUntilReady();
       } catch (error) {
-        if (this.monitorQueue === queue) this.monitorQueue = undefined;
+        if (competitor && this.competitorMonitorQueue === queue)
+          this.competitorMonitorQueue = undefined;
+        else if (!competitor && this.monitorQueue === queue)
+          this.monitorQueue = undefined;
         await queue.close().catch(() => undefined);
         throw error;
       }
@@ -498,7 +530,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
     };
     const assertAvailable = async (queue: Queue) => {
       const ready = await this.redis.get(
-        `${getNeoQueuePrefix(this.env)}:monitor:consumer:ready`,
+        `${getNeoQueuePrefix(this.env)}:${type}:consumer:ready`,
       );
       if (ready !== '1') throw new Error('MONITOR_CONSUMER_NOT_READY');
       const counts = await queue.getJobCounts(
@@ -520,14 +552,16 @@ export class TaskQueryRuntime implements OnModuleDestroy {
     return {
       store: this.createStore(ensureOpen),
       assertConsumer,
-      enqueue: async (raw) => {
-        const data = primaryMonitorJobSchema.parse(raw);
+      enqueue: async (raw: PrimaryMonitorJob | CompetitorMonitorJob) => {
+        const data = competitor
+          ? competitorMonitorJobSchema.parse(raw)
+          : primaryMonitorJobSchema.parse(raw);
         await command(async () => {
           const queue = await readyQueue();
           await withMonitorAdmission(
             {
               redis: this.redis,
-              key: `${getNeoQueuePrefix(this.env)}:monitor:admission-lock`,
+              key: `${getNeoQueuePrefix(this.env)}:${type}:admission-lock`,
               ensureOpen,
               onReleaseFailure: () =>
                 this.logger.warn(
@@ -541,7 +575,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
             async (assertOwned) => {
               await assertAvailable(queue);
               await assertOwned();
-              await queue.add('primary-monitor', data, { jobId: data.taskId });
+              await queue.add(name, data, { jobId: data.taskId });
               try {
                 await assertOwned();
               } catch {
@@ -562,6 +596,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...(this.importQueue ? [this.importQueue] : []),
         ...(this.exportQueue ? [this.exportQueue] : []),
         ...(this.monitorQueue ? [this.monitorQueue] : []),
+        ...(this.competitorMonitorQueue ? [this.competitorMonitorQueue] : []),
         ...this.checkQueues.values(),
       ].map((queue) => queue.close()),
     );

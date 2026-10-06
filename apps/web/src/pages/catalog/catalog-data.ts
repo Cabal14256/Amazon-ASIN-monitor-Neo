@@ -91,7 +91,7 @@ export function catalogWriteError(error: unknown): string {
     if (error.kind === 'INVALID_INPUT') return error.message;
     switch (error.status) {
       case 400:
-        return '提交内容无效，请检查必填项、长度和站点信息。';
+        return '提交内容无效，请检查必填项、国家、品牌和字段长度。';
       case 401:
         return '登录状态已失效，正在重新验证。';
       case 403:
@@ -111,12 +111,41 @@ export function catalogWriteError(error: unknown): string {
       case 429:
         return '操作过于频繁，请稍后重试。';
       case 503:
+        if (error.message === '写入结果未确认，请刷新数据后再操作')
+          return '写入结果未确认，请刷新目录核实后再操作，勿直接重试。';
         return 'ASIN 写入服务尚未开放，请使用现有入口。';
     }
     if (error.kind === 'INVALID_RESPONSE')
       return '服务器返回的结果不符合 ASIN 契约，请刷新后重试。';
   }
   return 'ASIN 操作暂不可用，请稍后重试。';
+}
+
+export function catalogWriteOutcomeUncertain(
+  error: unknown,
+  source: 'asin' | 'competitor',
+): boolean {
+  const definitivePrimary503 =
+    source === 'asin' &&
+    error instanceof ApiError &&
+    error.kind === 'HTTP' &&
+    error.status === 503 &&
+    [
+      '鉴权权威源尚未切换，请使用现有 ASIN 入口',
+      'ASIN 写入暂不可用，请使用现有 ASIN 入口',
+    ].includes(error.message);
+  return (
+    error instanceof ApiError &&
+    !definitivePrimary503 &&
+    (['TIMEOUT', 'NETWORK', 'INVALID_RESPONSE', 'CANCELLED'].includes(
+      error.kind,
+    ) ||
+      (error.kind === 'HTTP' &&
+        (source === 'competitor'
+          ? error.status === 503 &&
+            error.message === '写入结果未确认，请刷新数据后再操作'
+          : (error.status ?? 0) >= 500)))
+  );
 }
 
 export function catalogAccessDenied(error: unknown): boolean {
@@ -137,6 +166,13 @@ export function catalogActionSourceCurrent(
   action: CatalogAction,
   latest: CatalogGroup,
 ): boolean {
+  const groupCurrent =
+    'group' in action &&
+    action.group.id === latest.id &&
+    action.group.name === latest.name &&
+    action.group.country === latest.country &&
+    action.group.site === latest.site &&
+    action.group.brand === latest.brand;
   if (action.type === 'group-notify')
     return (
       action.group.id === latest.id &&
@@ -154,17 +190,22 @@ export function catalogActionSourceCurrent(
     action.type === 'create-asin'
   )
     return (
-      action.group.id === latest.id &&
-      action.group.name === latest.name &&
-      action.group.country === latest.country &&
-      action.group.site === latest.site &&
-      action.group.brand === latest.brand
+      groupCurrent &&
+      (action.type !== 'delete-group' ||
+        (action.group.children
+          ?.map((child) => child.id)
+          .sort()
+          .join('|') ?? '') ===
+          (latest.children
+            ?.map((child) => child.id)
+            .sort()
+            .join('|') ?? ''))
     );
   if ('child' in action) {
     const current = latest.children?.find(
       (item) => item.id === action.child.id,
     );
-    if (!current || latest.id !== action.group.id) return false;
+    if (!current || !groupCurrent) return false;
     if (action.type === 'asin-notify')
       return action.child.feishuNotifyEnabled === current.feishuNotifyEnabled;
     if (action.type === 'asin-manual')
@@ -177,7 +218,6 @@ export function catalogActionSourceCurrent(
         action.child.manualBrokenReason === current.manualBrokenReason &&
         action.child.manualExcludedReason === current.manualExcludedReason
       );
-    if (action.type !== 'edit-asin') return true;
     return Boolean(
       action.child.asin === current.asin &&
         (action.child.name ?? '') === (current.name ?? '') &&
@@ -193,4 +233,17 @@ export function catalogActionSourceCurrent(
 export function singleAsinCode(value: string): string | null {
   const code = value.trim().toUpperCase();
   return /^[A-Z0-9]{10}$/.test(code) ? code : null;
+}
+
+export function competitorAsinCode(value: string): string | null {
+  if (
+    value.length > 40 ||
+    [...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || code === 127;
+    })
+  )
+    return null;
+  const code = value.trim().toUpperCase();
+  return code && code.length <= 40 && [...code].length <= 20 ? code : null;
 }
