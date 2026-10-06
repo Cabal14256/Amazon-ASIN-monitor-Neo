@@ -262,6 +262,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         FOR EACH ROW EXECUTE FUNCTION ${qualified}.wait_monitor_notification();`);
       const blocker = await pool.connect();
       let pending: Promise<void> | undefined;
+      let releasing: Promise<boolean> | undefined;
       try {
         await blocker.query('BEGIN');
         const blockerPid = Number(
@@ -288,13 +289,27 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           pendingPins: 1,
           uncertainPins: 0,
         });
-        expect(await repository.release(identity)).toBe(false);
+        // The actual business transaction holds FOR SHARE on the slot through
+        // COMMIT. Release must wait for that lock, rather than synchronously
+        // return while this fixture still holds the notification blocker.
+        releasing = repository.release(identity);
+        void releasing.catch(() => undefined);
+        await vi.waitFor(async () => {
+          expect(
+            (
+              await pool.query(`SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE pid<>pg_backend_pid() AND wait_event_type='Lock'
+                AND query LIKE '%catalog_operation_slots%'`)
+            ).rows[0].n,
+          ).toBe(1);
+        });
         expect(
           (await pool.query('SELECT notification_sent FROM monitor_history'))
             .rows[0].notification_sent,
         ).toBe(false);
         await blocker.query('COMMIT');
         await pending;
+        expect(await releasing).toBe(false);
         expect(await repository.read(task.userId, 'asin')).toMatchObject({
           pendingPins: 0,
           uncertainPins: 0,
@@ -313,6 +328,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await blocker.query('ROLLBACK');
         blocker.release();
         await pending;
+        await releasing;
         await pool.query(`DROP TRIGGER wait_monitor_notification ON primary_monitor_notifications;
           DROP FUNCTION ${qualified}.wait_monitor_notification();`);
       }
@@ -478,14 +494,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await repository.bindTask(identity, parent);
       expect(await repository.findByTask(parent)).toEqual(identity);
       await expect(
-        repository.bindTask(identity, { ...parent, taskType: 'batch-check' }),
+        Promise.resolve().then(() =>
+          repository.bindTask(identity, { ...parent, taskType: 'batch-check' }),
+        ),
       ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_IDENTITY' });
       const competitor = await repository.reserve(
         { ownerId: task.userId, domain: 'competitor', kind: 'check' },
         async () => undefined,
       );
       await expect(
-        repository.bindTask(competitor, parent),
+        Promise.resolve().then(() => repository.bindTask(competitor, parent)),
       ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_IDENTITY' });
       await repository.close(identity, {
         source: 'worker',
@@ -540,11 +558,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     it('requires a precise bound task and definite rejection for producer release, never a generic failed or unbound proof', async () => {
       const identity = await imported();
       await expect(
-        repository.close(identity, {
-          status: 'failed',
-          source: 'producer',
-          task,
-        }),
+        Promise.resolve().then(() =>
+          repository.close(identity, {
+            status: 'failed',
+            source: 'producer',
+            task,
+          }),
+        ),
       ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_INVALID' });
       await expect(
         repository.close(identity, {
@@ -554,7 +574,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         }),
       ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_IDENTITY' });
       await expect(
-        repository.close(identity, { status: 'rejected', source: 'producer' }),
+        Promise.resolve().then(() =>
+          repository.close(identity, {
+            status: 'rejected',
+            source: 'producer',
+          }),
+        ),
       ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_INVALID' });
       expect(await repository.release(identity)).toBe(false);
       await repository.close(identity, {
@@ -564,7 +589,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       });
       expect(await repository.release(identity)).toBe(true);
       const unbound = await reserve();
-      await expect(repository.bindTask(unbound, task)).rejects.toMatchObject({
+      await expect(
+        Promise.resolve().then(() => repository.bindTask(unbound, task)),
+      ).rejects.toMatchObject({
         code: 'CATALOG_OPERATION_IDENTITY',
       });
       await expect(
