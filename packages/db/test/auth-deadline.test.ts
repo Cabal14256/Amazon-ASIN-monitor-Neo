@@ -22,6 +22,56 @@ function fixture() {
   return { pool, client };
 }
 describe('bounded PostgreSQL authentication operations', () => {
+  it('settles only after actual COMMIT and returns its client before borrowing a pin-settlement connection', async () => {
+    const { pool, client } = fixture();
+    const settled = vi.fn(async (outcome) => {
+      expect(outcome).toBe('committed');
+      expect(client.query).toHaveBeenCalledWith('COMMIT');
+      expect(client.release).toHaveBeenCalledExactlyOnceWith();
+    });
+    await withAuthDatabaseDeadline(pool, async () => 'ok', settled);
+    expect(settled).toHaveBeenCalledTimes(1);
+  });
+  it('keeps an in-flight COMMIT pin pending past the outer deadline, then records uncertainty only after it settles', async () => {
+    vi.useFakeTimers();
+    const { pool, client } = fixture();
+    let commitAck!: () => void;
+    const original = client.query.getMockImplementation()!;
+    client.query.mockImplementation(async (...args) =>
+      args[0] === 'COMMIT'
+        ? new Promise((resolve) => {
+            commitAck = () => resolve({ rows: [] });
+          })
+        : original(...args),
+    );
+    const settled = vi.fn(async () => undefined);
+    const task = withAuthDatabaseDeadline(pool, async () => 'ok', settled);
+    const rejected = expect(task).rejects.toBeInstanceOf(AuthQueryTimeoutError);
+    await vi.advanceTimersByTimeAsync(2000);
+    await rejected;
+    expect(settled).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+    commitAck();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledExactlyOnceWith('uncertain');
+    expect(client.query).not.toHaveBeenCalledWith('ROLLBACK');
+  });
+  it('requires a real ROLLBACK acknowledgement for definite business failure', async () => {
+    const { pool, client } = fixture();
+    const settled = vi.fn(async () => undefined);
+    await expect(
+      withAuthDatabaseDeadline(
+        pool,
+        async () => {
+          throw new Error('known failure');
+        },
+        settled,
+      ),
+    ).rejects.toThrow('known failure');
+    expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+    expect(settled).toHaveBeenCalledExactlyOnceWith('rolled-back');
+    expect(client.release).toHaveBeenCalledExactlyOnceWith();
+  });
   it('prevents a late password hash from issuing any account writes after the transaction deadline', async () => {
     vi.useFakeTimers();
     const { pool, client } = fixture();

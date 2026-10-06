@@ -29,6 +29,7 @@ import {
   type CompetitorAsin,
   type CompetitorVariantGroup,
 } from '../schema-competitor';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import {
   purgeCompetitorCheckReceipts,
   readCompetitorCheckReceipt,
@@ -105,6 +106,7 @@ class DrizzleCompetitorCheckUnit {
     );
   }
   saveReceipt(operation: VariantCheckOperation, result: unknown) {
+    assertCatalogWriteExecution(this.db, 'competitor', true);
     return saveCompetitorCheckReceipt(
       this.db,
       this.ensureOpen,
@@ -193,6 +195,7 @@ class DrizzleCompetitorCheckUnit {
     raw: CatalogVariantResult,
     guard: () => Promise<void>,
   ): Promise<CommittedCompetitorSingleCheck> {
+    assertCatalogWriteExecution(this.db, 'competitor', true);
     const result = decodeCatalogVariantResult(
       raw,
       expected.asin.asin,
@@ -265,6 +268,7 @@ class DrizzleCompetitorCheckUnit {
     guard: () => Promise<void>,
     monitor?: { operation: VariantCheckOperation; snapshotDigest: string },
   ): Promise<CommittedCompetitorGroupCheck> {
+    assertCatalogWriteExecution(this.db, 'competitor', true);
     if (monitor) {
       const operation = parseVariantCheckOperation(monitor.operation);
       if (

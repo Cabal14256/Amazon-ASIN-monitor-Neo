@@ -13,6 +13,7 @@ import {
   withAsinDatabaseTransaction,
 } from './asin-query-repository';
 import { prepareAsinTimestampWrites } from './asin-timestamp-policy';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import type { RoleWriteUnit } from './role-repository';
 
 export interface AsinBatchDeleteUnit extends RoleWriteUnit {
@@ -86,6 +87,7 @@ class DrizzleAsinBatchDeleteUnit
     );
   }
   async execute(raw: BatchDeleteIds) {
+    assertCatalogWriteExecution(this.db, 'asin');
     const ids = parseBatchDeleteRequest(raw);
     const candidates = await this.requestedAsins(ids.asinIds);
     // All Neo business writers acquire group locks before child rows. Group

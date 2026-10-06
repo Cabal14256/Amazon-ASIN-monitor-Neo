@@ -38,6 +38,7 @@ import {
   type AsinQueryUnit,
 } from './asin-query-repository';
 import { prepareAsinTimestampWrites } from './asin-timestamp-policy';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 
 export interface VariantGroupWriteFields {
   name: string;
@@ -190,6 +191,7 @@ export class DrizzleAsinWriteUnit
     { result, items }: BatchAsinPlan,
     onFailure?: (index: number, phase: 'group' | 'existing' | 'write') => void,
   ): Promise<BatchCreateAsinsData> {
+    assertCatalogWriteExecution(this.db, 'asin');
     const fail = (
       item: BatchAsinItem,
       message: string,
@@ -388,6 +390,7 @@ export class DrizzleAsinWriteUnit
     fields: GroupManualFields,
     operatorId: string,
   ) {
+    assertCatalogWriteExecution(this.db, 'asin');
     const lockedGroups = await this.lockGroups([groupId]);
     const lockedGroup = lockedGroups.get(groupId);
     if (!lockedGroup) throw new AsinWriteRepositoryError('group-not-found');
@@ -443,6 +446,7 @@ export class DrizzleAsinWriteUnit
     fields: AsinManualFields,
     operatorId: string,
   ) {
+    assertCatalogWriteExecution(this.db, 'asin');
     const { asin: previous, groups } = await this.lockAsin(asinId);
     const group = groups.get(previous.variantGroupId)!;
     const expected = fields.expectedManualState;
@@ -479,11 +483,13 @@ export class DrizzleAsinWriteUnit
     return current;
   }
   async deleteGroup(groupId: string) {
+    assertCatalogWriteExecution(this.db, 'asin');
     if (!(await this.lockGroups([groupId])).has(groupId)) return;
     await this.db.delete(variantGroups).where(eq(variantGroups.id, groupId));
     this.ensureOpen();
   }
   async deleteAsin(asinId: string) {
+    assertCatalogWriteExecution(this.db, 'asin');
     let parentId: string;
     try {
       parentId = (await this.lockAsin(asinId)).asin.variantGroupId;
@@ -515,6 +521,7 @@ export class DrizzleAsinWriteUnit
     this.ensureOpen();
   }
   async updateGroupNotify(groupId: string, enabled: boolean) {
+    assertCatalogWriteExecution(this.db, 'asin');
     if (!(await this.lockGroups([groupId])).has(groupId))
       throw new AsinWriteRepositoryError('group-not-found');
     await this.db
@@ -525,6 +532,7 @@ export class DrizzleAsinWriteUnit
     return this.detail(groupId);
   }
   async updateAsinNotify(asinId: string, enabled: boolean) {
+    assertCatalogWriteExecution(this.db, 'asin');
     await this.lockAsin(asinId);
     await this.db
       .update(asins)
@@ -534,6 +542,7 @@ export class DrizzleAsinWriteUnit
     return this.snapshot(asinId);
   }
   async createGroup(fields: VariantGroupWriteFields) {
+    assertCatalogWriteExecution(this.db, 'asin');
     const id = randomUUID();
     this.ensureOpen();
     await this.db.insert(variantGroups).values({
@@ -548,6 +557,7 @@ export class DrizzleAsinWriteUnit
     return this.detail(id);
   }
   async updateGroup(groupId: string, fields: VariantGroupWriteFields) {
+    assertCatalogWriteExecution(this.db, 'asin');
     if (!(await this.lockGroups([groupId])).has(groupId))
       throw new AsinWriteRepositoryError('group-not-found');
     await this.db
@@ -558,6 +568,7 @@ export class DrizzleAsinWriteUnit
     return this.detail(groupId);
   }
   async createAsin(fields: AsinWriteFields & { parentId: string }) {
+    assertCatalogWriteExecution(this.db, 'asin');
     if (!(await this.lockGroups([fields.parentId])).has(fields.parentId))
       throw new AsinWriteRepositoryError('group-not-found');
     const id = randomUUID();
@@ -578,6 +589,7 @@ export class DrizzleAsinWriteUnit
     return this.snapshot(id);
   }
   async updateAsin(asinId: string, fields: AsinWriteFields) {
+    assertCatalogWriteExecution(this.db, 'asin');
     await this.lockAsin(asinId);
     await this.db
       .update(asins)
@@ -587,6 +599,7 @@ export class DrizzleAsinWriteUnit
     return this.snapshot(asinId);
   }
   async moveAsin(asinId: string, targetGroupId: string) {
+    assertCatalogWriteExecution(this.db, 'asin');
     const { asin } = await this.lockAsin(asinId, targetGroupId);
     await this.db
       .update(asins)

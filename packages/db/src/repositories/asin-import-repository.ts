@@ -14,6 +14,7 @@ import {
   type AsinWriteUnit,
   type VariantGroupWriteFields,
 } from './asin-write-repository';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 
 export type ImportWritePhase = 'group' | 'existing' | 'write';
 export interface ImportChunkResult {
@@ -52,6 +53,7 @@ class DrizzleAsinImportUnit
   async findOrCreateImportGroup(
     fields: VariantGroupWriteFields,
   ): Promise<string> {
+    assertCatalogWriteExecution(this.db, 'asin');
     const checks = [
       [fields.name, 255],
       [fields.country, 10],
@@ -123,6 +125,7 @@ class DrizzleAsinImportUnit
     return id;
   }
   async writeImportChunk(items: BatchAsinItem[]): Promise<ImportChunkResult> {
+    assertCatalogWriteExecution(this.db, 'asin');
     if (!items.length || items.length > MAX_ASIN_BATCH_CREATE_ITEMS)
       throw new AsinImportRepositoryError('capacity');
     const phases = new Map<number, ImportWritePhase>();

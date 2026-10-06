@@ -17,6 +17,7 @@ import {
   competitorAsins as a,
   competitorVariantGroups as g,
 } from '../schema-competitor';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import {
   duplicateCompetitorAsin,
   recoverableCompetitorBatchError,
@@ -46,6 +47,7 @@ export class CompetitorBatchCreateUnit {
     { result, items }: BatchAsinPlan,
     onFailure?: (index: number, phase: 'group' | 'existing' | 'write') => void,
   ): Promise<BatchCreateAsinsData> {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (!items.length) return result;
     const parentIds = [...new Set(items.map((item) => item.parentId!))].filter(
       (id) => !id.includes('\0') && [...id].length <= 50,
