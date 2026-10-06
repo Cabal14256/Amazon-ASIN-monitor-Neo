@@ -167,6 +167,9 @@ suite.each(['primary','competitor'] as const)('%s scheduled frozen run real Post
     await insertReceipt(run,{ request_hash:'a'.repeat(64) });
     await expect(storage().completeBusiness(job,summary(run))).rejects.toMatchObject({ code:'identity' });
     await connection().query(`DELETE FROM ${qualified}."${receiptTable}" WHERE task_id=$1`,[job.taskId]);
+    await insertReceipt(run,{ completed_at:new Date(Date.parse(job.expiresAt) + 60_000).toISOString() });
+    await expect(storage().completeBusiness(job,summary(run))).rejects.toMatchObject({ code:'identity' });
+    await connection().query(`DELETE FROM ${qualified}."${receiptTable}" WHERE task_id=$1`,[job.taskId]);
     await insertReceipt(run);
     await expect(storage().completeBusiness(job,{ ...summary(run),brokenMembers:1 })).rejects.toMatchObject({ code:'identity' });
     const business = await storage().completeBusiness(job,summary(run),domain === 'primary');

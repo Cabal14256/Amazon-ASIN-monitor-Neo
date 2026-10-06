@@ -25,6 +25,8 @@
 
 `completeBusiness(job,result,followUp)` 不创建业务回执。#188 的固定快照检查适配器必须在同一 PostgreSQL 事务里写业务状态、GROUP/ASIN 历史和私有 group receipt；不能先保存回执，再异步写历史。`scheduledMonitorGroupOperation()` 的稳定 key 绑定 task/ordinal，而 requestHash 绑定原 job、组 ID 与快照；替换输入只能与旧操作冲突，不能变成第二次成功写入。
 
+业务完成边界同时复核每张收据完成时间在原任务创建与本次完成时间之间，并在实际 UPDATE 中用数据库 `clock_timestamp()` 检查保留期。先前读到未过期不能使跨越保留期后的写入继续成功；该失败回滚新完成边界，保留原组收据以供对账。
+
 `followUp=true` 只适用于 US 主营。仓库使用实际业务完成时间一次性构建严格 system competitor child，保留父 slot、interval、batch，完整保存 child payload、digest、requestedAt，与父 `business-completed` 在同一事务内提交。重放返回原 child，不能用当前时间重建。竞品或非 US 主营不能递归保存 child。保留期结束前无法构造有效 child 时拒绝新的完成边界，不能延长原任务 TTL。
 
 后续消费者应先检查业务回执/完成边界，再判断是否还可以执行未提交组。已有 `business-completed` 只恢复原 child 的投递；Queue.add ACK 不明时只用同一个原 jobId/payload 对账或重投。通知 ACK 不明仍使用私有 claimed 收据待核实，不能盲目再次发送。

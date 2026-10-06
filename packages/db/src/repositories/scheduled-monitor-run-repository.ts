@@ -311,6 +311,8 @@ export class PgScheduledMonitorRunRepository {
         throw new ScheduledMonitorRunError('identity');
       const receipts = await tx.query(`SELECT * FROM ${this.receipts} WHERE task_id=$1 ORDER BY ordinal LIMIT $2`, [job.taskId,SCHEDULED_MONITOR_MAX_GROUPS + 1]);
       if (receipts.length !== run.groups.length) throw new ScheduledMonitorRunError('state');
+      const now = await this.now(tx);
+      if (Date.parse(job.expiresAt) <= Date.parse(now)) throw new ScheduledMonitorRunError('expired');
       let brokenGroups = 0, brokenMembers = 0;
       for (const [ordinal, row] of receipts.entries()) {
         const operation = scheduledMonitorGroupOperation(job,run.groups[ordinal]);
@@ -318,17 +320,16 @@ export class PgScheduledMonitorRunRepository {
           throw new ScheduledMonitorRunError('identity');
         const counts = receiptCounts(decodeVariantCheckReceiptResult(row.result,operation.resultKind),run.groups[ordinal]);
         const completedAt = iso(row.completed_at);
-        if (!completedAt || completedAt < job.createdAt) throw new ScheduledMonitorRunError('identity');
+        if (!completedAt || completedAt < job.createdAt || completedAt > now) throw new ScheduledMonitorRunError('identity');
         brokenGroups += counts.brokenGroups;
         brokenMembers += counts.brokenMembers;
       }
       if (result.data.brokenGroups !== brokenGroups || result.data.brokenMembers !== brokenMembers)
         throw new ScheduledMonitorRunError('identity');
-      const now = await this.now(tx);
-      if (Date.parse(job.expiresAt) <= Date.parse(now)) throw new ScheduledMonitorRunError('expired');
       const child = followUp ? createScheduledMonitorFollowUp(job,now) : null;
-      await tx.query(`UPDATE ${this.runs} SET state='business-completed',business_completed_at=$2::timestamptz,result=$3::jsonb,follow_up_job=$4::jsonb,follow_up_digest=$5,follow_up_requested_at=$6::timestamptz WHERE task_id=$1`,
+      const updated = await tx.query(`UPDATE ${this.runs} SET state='business-completed',business_completed_at=$2::timestamptz,result=$3::jsonb,follow_up_job=$4::jsonb,follow_up_digest=$5,follow_up_requested_at=$6::timestamptz WHERE task_id=$1 AND expires_at > clock_timestamp() RETURNING task_id`,
         [job.taskId,now,JSON.stringify(result.data),child ? JSON.stringify(child) : null,child ? scheduledMonitorJobDigest(child) : null,child?.requestedAt ?? null]);
+      if (updated.length !== 1) throw new ScheduledMonitorRunError('expired');
       return (await this.existing(tx,job))!;
     },signal);
   }
