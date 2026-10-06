@@ -44,6 +44,118 @@ afterEach(async () => {
 });
 
 describe('task API boundary', () => {
+  const id = '123e4567-e89b-42d3-a456-426614174000';
+  const exportTask = () =>
+    taskFixture({
+      taskId: id,
+      status: 'completed',
+      filename: 'ASIN数据_2026-10-07.xlsx',
+      downloadUrl: `/api/v1/tasks/${id}/download`,
+      result: {
+        exportType: 'asin',
+        filename: 'ASIN数据_2026-10-07.xlsx',
+        mimeType:
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        fileSizeBytes: 4,
+        artifact: {
+          taskId: id,
+          key: `export-${id}.xlsx`,
+          bytes: 4,
+          sha256: 'a'.repeat(64),
+        },
+      },
+    });
+  const workbook = () =>
+    new Response(new Uint8Array([80, 75, 3, 4]), {
+      headers: {
+        'content-type':
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+    });
+  it.each(['/api/', 'https://api.test/api/'])(
+    'downloads the validated ASIN workbook with normalized %s and the actual XLSX filename',
+    async (baseURL) => {
+      const f = setup(baseURL);
+      f.local.set('token', 'fixture-legacy');
+      f.fetcher.mockResolvedValueOnce(workbook());
+      const downloaded = await f.tasks.downloadAsinExport(exportTask());
+      expect(downloaded.filename).toBe('ASIN数据_2026-10-07.xlsx');
+      expect(downloaded.blob.size).toBe(4);
+      expect(String(f.fetcher.mock.calls[0][0])).toBe(
+        `${
+          baseURL.startsWith('https') ? 'https://api.test' : 'https://app.test'
+        }/api/v1/tasks/${id}/download`,
+      );
+      expect(f.fetcher.mock.calls[0][1]?.credentials).toBe('include');
+      expect(
+        new Headers(f.fetcher.mock.calls[0][1]?.headers).get('authorization'),
+      ).toBe('Bearer fixture-legacy');
+      expect(String(f.fetcher.mock.calls[0][0])).not.toContain('/api/api/');
+      expect(f.fetcher).toHaveBeenCalledOnce();
+    },
+  );
+  it('rejects absent or mismatched export receipts before downloading', async () => {
+    const f = setup();
+    for (const invalid of [
+      { ...exportTask(), filename: '../unsafe.xlsx' },
+      { ...exportTask(), result: null },
+    ])
+      await expect(f.tasks.downloadAsinExport(invalid)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it.each([
+    new Response('{}', { headers: { 'content-type': 'application/json' } }),
+    new Response(new Uint8Array([80, 75]), {
+      headers: {
+        'content-type':
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+    }),
+  ])(
+    'rejects a successful HTTP body that is not the advertised workbook',
+    async (response) => {
+      const f = setup();
+      f.fetcher.mockResolvedValueOnce(response);
+      await expect(
+        f.tasks.downloadAsinExport(exportTask()),
+      ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+    },
+  );
+  it.each([403, 404])(
+    'reports the server %s permission/expired-artifact rejection without replay',
+    async (status) => {
+      const f = setup();
+      f.fetcher.mockResolvedValueOnce(
+        jsonResponse({ success: false, errorMessage: '文件不可用' }, status),
+      );
+      await expect(
+        f.tasks.downloadAsinExport(exportTask()),
+      ).rejects.toMatchObject({ kind: 'HTTP', status });
+      expect(f.fetcher).toHaveBeenCalledOnce();
+    },
+  );
+  it('cancels a workbook transfer when the caller aborts', async () => {
+    const f = setup();
+    const controller = new AbortController();
+    f.fetcher.mockImplementationOnce(
+      async (_url, init) =>
+        new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          ),
+        ),
+    );
+    const cancelled = expect(
+      f.tasks.downloadAsinExport(exportTask(), controller.signal),
+    ).rejects.toMatchObject({ kind: 'CANCELLED' });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await cancelled;
+    expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+
   it('uses one normalized request/download origin and keeps Cookie authentication', async () => {
     const f = setup();
     await f.tasks.get('job-1');

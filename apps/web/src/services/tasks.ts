@@ -1,4 +1,5 @@
 import {
+  asinExportArtifactSchema,
   createExportTaskRequestSchema,
   createExportTaskResultSchema,
   taskInfoResultSchema,
@@ -24,6 +25,36 @@ export const isTaskMessage = (message: WsMessage) =>
 
 // Check results can reach 32 MiB before the HTTP envelope and task metadata.
 const TASK_READ_RESPONSE_LIMIT = 40 * 1024 * 1024;
+const XLSX_MIME =
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Only the completed task's own validated ASIN workbook can be offered. */
+export function asinExportDownloadFilename(task: TaskInfo): string | null {
+  if (
+    task.status !== 'completed' ||
+    task.taskType !== 'export' ||
+    task.taskSubType !== 'asin' ||
+    !isValidTaskId(task.taskId) ||
+    task.downloadUrl !==
+      `/api/v1/tasks/${encodeURIComponent(task.taskId)}/download` ||
+    !task.result ||
+    typeof task.result !== 'object' ||
+    Array.isArray(task.result)
+  )
+    return null;
+  const result = task.result as Record<string, unknown>;
+  const artifact = asinExportArtifactSchema.safeParse(result.artifact);
+  return artifact.success &&
+    artifact.data.taskId === task.taskId &&
+    result.exportType === 'asin' &&
+    result.mimeType === XLSX_MIME &&
+    result.fileSizeBytes === artifact.data.bytes &&
+    typeof result.filename === 'string' &&
+    /^ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/.test(result.filename) &&
+    task.filename === result.filename
+    ? result.filename
+    : null;
+}
 
 /** Same constraints used by every task URL and response receipt. */
 export function isValidTaskId(taskId: string): boolean {
@@ -156,6 +187,20 @@ export class TaskApi {
   /** Authenticated transfer also works for legacy Bearer sessions. */
   async download(taskId: string, signal?: AbortSignal): Promise<Blob> {
     return this.http.download(`${taskPath(taskId)}/download`, signal);
+  }
+
+  async downloadAsinExport(task: TaskInfo, signal?: AbortSignal) {
+    const filename = asinExportDownloadFilename(task);
+    if (!filename) throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
+    const result = task.result as { fileSizeBytes: number };
+    const expectedBytes = result.fileSizeBytes;
+    const blob = await this.download(task.taskId, signal);
+    if (blob.type !== XLSX_MIME || blob.size !== expectedBytes)
+      throw new ApiError(
+        'INVALID_RESPONSE',
+        '导出文件类型或大小与任务回执不符',
+      );
+    return { blob, filename };
   }
 
   /** Stops local waiting only; server cancellation is the explicit cancel() action. */

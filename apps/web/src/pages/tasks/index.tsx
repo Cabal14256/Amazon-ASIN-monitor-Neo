@@ -1,6 +1,6 @@
 import type { TaskInfo } from '@asin-monitor/contracts';
 import { ChevronDown, Download, RefreshCw, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
@@ -230,9 +230,25 @@ function TaskDetails({
 export default function TaskCenterPage() {
   const { runtime } = useAuth();
   const identity = useIdentity();
+  const access = createAccess(
+    identity.status === 'authenticated' ? identity.identity : undefined,
+  );
   const canReadASIN =
     identity.status === 'authenticated' &&
-    createAccess(identity.identity).canReadASIN;
+    access.canReadASIN &&
+    !access.mustChangePassword;
+  const scope = JSON.stringify([
+    identity.status,
+    identity.status === 'authenticated' ? identity.identity.user.id : null,
+    identity.status === 'authenticated' ? identity.identity.sessionId : null,
+    runtime.session.revision,
+    canReadASIN,
+    access.mustChangePassword,
+  ]);
+  const downloadScope = useRef(scope);
+  downloadScope.current = scope;
+  const downloadRequest = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
   const [filter, setFilter] = useState<'all' | 'active'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -243,6 +259,19 @@ export default function TaskCenterPage() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      downloadRequest.current?.abort();
+    };
+  }, []);
+  useEffect(() => {
+    downloadRequest.current?.abort();
+    downloadRequest.current = null;
+    setDownloadId(null);
+    setDownloadError(null);
+  }, [scope]);
   const tasks = useTaskListQuery(runtime, { status: filter, limit: 100 }, true);
   const list = tasks.data;
   const selectedTask = list?.find((task) => task.taskId === selectedId);
@@ -305,29 +334,62 @@ export default function TaskCenterPage() {
   }
 
   async function downloadTask(task: TaskInfo) {
-    if (downloadId || !hasTaskDownload(task, canReadASIN)) return;
+    if (
+      identity.status !== 'authenticated' ||
+      access.mustChangePassword ||
+      downloadRequest.current ||
+      !hasTaskDownload(task, canReadASIN)
+    )
+      return;
+    const controller = new AbortController();
+    downloadRequest.current = controller;
     setDownloadId(task.taskId);
     setDownloadError(null);
     try {
-      const blob = await runtime.tasks.download(task.taskId);
+      const { blob, filename } =
+        task.taskType === 'export'
+          ? await runtime.tasks.downloadAsinExport(task, controller.signal)
+          : {
+              blob: await runtime.tasks.download(
+                task.taskId,
+                controller.signal,
+              ),
+              filename: `${
+                task.taskType === 'import' ? 'import' : 'check'
+              }-result-${task.taskId}.json`,
+            };
+      if (
+        controller.signal.aborted ||
+        !mounted.current ||
+        downloadScope.current !== scope
+      )
+        return;
       const objectURL = URL.createObjectURL(blob);
       try {
         const link = document.createElement('a');
         link.href = objectURL;
-        link.download = `${
-          task.taskType === 'import' ? 'import' : 'check'
-        }-result-${task.taskId}.json`;
+        link.download = filename;
         document.body.append(link);
         link.click();
         link.remove();
       } finally {
         // Give the browser time to begin reading the object URL after click().
-        setTimeout(() => URL.revokeObjectURL(objectURL), 30_000);
+        const revoke = URL.revokeObjectURL.bind(URL);
+        setTimeout(() => revoke(objectURL), 30_000);
       }
     } catch (error) {
-      setDownloadError(errorMessage(error));
+      if (
+        mounted.current &&
+        downloadScope.current === scope &&
+        !controller.signal.aborted
+      )
+        setDownloadError(errorMessage(error));
     } finally {
-      setDownloadId(null);
+      if (downloadRequest.current === controller) {
+        downloadRequest.current = null;
+        if (mounted.current && downloadScope.current === scope)
+          setDownloadId(null);
+      }
     }
   }
 
