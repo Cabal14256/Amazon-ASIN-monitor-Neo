@@ -2,6 +2,8 @@
 
 关联 #208，依赖 #204 的内部契约、CRC32/slot 政策和 `0016` 双库私有账本。这一层不注册 Worker，不创建 repeat job，不向公共任务中心索引 system 任务，也不启用生产调度。#188 后续连接业务检查、组事务回执、通知和竞品投递；#189 最后连接调度器。
 
+基础迁移已由 PR #209 正式进入 `main`；本分支通过普通 merge 同步其最终约束。`@asin-monitor/db` 导出本层快照域和两个逻辑库仓库供受信任 Worker 使用，不注册公共 HTTP/WS 入口。隔离 Integration workflow 在 scheduled ledger 步骤显式启用并执行本层双 PG 用例；未运行真实服务时不记录为通过。最终 follow-up CHECK 会直接拒绝改写原时钟/TTL（SQLSTATE `23514`），仓库仍校验 SQL 无法计算的原 child 摘要。
+
 ## 首次受理与固定集合
 
 `PgPrimaryScheduledMonitorRunRepository` 与 `PgCompetitorScheduledMonitorRunRepository` 各使用对应数据库连接。调用方拥有连接池；仓库关闭时只中断自己借用的事务，不关闭共享池。`assertReady()` 拒绝同时包含另一逻辑库商品表的目标，要求私有账本及本域商品表可访问。

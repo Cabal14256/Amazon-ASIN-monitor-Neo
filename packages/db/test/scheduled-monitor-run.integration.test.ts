@@ -291,6 +291,7 @@ suite.each(['primary', 'competitor'] as const)(
       const groups = [' raw 😀 ', 'é', 'e\u0301', '😀', '\uE000', 'null'].map(
         (id, index) => ({
           ...scheduledGroup(domain, id),
+          id,
           create_time:
             index === 5
               ? null
@@ -485,7 +486,7 @@ suite.each(['primary', 'competitor'] as const)(
       ).rejects.toThrow();
     });
     if (domain === 'primary')
-      it('rejects a persisted US child whose original clock or retention was replaced together with its digest', async () => {
+      it('rejects replaced US child clocks in SQL and a forged digest on read without losing the original child', async () => {
         const job = await nowJob();
         await insertRows(groupTable, [scheduledGroup(domain)]);
         await insertRows(memberTable, [scheduledMember(domain)]);
@@ -512,32 +513,34 @@ suite.each(['primary', 'competitor'] as const)(
           },
         ]) {
           const child = { ...original, ...changes };
-          await connection().query(
-            `UPDATE ${qualified}."${runTable}" SET follow_up_job=$2::jsonb,follow_up_digest=$3,follow_up_requested_at=$4::timestamptz WHERE task_id=$1`,
-            [
-              job.taskId,
-              JSON.stringify(child),
-              scheduledMonitorJobDigest(child),
-              child.requestedAt,
-            ],
-          );
-          await expect(storage().read(job)).rejects.toMatchObject({
-            code: 'identity',
-          });
-          await expect(storage().complete(job)).rejects.toMatchObject({
-            code: 'identity',
-          });
-          await connection().query(
-            `UPDATE ${qualified}."${runTable}" SET follow_up_job=$2::jsonb,follow_up_digest=$3,follow_up_requested_at=$4::timestamptz WHERE task_id=$1`,
-            [
-              job.taskId,
-              JSON.stringify(original),
-              business.followUpDigest,
-              original.requestedAt,
-            ],
-          );
+          await expect(
+            connection().query(
+              `UPDATE ${qualified}."${runTable}" SET follow_up_job=$2::jsonb,follow_up_digest=$3,follow_up_requested_at=$4::timestamptz WHERE task_id=$1`,
+              [
+                job.taskId,
+                JSON.stringify(child),
+                scheduledMonitorJobDigest(child),
+                child.requestedAt,
+              ],
+            ),
+          ).rejects.toMatchObject({ code: '23514' });
           expect(await storage().read(job)).toEqual(business);
         }
+        await connection().query(
+          `UPDATE ${qualified}."${runTable}" SET follow_up_digest=$2 WHERE task_id=$1`,
+          [job.taskId, 'a'.repeat(64)],
+        );
+        await expect(storage().read(job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        await expect(storage().complete(job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        await connection().query(
+          `UPDATE ${qualified}."${runTable}" SET follow_up_digest=$2 WHERE task_id=$1`,
+          [job.taskId, business.followUpDigest],
+        );
+        expect(await storage().read(job)).toEqual(business);
         expect((await storage().complete(job)).followUpJob).toEqual(original);
       });
   },

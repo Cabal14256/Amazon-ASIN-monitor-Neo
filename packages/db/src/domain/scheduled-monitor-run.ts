@@ -176,7 +176,8 @@ export function scheduledMonitorStorageBytes(value: unknown): number {
   if (!json) throw new ScheduledMonitorRunError('input');
   let bytes = Buffer.byteLength(json),
     quoted = false,
-    escaped = false;
+    escaped = false,
+    previous = '';
   for (const character of json) {
     if (quoted) {
       if (escaped) escaped = false;
@@ -184,7 +185,12 @@ export function scheduledMonitorStorageBytes(value: unknown): number {
       else if (character === '"') quoted = false;
     } else if (character === '"') quoted = true;
     else if (character === ':' || character === ',') bytes++;
-    else if (character === 'e' || character === 'E') bytes += 320;
+    else if (
+      (character === 'e' || character === 'E') &&
+      /^[0-9]$/.test(previous)
+    )
+      bytes += 320;
+    previous = character;
   }
   return bytes;
 }

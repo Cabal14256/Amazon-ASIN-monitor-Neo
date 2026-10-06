@@ -198,7 +198,7 @@ jobs:
       - name: Verify scheduled ledgers on both PostgreSQL databases and batch policy against real MySQL
         env:
           RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'
-        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism
+        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts test/scheduled-monitor-run.integration.test.ts --no-file-parallelism
 
       - name: Run authentication cleanup and audit archive PostgreSQL transactions
         run: pnpm --filter @asin-monitor/db exec vitest run test/auth-maintenance.integration.test.ts

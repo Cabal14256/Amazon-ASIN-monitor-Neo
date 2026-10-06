@@ -8,6 +8,7 @@ import {
   createScheduledMonitorFollowUp,
   freezeScheduledMonitorSnapshot,
   parseScheduledMonitorSnapshot,
+  SCHEDULED_MONITOR_MAX_SNAPSHOT_BYTES,
   scheduledMonitorGroupOperation,
   scheduledMonitorGroupSnapshotDigest,
   scheduledMonitorSnapshotDigest,
@@ -383,6 +384,37 @@ describe('scheduled US follow-up identity boundary', () => {
     const value = { raw: '组, : 😀', nested: [null, true] };
     expect(scheduledMonitorStorageBytes(value)).toBe(
       Buffer.byteLength(JSON.stringify(value)) + 4,
+    );
+  });
+  it('reserves exponent expansion only for JSON numbers, preserving boolean literals', () => {
+    const value = {
+      maximum: Number.MAX_VALUE,
+      minimum: Number.MIN_VALUE,
+      flags: [true, false],
+      text: '1e99',
+    };
+    expect(scheduledMonitorStorageBytes(value)).toBe(
+      Buffer.byteLength(JSON.stringify(value)) + 8 + 2 * 320,
+    );
+  });
+  it('accepts a complete 10000-member primary catalog whose JSONB fits the snapshot budget', () => {
+    const job = scheduledJob();
+    const members = Array.from({ length: 10000 }, (_, index) => ({
+      ...scheduledMember(
+        'primary',
+        ' 原始组😀 ',
+        `member-${String(index).padStart(5, '0')}`,
+      ),
+      asin: `B${String(index).padStart(9, '0')}`,
+    }));
+    const groups = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup()],
+      members,
+    );
+    expect(groups[0].members).toHaveLength(10000);
+    expect(scheduledMonitorStorageBytes(groups)).toBeLessThan(
+      SCHEDULED_MONITOR_MAX_SNAPSHOT_BYTES,
     );
   });
 });

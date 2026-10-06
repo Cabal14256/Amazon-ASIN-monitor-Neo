@@ -363,7 +363,7 @@ export class PgScheduledMonitorRunRepository {
     let last: string | null = null,
       scanned = 0;
     while (true) {
-      const page = await tx.query<{ id: string }>(
+      const page: { id: string }[] = await tx.query<{ id: string }>(
         `SELECT id FROM ${this.groupTable} WHERE upper(rtrim(country))=$1
          ${
            this.domain === 'primary'
