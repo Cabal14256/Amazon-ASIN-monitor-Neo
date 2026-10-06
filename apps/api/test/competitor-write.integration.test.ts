@@ -5,7 +5,9 @@ import {
 import {
   createPgPool,
   formatShanghaiTimestamp,
+  PgCatalogOperationRepository,
   PgCompetitorWriteRepository,
+  withCatalogOperationExecution,
 } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
@@ -1608,7 +1610,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
       expect((await request('POST', 'asins', asinBody)).statusCode).toBe(200);
     });
-    it('cancels a blocked write before commit and releases both borrowed transactions', async () => {
+    it('cancels a blocked write and releases borrowed transactions while retaining an unconfirmed physical fence', async () => {
       await group('g1');
       const before = await snapshot(),
         blocker = await f.pools.competitorPool.connect();
@@ -1616,15 +1618,25 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         f.pools.primaryPool,
         f.pools.competitorPool,
       );
+      const fences = new PgCatalogOperationRepository(f.pools.primaryPool);
+      // A private direct-repository fixture still needs the same real durable
+      // scope as the HTTP writers. Do not bypass the new mutation guard.
+      const operation = await fences.reserve(
+        { ownerId: userId, domain: 'competitor', kind: 'write' },
+        async () => undefined,
+      );
       try {
         await blocker.query('BEGIN');
         await blocker.query(
           "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
         );
         const abort = new AbortController();
-        const pending = repository.transaction(
-          (unit) => unit.createAsin({ ...asinBody, asinType: '1', name: null }),
-          abort.signal,
+        const pending = withCatalogOperationExecution(fences, operation, () =>
+          repository.transaction(
+            (unit) =>
+              unit.createAsin({ ...asinBody, asinType: '1', name: null }),
+            abort.signal,
+          ),
         );
         const rejected = expect(pending).rejects.toMatchObject({
           code: 'cancelled',
@@ -1638,7 +1650,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await blocker.query('ROLLBACK');
         blocker.release();
       }
-      expect((await request('POST', 'asins', asinBody)).statusCode).toBe(200);
+      await vi.waitFor(async () => {
+        expect(await fences.read(userId, 'competitor')).toMatchObject({
+          state: 'uncertain',
+          pendingPins: 0,
+          uncertainPins: 1,
+        });
+      });
+      await fences.close(operation, { source: 'sync', status: 'failed' });
+      expect(await fences.release(operation)).toBe(false);
+      expect((await request('POST', 'asins', asinBody)).statusCode).toBe(409);
+      expect(await snapshot()).toEqual(before);
     });
     it('rejects two pool objects connected to the same actual database before business SQL', async () => {
       const other = createPgPool(f.env.DATABASE_URL, {
