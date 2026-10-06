@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  addBatchAsinFailure,
+  addBatchAsinSuccess,
+  prepareBatchAsins,
+} from '../../../../../packages/db/src/domain/asin-batch-create';
+import {
   parseAsinBatchReceipt,
   readAsinBatchReceipt,
   removeAsinBatchReceipt,
@@ -57,6 +62,7 @@ function receipt(
           country: 'US',
           success: true,
           id: 'created-1',
+          parentId: 'Raw Ś',
         },
         {
           index: 1,
@@ -73,6 +79,34 @@ function receipt(
   };
 }
 describe('strict owner/session/operation-bound primary batch receipts', () => {
+  it('persists the actual Neo successful producer shape including its normalized parentId', () => {
+    const value = receipt();
+    const plan = prepareBatchAsins(value.items, () => 'created-1');
+    addBatchAsinSuccess(plan.result, plan.items[0]);
+    addBatchAsinFailure(plan.result, plan.items[1], 'Duplicate');
+    value.result = plan.result;
+    expect(value.result.results[0]).toEqual({
+      index: 0,
+      id: 'created-1',
+      asin: 'B000000001',
+      country: 'US',
+      parentId: 'Raw Ś',
+      success: true,
+    });
+    const storage = { local: new MemoryStorage(), session: null };
+    expect(saveAsinBatchReceipt('operator', value, storage)).toBe(true);
+    expect(
+      readAsinBatchReceipt('operator', owner, 'operation-1', storage),
+    ).toEqual({ receipt: value, persisted: true });
+  });
+  it.each([null, 1, 'different-group', 'Raw Ś\u0000'])(
+    'rejects an invalid or unrelated successful producer parentId %j',
+    (parentId) => {
+      const value = receipt();
+      value.result.results[0].parentId = parentId;
+      expect(parseAsinBatchReceipt(JSON.stringify(value))).toBeNull();
+    },
+  );
   it('preserves original source and submitted items with known partial row outcomes', () => {
     const value = receipt();
     expect(parseAsinBatchReceipt(JSON.stringify(value))).toEqual(value);

@@ -140,6 +140,7 @@ export function parseAsinBatchReceipt(
           'success',
           'message',
           'id',
+          'parentId',
         ]) ||
         !Number.isInteger(row.index) ||
         seen.has(row.index) ||
@@ -147,7 +148,12 @@ export function parseAsinBatchReceipt(
         row.asin !== item.asin ||
         row.country !== item.country ||
         (!row.success && !row.message?.trim()) ||
-        (row.id !== undefined && typeof row.id !== 'string')
+        (row.id !== undefined && typeof row.id !== 'string') ||
+        (row.parentId !== undefined &&
+          (typeof row.parentId !== 'string' ||
+            !validBatchCreateText(row.parentId, 50, true) ||
+            // Both producers normalize parentId before adding success rows.
+            row.parentId !== item.parentId?.trim()))
       )
         return null;
       seen.add(row.index);

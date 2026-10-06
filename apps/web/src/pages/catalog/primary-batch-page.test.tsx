@@ -19,6 +19,7 @@ import {
   sessionFixture,
 } from '../../lib/transport-fixtures';
 import { createTransportRuntime } from '../../services/runtime';
+import { readAsinBatchReceipt } from '../asin/asin-batch-receipt';
 import { ASIN_CATALOG } from '../asin/config';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { catalogSafetyKey } from './catalog-safety-gate';
@@ -109,7 +110,7 @@ function fixture(
       const receipt = ++receiptSerial;
       const items = (
         JSON.parse(String(options.body)) as {
-          items: Array<{ asin: string; country: string }>;
+          items: Array<{ asin: string; country: string; parentId: string }>;
         }
       ).items;
       await postGate?.promise;
@@ -131,6 +132,8 @@ function fixture(
         country: item.country,
         success: outcomes[index] ?? true,
         id: outcomes[index] ?? true ? `created-${receipt}-${index}` : undefined,
+        // Both actual Legacy and Neo success producers include this field.
+        parentId: outcomes[index] ?? true ? item.parentId.trim() : undefined,
         message: outcomes[index] ?? true ? undefined : 'Fixture duplicate',
       }));
       for (const row of results)
@@ -499,6 +502,14 @@ describe('actual primary batch-create catalog integration', () => {
         ...item,
         parentId: 'different-group',
       }));
+      saved.result.results = saved.result.results.map(
+        (row: { parentId?: string }) => ({
+          ...row,
+          ...(row.parentId !== undefined
+            ? { parentId: 'different-group' }
+            : {}),
+        }),
+      );
       window.localStorage.setItem(key, JSON.stringify(saved));
     }
     f.unmount();
@@ -630,6 +641,38 @@ describe('actual primary batch-create catalog integration', () => {
     const result = within(screen.getByRole('region', { name: '批量添加结果' }));
     expect(result.getByText('B000000001')).toBeTruthy();
     expect(result.getByText('Fixture duplicate')).toBeTruthy();
+    expect(f.posts()).toHaveLength(1);
+  });
+  it('persists actual-shaped successful producer parentIds and restores the known result after a clean remount', async () => {
+    const f = fixture();
+    f.outcomes([true, true]);
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    const stored = readAsinBatchReceipt(
+      'operator',
+      JSON.stringify(['asin', 'operator', 'session-1']),
+    );
+    expect(stored?.persisted).toBe(true);
+    expect(stored?.receipt.result.results.map((row) => row.parentId)).toEqual([
+      'group-1',
+      'group-1',
+    ]);
+    f.unmount();
+    f.remount();
+    const result = within(
+      await screen.findByRole('region', { name: '批量添加结果' }),
+    );
+    expect(
+      result.getByText(
+        '变体组「Primary fixture」 · 共 2 个，成功 2 个，失败 0 个。',
+      ),
+    ).toBeTruthy();
+    expect(result.getByText('B000000001')).toBeTruthy();
+    expect(result.getByText('B000000002')).toBeTruthy();
     expect(f.posts()).toHaveLength(1);
   });
   it.each([
