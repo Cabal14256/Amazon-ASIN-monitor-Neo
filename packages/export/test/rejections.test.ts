@@ -1,6 +1,7 @@
 import {
   mkdtemp,
   open,
+  opendir,
   readdir,
   rm,
   unlink,
@@ -95,9 +96,19 @@ describe('private immutable export rejection journal', () => {
     ];
     for (const taskId of ids)
       await store.recordRejectedSubmission({ ...identity, taskId });
-    const ordered = (await readdir(directory)).map((name) =>
-      name.slice('export-rejected-'.length, -'.json'.length),
-    );
+    // readdir may sort its result on Windows; opendir preserves the native
+    // cursor order used by the production sweep on both Windows and Linux.
+    const ordered: string[] = [];
+    const cursor = await opendir(directory);
+    try {
+      for (let entry = await cursor.read(); entry; entry = await cursor.read())
+        ordered.push(
+          entry.name.slice('export-rejected-'.length, -'.json'.length),
+        );
+    } finally {
+      await cursor.close();
+    }
+    expect(ordered).toHaveLength(3);
     await writeFile(join(directory, `export-rejected-${ordered[0]}.json`), '{');
     await expect(
       store.reconcileRejectedSubmissions(1, async () => true),
