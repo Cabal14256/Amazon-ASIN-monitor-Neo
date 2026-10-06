@@ -49,7 +49,10 @@ async function publicTableNames(
       -- Neo-only upgrades are verified by their own integration fixtures.
       AND table_name NOT IN (
         'audit_logs_archive', 'variant_check_receipts',
-        'primary_monitor_runs', 'primary_monitor_notifications'
+        'primary_monitor_runs', 'primary_monitor_notifications',
+        'primary_scheduled_monitor_runs', 'primary_scheduled_monitor_notifications',
+        'primary_scheduled_monitor_group_receipts', 'competitor_scheduled_monitor_runs',
+        'competitor_scheduled_monitor_notifications', 'competitor_scheduled_monitor_group_receipts'
       )
       AND NOT EXISTS (
         SELECT 1 FROM pg_inherits inheritance

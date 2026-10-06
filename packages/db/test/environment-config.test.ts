@@ -118,4 +118,33 @@ describe('TimescaleDB 环境配置', () => {
       workflow.match(/sh \/tmp\/apply-baseline\.sh \/tmp\/0000_baseline\.sql/g),
     ).toHaveLength(2);
   });
+
+  it('定时账本由显式命令升级且真实双库/MySQL测试不会在CI跳过', () => {
+    const root = JSON.parse(read('package.json')) as {
+      scripts: Record<string, string>;
+    };
+    const compose = read('compose.neo.yml');
+    const workflow = read('.github/workflows/integration.yml');
+    for (const domain of ['primary', 'competitor']) {
+      expect(root.scripts[`db:upgrade:scheduled-monitor:${domain}`]).toContain(
+        `sh /opt/asin-monitor/apply-scheduled-monitor.sh ${domain}`,
+      );
+      expect(compose).toContain(
+        `- ./packages/db/migrations/0016_scheduled_monitor_${domain}.sql:/opt/asin-monitor/0016_scheduled_monitor_${domain}.sql:ro`,
+      );
+      expect(compose).toContain(
+        `- ./packages/db/migrations/0016_scheduled_monitor_${domain}.rollback.sql:/opt/asin-monitor/0016_scheduled_monitor_${domain}.rollback.sql:ro`,
+      );
+    }
+    expect(compose).toContain(
+      '- ./packages/db/docker/apply-scheduled-monitor.sh:/opt/asin-monitor/apply-scheduled-monitor.sh:ro',
+    );
+    expect(compose).not.toContain(
+      '/docker-entrypoint-initdb.d/0016_scheduled_monitor',
+    );
+    expect(workflow).toContain("RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'");
+    expect(workflow).toContain(
+      'vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism',
+    );
+  });
 });

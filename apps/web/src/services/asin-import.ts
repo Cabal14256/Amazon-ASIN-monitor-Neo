@@ -14,9 +14,12 @@ export function validateAsinImportFile(file: File): void {
     throw new ApiError('INVALID_INPUT', '导入文件不能超过 10 MiB');
 }
 
-export async function submitAsinImport(
+export type ImportDomain = 'asin' | 'competitor';
+
+export async function submitVariantGroupImport(
   http: HttpClient,
   file: File,
+  domain: ImportDomain,
   signal?: AbortSignal,
 ) {
   validateAsinImportFile(file);
@@ -32,7 +35,9 @@ export async function submitAsinImport(
   );
   form.append('useAsync', 'true');
   const response = await http.request(
-    '/api/v1/variant-groups/import-excel',
+    domain === 'competitor'
+      ? '/api/v1/competitor/variant-groups/import-excel'
+      : '/api/v1/variant-groups/import-excel',
     {
       method: 'POST',
       body: form,
@@ -47,6 +52,22 @@ export async function submitAsinImport(
   if (!('taskId' in response.data) || !TASK_ID.test(response.data.taskId))
     throw new ApiError('INVALID_RESPONSE', '导入任务响应无效');
   return response.data;
+}
+
+/** Keep the existing primary transport signature stable. */
+export function submitAsinImport(
+  http: HttpClient,
+  file: File,
+  signal?: AbortSignal,
+) {
+  return submitVariantGroupImport(http, file, 'asin', signal);
+}
+export function submitCompetitorImport(
+  http: HttpClient,
+  file: File,
+  signal?: AbortSignal,
+) {
+  return submitVariantGroupImport(http, file, 'competitor', signal);
 }
 
 /** A 500 after task creation carries a lookup ID, never a safe retry signal. */
