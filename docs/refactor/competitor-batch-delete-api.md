@@ -4,11 +4,11 @@
 
 ## 请求与结果
 
-请求接受 `groupIds`、`asinIds`、`useAsync`。保留 Legacy 标量字符串转换、去空白、去重及顺序；`useAsync` 支持布尔值和原有 true/false、1/0、yes/no、on/off 字符串。默认超过 50 个目标或估算 500 个 ASIN 时异步，分块默认 50，显式模式仍覆盖阈值。使用现有 `BATCH_DELETE_*` 环境配置。
+请求接受 `groupIds`、`asinIds`、`useAsync`。Issue #212 后 ID 仅接受原始字符串，保留所有空格、大小写与重音，不 trim 或标量转换；仅精确重复的字符串按首次顺序去重。`useAsync` 继续支持布尔值和原有 true/false、1/0、yes/no、on/off 字符串。默认超过 50 个目标或估算 500 个 ASIN 时异步，分块默认 50，显式模式仍覆盖阈值。使用现有 `BATCH_DELETE_*` 环境配置。
 
-两种 ID 原始数组合计最多 1000 项，超过返回 413。不可存储的 ID、未知字段及非对象请求返回 400；没有有效目标返回原有“请提供变体组 ID 或 ASIN ID 列表”。合法目标全部不存在时仍成功返回完整 skipped 列表。
+两种 ID 原始数组合计最多 1000 项，超过返回 413。ID 为 1–50 个码点，拒绝真正空串、非字符串、C0/C1 控制字符和孤立 surrogate；非空全空格 ID 合法。非数组列表、未知字段及非对象请求返回 400；没有目标返回原有“请提供变体组 ID 或 ASIN ID 列表”。合法目标全部不存在时仍成功返回保留原值的完整 skipped 列表。
 
-Legacy 批量删除在 CI 查询后通过精确字符串 Set/Map 筛选，因此仅大小写、重音或尾随空格等价的 ID 不自动变成规范 ID。Neo 保留此行为。一个组与其子 ASIN 同时被请求时，子项计入嵌套删除，不重复计入直接删除。响应沿用共享完整契约，包括同步 counts/skipped、异步任务 ID，以及任务查询中的累计结果、失败分块和 verificationPassed。
+Neo bulk 使用 literal 主键 SQL 条件和精确字符串结果校验，不使用 `rtrim`/查询 CI collation。Legacy 在查询之前 trim 请求，可能把带空格的迁移 ID 变成邻居并删除邻居；Neo 明确修复这个危险行为，原值不存在时只 skipped，不能声称该情形与旧产物等价。冻结 v1/旧 parser 保留；两域真实隔离 MySQL 对拍与 compiled Worker 验证见 [原始 ID 说明](../runbooks/neo-literal-batch-delete.md)。一个组与其子 ASIN 同时被请求时，子项计入嵌套删除，不重复计入直接删除。响应沿用共享完整契约，包括同步 counts/skipped、异步任务 ID，以及任务查询中的累计结果、失败分块和 verificationPassed。
 
 ## 数据库与鉴权
 
