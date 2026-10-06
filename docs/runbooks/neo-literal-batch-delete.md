@@ -31,6 +31,25 @@ pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-delete.int
 
 PostgreSQL 使用既有随机私有 schema 与真实约束/触发器；MySQL 使用明确 opt-in 的随机私有数据库和真实 Legacy DDL；Redis 使用随机前缀。只有 `RUN_INTEGRATION_TESTS=true` 且 `INTEGRATION_ALLOW_DROP_DATABASES=true` 的一次性环境允许创建/清理 MySQL fixture。测试仅使用合成数据，本地默认 skip 不视为真实验收通过，不加载未知部署 `.env`。
 
+### 本地代码验收记录
+
+基于正常合并 `main` 的 `4a3164d`，在 Windows 以 `NODE_OPTIONS=--max-old-space-size=1536`、Vitest 单 worker 串行验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| API/Worker 依赖图九包 build | 通过 |
+| contracts / config | 213 / 41 passed，无 skip |
+| DB 默认排除四项数据库运维集成入口的 suite | 893 passed / 227 skipped |
+| API 全套 | 1710 passed / 549 skipped |
+| Worker 全套 | 250 passed / 41 skipped |
+| 改动 API/Worker/DB 测试及 helper 的 expanded strict | 通过，不降低 strict |
+| 根 contracts / Legacy server unit / URL 与格式工具 | 40 / 55 / 8 passed |
+| `max setup` 后根 `tsc --noEmit` | 通过 |
+
+DB 的 227 skip 包含 13 项仅 Linux 可运行的部署脚本测试，其余及 API/Worker skip 是未开启实际服务 opt-in。两域批量删除实际入口包含 54 项集成测试，默认 skip；它们须在 Integration CI 执行，不能以本表替代实际 SQL/BullMQ/Legacy 对拍。未触及 Web 与 Legacy 前端源码，本地未重复其全套/构建；它们由 CI 基线运行。所有 18 个变更文件 Prettier 与 `git diff --check` 通过。
+
+常规生产 build 和改动范围 expanded strict 分别验证；全 API 测试目录扩大 `tsc` 的检查存在既有未触碰 helper/ops 类型及 rootDir 错误，未冒称该检查通过，也未修改项目 tsconfig 规避它。
+
 ## Web 临时限制与回滚
 
 #211 的 UI 在后端修复前暂时拒绝首尾空格 ID。#212 不依赖未合并的 UI 分支；两项正式进入主线后，必须用同一 Neo helper/typed schema 放回原值可选能力并补 mounted POST 原值验证。暂时拒绝不能当作 API 风险已修复，也不能宣称 Web 原始 ID 功能零缺失。
