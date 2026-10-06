@@ -96,6 +96,7 @@ describe('Legacy to BullMQ queue policy parity', () => {
         expect(policy.physicalName).toBe(baseline.physicalName);
         expect(policy.defaultJobOptions).toEqual(
           name === 'monitor' ||
+            name === 'competitor-monitor' ||
             name === 'variant-check' ||
             name === 'batch-check'
             ? {
@@ -153,7 +154,17 @@ describe('Legacy to BullMQ queue policy parity', () => {
       ).toEqual({ age: expectedAge });
       expect(
         getQueuePolicy('competitor-monitor', env).defaultJobOptions,
-      ).toMatchObject({ removeOnComplete: { age: 3600 } });
+      ).toMatchObject({
+        removeOnComplete: { age: expectedAge },
+        removeOnFail: { age: expectedAge },
+      });
+      expect(
+        getQueueOptions('competitor-monitor', env, { host: 'localhost' })
+          .defaultJobOptions,
+      ).toMatchObject({
+        removeOnComplete: { age: expectedAge },
+        removeOnFail: { age: expectedAge },
+      });
     },
   );
 

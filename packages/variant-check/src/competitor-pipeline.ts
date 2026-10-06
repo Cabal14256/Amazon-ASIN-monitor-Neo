@@ -1,6 +1,7 @@
 import { competitorCheckDataSchema } from '@asin-monitor/contracts';
 import {
   assertVariantCheckOperationRequest,
+  competitorMonitorSnapshotDigest,
   VariantCheckError,
   type CommittedCompetitorGroupCheck,
   type CommittedCompetitorSingleCheck,
@@ -12,6 +13,7 @@ import {
 } from '@asin-monitor/db';
 import {
   abortError,
+  CatalogDeferredError,
   decodeCatalogVariantResult,
   normalizeCountry,
   SpApiError,
@@ -21,6 +23,7 @@ import {
   type Logger,
   type RedisCatalogCheckStore,
 } from '@asin-monitor/sp-api';
+import { setTimeout as delay } from 'node:timers/promises';
 import { VariantCheckCommitUncertainError } from './pipeline';
 import { normalizeAsinType } from './record-mapper';
 
@@ -30,6 +33,7 @@ export interface CompetitorCheckContext {
   forceRefresh: boolean;
   signal?: AbortSignal;
   operation?: VariantCheckOperation;
+  snapshotDigest?: string;
   authorize(unit: CompetitorCheckUnit): Promise<void>;
   checkpoint(): Promise<void>;
   onProgress?(completed: number, total: number): Promise<void> | void;
@@ -74,7 +78,7 @@ function groupResult(
   const results = value.asins.map((asin) => {
     const observation = observed.get(asin.id);
     if (!observation) throw new VariantCheckError('invalid-result');
-    if (observation.kind === 'failed') {
+    if (observation.kind !== 'checked') {
       counts.SP_API_ERROR++;
       return {
         asin: asin.asin,
@@ -388,6 +392,9 @@ export class CompetitorCheckPipeline {
       assertVariantCheckOperationRequest(context.operation, {
         groupId: id,
         forceRefresh: context.forceRefresh,
+        ...(context.operation.taskType === 'competitor-monitor'
+          ? { snapshotDigest: context.snapshotDigest }
+          : {}),
       });
     }
     return this.run<CompetitorGroupCheckData>(context, async (scope) => {
@@ -397,9 +404,19 @@ export class CompetitorCheckPipeline {
       if ('completed' in initial)
         return initial.completed as CompetitorGroupCheckData;
       const snapshot: CompetitorGroupCheckSnapshot = initial.snapshot;
-      const observations = new Array<CompetitorCheckObservation>(
-        snapshot.asins.length,
-      );
+      const monitor = context.operation?.taskType === 'competitor-monitor';
+      if (
+        monitor &&
+        (context.forceRefresh ||
+          !context.snapshotDigest ||
+          !/^[a-f0-9]{64}$/.test(context.snapshotDigest) ||
+          competitorMonitorSnapshotDigest(snapshot) !== context.snapshotDigest)
+      )
+        throw new VariantCheckError('snapshot-changed');
+      const observations = new Array<
+        | CompetitorCheckObservation
+        | { asinId: string; kind: 'deferred'; error: string }
+      >(snapshot.asins.length);
       let next = 0;
       let completed = 0;
       let progress = Promise.resolve();
@@ -440,7 +457,10 @@ export class CompetitorCheckPipeline {
                   throw error;
                 observation = {
                   asinId: row.id,
-                  kind: 'failed',
+                  kind:
+                    monitor && error instanceof CatalogDeferredError
+                      ? 'deferred'
+                      : 'failed',
                   error: 'SP-API检查失败',
                 };
               }
@@ -459,11 +479,84 @@ export class CompetitorCheckPipeline {
         }),
       );
       if (failure) throw failure;
+      const deferred = observations.flatMap((value, index) =>
+        value.kind === 'deferred' ? [index] : [],
+      );
+      if (deferred.length) {
+        await delay(2000, undefined, { signal: scope.signal });
+        let nextDeferred = 0;
+        let deferredFailure: unknown;
+        await Promise.all(
+          Array.from({ length: Math.min(2, deferred.length) }, async () => {
+            while (nextDeferred < deferred.length && !deferredFailure) {
+              const index = deferred[nextDeferred++],
+                row = snapshot.asins[index];
+              try {
+                await scope.guard();
+                try {
+                  const result = decodeCatalogVariantResult(
+                    await this.checker.check(row.asin, row.country, {
+                      forceRefresh: true,
+                      priority: 1,
+                      owner: 'competitor',
+                      signal: scope.signal,
+                    }),
+                    row.asin,
+                    normalizeCountry(row.country),
+                  );
+                  observations[index] = {
+                    asinId: row.id,
+                    kind: 'checked',
+                    result,
+                  };
+                } catch (error) {
+                  if (scope.signal.aborted) throw abortError(scope.signal);
+                  if (
+                    error instanceof SpApiError &&
+                    [
+                      'CANCELLED',
+                      'CLOSED',
+                      'CAPACITY',
+                      'TIMEOUT',
+                      'DEPENDENCY_ERROR',
+                    ].includes(error.code)
+                  )
+                    throw error;
+                  observations[index] = {
+                    asinId: row.id,
+                    kind: 'failed',
+                    error: 'SP-API延后复核失败',
+                  };
+                }
+                await scope.guard();
+              } catch (error) {
+                deferredFailure ??= error;
+              }
+            }
+          }),
+        );
+        if (deferredFailure) throw deferredFailure;
+      }
       await scope.guard();
+      const finalObservations: CompetitorCheckObservation[] = observations.map(
+        (item) => {
+          if (item.kind === 'deferred')
+            throw new VariantCheckError('invalid-result');
+          return item;
+        },
+      );
       const output = await this.persist(context, scope, async (unit) =>
         groupResult(
-          await unit.commitGroup(snapshot, observations, () =>
-            scope.guard(unit),
+          await unit.commitGroup(
+            snapshot,
+            finalObservations,
+            () => scope.guard(unit),
+            monitor
+              ? {
+                  operation: context.operation!,
+                  snapshotDigest: context.snapshotDigest!,
+                }
+              : undefined,
           ),
           snapshot,
         ),
@@ -473,10 +566,12 @@ export class CompetitorCheckPipeline {
         snapshot.asins.map((row, index) => ({
           asin: row.asin,
           country: row.country,
-          failed: observations[index].kind === 'failed',
+          failed: observations[index].kind !== 'checked',
           notFound:
             observations[index].kind === 'checked' &&
-            observations[index].result.errorType === 'NOT_FOUND',
+            (observations[index].result.errorType === 'NOT_FOUND' ||
+              (deferred.includes(index) &&
+                observations[index].result.errorType !== 'SP_API_ERROR')),
         })),
       );
       this.logger.info('竞品变体组检查完成', {

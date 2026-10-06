@@ -101,6 +101,7 @@ export const competitorMonitorHistory = pgTable(
     checkTime: timestampColumn('check_time').notNull(),
     checkResult: jsonb('check_result').$type<Record<string, unknown>>(),
     notificationSent: boolean('notification_sent').default(false),
+    monitorTaskId: varchar('monitor_task_id', { length: 36 }),
     createTime: timestampColumn('create_time').default(localTimestamp),
   },
   (table) => [
@@ -110,6 +111,11 @@ export const competitorMonitorHistory = pgTable(
     index('idx_competitor_monitor_history_asin_id').on(table.asinId),
     index('idx_competitor_monitor_history_check_time').on(table.checkTime),
     index('idx_competitor_monitor_history_country').on(table.country),
+    index('idx_competitor_monitor_history_task_country').on(
+      table.monitorTaskId,
+      table.country,
+      table.notificationSent,
+    ),
   ],
 );
 
@@ -144,4 +150,8 @@ export type CompetitorFeishuConfig = typeof competitorFeishuConfig.$inferSelect;
 export type NewCompetitorFeishuConfig =
   typeof competitorFeishuConfig.$inferInsert;
 
+export {
+  competitorMonitorNotifications,
+  competitorMonitorRuns,
+} from './monitor';
 export { competitorVariantCheckReceipts } from './variant-check-receipts';
