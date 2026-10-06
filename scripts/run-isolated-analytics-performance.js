@@ -142,7 +142,7 @@ async function main() {
       warmupsPerTargetCase: config.warmup,
       measuredPairsPerCase: config.iterations,
       requestTimeoutMs: 30_000,
-      benchmarkDeadlineMs: 900_000,
+      benchmarkDeadlineMs: 30 * 60_000,
       requiredAggregateP95Speedup: config.requiredP95Speedup,
       aggregateCases: 24,
       adaptiveCorrectnessOnlyCases: 4,

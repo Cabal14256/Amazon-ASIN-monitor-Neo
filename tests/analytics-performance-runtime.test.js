@@ -35,6 +35,21 @@ test('upgrade bootstrap targets both logical domains without loading rollback SQ
   assert.throws(() => migrationPlan(['0017_other.v2.sql']));
 });
 
+test('every new filename requires an explicit domain mapping even when its version exists', () => {
+  for (const filename of [
+    '0001_primary_fix.sql',
+    '0009_primary_fix.sql',
+    '0015_primary_fix.sql',
+    '0016_primary_fix.sql',
+    'migration.sql',
+  ])
+    assert.throws(
+      () => migrationPlan([filename]),
+      /Unclassified migration requires fixture review/,
+      filename,
+    );
+});
+
 test('startup artifacts redact secrets split at every chunk boundary before truncation', () => {
   const secret = 'synthetic-secret-that-must-not-survive';
   for (let split = 1; split < secret.length; split++) {

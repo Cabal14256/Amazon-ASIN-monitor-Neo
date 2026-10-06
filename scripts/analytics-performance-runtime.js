@@ -3,25 +3,34 @@
 const { StringDecoder } = require('node:string_decoder');
 
 function migrationPlan(filenames) {
+  const domainsByFilename = new Map([
+    ['0001_timescale_aggregates.sql', ['primary']],
+    ['0002_timescale_storage_policies.sql', ['primary']],
+    ['0003_auth_maintenance.sql', ['primary']],
+    ['0004_asin_timestamp_policy.sql', ['primary']],
+    ['0005_import_group_collation.sql', ['primary']],
+    ['0006_variant_check_receipts.sql', ['primary']],
+    ['0007_monitor_history_matching.sql', ['primary']],
+    ['0008_monitor_interval_projection.sql', ['primary']],
+    ['0009_notification_country_collation.sql', ['primary', 'competitor']],
+    ['0010_competitor_query_matching.sql', ['competitor']],
+    ['0011_competitor_write_policy.sql', ['competitor']],
+    ['0012_primary_monitor.sql', ['primary']],
+    ['0013_feishu_revision.sql', ['primary']],
+    ['0014_competitor_check_receipts.sql', ['competitor']],
+    ['0015_competitor_monitor.sql', ['competitor']],
+    ['0016_scheduled_monitor_primary.sql', ['primary']],
+    ['0016_scheduled_monitor_competitor.sql', ['competitor']],
+  ]);
   return filenames
-    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .filter((name) => name.endsWith('.sql'))
     .filter((name) => !name.endsWith('.rollback.sql'))
     .filter((name) => name !== '0000_baseline.sql')
     .sort()
     .map((filename) => {
-      if (!/^\d{4}_[a-z_]+\.sql$/.test(filename))
+      const domains = domainsByFilename.get(filename);
+      if (!domains)
         throw new Error('Unclassified migration requires fixture review');
-      const version = Number(filename.slice(0, 4));
-      let domains;
-      if (version >= 1 && version <= 8) domains = ['primary'];
-      else if (version === 9) domains = ['primary', 'competitor'];
-      else if ([10, 11, 14, 15].includes(version)) domains = ['competitor'];
-      else if ([12, 13].includes(version)) domains = ['primary'];
-      else if (filename === '0016_scheduled_monitor_primary.sql')
-        domains = ['primary'];
-      else if (filename === '0016_scheduled_monitor_competitor.sql')
-        domains = ['competitor'];
-      else throw new Error('Unclassified migration requires fixture review');
       return { filename, domains };
     });
 }

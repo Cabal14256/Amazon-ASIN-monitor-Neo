@@ -10,7 +10,7 @@
 
 两个 API 使用真实 Redis，明确开启现有 benchmark cache bypass、关闭调度器和限流；Legacy 使用 raw、Neo 使用 CAGG，连接池上限均为 10。只启动 API 角色，测量无并发写入。这证明隔离静态数据的实际 HTTP 分析路径；高写入期间读隔离和完整导出任务链 RSS 仍需 #190 后续验收。
 
-复用 `scripts/benchmark-analytics.js` 原 28 case 矩阵：24 个聚合场景每次响应须证明 cacheHit=false、Legacy source=raw、Neo source=agg，非空且语义相同；4 个 adaptive 场景保留原正确性检查和信息性时延，不套用聚合 3 倍目标。每 target/case warmup 2 次、测量 20 次，成对交替请求顺序，使用原 percentile 算法与完整 HTTP 响应体耗时。每个聚合场景必须 Legacy P95 / Neo P95 >= 3，不允许平均值遮蔽单项失败。请求超时 30 秒，整体 benchmark 15 分钟，workflow 45 分钟；超时算失败。
+复用 `scripts/benchmark-analytics.js` 原 28 case 矩阵：24 个聚合场景每次响应须证明 cacheHit=false、Legacy source=raw、Neo source=agg，非空且语义相同；4 个 adaptive 场景保留原正确性检查和信息性时延，不套用聚合 3 倍目标。每 target/case warmup 2 次、测量 20 次，成对交替请求顺序，使用原 percentile 算法与完整 HTTP 响应体耗时。每个聚合场景必须 Legacy P95 / Neo P95 >= 3，不允许平均值遮蔽单项失败。请求超时 30 秒，整体 benchmark 30 分钟，workflow 45 分钟；超时算失败。首次运行 37523405165 在仍正常测量时触发原 15 分钟总截止，只生成 manifest/启动诊断，没有完整报告；延长的是完成既定样本的总预算，逐请求截止、样本数量和 3 倍门槛保持不变。
 
 报告包含每次样本、response digest / shape、所有比较门禁和 P50/P90/P95、逐场景 speedup 及汇总。未达到 3 倍、缓存命中、raw fallback、空响应、语义差异或请求失败均使 job 失败；workflow 在失败时仍上传已生成的证据。启动或 deadline 失败只有 manifest/脱敏启动诊断时，不得将缺失测量宣称为通过。
 
