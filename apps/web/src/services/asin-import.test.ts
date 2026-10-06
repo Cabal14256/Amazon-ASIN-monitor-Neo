@@ -3,6 +3,7 @@ import { ApiError, HttpClient } from '../lib/http';
 import { jsonResponse, sessionFixture } from '../lib/transport-fixtures';
 import {
   submitAsinImport,
+  submitCompetitorImport,
   uncertainAsinImportTaskId,
   validateAsinImportFile,
 } from './asin-import';
@@ -25,6 +26,34 @@ function client(baseURL: string, fetcher: typeof fetch) {
 }
 
 describe('ASIN import transport', () => {
+  it.each(['/api/', 'https://app.test/api/'])(
+    'submits competitor XLSX using the same normalized multipart transport with %s',
+    async (baseURL) => {
+      const fetcher = vi.fn<typeof fetch>(async (_url, options) => {
+        const form = options!.body as FormData;
+        expect(form.getAll('file')).toHaveLength(1);
+        expect((form.get('file') as File).type).toBe(
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+        expect(form.get('useAsync')).toBe('true');
+        expect(new Headers(options?.headers).has('content-type')).toBe(false);
+        return jsonResponse({
+          success: true,
+          errorCode: 0,
+          data: { taskId, status: 'pending' },
+        });
+      });
+      await submitCompetitorImport(
+        client(baseURL, fetcher),
+        new File(['xlsx'], 'rival.xlsx'),
+      );
+      expect(fetcher.mock.calls[0][0]).toBe(
+        'https://app.test/api/v1/competitor/variant-groups/import-excel',
+      );
+      expect(fetcher).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(['/api', 'https://app.test/api/'])(
     'normalizes %s and submits one multipart file asynchronously',
     async (baseURL) => {

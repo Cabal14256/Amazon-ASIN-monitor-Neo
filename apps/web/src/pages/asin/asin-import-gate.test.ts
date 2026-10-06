@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   claimAsinImportGate,
+  claimImportGate,
+  importGateKey,
   readAsinImportGate,
+  readImportGate,
   writeAsinImportGate,
+  writeImportGate,
 } from './asin-import-gate';
 
 class MemoryStorage {
@@ -19,6 +23,26 @@ class MemoryStorage {
 }
 
 describe('ASIN import retry gate', () => {
+  it('keeps the original primary key and isolates competitor claims and cleanup', () => {
+    const storage = new MemoryStorage();
+    const owner = 'User α ';
+    expect(importGateKey('asin', owner)).toBe(
+      'neo:asin-import:User%20%CE%B1%20',
+    );
+    expect(claimAsinImportGate(storage, owner, () => 100).kind).toBe('claimed');
+    expect(claimImportGate(storage, 'competitor', owner, () => 200).kind).toBe(
+      'claimed',
+    );
+    expect(claimImportGate(storage, 'competitor', owner).kind).toBe('blocked');
+    expect(readImportGate(storage, 'competitor', owner)?.savedAt).toBe(200);
+    writeImportGate(storage, 'competitor', owner, null);
+    expect(readImportGate(storage, 'competitor', owner)).toBeNull();
+    expect(readAsinImportGate(storage, owner)?.savedAt).toBe(100);
+    storage.setItem(importGateKey('competitor', owner), 'invalid');
+    expect(readImportGate(storage, 'competitor', owner)).toBeNull();
+    expect(readAsinImportGate(storage, owner)?.savedAt).toBe(100);
+  });
+
   it('survives route remount, scopes by owner and makes interrupted sending uncertain', () => {
     const storage = new MemoryStorage();
     const time = Date.UTC(2026, 8, 27);

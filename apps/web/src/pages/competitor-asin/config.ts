@@ -21,7 +21,7 @@ export const COMPETITOR_CATALOG: CatalogConfig = {
   label: '竞品 ASIN',
   heading: '竞品变体组与 ASIN',
   description:
-    '查找竞品变体组，管理单项资料与归属；单组与单 ASIN 检查已接入异步任务。竞品批量检查接口仍在迁移。',
+    '查找竞品变体组，管理单项资料与归属。CSV / XLSX 导入、单组与单 ASIN 检查已接入异步任务，可在任务中心核对结果。竞品批量检查接口与导出仍在迁移。',
   showSite: false,
   showSource: false,
   showManual: false,
