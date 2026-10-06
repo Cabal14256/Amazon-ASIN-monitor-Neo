@@ -26,6 +26,7 @@ import {
   useTaskQuery,
 } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
+import { backupTaskOutcome } from '../../services/backup-model';
 import {
   canCancelTask,
   canOpenTaskDetail,
@@ -159,6 +160,16 @@ function TaskDetails({
         >
           后台结果校验未通过，请查看错误明细。
         </p>
+      )}
+      {backupTaskOutcome(task).length > 0 && (
+        <section
+          aria-label="备份恢复回执"
+          className="rounded-control bg-status-warning-soft p-4 text-sm"
+        >
+          {backupTaskOutcome(task).map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </section>
       )}
       {counts.length > 0 && (
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">

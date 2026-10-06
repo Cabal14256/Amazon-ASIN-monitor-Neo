@@ -1,4 +1,10 @@
 import { buildApiURL } from './api-url';
+import {
+  validStreamOptions,
+  writeDownloadStream,
+  type DownloadSink,
+  type DownloadStreamOptions,
+} from './download-stream';
 import type { SessionStore } from './session';
 
 export type ApiFailure =
@@ -469,6 +475,113 @@ export class HttpClient {
       work
         .then(resolve, reject)
         .finally(() => requestSignal.removeEventListener('abort', cancelled));
+    });
+  }
+  /** Authenticated streaming transfers participate in the same session cleanup. */
+  async downloadTo(
+    path: string,
+    sink: DownloadSink,
+    options: DownloadStreamOptions,
+  ): Promise<number> {
+    if (this.closed) throw new ApiError('CLOSED', '请求客户端已关闭');
+    if (this.active.size >= 64)
+      throw new ApiError('CAPACITY', '请求过多，请稍后重试');
+    if (!validStreamOptions(options))
+      throw new ApiError('INVALID_INPUT', '流式下载限制无效');
+    const url = this.url(path);
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const revision = this.options.session.revision;
+    const abort = () =>
+      controller.abort(new ApiError('CANCELLED', '下载已取消'));
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(
+      () => controller.abort(new ApiError('TIMEOUT', '下载超时')),
+      options.timeoutMs,
+    );
+    const headers = new Headers({ accept: options.expectedType });
+    const token = this.options.session.getLegacyToken();
+    if (token) headers.set('authorization', `Bearer ${token}`);
+    this.active.add(controller);
+    let abortedSink = false;
+    let received: Response | undefined;
+    const abortSink = (reason: unknown) => {
+      if (abortedSink) return;
+      abortedSink = true;
+      void sink.abort(reason).catch(() => undefined);
+    };
+    const onAbort = () => abortSink(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    const work = (async () => {
+      if (signal.aborted) throw signal.reason;
+      const response = await (this.options.fetch ?? fetch)(url, {
+        method: 'GET',
+        headers,
+        credentials: 'include',
+        redirect: 'error',
+        signal,
+      });
+      received = response;
+      if (signal.aborted) {
+        void response.body?.cancel().catch(() => undefined);
+        throw signal.reason;
+      }
+      if (!response.ok) {
+        let envelope: Record<string, unknown> | undefined;
+        try {
+          const payload = await readJson(response, 8192);
+          if (payload && typeof payload === 'object' && !Array.isArray(payload))
+            envelope = payload as Record<string, unknown>;
+        } catch {
+          /* HTTP status remains authoritative. */
+        }
+        if (response.status === 401) {
+          if (revision === this.options.session.revision) {
+            this.active.delete(controller);
+            try {
+              this.options.onUnauthorized?.();
+            } catch {
+              /* Preserve auth failure. */
+            }
+          }
+          throw new ApiError('AUTH', '未认证或认证已过期', 401, 401);
+        }
+        throw new ApiError(
+          'HTTP',
+          typeof envelope?.errorMessage === 'string' &&
+          envelope.errorMessage.length <= 500
+            ? envelope.errorMessage
+            : '备份下载失败',
+          response.status,
+        );
+      }
+      return await writeDownloadStream(response, sink, options, signal);
+    })()
+      .catch((error: unknown) => {
+        void received?.body?.cancel(error).catch(() => undefined);
+        abortSink(error);
+        if (signal.aborted) throw signal.reason;
+        if (error instanceof ApiError) throw error;
+        throw new ApiError('NETWORK', '网络或保存文件失败，归档未完成');
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        options.signal?.removeEventListener('abort', abort);
+        signal.removeEventListener('abort', onAbort);
+        this.active.delete(controller);
+      });
+    // Non-cooperating fetch/disk work keeps its admission slot until settled.
+    return new Promise<number>((resolve, reject) => {
+      const cancelled = () => {
+        abortSink(signal.reason);
+        reject(signal.reason);
+      };
+      if (signal.aborted) cancelled();
+      else signal.addEventListener('abort', cancelled, { once: true });
+      work
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener('abort', cancelled));
     });
   }
   cancelAll(): void {

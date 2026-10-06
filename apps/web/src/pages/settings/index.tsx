@@ -27,6 +27,7 @@ import {
   SettingsApi,
   type FeishuDraft,
 } from '../../services/settings';
+import { BackupPanel } from './backup-panel';
 import {
   deniedSettingsError,
   isEmptySensitiveReplacement,
@@ -880,35 +881,6 @@ function StatusPanel({
         </CardContent>
       </Card>
     </div>
-  );
-}
-
-function BackupPanel() {
-  return (
-    <Card>
-      <CardHeader
-        title="备份与恢复"
-        description="数据库备份域正在单独迁移，当前 Neo API 尚未提供可执行的备份、恢复或下载端点。"
-      />
-      <CardContent>
-        <div className="rounded-control bg-status-warning-soft p-5 text-sm text-status-warning">
-          <div className="flex items-start gap-3">
-            <AlertTriangle
-              aria-hidden="true"
-              className="mt-0.5 size-5 shrink-0"
-            />
-            <div>
-              <p className="font-semibold">暂不可用</p>
-              <p className="mt-2 leading-6">
-                Legacy 备份入口继续承担现有业务。Neo 侧会在备份 API、pg_dump
-                产物和 Worker
-                任务链路完成后再开放此区域；当前页面不会发送未实现的请求。
-              </p>
-            </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
