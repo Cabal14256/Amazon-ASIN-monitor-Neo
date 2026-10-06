@@ -5,7 +5,7 @@ import {
   BatchDeleteInputError,
   CompetitorTransactionError,
   CompetitorWriteError,
-  parseBatchDeleteRequest,
+  parseNeoBatchDeleteRequest,
   useAsyncBatchDelete,
   type CompetitorBatchDeleteRepositoryPort,
 } from '@asin-monitor/db';
@@ -65,7 +65,7 @@ export class CompetitorBatchDeleteService implements OnModuleDestroy {
     try {
       const accepted = await this.repository.transaction(async (unit) => {
         await authorizeAdministration(unit, principal, 'asin:delete');
-        const request = parseBatchDeleteRequest(body);
+        const request = parseNeoBatchDeleteRequest(body);
         const analysis = await unit.analyze(request);
         if (
           !useAsyncBatchDelete(analysis, request.useAsync, {
