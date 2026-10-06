@@ -62,9 +62,11 @@ API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变�
 
 旧 v1 私有队列回执继续采用原严格身份/参数摘要，在 3 秒任务查询内恢复原状态，不追加大文件哈希或文件同步；这是可信旧队列结果的兼容恢复，不能据此追溯证明旧发布已完成目录 fsync。旧 sidecar 的 Worker 重放会先执行上述同步，原时间、文件名、内容和 proof/hash 不变。已完成历史任务的普通读取不改终态、也不把兼容显示升级为新的磁盘持久化证据。
 
-选择性 dump 增加 `--strict-names`：任意一个原样、区分大小写的所选表不存在时整体失败，不发布仅包含其余表的归档。选择性原位恢复在 API 创建任务之前、Worker 取得目标 advisory lock 后分别读取真实 `pg_catalog`，递归包含所选分区/继承子表，拒绝未包含在选择中的 incoming FK、视图/物化视图和其他阻止 DROP 的正常依赖，以及 extension-owned 对象。API 返回固定 409，建议完整隔离恢复或包含依赖的备份；列表中的 `restoreSupported` 仅代表格式/引擎/容量/locale 初步资格，不能替代这次实际目录预检。不会使用 CASCADE 删除外部对象。预检后新增的依赖仍由原 `--clean --single-transaction` 失败并整体回滚；真实 CLI 回归继续验证该最后边界。
+选择性 dump 增加 `--strict-names`：任意一个原样、区分大小写的所选表不存在时整体失败，不发布仅包含其余表的归档。选择性原位恢复在 API 创建任务之前、Worker 取得目标 advisory lock 后分别读取真实 `pg_catalog`，递归包含所选分区/继承子表及其 automatic/internal-owned 对象（例如 serial 序列、行类型、规则与默认值），拒绝来自集合外的 incoming FK、视图/物化视图、引用所选序列的外部默认值、返回所选行类型的外部函数和其他阻止 DROP 的正常依赖，以及 extension-owned 对象。目录、函数与 regclass 引用均限定 `pg_catalog`，不依赖目标连接的 search_path。API 返回固定 409，建议完整隔离恢复或包含依赖的备份；列表中的 `restoreSupported` 仅代表格式/引擎/容量/locale 初步资格，不能替代这次实际目录预检。不会使用 CASCADE 删除外部对象。预检后新增的依赖仍由原 `--clean --single-transaction` 失败并整体回滚；真实 CLI 回归继续验证该最后边界。
 
 `GET /backup/scheduled-tasks` 记录于独立 [Neo 增量端点清单](../../packages/contracts/docs/neo-endpoint-inventory.md)，合并迁移清单为 119 项；原 118 项冻结对拍基线和 backup 7 项保持不变。实际控制器仍使用认证与 `settings:write`，增量清单不替代运行时鉴权。
+
+目录闭包依据 [PostgreSQL 16 的 pg_depend 所有权与正常依赖语义](https://www.postgresql.org/docs/16/catalog-pg-depend.html)：删除表会自动删除的序列、行类型等仍可能被集合外对象引用，不能只检查直接引用表的依赖。
 
 未带 schema 的表模式由 pg_dump 按来源 search_path 可见性解析，旧元数据没有冻结该 path。恢复预检发现同名关系跨 schema 时拒绝该含糊选择，建议使用完整 `schema.table` 重新备份；不会将不可见同名表误算为归档内的依赖闭合成员。依据 [PostgreSQL 16 pg_dump 官方源码的模式展开](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/bin/pg_dump/pg_dump.c) 和 [官方 strict-names 说明](https://www.postgresql.org/docs/16/app-pgdump.html)。
 

@@ -499,6 +499,124 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await scratchPool.query(`DROP TABLE IF EXISTS public.${parent}`);
       }
     }, 30000);
+    it('detects an outside default referencing a selected owned sequence and permits its closed selection', async () => {
+      const suffix = randomUUID().replaceAll('-', '').slice(0, 8);
+      const parent = `serial_parent_${suffix}`;
+      const outside = `serial_default_${suffix}`;
+      try {
+        await scratchPool.query(
+          `CREATE TABLE public.${parent} (id serial PRIMARY KEY, note text NOT NULL)`,
+        );
+        await scratchPool.query(
+          `INSERT INTO public.${parent} (note) VALUES ('serial-original')`,
+        );
+        const created = await runJob(scratchUrl, 'create', {
+          tables: [`public.${parent}`],
+        });
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        if (!artifact.filename) throw new Error('Missing serial archive');
+        await scratchPool.query(
+          `CREATE TABLE public.${outside} (id integer DEFAULT nextval('public.${parent}_id_seq'::regclass))`,
+        );
+        await scratchPool.query(`INSERT INTO public.${outside} DEFAULT VALUES`);
+        await scratchPool.query(
+          `UPDATE public.${parent} SET note='serial-live'`,
+        );
+        expect(
+          selectiveBackupRestoreBlocked(
+            (
+              await scratchPool.query(
+                backupSelectiveRestoreQuery([`public.${parent}`]),
+              )
+            ).rows,
+          ),
+        ).toBe(true);
+        await expect(
+          runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+        ).rejects.toThrow('未包含在归档中的外部依赖');
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${parent}`)).rows,
+        ).toEqual([{ note: 'serial-live' }]);
+        expect(
+          (await scratchPool.query(`SELECT id FROM public.${outside}`)).rows,
+        ).toEqual([{ id: 2 }]);
+        const tables = [`public.${parent}`, `public.${outside}`];
+        expect(
+          selectiveBackupRestoreBlocked(
+            (await scratchPool.query(backupSelectiveRestoreQuery(tables))).rows,
+          ),
+        ).toBe(false);
+        const closed = backupTaskResultDataSchema.parse(
+          (await runJob(scratchUrl, 'create', { tables })).result,
+        );
+        if (!closed.filename) throw new Error('Missing closed serial archive');
+        await scratchPool.query(
+          `UPDATE public.${parent} SET note='serial-mutated'`,
+        );
+        await scratchPool.query(`INSERT INTO public.${outside} DEFAULT VALUES`);
+        await runJob(scratchUrl, 'restore', { filename: closed.filename });
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${parent}`)).rows,
+        ).toEqual([{ note: 'serial-live' }]);
+        expect(
+          (await scratchPool.query(`SELECT id FROM public.${outside}`)).rows,
+        ).toEqual([{ id: 2 }]);
+        expect(
+          (
+            await scratchPool.query(
+              `SELECT nextval('public.${parent}_id_seq'::regclass)::integer AS id`,
+            )
+          ).rows,
+        ).toEqual([{ id: 3 }]);
+      } finally {
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${outside}`);
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${parent}`);
+      }
+    }, 30000);
+    it('refuses an outside function returning the implicit row type of a selected table', async () => {
+      const suffix = randomUUID().replaceAll('-', '').slice(0, 8);
+      const table = `row_type_${suffix}`;
+      const outside = `row_function_${suffix}`;
+      try {
+        await scratchPool.query(
+          `CREATE TABLE public.${table} (id integer PRIMARY KEY, note text NOT NULL)`,
+        );
+        await scratchPool.query(
+          `INSERT INTO public.${table} VALUES (1, 'row-original')`,
+        );
+        const created = await runJob(scratchUrl, 'create', {
+          tables: [`public.${table}`],
+        });
+        const artifact = backupTaskResultDataSchema.parse(created.result);
+        if (!artifact.filename) throw new Error('Missing row type archive');
+        await scratchPool.query(
+          `CREATE FUNCTION public.${outside}() RETURNS SETOF public.${table} LANGUAGE SQL AS 'SELECT * FROM public.${table}'`,
+        );
+        await scratchPool.query(`UPDATE public.${table} SET note='row-live'`);
+        expect(
+          selectiveBackupRestoreBlocked(
+            (
+              await scratchPool.query(
+                backupSelectiveRestoreQuery([`public.${table}`]),
+              )
+            ).rows,
+          ),
+        ).toBe(true);
+        await expect(
+          runJob(scratchUrl, 'restore', { filename: artifact.filename }),
+        ).rejects.toThrow('未包含在归档中的外部依赖');
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${table}`)).rows,
+        ).toEqual([{ note: 'row-live' }]);
+        expect(
+          (await scratchPool.query(`SELECT note FROM public.${outside}()`))
+            .rows,
+        ).toEqual([{ note: 'row-live' }]);
+      } finally {
+        await scratchPool.query(`DROP FUNCTION IF EXISTS public.${outside}()`);
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${table}`);
+      }
+    }, 30000);
     it('refuses ambiguous unqualified names instead of counting a hidden referencing table as archived', async () => {
       const hidden = `hidden_${randomUUID().replaceAll('-', '').slice(0, 8)}`;
       await scratchPool.query(`CREATE SCHEMA ${hidden}`);

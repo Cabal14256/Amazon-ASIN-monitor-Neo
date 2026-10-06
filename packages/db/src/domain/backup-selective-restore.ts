@@ -16,6 +16,8 @@ const tablesSchema = z
  * The older metadata does not freeze that path, so never count hidden names as
  * additional archived relations and incorrectly allow their dependencies.
  * Include all descendants for --table-and-children, not just direct children.
+ * Follow automatic/internal ownership to sequences, row types and rules:
+ * an outside default or function can block their implicit DROP too.
  * A missing target table is safe: restore will create it from the archive. */
 export function backupSelectiveRestoreQuery(
   tables: readonly string[],
@@ -28,44 +30,38 @@ export function backupSelectiveRestoreQuery(
   return {
     text: `/* backup_selective_restore_dependencies */
       WITH RECURSIVE requested AS (
-        SELECT * FROM unnest($1::text[], $2::text[]) AS requested(name, namespace)
+        SELECT * FROM ROWS FROM (
+          pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[])
+        ) AS requested(name, namespace)
       ), ambiguous AS (
-        SELECT requested.name FROM requested JOIN pg_class relation ON relation.relname = requested.name
+        SELECT requested.name FROM requested JOIN pg_catalog.pg_class relation ON relation.relname = requested.name
         WHERE requested.namespace IS NULL AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-        GROUP BY requested.name HAVING count(DISTINCT relation.oid) > 1
+        GROUP BY requested.name HAVING pg_catalog.count(DISTINCT relation.oid) > 1
       ), selected(oid) AS (
         SELECT relation.oid
-        FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        FROM pg_catalog.pg_class relation JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
         JOIN requested ON relation.relname = requested.name
           AND (requested.namespace IS NULL OR namespace.nspname = requested.namespace)
         WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
         UNION
-        SELECT children.inhrelid FROM pg_inherits children JOIN selected ON selected.oid = children.inhparent
+        SELECT children.inhrelid FROM pg_catalog.pg_inherits children JOIN selected ON selected.oid = children.inhparent
+      ), owned(classid, objid) AS (
+        SELECT 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid, oid FROM selected
+        UNION
+        SELECT dependency.classid, dependency.objid FROM pg_catalog.pg_depend dependency JOIN owned
+          ON dependency.refclassid = owned.classid AND dependency.refobjid = owned.objid
+        WHERE dependency.deptype IN ('a', 'i')
       )
       SELECT EXISTS (
-        SELECT 1 FROM pg_depend dependency
-        WHERE dependency.refclassid = 'pg_class'::regclass
-          AND dependency.refobjid IN (SELECT oid FROM selected)
-          AND dependency.deptype = 'n'
-          AND CASE dependency.classid
-            WHEN 'pg_constraint'::regclass THEN NOT EXISTS (
-              SELECT 1 FROM pg_constraint owned WHERE owned.oid = dependency.objid AND owned.conrelid IN (SELECT oid FROM selected)
-            )
-            WHEN 'pg_rewrite'::regclass THEN NOT EXISTS (
-              SELECT 1 FROM pg_rewrite owned WHERE owned.oid = dependency.objid AND owned.ev_class IN (SELECT oid FROM selected)
-            )
-            WHEN 'pg_attrdef'::regclass THEN NOT EXISTS (
-              SELECT 1 FROM pg_attrdef owned WHERE owned.oid = dependency.objid AND owned.adrelid IN (SELECT oid FROM selected)
-            )
-            WHEN 'pg_class'::regclass THEN NOT EXISTS (
-              SELECT 1 FROM selected WHERE selected.oid = dependency.objid
-              UNION ALL SELECT 1 FROM pg_index owned WHERE owned.indexrelid = dependency.objid AND owned.indrelid IN (SELECT oid FROM selected)
-            )
-            ELSE true
-          END
+        SELECT 1 FROM pg_catalog.pg_depend dependency JOIN owned referenced
+          ON dependency.refclassid = referenced.classid AND dependency.refobjid = referenced.objid
+        WHERE dependency.deptype = 'n' AND NOT EXISTS (
+          SELECT 1 FROM owned WHERE owned.classid = dependency.classid AND owned.objid = dependency.objid
+        )
         UNION ALL
-        SELECT 1 FROM pg_depend membership WHERE membership.classid = 'pg_class'::regclass
-          AND membership.objid IN (SELECT oid FROM selected) AND membership.deptype = 'e'
+        SELECT 1 FROM pg_catalog.pg_depend membership JOIN owned
+          ON membership.classid = owned.classid AND membership.objid = owned.objid
+        WHERE membership.deptype = 'e'
         UNION ALL SELECT 1 FROM ambiguous
       ) AS blocked`,
     values: [names, schemas],
