@@ -1,6 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
 import { Upload } from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { Button } from '../../components/ui/button';
@@ -20,11 +27,13 @@ import {
   runWithCatalogOperationLock,
   writeImportCatalogSafety,
 } from '../catalog/catalog-operation-lock';
+import { CatalogRefreshContext } from '../catalog/catalog-refresh-context';
 import {
   catalogSafetyKey,
   readCatalogSafetyGate,
   type CatalogSafetyGate,
 } from '../catalog/catalog-safety-gate';
+import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import {
   claimImportGate,
   importGateKey,
@@ -32,6 +41,7 @@ import {
   writeImportGate,
   type AsinImportGate,
 } from './asin-import-gate';
+import { ASIN_CATALOG } from './config';
 
 function storage(kind: 'local' | 'session' = 'local'): Storage | null {
   try {
@@ -64,7 +74,10 @@ function restoredGate(
   const fallback = session ? readImportGate(session, domain, userId) : null;
   return fallback?.phase === 'uncertain' &&
     fallback.taskId &&
-    (!persisted || fallback.savedAt === persisted.savedAt)
+    (!persisted ||
+      (fallback.savedAt === persisted.savedAt &&
+        (!persisted.operationId ||
+          fallback.operationId === persisted.operationId)))
     ? fallback
     : persisted;
 }
@@ -113,6 +126,53 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
   const userId = current?.user.id ?? '';
   const access = createAccess(current);
   const canImport = access.canWriteASIN && !access.mustChangePassword;
+  const reconciliationRevision = runtime.session?.revision;
+  const reconciliationSession = current?.sessionId;
+  const catalogRefresh = useContext(CatalogRefreshContext);
+  const latestCatalogRefresh = useRef(catalogRefresh);
+  latestCatalogRefresh.current = catalogRefresh;
+  const liveReconciliation = useCallback(() => {
+    const state = identity.getSnapshot();
+    const policy = createAccess(
+      state.status === 'authenticated' ? state.identity : undefined,
+    );
+    return (
+      mounted.current &&
+      owner.current === userId &&
+      runtime.session?.revision === reconciliationRevision &&
+      state.status === 'authenticated' &&
+      state.identity.user.id === userId &&
+      state.identity.sessionId === reconciliationSession &&
+      policy.canWriteASIN &&
+      policy.canReadASIN &&
+      !policy.mustChangePassword
+    );
+  }, [
+    identity,
+    reconciliationRevision,
+    reconciliationSession,
+    runtime.session,
+    userId,
+  ]);
+  const refreshImportCatalog = useCallback(async () => {
+    const original = latestCatalogRefresh.current;
+    if (!liveReconciliation())
+      throw new ApiError(
+        'CANCELLED',
+        '当前目录读取权限或会话已变化，导入保护仍保留',
+      );
+    if (original) await original();
+    else {
+      // Standalone panel has no mounted query. Verify one bounded real read and
+      // discard old catalog caches so a later page cannot reuse stale rows.
+      const config =
+        domain === 'competitor' ? COMPETITOR_CATALOG : ASIN_CATALOG;
+      await config.list(runtime.http, { current: 1, pageSize: 10 });
+    }
+    if (!liveReconciliation() || original !== latestCatalogRefresh.current)
+      throw new ApiError('CANCELLED', '目录查询或会话已改变，导入保护仍保留');
+    if (!original) runtime.queryClient.removeQueries({ queryKey: [domain] });
+  }, [domain, liveReconciliation, runtime]);
   const domainLabel = domain === 'competitor' ? '竞品 ASIN' : '主营 ASIN';
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -284,7 +344,12 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
         : result.status === 'cancelled'
         ? '导入任务已取消，可能已有部分行提交；请核对后再决定是否重试。'
         : '导入任务失败，可能已有部分行提交；请核对后再决定是否重试。';
-    void runWithCatalogOperationLock(locks, userId, domain, () => {
+    void runWithCatalogOperationLock(locks, userId, domain, async () => {
+      if (!active || !liveReconciliation())
+        return {
+          kind: 'changed' as const,
+          gate: restoredGate(stored, domain, userId),
+        };
       // Do not interpret temporarily inaccessible storage as an absent gate.
       stored.getItem(importGateKey(domain, userId));
       const persisted = restoredGate(stored, domain, userId);
@@ -299,10 +364,12 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
         persisted.savedAt === gate.savedAt;
       if (persisted?.taskId !== taskId && !matchesSendingClaim)
         return { kind: 'changed' as const, gate: persisted };
-      const nextGate: AsinImportGate | null =
-        result.status === 'completed'
-          ? null
-          : { ...gate, phase: 'settled', taskId, savedAt: gate.savedAt };
+      const nextGate: AsinImportGate = {
+        ...gate,
+        phase: 'settled',
+        taskId,
+        savedAt: gate.savedAt,
+      };
       const session = storage('session');
       const sessionRaw = session?.getItem(importGateKey(domain, userId));
       if (!writeImportGate(stored, domain, userId, nextGate))
@@ -315,6 +382,35 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
         return { kind: 'unavailable' as const };
       if (!writeImportCatalogSafety(stored, userId, domain, gate, nextGate))
         return { kind: 'unavailable' as const };
+      if (result.status === 'completed') {
+        const key = importGateKey(domain, userId);
+        const localRaw = stored.getItem(key);
+        const sharedRaw = stored.getItem(catalogSafetyKey(userId, domain));
+        const fallbackRaw = session?.getItem(key) ?? null;
+        try {
+          await refreshImportCatalog();
+        } catch {
+          return { kind: 'refresh-failed' as const, gate: nextGate };
+        }
+        if (
+          !active ||
+          !liveReconciliation() ||
+          stored.getItem(key) !== localRaw ||
+          stored.getItem(catalogSafetyKey(userId, domain)) !== sharedRaw ||
+          (session?.getItem(key) ?? null) !== fallbackRaw
+        )
+          return {
+            kind: 'changed' as const,
+            gate: restoredGate(stored, domain, userId),
+          };
+        if (
+          !writeImportCatalogSafety(stored, userId, domain, nextGate, null) ||
+          !writeImportGate(stored, domain, userId, null) ||
+          stored.getItem(key) !== null
+        )
+          return { kind: 'unavailable' as const };
+        return { kind: 'settled' as const, gate: null };
+      }
       return { kind: 'settled' as const, gate: nextGate };
     })
       .then((transition) => {
@@ -330,6 +426,13 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
         if (transition.kind === 'unavailable') {
           setSettlementUnavailable(true);
           setNotice('无法保存导入任务状态，请检查浏览器本地存储权限。');
+          return;
+        }
+        if (transition.kind === 'refresh-failed') {
+          setGate(transition.gate);
+          setNotice(
+            '任务已结束，但目录重读失败或查询范围已改变；导入保护仍保留，请仅重读核实，勿重发导入。',
+          );
           return;
         }
         setLastTaskId(taskId);
@@ -356,6 +459,10 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
     taskId,
     userId,
     settlementRetry,
+    reconciliationRevision,
+    reconciliationSession,
+    liveReconciliation,
+    refreshImportCatalog,
   ]);
 
   if (!canImport) return null;
@@ -568,7 +675,8 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
   }
 
   async function unlockAfterReconciliation() {
-    if (!canReconcile) return;
+    if (!canReconcile || busy || request.current || !liveReconciliation())
+      return;
     const stored = storage();
     const locks = navigator.locks;
     if (!stored || !locks || !gate) {
@@ -576,48 +684,88 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
       return;
     }
     const expected = gate;
+    setBusy(true);
     let result: 'changed' | 'cleared' | 'unavailable' | 'active';
     try {
       const key = importGateKey(domain, userId);
       const previousRaw = stored.getItem(key);
-      result = await runWithCatalogOperationLock(locks, userId, domain, () => {
-        if (
-          latestTask.current?.taskId === expected.taskId &&
-          isActiveTask(latestTask.current.status)
-        )
-          return 'active' as const;
-        if (
-          latestTask.current?.taskId === expected.taskId &&
-          isTerminalTask(latestTask.current.status) &&
-          expected.phase !== 'settled'
-        )
-          return 'changed' as const;
-        const current = restoredGate(stored, domain, userId);
-        const session = storage('session');
-        const sessionGate = session
-          ? readImportGate(session, domain, userId)
-          : null;
-        const matchesUnsavedGate =
-          expected.phase === 'uncertain' &&
-          expected.taskId &&
-          ((current?.phase === 'uncertain' &&
-            current.taskId === null &&
-            current.savedAt === expected.savedAt) ||
-            (!current &&
-              JSON.stringify(sessionGate) === JSON.stringify(expected)));
-        if (
-          stored.getItem(key) !== previousRaw ||
-          (JSON.stringify(current) !== JSON.stringify(expected) &&
-            !matchesUnsavedGate)
-        )
-          return 'changed' as const;
-        return writeImportGate(stored, domain, userId, null) &&
-          writeImportCatalogSafety(stored, userId, domain, expected, null)
-          ? ('cleared' as const)
-          : ('unavailable' as const);
-      });
+      result = await runWithCatalogOperationLock(
+        locks,
+        userId,
+        domain,
+        async () => {
+          if (!liveReconciliation()) return 'changed' as const;
+          if (
+            latestTask.current?.taskId === expected.taskId &&
+            isActiveTask(latestTask.current.status)
+          )
+            return 'active' as const;
+          if (
+            latestTask.current?.taskId === expected.taskId &&
+            isTerminalTask(latestTask.current.status) &&
+            expected.phase !== 'settled'
+          )
+            return 'changed' as const;
+          const current = restoredGate(stored, domain, userId);
+          const session = storage('session');
+          const sessionGate = session
+            ? readImportGate(session, domain, userId)
+            : null;
+          const matchesUnsavedGate =
+            expected.phase === 'uncertain' &&
+            expected.taskId &&
+            ((current?.phase === 'uncertain' &&
+              current.taskId === null &&
+              current.savedAt === expected.savedAt) ||
+              (!current &&
+                JSON.stringify(sessionGate) === JSON.stringify(expected)));
+          if (
+            stored.getItem(key) !== previousRaw ||
+            (JSON.stringify(current) !== JSON.stringify(expected) &&
+              !matchesUnsavedGate)
+          )
+            return 'changed' as const;
+          const sharedRaw = stored.getItem(catalogSafetyKey(userId, domain));
+          const sessionRaw = session?.getItem(key) ?? null;
+          await refreshImportCatalog();
+          if (
+            !liveReconciliation() ||
+            stored.getItem(key) !== previousRaw ||
+            stored.getItem(catalogSafetyKey(userId, domain)) !== sharedRaw ||
+            (session?.getItem(key) ?? null) !== sessionRaw ||
+            JSON.stringify(restoredGate(stored, domain, userId)) !==
+              JSON.stringify(current)
+          )
+            return 'changed' as const;
+          if (
+            latestTask.current?.taskId === expected.taskId &&
+            isActiveTask(latestTask.current.status)
+          )
+            return 'active' as const;
+          if (
+            sessionRaw &&
+            (!session ||
+              !writeImportGate(session, domain, userId, null) ||
+              session.getItem(key) !== null)
+          )
+            return 'unavailable' as const;
+          return writeImportCatalogSafety(
+            stored,
+            userId,
+            domain,
+            expected,
+            null,
+          ) &&
+            writeImportGate(stored, domain, userId, null) &&
+            stored.getItem(key) === null
+            ? ('cleared' as const)
+            : ('unavailable' as const);
+        },
+      );
     } catch {
       result = 'unavailable';
+    } finally {
+      if (mounted.current && owner.current === userId) setBusy(false);
     }
     if (owner.current !== userId || !mounted.current) return;
     if (result === 'active') {
@@ -629,7 +777,7 @@ function ImportPanel({ domain }: { domain: ImportDomain }) {
       setNotice(
         result === 'changed'
           ? '原任务状态已变化，请重新核实后再解锁。'
-          : '无法清除导入锁，请检查浏览器本地存储权限。',
+          : '目录重读或保护清理未确认，导入保护仍保留；请恢复读取及本地存储后再核实。',
       );
       return;
     }

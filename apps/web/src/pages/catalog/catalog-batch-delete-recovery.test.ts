@@ -88,6 +88,62 @@ async function accepted(
 }
 
 describe('catalog batch deletion durable recovery', () => {
+  it.each(['asin', 'competitor'] as const)(
+    'recovers an exact %s session-only unsent claim when bridge rollback is denied',
+    async (domain) => {
+      const f = fixture(domain);
+      const scope = JSON.stringify([domain, 'owner', 'session-1']);
+      const recovery = new CatalogBatchDeleteRecovery(
+        'owner',
+        domain,
+        f.local,
+        f.session,
+        f.locks,
+        () => 'unsent-original',
+        scope,
+      );
+      const remove = f.local.removeItem;
+      const set = f.local.setItem;
+      f.local.setItem = (key, value) => {
+        if (key === recovery.key) throw new Error('quota');
+        set(key, value);
+      };
+      f.local.removeItem = (key) => {
+        if (key === importGateKey(domain, 'owner'))
+          throw new Error('cleanup denied');
+        remove(key);
+      };
+      const send = vi.fn(async () => counts);
+      await expect(
+        recovery.submit(['Group original'], send, f.current, f.publish),
+      ).rejects.toThrow('尚未发送请求');
+      expect(send).not.toHaveBeenCalled();
+      const restored = new CatalogBatchDeleteRecovery(
+        'owner',
+        domain,
+        f.local,
+        f.session,
+        f.locks,
+        undefined,
+        scope,
+      );
+      const gate = restored.read() as CatalogBatchDeleteGate;
+      expect(gate).toMatchObject({
+        operationId: 'unsent-original',
+        ownerScope: scope,
+        groupIds: ['Group original'],
+        state: 'unknown',
+      });
+      f.local.removeItem = remove;
+      const refresh = vi.fn(async () => undefined);
+      expect(
+        await restored.reconcile(gate, vi.fn(), refresh, f.current, true),
+      ).toMatchObject({ kind: 'cleared' });
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(f.local.getItem(importGateKey(domain, 'owner'))).toBeNull();
+      expect(f.session.getItem(restored.fallbackKey)).toBeNull();
+    },
+  );
   it('preserves known terminal counts through session fallback and refuses to clear while durable receipt writes fail', async () => {
     const f = fixture();
     const gate = await accepted(f);

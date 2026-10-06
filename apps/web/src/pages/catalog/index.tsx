@@ -69,6 +69,7 @@ import {
 } from './catalog-data';
 import { CATALOG_GATE_CHANGED } from './catalog-gate-events';
 import { runWithCatalogOperationLock } from './catalog-operation-lock';
+import { CatalogRefreshContext } from './catalog-refresh-context';
 import {
   catalogImportBlocksWrite,
   catalogSafetyKey,
@@ -1115,6 +1116,60 @@ export function CatalogPage({
   const [country, setCountry] = useState('');
   const [status, setStatus] = useState<StatusFilter>('ALL');
   const [query, setQuery] = useState<CatalogQuery>(INITIAL_QUERY);
+  const importReadEpoch = useRef(0);
+  const importSessionRevision = runtime.session.revision;
+  useLayoutEffect(() => {
+    importReadEpoch.current++;
+  }, [query, ownerId, peerSessionId, importSessionRevision]);
+  const refreshImportedCatalog = useMemo(
+    () => async () => {
+      const epoch = importReadEpoch.current;
+      const check = () => {
+        const state = identity.getSnapshot();
+        const policy = createAccess(
+          state.status === 'authenticated' ? state.identity : undefined,
+        );
+        if (
+          importReadEpoch.current !== epoch ||
+          runtime.session.revision !== importSessionRevision ||
+          state.status !== 'authenticated' ||
+          state.identity.user.id !== ownerId ||
+          state.identity.sessionId !== peerSessionId ||
+          !policy.canReadASIN ||
+          policy.mustChangePassword
+        )
+          throw new ApiError(
+            'CANCELLED',
+            '目录查询或会话已改变，请重读当前目录后再解除导入保护',
+          );
+      };
+      check();
+      await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+      check();
+      const first = await config.list(runtime.http, query);
+      check();
+      const last = Math.max(1, Math.ceil(first.total / first.pageSize));
+      const corrected =
+        first.current > last ? { ...query, current: last } : query;
+      const fresh =
+        corrected === query
+          ? first
+          : await config.list(runtime.http, corrected);
+      check();
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+      runtime.queryClient.setQueryData([config.id, 'groups', corrected], fresh);
+      if (corrected !== query) setQuery(corrected);
+    },
+    [
+      config,
+      identity,
+      importSessionRevision,
+      ownerId,
+      peerSessionId,
+      query,
+      runtime,
+    ],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const crossTabSafetyRevision = useRef(0);
   const clearCatalogCache = useCallback(async () => {
@@ -2023,7 +2078,9 @@ export function CatalogPage({
             </Button>
           </div>
         )}
-        {extra}
+        <CatalogRefreshContext.Provider value={refreshImportedCatalog}>
+          {extra}
+        </CatalogRefreshContext.Provider>
         {importBlocked && (
           <div className="space-y-2">
             <p role="status">

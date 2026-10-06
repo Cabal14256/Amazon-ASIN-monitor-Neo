@@ -3,6 +3,7 @@ import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { Button } from '../../components/ui/button';
 import { useTaskQuery } from '../../hooks/tasks';
+import { ApiError } from '../../lib/http';
 import { isBulkDeleteId } from '../../services/catalog-batch-delete';
 import { isTerminalTask } from '../../services/tasks';
 import { browserBatchDeleteRecovery } from './catalog-batch-delete-recovery';
@@ -71,6 +72,7 @@ export function useCatalogBatchDelete(options: {
   const [busy, setBusy] = useState(false);
   const busyRef = useRef<symbol | null>(null);
   const scopeEpoch = useRef(0);
+  const queryEpoch = useRef(0);
   const [message, setMessage] = useState<string | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const mounted = useRef(true);
@@ -150,6 +152,7 @@ export function useCatalogBatchDelete(options: {
     setRestoredReceipt(null);
   }, [authScope]);
   useLayoutEffect(() => {
+    queryEpoch.current++;
     setSelection({ scope, ids: [] });
     setConfirmation(null);
     setMessage(null);
@@ -196,19 +199,29 @@ export function useCatalogBatchDelete(options: {
   }, [owner, recovery, runtime.queryClient, revision, sessionId]);
 
   async function refresh() {
-    if (!current(false)) throw new Error('当前会话已变化，请在原账号下核实。');
+    const epoch = queryEpoch.current;
+    const check = () => {
+      if (!current(false))
+        throw new Error('当前会话已变化，请在原账号下核实。');
+      if (queryEpoch.current !== epoch)
+        throw new ApiError(
+          'CANCELLED',
+          '查询范围已改变，请重读当前目录后再解除删除保护。',
+        );
+    };
+    check();
     const config = latest.current.config;
     const query = latest.current.query;
     await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
-    if (!current(false)) throw new Error('当前会话已变化，请在原账号下核实。');
+    check();
     const first = await config.list(runtime.http, query);
-    if (!current(false)) throw new Error('当前会话已变化，请在原账号下核实。');
+    check();
     const last = Math.max(1, Math.ceil(first.total / first.pageSize));
     const corrected =
       first.current > last ? { ...query, current: last } : query;
     const fresh =
       corrected === query ? first : await config.list(runtime.http, corrected);
-    if (!current(false)) throw new Error('当前会话已变化，请在原账号下核实。');
+    check();
     runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
     runtime.queryClient.setQueryData([config.id, 'groups', corrected], fresh);
     if (corrected !== query) latest.current.onQuery(corrected);

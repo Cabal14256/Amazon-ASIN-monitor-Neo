@@ -20,10 +20,11 @@ import {
 } from '../../lib/transport-fixtures';
 import { createTransportRuntime } from '../../services/runtime';
 import { taskKeys } from '../../services/task-queries';
-import { importGateKey } from '../asin/asin-import-gate';
+import { importGateKey, writeImportGate } from '../asin/asin-import-gate';
 import { AsinImportPanel } from '../asin/asin-import-panel';
 import { ASIN_CATALOG } from '../asin/config';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
+import { writeImportCatalogSafety } from './catalog-operation-lock';
 import { catalogSafetyKey } from './catalog-safety-gate';
 import { writeImportGate as writeMainImport } from './fixtures/main-197-asin-import-gate';
 import { CatalogPage } from './index';
@@ -255,6 +256,123 @@ function expectSelectionBlocked() {
 }
 
 describe('mounted primary and competitor bulk-delete real HTTP transport', () => {
+  it.each(['asin', 'competitor'] as const)(
+    'rolls back a %s pre-dispatch import bridge when the larger catalog envelope hits quota',
+    async (domain) => {
+      const f = fixture(domain, { permissions: ['asin:read', 'asin:delete'] });
+      await selectAll();
+      const original = Storage.prototype.setItem;
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+        this: Storage,
+        key,
+        value,
+      ) {
+        if (
+          this === localStorage &&
+          key === catalogSafetyKey('operator', domain)
+        )
+          throw new DOMException('quota', 'QuotaExceededError');
+        return original.call(this, key, value);
+      });
+      fireEvent.click(screen.getByRole('button', { name: '批量删除所选组' }));
+      fireEvent.click(screen.getByRole('button', { name: '确认批量删除' }));
+      await screen.findByText(/尚未发送请求/);
+      expect(mutations(f)).toHaveLength(0);
+      expect(
+        localStorage.getItem(importGateKey(domain, 'operator')),
+      ).toBeNull();
+      expect(
+        sessionStorage.getItem(
+          `${catalogSafetyKey('operator', domain)}:batch-receipt`,
+        ),
+      ).toBeNull();
+      vi.restoreAllMocks();
+      f.unmount();
+      f.remount();
+      await selectAll();
+      expect(
+        screen.getByRole('button', { name: '选择本页可删除组' }),
+      ).toHaveProperty('disabled', false);
+    },
+  );
+  it.each(['asin', 'competitor'] as const)(
+    'retains both %s import guards across failed manual reread and reload',
+    async (domain) => {
+      const gate = {
+        phase: 'uncertain' as const,
+        taskId: null,
+        savedAt: 1,
+        operationId: 'original-import',
+      };
+      writeImportGate(localStorage, domain, 'operator', gate);
+      writeImportCatalogSafety(localStorage, 'operator', domain, gate, gate);
+      const f = fixture(domain, { withImport: true });
+      await screen.findByRole('button', { name: '已核实原任务，允许重新导入' });
+      f.setListResponse(async () => {
+        throw new Error('offline');
+      });
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole('button', { name: '已核实原任务，允许重新导入' }),
+        );
+      });
+      expect(
+        localStorage.getItem(importGateKey(domain, 'operator')),
+      ).not.toBeNull();
+      expect(
+        localStorage.getItem(catalogSafetyKey('operator', domain)),
+      ).not.toBeNull();
+      f.unmount();
+      f.remount();
+      await screen.findByRole('button', { name: '已核实原任务，允许重新导入' });
+      expectSelectionBlocked();
+      expect(mutations(f)).toHaveLength(0);
+    },
+  );
+  it.each(['asin', 'competitor'] as const)(
+    'keeps %s deletion safety when reconciliation query A changes to B while GET is pending',
+    async (domain) => {
+      const f = fixture(domain);
+      await screen.findAllByText('Group Grüp-1');
+      const pending = deferred<Response>();
+      let reads = 0;
+      f.setListResponse(async () =>
+        ++reads === 1
+          ? pending.promise
+          : jsonResponse({
+              success: true,
+              data: {
+                list: [group('query-B')],
+                total: 21,
+                current: 2,
+                pageSize: 10,
+              },
+            }),
+      );
+      await confirm();
+      await waitFor(() => expect(reads).toBe(1));
+      fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+      await screen.findAllByText('Group query-B');
+      await act(async () => {
+        pending.resolve(
+          jsonResponse({
+            success: true,
+            data: {
+              list: [group('query-A')],
+              total: 21,
+              current: 1,
+              pageSize: 10,
+            },
+          }),
+        );
+      });
+      expect(
+        localStorage.getItem(catalogSafetyKey('operator', domain)),
+      ).not.toBeNull();
+      expectSelectionBlocked();
+      expect(mutations(f)).toHaveLength(1);
+    },
+  );
   it.each(['asin', 'competitor'] as const)(
     'recovers a known %s import receipt from its shared envelope after an old tab clears only the original import key',
     async (domain) => {

@@ -57,6 +57,17 @@ export class CatalogBatchDeleteRecovery {
         this.domain,
       );
       if (
+        !local &&
+        fallback?.phase === 'batch-delete' &&
+        fallback.operationId !== 'invalid-record'
+      ) {
+        const bridge = this.local.getItem(
+          importGateKey(this.domain, this.owner),
+        );
+        if (bridge !== null && this.ownsImportBridge(bridge, fallback))
+          return fallback;
+      }
+      if (
         local?.phase === 'batch-delete' &&
         fallback?.phase === 'batch-delete' &&
         local.operationId === fallback.operationId &&
@@ -110,19 +121,47 @@ export class CatalogBatchDeleteRecovery {
     }
     return saved;
   }
-  private clear(expected: CatalogBatchDeleteGate): boolean {
+  private clear(expected: CatalogBatchDeleteGate, unsent = false): boolean {
     const current = this.read();
     if (
-      current?.phase !== 'batch-delete' ||
-      current.operationId !== expected.operationId ||
-      current.taskId !== expected.taskId ||
-      current.state !== expected.state
+      !(unsent && !current && this.local.getItem(this.key) === null) &&
+      (current?.phase !== 'batch-delete' ||
+        current.operationId !== expected.operationId ||
+        current.ownerScope !== expected.ownerScope ||
+        current.submittedAt !== expected.submittedAt ||
+        JSON.stringify(current.groupIds) !==
+          JSON.stringify(expected.groupIds) ||
+        current.taskId !== expected.taskId ||
+        current.state !== expected.state)
     )
       return false;
+    const fallbackRaw = this.session?.getItem(this.fallbackKey) ?? null;
+    if (fallbackRaw !== null) {
+      const fallback = readCatalogSafetyGate(
+        { getItem: () => fallbackRaw, removeItem: () => undefined },
+        this.owner,
+        this.domain,
+      );
+      if (
+        fallback?.phase !== 'batch-delete' ||
+        fallback.operationId !== expected.operationId ||
+        fallback.ownerScope !== expected.ownerScope ||
+        fallback.submittedAt !== expected.submittedAt ||
+        JSON.stringify(fallback.groupIds) !== JSON.stringify(expected.groupIds)
+      )
+        return false;
+    }
     const importRaw = this.local.getItem(
       importGateKey(this.domain, this.owner),
     );
     if (importRaw !== null && !this.ownsImportBridge(importRaw, expected))
+      return false;
+    if (
+      importRaw !== null &&
+      !writeImportGate(this.local, this.domain, this.owner, null)
+    )
+      return false;
+    if (this.local.getItem(importGateKey(this.domain, this.owner)) !== null)
       return false;
     try {
       this.session?.removeItem(this.fallbackKey);
@@ -130,11 +169,6 @@ export class CatalogBatchDeleteRecovery {
     } catch {
       return false;
     }
-    if (
-      importRaw !== null &&
-      !writeImportGate(this.local, this.domain, this.owner, null)
-    )
-      return false;
     if (!writeCatalogSafetyGate(this.local, this.owner, this.domain, null))
       return false;
     notifyCatalogGateChanged(importGateKey(this.domain, this.owner));
@@ -182,8 +216,27 @@ export class CatalogBatchDeleteRecovery {
           state: 'unknown',
           ...(this.ownerScope ? { ownerScope: this.ownerScope } : {}),
         };
-        if (!this.remember(claim))
-          throw new Error('无法保存删除状态，尚未发送请求。');
+        if (!this.remember(claim)) {
+          // Still under both locks; no destructive request has been dispatched.
+          let rolledBack = false;
+          try {
+            rolledBack = this.clear(claim, true);
+          } catch {
+            /* Keep the exact operation-bound session receipt for recovery. */
+          }
+          if (current()) {
+            const remaining = this.read();
+            if (rolledBack) publish(null);
+            else if (remaining?.phase === 'batch-delete') publish(remaining);
+            else if (!remaining) publish(claim);
+          }
+          throw new ApiError(
+            'INVALID_INPUT',
+            rolledBack
+              ? '无法保存删除状态，尚未发送请求；原保护已回滚。'
+              : '无法保存删除状态，尚未发送请求；请恢复原删除回执并核实保护。',
+          );
+        }
         if (!current()) {
           this.clear(claim);
           return { kind: 'stale' as const };
