@@ -34,7 +34,7 @@ sh packages/db/docker/apply-scheduled-monitor.sh competitor packages/db/migratio
 
 SQL 在单个事务内执行，锁等待 5 秒、statement timeout 30 秒；同一 domain 的升级通过事务级 advisory lock 串行。已有私有表在 DDL 前取得排他表锁，以防校验后并发更换结构。
 
-首次创建记录 `amazon-asin-monitor:scheduled-ledger:v1` 版本与 catalog 指纹；重复执行在 DDL 前后核对列类型/空值/default/collation、约束与验证状态、索引及有效性、非内部 trigger、rule 和 RLS。ACL 与 ownership 可按部署授权调整，不进入结构摘要。无标记的预存表、未知标记、任何结构漂移均拒绝且回滚，不能依靠 `IF NOT EXISTS` 静默沿用或修补。该标记属于迁移事实源，不能手工重写以掩盖漂移；修复应先在隔离副本确认原因，再走独立迁移。
+首次创建记录 `amazon-asin-monitor:scheduled-ledger:v1` 版本与 catalog 指纹；重复执行在 DDL 前后核对列类型/空值/default/collation、约束与验证状态、索引及有效性、用户 trigger、内部外键 trigger 的启用状态、rule 和 RLS。内部 trigger 使用逻辑约束与函数身份，排除会因恢复而变化的 OID 名称。ACL 与 ownership 可按部署授权调整，不进入结构摘要。无标记的预存表、未知标记、首次索引命名冲突或任何结构漂移均拒绝且回滚，不能依靠 `IF NOT EXISTS` 静默沿用或修补。该标记属于迁移事实源，不能手工重写以掩盖漂移；修复应先在隔离副本确认原因，再走独立迁移。
 
 ## 回滚与后续存储纪律
 

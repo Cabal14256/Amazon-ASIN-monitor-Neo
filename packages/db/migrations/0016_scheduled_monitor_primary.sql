@@ -25,6 +25,10 @@ DECLARE
   fingerprint text;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('amazon-asin-monitor:scheduled-ledger:primary',0));
+  IF to_regclass('public.primary_scheduled_monitor_runs') IS NULL
+     AND to_regclass('public.idx_primary_scheduled_monitor_expiry') IS NOT NULL THEN
+    RAISE EXCEPTION 'scheduled ledger index namespace collision';
+  END IF;
   FOREACH table_name IN ARRAY ARRAY['primary_scheduled_monitor_runs','primary_scheduled_monitor_notifications','primary_scheduled_monitor_group_receipts'] LOOP
     relation := to_regclass('public.' || table_name);
     expected_prefix := 'amazon-asin-monitor:scheduled-ledger:v1:primary:' || table_name || ':';
@@ -40,6 +44,7 @@ BEGIN
       'constraints', (SELECT coalesce(jsonb_agg(jsonb_build_array(k.conname,k.contype,k.convalidated,pg_get_constraintdef(k.oid)) ORDER BY k.conname),'[]'::jsonb) FROM pg_constraint k WHERE k.conrelid=c.oid),
       'indexes', (SELECT coalesce(jsonb_agg(jsonb_build_array(i.indexrelid::regclass::text,i.indisvalid,i.indisready,pg_get_indexdef(i.indexrelid)) ORDER BY i.indexrelid::regclass::text),'[]'::jsonb) FROM pg_index i WHERE i.indrelid=c.oid),
       'triggers', (SELECT coalesce(jsonb_agg(jsonb_build_array(t.tgname,t.tgenabled,pg_get_triggerdef(t.oid)) ORDER BY t.tgname),'[]'::jsonb) FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal),
+      'constraintTriggers', (SELECT coalesce(jsonb_agg(jsonb_build_array(k.conname,t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,t.tgfoid::regproc::text) ORDER BY k.conname,t.tgtype,t.tgfoid::regproc::text),'[]'::jsonb) FROM pg_trigger t LEFT JOIN pg_constraint k ON k.oid=t.tgconstraint WHERE t.tgrelid=c.oid AND t.tgisinternal),
       'rules', (SELECT coalesce(jsonb_agg(pg_get_ruledef(r.oid) ORDER BY r.rulename),'[]'::jsonb) FROM pg_rewrite r WHERE r.ev_class=c.oid)
     )::text) INTO fingerprint FROM pg_class c WHERE c.oid=relation;
     IF marker <> expected_prefix || fingerprint THEN
@@ -142,6 +147,7 @@ BEGIN
       'constraints', (SELECT coalesce(jsonb_agg(jsonb_build_array(k.conname,k.contype,k.convalidated,pg_get_constraintdef(k.oid)) ORDER BY k.conname),'[]'::jsonb) FROM pg_constraint k WHERE k.conrelid=c.oid),
       'indexes', (SELECT coalesce(jsonb_agg(jsonb_build_array(i.indexrelid::regclass::text,i.indisvalid,i.indisready,pg_get_indexdef(i.indexrelid)) ORDER BY i.indexrelid::regclass::text),'[]'::jsonb) FROM pg_index i WHERE i.indrelid=c.oid),
       'triggers', (SELECT coalesce(jsonb_agg(jsonb_build_array(t.tgname,t.tgenabled,pg_get_triggerdef(t.oid)) ORDER BY t.tgname),'[]'::jsonb) FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal),
+      'constraintTriggers', (SELECT coalesce(jsonb_agg(jsonb_build_array(k.conname,t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,t.tgfoid::regproc::text) ORDER BY k.conname,t.tgtype,t.tgfoid::regproc::text),'[]'::jsonb) FROM pg_trigger t LEFT JOIN pg_constraint k ON k.oid=t.tgconstraint WHERE t.tgrelid=c.oid AND t.tgisinternal),
       'rules', (SELECT coalesce(jsonb_agg(pg_get_ruledef(r.oid) ORDER BY r.rulename),'[]'::jsonb) FROM pg_rewrite r WHERE r.ev_class=c.oid)
     )::text) INTO fingerprint FROM pg_class c WHERE c.oid=relation;
     marker := obj_description(relation,'pg_class');

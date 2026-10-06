@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { competitorMonitorJobSchema } from '../src/domains/competitor-monitor';
 import {
   primaryMonitorJobSchema,
   triggerMonitorRequestSchema,
@@ -34,6 +35,10 @@ describe('private scheduled monitor contracts', () => {
   it('keeps the system actor separate from manual task and public trigger shapes', () => {
     expect(scheduledMonitorJobSchema.parse(job)).toEqual(job);
     expect(primaryMonitorJobSchema.safeParse(job).success).toBe(false);
+    expect(
+      competitorMonitorJobSchema.safeParse({ ...job, domain: 'competitor' })
+        .success,
+    ).toBe(false);
     expect(triggerMonitorRequestSchema.safeParse(job).success).toBe(false);
     expect(
       scheduledMonitorJobSchema.safeParse({ ...job, userId: 'ordinary-user' })
@@ -46,6 +51,13 @@ describe('private scheduled monitor contracts', () => {
     { version: 2 },
     { taskType: 'monitor' },
     { actor: { kind: 'user', purpose: 'scheduled-monitor' } },
+    {
+      actor: {
+        kind: 'system',
+        purpose: 'scheduled-monitor',
+        sessionId: 'borrowed-session',
+      },
+    },
     {
       actor: {
         kind: 'system',

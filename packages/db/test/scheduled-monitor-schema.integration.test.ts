@@ -233,7 +233,9 @@ suite.each(domains)(
       `ALTER TABLE ${prefix}_runs DROP CONSTRAINT ck_${prefix}_batch`,
       `ALTER TABLE ${prefix}_runs DROP CONSTRAINT ck_${prefix}_digest; ALTER TABLE ${prefix}_runs ADD CONSTRAINT ck_${prefix}_digest CHECK (true)`,
       `ALTER TABLE ${prefix}_runs ENABLE ROW LEVEL SECURITY`,
+      `ALTER TABLE ${prefix}_runs DISABLE TRIGGER ALL`,
       `DROP INDEX idx_${prefix}_expiry`,
+      `DROP TABLE ${prefix}_runs CASCADE; CREATE TABLE index_owner(id integer); CREATE INDEX idx_${prefix}_expiry ON index_owner(id)`,
       `ALTER TABLE ${prefix}_notifications DROP CONSTRAINT fk_${prefix}_notice_run`,
     ])(
       'refuses catalog drift before a repeated upgrade can repair it (%#)',
@@ -277,6 +279,71 @@ suite.each(domains)(
         ])
           await reject(() => insert('runs', run(change)), '23514');
       }));
+    it('rejects missing and JSON-null required identity/time keys instead of passing SQL UNKNOWN', () =>
+      transaction(async () => {
+        for (const key of [
+          'version',
+          'source',
+          'taskType',
+          'actor',
+          'domain',
+          'country',
+          'taskId',
+          'jobId',
+          'intervalMinutes',
+          'batchConfig',
+          'plannedSlot',
+          'requestedAt',
+          'createdAt',
+          'expiresAt',
+        ]) {
+          const missing: Record<string, unknown> = { ...job };
+          delete missing[key];
+          for (const value of [missing, { ...job, [key]: null }])
+            await reject(
+              () => insert('runs', run({ job: JSON.stringify(value) })),
+              '23514',
+            );
+        }
+        for (const value of [
+          null,
+          { ...job, actor: { kind: 'system' } },
+          { ...job, actor: { purpose: 'scheduled-monitor' } },
+          { ...job, actor: { kind: null, purpose: 'scheduled-monitor' } },
+          { ...job, batchConfig: { batchIndex: 0 } },
+          { ...job, batchConfig: { totalBatches: 1 } },
+          { ...job, batchConfig: { batchIndex: null, totalBatches: 1 } },
+        ])
+          await reject(
+            () => insert('runs', run({ job: JSON.stringify(value) })),
+            '23514',
+          );
+      }));
+    it('refuses the opposite domain upgrade before creating any mixed-ledger table', async () => {
+      const opposite = domain === 'primary' ? 'competitor' : 'primary';
+      const oppositeSql = readFileSync(
+        resolve(
+          __dirname,
+          `../migrations/0016_scheduled_monitor_${opposite}.sql`,
+        ),
+        'utf8',
+      ).replaceAll('public.', `${qualified}.`);
+      try {
+        await expect(connection().query(oppositeSql)).rejects.toMatchObject({
+          code: 'P0001',
+        });
+      } finally {
+        await connection().query('ROLLBACK');
+      }
+      expect(
+        (
+          await connection().query(
+            'SELECT count(*)::integer AS n FROM information_schema.tables WHERE table_schema=$1 AND table_name LIKE $2',
+            [schema, `${opposite}_scheduled_monitor_%`],
+          )
+        ).rows[0].n,
+      ).toBe(0);
+    });
     it('rejects stale-plan replacements and capacities before any receipt or notice exists', () =>
       transaction(async () => {
         for (const change of [
