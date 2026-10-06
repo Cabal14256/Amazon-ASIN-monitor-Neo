@@ -98,6 +98,7 @@ function fixture(
   } as unknown as IdentityStore;
   let listFails = false,
     taskStatus = 'pending';
+  let listResponse: (() => Promise<Response>) | null = null;
   let checkResponse: () => Promise<Response> = async () =>
     envelope({
       taskId: 'job-1',
@@ -123,6 +124,7 @@ function fixture(
     if (path.endsWith(encodeURIComponent(group.id))) return envelope(group);
     if (listFails)
       return jsonResponse({ success: false, errorMessage: 'read failed' }, 500);
+    if (listResponse) return listResponse();
     return envelope({
       list: [group, second],
       total: 2,
@@ -160,6 +162,9 @@ function fixture(
     },
     setListFailure: (value: boolean) => {
       listFails = value;
+    },
+    setList: (next: () => Promise<Response>) => {
+      listResponse = next;
     },
     setTaskStatus: (status: string) => {
       taskStatus = status;
@@ -215,6 +220,18 @@ async function openDetails() {
   );
   await screen.findAllByRole('button', { name: '立即检查' });
 }
+function peerClearsCheck(domain: 'asin' | 'competitor' = 'asin') {
+  const key = catalogSafetyKey('operator', domain);
+  window.localStorage.removeItem(catalogCheckGateKey(domain, 'operator'));
+  window.localStorage.removeItem(key);
+  window.dispatchEvent(
+    new StorageEvent('storage', {
+      key,
+      newValue: null,
+      storageArea: window.localStorage,
+    }),
+  );
+}
 describe('mounted existing Neo manual check endpoints with actual transport', () => {
   it('shares desktop/mobile selection, confirms the raw targets and submits one normalized async primary batch', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-07T00:00:00Z'));
@@ -259,7 +276,7 @@ describe('mounted existing Neo manual check endpoints with actual transport', ()
       JSON.parse(
         window.localStorage.getItem(catalogSafetyKey('operator', 'asin'))!,
       ),
-    ).toMatchObject({ phase: 'check', check: { taskId: 'job-1' } });
+    ).toMatchObject({ phase: 'inspection', check: { taskId: 'job-1' } });
   });
   it.each([
     ['group', 0, 'competitor-variant-group-check', 'variant-groups', group.id],
@@ -296,13 +313,23 @@ describe('mounted existing Neo manual check endpoints with actual transport', ()
       });
     },
   );
-  it('clears selections and confirmation when applied query changes', async () => {
+  it('permanently clears selections and confirmation on an applied query A → B → A roundtrip', async () => {
     const f = fixture();
     await selectGroup();
     fireEvent.click(screen.getByRole('button', { name: '检查所选组' }));
     fireEvent.click(screen.getByRole('button', { name: '异常' }));
     expect(screen.queryByRole('region', { name: '确认检查' })).toBeNull();
     expect(screen.getByText('已选 0 组')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '全部' }));
+    expect(screen.queryByRole('region', { name: '确认检查' })).toBeNull();
+    expect(screen.getByText('已选 0 组')).toBeTruthy();
+    expect(
+      screen
+        .getAllByRole('checkbox', {
+          name: `选择变体组 ${group.name}，ID ${JSON.stringify(group.id)}`,
+        })
+        .every((input) => !(input as HTMLInputElement).checked),
+    ).toBe(true);
     expect(f.checkCalls()).toHaveLength(0);
   });
   it.each(['owner', 'session', 'read-permission', 'password'] as const)(
@@ -451,6 +478,154 @@ describe('mounted existing Neo manual check endpoints with actual transport', ()
     ).toBeNull();
     expect(f.checkCalls()).toHaveLength(1);
   });
+  it.each(['asin', 'competitor'] as const)(
+    'shows a GET-only retry when a peer reconciles the %s check but this tab cannot reread its catalog',
+    async (domain) => {
+      const f = fixture(domain, ['asin:read', 'asin:write', 'asin:delete']);
+      if (domain === 'asin') await submitBatch();
+      else {
+        await openDetails();
+        fireEvent.click(screen.getAllByRole('button', { name: '立即检查' })[0]);
+        fireEvent.click(
+          within(screen.getByRole('region', { name: '确认检查' })).getByRole(
+            'button',
+            { name: '确认提交检查' },
+          ),
+        );
+      }
+      await screen.findByText('job-1');
+      f.setListFailure(true);
+      act(() => peerClearsCheck(domain));
+      await screen.findByText(/其他标签已核实原检查，但本页目录重读失败/);
+      expect(screen.queryByText('job-1')).toBeNull();
+      expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+      expect(
+        f.runtime.queryClient.getQueryData([
+          'catalog-write-safety',
+          'operator',
+          domain,
+        ]),
+      ).toMatchObject({ phase: 'check' });
+      fireEvent.click(
+        screen.getByRole('button', { name: '重新读取检查后的目录' }),
+      );
+      await screen.findByText(/其他标签已核实原检查，但本页目录重读失败/);
+      expect(f.checkCalls()).toHaveLength(1);
+      f.setListFailure(false);
+      fireEvent.click(
+        screen.getByRole('button', { name: '重新读取检查后的目录' }),
+      );
+      await screen.findByRole('button', { name: '新建变体组' });
+      expect(
+        f.runtime.queryClient.getQueryData([
+          'catalog-write-safety',
+          'operator',
+          domain,
+        ]),
+      ).toBeNull();
+      expect(
+        screen.queryByRole('button', { name: '重新读取检查后的目录' }),
+      ).toBeNull();
+      expect(f.checkCalls()).toHaveLength(1);
+    },
+  );
+  it('keeps a replacement peer check guarded when an older catalog reread completes late', async () => {
+    const f = fixture('asin', ['asin:read', 'asin:write', 'asin:delete']);
+    await submitBatch();
+    await screen.findByText('job-1');
+    const reread = deferred<Response>();
+    f.setList(() => reread.promise);
+    act(() => peerClearsCheck());
+    await screen.findByText(/其他标签已核实原检查，正在重新读取本页目录/);
+    const check = {
+      requestId: 'peer-check-2',
+      submittedAt: Date.now(),
+      target: { kind: 'group', id: group.id, label: group.name },
+      taskId: 'job-2',
+    };
+    const key = catalogSafetyKey('operator', 'asin');
+    const raw = JSON.stringify({
+      phase: 'inspection',
+      operationId: check.requestId,
+      check,
+    });
+    act(() => {
+      window.localStorage.setItem(
+        catalogCheckGateKey('asin', 'operator'),
+        JSON.stringify(check),
+      );
+      window.localStorage.setItem(key, raw);
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key,
+          newValue: raw,
+          storageArea: window.localStorage,
+        }),
+      );
+    });
+    await act(async () =>
+      reread.resolve(
+        envelope({ list: [group], total: 1, current: 1, pageSize: 10 }),
+      ),
+    );
+    await screen.findByText('job-2');
+    expect(window.localStorage.getItem(key)).toBe(raw);
+    expect(
+      f.runtime.queryClient.getQueryData([
+        'catalog-write-safety',
+        'operator',
+        'asin',
+      ]),
+    ).toMatchObject({ phase: 'check', operationId: 'peer-check-2' });
+    expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+    expect(f.checkCalls()).toHaveLength(1);
+  });
+  it.each(['owner', 'read-permission', 'password', 'leave'] as const)(
+    'aborts a peer catalog reread and ignores its late response after %s changes',
+    async (boundary) => {
+      const f = fixture();
+      await submitBatch();
+      await screen.findByText('job-1');
+      const reread = deferred<Response>();
+      f.setList(() => reread.promise);
+      const before = f.fetcher.mock.calls.length;
+      act(() => peerClearsCheck());
+      await screen.findByText(/其他标签已核实原检查，正在重新读取本页目录/);
+      await waitFor(() =>
+        expect(f.fetcher.mock.calls.length).toBeGreaterThan(before),
+      );
+      const pendingSignals = f.fetcher.mock.calls
+        .slice(before)
+        .filter(([input]) =>
+          new URL(String(input)).pathname.endsWith('/variant-groups'),
+        )
+        .map(([, options]) => options?.signal);
+      act(() => {
+        if (boundary === 'owner') f.setOwner('other');
+        if (boundary === 'read-permission') f.setIdentity({ permissions: [] });
+        if (boundary === 'password')
+          f.setIdentity({ mustChangePassword: true });
+        if (boundary === 'leave') f.unmount();
+      });
+      await waitFor(() =>
+        expect(pendingSignals.some((signal) => signal?.aborted)).toBe(true),
+      );
+      await act(async () =>
+        reread.resolve(
+          envelope({ list: [group], total: 1, current: 1, pageSize: 10 }),
+        ),
+      );
+      expect(
+        f.runtime.queryClient.getQueryData([
+          'catalog-write-safety',
+          'operator',
+          'asin',
+        ]),
+      ).toMatchObject({ phase: 'check' });
+      expect(screen.queryByText('job-1')).toBeNull();
+      expect(f.checkCalls()).toHaveLength(1);
+    },
+  );
   it('honors a cross-tab CRUD gate without claiming a batch or sending a request', async () => {
     const key = catalogSafetyKey('operator', 'asin');
     window.localStorage.setItem(

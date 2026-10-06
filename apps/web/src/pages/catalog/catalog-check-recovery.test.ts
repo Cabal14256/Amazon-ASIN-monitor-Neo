@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
+import {
+  readCatalogSafetyGate as readMainGate,
+  writeCatalogSafetyGate as writeMainGate,
+} from './__fixtures__/catalog-safety-gate-main-197925d';
 import { CatalogCheckRecovery } from './catalog-check-recovery';
 import { catalogSafetyKey, readCatalogSafetyGate } from './catalog-safety-gate';
 
@@ -16,7 +20,7 @@ function storage() {
     }),
   };
 }
-function fixture(shared = false) {
+function fixture(shared = false, catalog: 'asin' | 'competitor' = 'asin') {
   const local = storage(),
     session = storage();
   let previous = Promise.resolve();
@@ -38,19 +42,115 @@ function fixture(shared = false) {
   let id = 0;
   const create = (owner = 'operator') =>
     new CatalogCheckRecovery(
-      'asin',
+      catalog,
       owner,
       local,
       session,
       locks,
       () => 1000,
       () => `request-${++id}`,
-      shared ? { owner, catalog: 'asin' } : undefined,
+      shared ? { owner, catalog } : undefined,
     );
   return { local, session, create, store: create() };
 }
 
 describe('shared catalog check operation gate', () => {
+  it.each(['asin', 'competitor'] as const)(
+    'executes the old main parser against a new %s check envelope without dropping the guard or receipt',
+    async (catalog) => {
+      const f = fixture(true, catalog),
+        key = catalogSafetyKey('operator', catalog);
+      const send = vi.fn(async () => {
+        const raw = f.local.getItem(key);
+        expect(JSON.parse(raw!)).toMatchObject({
+          phase: 'inspection',
+          check: { requestId: 'request-1' },
+        });
+        const oldView = readMainGate(f.local, 'operator', catalog);
+        expect(oldView).toEqual({
+          phase: 'inspection',
+          operationId: 'request-1',
+        });
+        expect(f.local.getItem(key)).toBe(raw);
+        // Exercise an old bundle rewriting the reservation after parsing it.
+        expect(writeMainGate(f.local, 'operator', catalog, oldView)).toBe(true);
+        expect(f.local.getItem(key)).not.toContain('check');
+        return {
+          kind: 'task' as const,
+          taskId: 'task-1',
+          status: 'pending' as const,
+        };
+      });
+      const result = await f.store.submit(target, send);
+      expect(result).toMatchObject({ kind: 'task', persisted: true });
+      const acceptedRaw = f.local.getItem(key);
+      const oldView = readMainGate(f.local, 'operator', catalog);
+      expect(oldView?.phase).toBe('inspection');
+      expect(f.local.getItem(key)).toBe(acceptedRaw);
+      writeMainGate(f.local, 'operator', catalog, oldView);
+      expect(f.create().read()).toMatchObject({ taskId: 'task-1' });
+      expect((await f.create().submit(target, send)).kind).toBe('blocked');
+      expect(send).toHaveBeenCalledTimes(1);
+      if (result.kind !== 'task') throw new Error('task');
+      expect(
+        await f.create().reconcile(result.gate, async () => ({
+          taskId: 'task-1',
+          status: 'completed',
+        })),
+      ).toBe('cleared');
+      expect(f.local.getItem(key)).toBeNull();
+      expect(f.local.getItem(f.store.key)).toBeNull();
+    },
+  );
+  it('never claims or clears a different old inspection reservation after payload loss', async () => {
+    const f = fixture(true);
+    const result = await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'pending',
+    }));
+    if (result.kind !== 'task') throw new Error('task');
+    const replacement = { phase: 'inspection' as const, operationId: 'other' };
+    writeMainGate(f.local, 'operator', 'asin', replacement);
+    expect(await f.store.clear(result.gate)).toBe(false);
+    expect(readMainGate(f.local, 'operator', 'asin')).toEqual(replacement);
+    expect(f.store.read()?.taskId).toBe('task-1');
+  });
+  it.each([
+    { phase: 'inspection', operationId: 'broken', check: {} },
+    { phase: 'inspection', operationId: 'other', batchDelete: {} },
+    { phase: 'inspection', operationId: 'other', importOperation: true },
+  ])('preserves other or malformed inspection envelopes: %j', async (value) => {
+    const f = fixture(true),
+      key = catalogSafetyKey('operator', 'asin'),
+      raw = JSON.stringify(value),
+      send = vi.fn();
+    f.local.setItem(key, raw);
+    expect(readMainGate(f.local, 'operator', 'asin')?.phase).toBe('inspection');
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')?.phase).toBe(
+      Object.hasOwn(value, 'check') ? 'check-invalid' : 'inspection',
+    );
+    await expect(f.store.submit(target, send)).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    expect(f.local.getItem(key)).toBe(raw);
+    expect(send).not.toHaveBeenCalled();
+  });
+  it('does not discard an unreadable foreign inspection envelope', async () => {
+    const f = fixture(true),
+      key = catalogSafetyKey('operator', 'asin'),
+      raw = '{"phase":"inspection","batchDelete":',
+      send = vi.fn();
+    f.local.setItem(key, raw);
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')?.phase).toBe(
+      'inspection',
+    );
+    await expect(f.store.submit(target, send)).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    expect(f.local.getItem(key)).toBe(raw);
+    expect(send).not.toHaveBeenCalled();
+  });
   it('claims the shared gate before dispatch and restores raw selected IDs with the accepted task', async () => {
     const f = fixture(true);
     const batch = {

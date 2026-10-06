@@ -64,6 +64,22 @@ export class CatalogCheckRecovery {
       : null;
   }
 
+  private ownsSharedGate(
+    current: ReturnType<CatalogCheckRecovery['sharedGate']>,
+    requestId: string,
+  ): boolean {
+    if (!current) return true;
+    if (current.operationId !== requestId) return false;
+    if (current.phase === 'check') return true;
+    // An old client may rewrite its parsed inspection reservation, dropping
+    // the envelope payload. Only our matching independent receipt can prove
+    // this reservation belongs to the check being updated or reconciled.
+    return (
+      current.phase === 'inspection' &&
+      parse(this.local.getItem(this.key))?.requestId === requestId
+    );
+  }
+
   read(): CatalogCheckGate | null {
     const shared = this.sharedGate();
     const local =
@@ -86,11 +102,7 @@ export class CatalogCheckRecovery {
       const raw = JSON.stringify(gate);
       if (this.shared) {
         const current = this.sharedGate();
-        if (
-          current &&
-          (current.phase !== 'check' || current.operationId !== gate.requestId)
-        )
-          return false;
+        if (!this.ownsSharedGate(current, gate.requestId)) return false;
         const shared = {
           phase: 'check' as const,
           operationId: gate.requestId,
@@ -103,7 +115,7 @@ export class CatalogCheckRecovery {
             this.shared.catalog,
             shared,
           ) ||
-          this.local.getItem(this.lockKey) !== JSON.stringify(shared)
+          JSON.stringify(this.sharedGate()) !== JSON.stringify(shared)
         )
           return false;
         this.shared.publish?.(shared);
@@ -143,12 +155,7 @@ export class CatalogCheckRecovery {
         return false;
       if (this.shared) {
         const shared = this.sharedGate();
-        if (
-          shared &&
-          (shared.phase !== 'check' ||
-            shared.operationId !== expected.requestId)
-        )
-          return false;
+        if (!this.ownsSharedGate(shared, expected.requestId)) return false;
       }
       this.local.removeItem(this.key);
       this.session?.removeItem(this.key);

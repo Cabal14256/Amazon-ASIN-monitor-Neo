@@ -1147,6 +1147,12 @@ function CatalogPageBody({
   } | null>(null);
   const pendingConfirmation =
     confirmation?.scope === selectionScope ? confirmation : null;
+  useLayoutEffect(() => {
+    // Invalidate the stored targets, not only their visibility. Returning to a
+    // previous query must never revive an old selection or confirmation.
+    setSelectedGroups({ scope: selectionScope, ids: [] });
+    setConfirmation(null);
+  }, [selectionScope]);
   const selection: CatalogSelection = {
     ids: selectedGroupIds,
     disabled: checkBusy || writing || Boolean(safety) || storageUnavailable,
@@ -1174,6 +1180,14 @@ function CatalogPageBody({
   const checkOwner = useRef(userId);
   checkOwner.current = userId;
   const checkRequest = useRef<AbortController | null>(null);
+  const peerCheckRequest = useRef<AbortController | null>(null);
+  const invalidatePeerCheck = useCallback(() => {
+    ++crossTabSafetyRevision.current;
+    peerCheckRequest.current?.abort();
+  }, []);
+  const [peerCheckRefresh, setPeerCheckRefresh] = useState<
+    'reading' | 'failed' | null
+  >(null);
   const recovery = useMemo(() => {
     try {
       return config.checks && userId
@@ -1218,6 +1232,7 @@ function CatalogPageBody({
     return () => {
       mounted.current = false;
       checkRequest.current?.abort();
+      peerCheckRequest.current?.abort();
     };
   }, []);
   useEffect(() => {
@@ -1247,6 +1262,81 @@ function CatalogPageBody({
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  const rereadReleasedCheck = useCallback(
+    async (stored: Storage, revision: number) => {
+      peerCheckRequest.current?.abort();
+      const controller = new AbortController();
+      peerCheckRequest.current = controller;
+      const current = () =>
+        mounted.current &&
+        currentCheckScope() &&
+        !controller.signal.aborted &&
+        revision === crossTabSafetyRevision.current;
+      const guard = () => {
+        if (!current()) throw new ApiError('CANCELLED', '身份或页面已变化');
+      };
+      setPeerCheckRefresh('reading');
+      try {
+        guard();
+        await clearCatalogCache();
+        guard();
+        const firstPage = await config.list(
+          runtime.http,
+          query,
+          controller.signal,
+        );
+        guard();
+        const lastPage = Math.max(
+          1,
+          Math.ceil(firstPage.total / firstPage.pageSize),
+        );
+        const correctedQuery =
+          firstPage.current > lastPage
+            ? { ...query, current: lastPage }
+            : query;
+        const fresh =
+          correctedQuery === query
+            ? firstPage
+            : await config.list(
+                runtime.http,
+                correctedQuery,
+                controller.signal,
+              );
+        guard();
+        const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+        if (latest || recovery?.read()) {
+          if (latest) runtime.queryClient.setQueryData(safetyKey, latest);
+          restoreCheck();
+          setPeerCheckRefresh(null);
+          return;
+        }
+        runtime.queryClient.setQueryData(
+          [config.id, 'groups', correctedQuery],
+          fresh,
+        );
+        if (correctedQuery !== query) setQuery(correctedQuery);
+        runtime.queryClient.setQueryData(safetyKey, null);
+        setPeerCheckRefresh(null);
+      } catch {
+        if (current()) setPeerCheckRefresh('failed');
+        // The cached check still blocks operations until a successful GET.
+      } finally {
+        if (peerCheckRequest.current === controller)
+          peerCheckRequest.current = null;
+      }
+    },
+    [
+      clearCatalogCache,
+      config,
+      currentCheckScope,
+      ownerId,
+      query,
+      recovery,
+      restoreCheck,
+      runtime,
+      safetyKey,
+    ],
+  );
   useLayoutEffect(() => {
     if (!ownerId || !config.writes) return;
     let active = true;
@@ -1263,6 +1353,8 @@ function CatalogPageBody({
       const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {
+        peerCheckRequest.current?.abort();
+        setPeerCheckRefresh(null);
         runtime.queryClient.setQueryData(safetyKey, incoming);
         if (incoming.phase === 'refresh') {
           setAction(null);
@@ -1280,6 +1372,11 @@ function CatalogPageBody({
         currentSafety?.phase !== 'check'
       ) {
         runtime.queryClient.setQueryData(safetyKey, null);
+        setPeerCheckRefresh(null);
+        return;
+      }
+      if (currentSafety.phase === 'check') {
+        void rereadReleasedCheck(stored, revision);
         return;
       }
       void (async () => {
@@ -1321,9 +1418,19 @@ function CatalogPageBody({
     window.addEventListener('storage', syncSafety);
     return () => {
       active = false;
+      invalidatePeerCheck();
       window.removeEventListener('storage', syncSafety);
     };
-  }, [clearCatalogCache, config, ownerId, query, runtime, safetyKey]);
+  }, [
+    clearCatalogCache,
+    config,
+    ownerId,
+    query,
+    rereadReleasedCheck,
+    runtime,
+    safetyKey,
+    invalidatePeerCheck,
+  ]);
   useEffect(() => {
     if (!action) return;
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -1826,6 +1933,36 @@ function CatalogPageBody({
     }
   }
 
+  async function retryReleasedCheck() {
+    if (
+      peerCheckRefresh === 'reading' ||
+      safety?.phase !== 'check' ||
+      !mounted.current ||
+      !currentCheckScope()
+    )
+      return;
+    try {
+      await runWithCatalogLock(async () => {
+        if (!mounted.current || !currentCheckScope()) return;
+        const stored = catalogSafetyStorage();
+        if (!stored) {
+          setStorageUnavailable(true);
+          return;
+        }
+        const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+        if (latest || recovery?.read()) {
+          if (latest) runtime.queryClient.setQueryData(safetyKey, latest);
+          restoreCheck();
+          setPeerCheckRefresh(null);
+          return;
+        }
+        await rereadReleasedCheck(stored, ++crossTabSafetyRevision.current);
+      });
+    } catch {
+      if (mounted.current && currentCheckScope()) setPeerCheckRefresh('failed');
+    }
+  }
+
   async function retryAfterWrite() {
     if (safety?.phase !== 'refresh') return;
     const { message, detailId, createUncertain } = safety;
@@ -2032,6 +2169,24 @@ function CatalogPageBody({
         </section>
 
         {storageWarning}
+        {safety?.phase === 'check' && !checkState && peerCheckRefresh && (
+          <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
+            <p role="alert">
+              {peerCheckRefresh === 'reading'
+                ? '其他标签已核实原检查，正在重新读取本页目录；目录操作仍暂停。'
+                : '其他标签已核实原检查，但本页目录重读失败；目录操作仍暂停。请重新读取目录后继续。'}
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              disabled={storageUnavailable}
+              pending={peerCheckRefresh === 'reading'}
+              onClick={() => void retryReleasedCheck()}
+            >
+              重新读取检查后的目录
+            </Button>
+          </div>
+        )}
         {safety?.phase === 'check-invalid' && (
           <p
             role="alert"
