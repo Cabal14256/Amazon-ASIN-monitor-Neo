@@ -8,6 +8,7 @@ import {
   validBatchCreateText,
   type AsinBatchCreateInput,
 } from '../../services/asin-batch-create';
+import { catalogSafetyKey } from '../catalog/catalog-safety-gate';
 
 export interface AsinBatchReceipt {
   operationId: string;
@@ -297,6 +298,43 @@ export function removeAsinBatchReceipt(
       }
     }
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Caller holds this original user's catalog lock. Never interpret a damaged
+ * shared gate as absence or mutate it while retiring an old session receipt. */
+export function removeUnprotectedAsinBatchReceipt(
+  userId: string,
+  expected: AsinBatchReceipt,
+  storage = browserReceiptStorage(),
+): boolean {
+  try {
+    if (
+      !storage.local ||
+      !parseAsinBatchReceipt(JSON.stringify(expected)) ||
+      JSON.parse(expected.owner)[1] !== userId
+    )
+      return false;
+    const raw = storage.local.getItem(catalogSafetyKey(userId, 'asin'));
+    if (raw !== null) {
+      if (raw.length > 2 * 1024 * 1024) return false;
+      const gate: unknown = JSON.parse(raw);
+      if (
+        !gate ||
+        typeof gate !== 'object' ||
+        Array.isArray(gate) ||
+        !('phase' in gate) ||
+        (gate.phase !== 'refresh' && gate.phase !== 'inspection') ||
+        !('operationId' in gate) ||
+        typeof gate.operationId !== 'string' ||
+        !/^[a-z0-9-]{1,80}$/i.test(gate.operationId) ||
+        gate.operationId === expected.operationId
+      )
+        return false;
+    }
+    return removeAsinBatchReceipt(userId, expected, storage);
   } catch {
     return false;
   }

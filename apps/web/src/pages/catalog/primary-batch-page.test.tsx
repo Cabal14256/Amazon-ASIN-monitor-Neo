@@ -19,7 +19,10 @@ import {
   sessionFixture,
 } from '../../lib/transport-fixtures';
 import { createTransportRuntime } from '../../services/runtime';
-import { readAsinBatchReceipt } from '../asin/asin-batch-receipt';
+import {
+  readAsinBatchReceipt,
+  saveAsinBatchReceipt,
+} from '../asin/asin-batch-receipt';
 import { ASIN_CATALOG } from '../asin/config';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { catalogSafetyKey } from './catalog-safety-gate';
@@ -79,8 +82,10 @@ function fixture(
   };
   const listeners = new Set<() => void>();
   const refresh = vi.fn(async () => state);
+  let anonymous = false;
+  const anonymousState = { status: 'anonymous' as const };
   const identity = {
-    getSnapshot: () => state,
+    getSnapshot: () => (anonymous ? anonymousState : state),
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -276,6 +281,12 @@ function fixture(
         for (const listener of listeners) listener();
       });
     },
+    logout: async () => {
+      await act(async () => {
+        anonymous = true;
+        for (const listener of listeners) listener();
+      });
+    },
     unmount: () => view.unmount(),
     remount: () => {
       view = render(page());
@@ -307,6 +318,146 @@ const guardKey = catalogSafetyKey('operator', 'asin');
 const fiftyPointGroupId = ` ${'😀'.repeat(48)} `;
 
 describe('actual primary batch-create catalog integration', () => {
+  it.each(['owner', 'session', 'logout', 'permission-then-logout'] as const)(
+    'removes only an unprotected completed receipt when the session changes by %s',
+    async (change) => {
+      const f = fixture();
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      const originalOwner = JSON.stringify(['asin', 'operator', 'session-1']);
+      expect(
+        readAsinBatchReceipt('operator', originalOwner)?.receipt,
+      ).toBeTruthy();
+      if (change === 'permission-then-logout') {
+        await f.identity('operator', ['asin:read']);
+        await f.logout();
+      } else if (change === 'logout') await f.logout();
+      else
+        await f.identity(
+          change === 'owner' ? 'other' : 'operator',
+          ['asin:read', 'asin:write'],
+          'session-2',
+        );
+      await waitFor(() =>
+        expect(readAsinBatchReceipt('operator', originalOwner)).toBeNull(),
+      );
+      expect(
+        Object.keys(window.localStorage).filter((key) =>
+          key.startsWith('neo:asin-batch-create-receipt:'),
+        ),
+      ).toHaveLength(0);
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+  it('retains the exact old-session receipt while its original operation is still guarded', async () => {
+    const f = fixture();
+    f.failReads(true);
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    const originalOwner = JSON.stringify(['asin', 'operator', 'session-1']);
+    const original = readAsinBatchReceipt('operator', originalOwner);
+    expect(original).toBeTruthy();
+    await f.identity('operator', ['asin:read', 'asin:write'], 'session-2');
+    expect(readAsinBatchReceipt('operator', originalOwner)).toEqual(original);
+    expect(window.localStorage.getItem(guardKey)).not.toBeNull();
+    expect(f.posts()).toHaveLength(1);
+  });
+  it('uses the original owner lock and rechecks a gate installed while old receipt cleanup is queued', async () => {
+    const f = fixture();
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+    const original = readAsinBatchReceipt('operator', owner)!;
+    const queued = deferred<void>();
+    const lock = vi.fn(async (_name: string, work: () => unknown) => {
+      await queued.promise;
+      return work();
+    });
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request: lock },
+    });
+    await f.identity('other');
+    await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+    expect(lock.mock.calls[0][0]).toBe(guardKey);
+    const gate = JSON.stringify({
+      phase: 'inspection',
+      operationId: original.receipt.operationId,
+    });
+    window.localStorage.setItem(guardKey, gate);
+    await act(async () => queued.resolve());
+    expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+    expect(window.localStorage.getItem(guardKey)).toBe(gate);
+    expect(f.posts()).toHaveLength(1);
+  });
+  it.each([false, true])(
+    'reconciles a cross-tab operation B instead of preferring the visible completed receipt A (known=%s)',
+    async (known) => {
+      const f = fixture();
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+      const first = readAsinBatchReceipt('operator', owner)!.receipt;
+      const second = {
+        ...first,
+        operationId: 'operation-b',
+        submittedAt: first.submittedAt + 1,
+      };
+      const gate = {
+        phase: 'refresh',
+        operationId: second.operationId,
+        detailId: f.group.id,
+        message: null,
+        createUncertain: !known,
+        batchCreate: true,
+        batchCreateOwner: owner,
+      };
+      await act(async () => {
+        window.localStorage.setItem(guardKey, JSON.stringify(gate));
+        window.dispatchEvent(
+          new StorageEvent('storage', {
+            key: guardKey,
+            storageArea: window.localStorage,
+            newValue: JSON.stringify(gate),
+          }),
+        );
+      });
+      await screen.findByRole('button', { name: '重新读取目录' });
+      // B's durable receipt arrives after this tab rendered the new gate. No
+      // React render or storage event replaces this tab's completed memory A.
+      if (known) expect(saveAsinBatchReceipt('operator', second)).toBe(true);
+      const reads = f.fetcher.mock.calls.length;
+      fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+      await waitFor(() => {
+        const current = window.localStorage.getItem(guardKey);
+        if (known) expect(current).toBeNull();
+        else
+          expect(JSON.parse(current!)).toMatchObject({
+            phase: 'inspection',
+            operationId: second.operationId,
+          });
+      });
+      expect(f.fetcher.mock.calls.length).toBeGreaterThan(reads);
+      expect(
+        screen.queryByText('已知回执与原操作不匹配，写入保护仍保留。'),
+      ).toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
   it('requires explicit same-user original-session recovery and keeps the exact partial receipt through GET-only reconciliation', async () => {
     const f = fixture();
     f.failReads(true);

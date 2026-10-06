@@ -46,6 +46,7 @@ import { AsinBatchCreateResult } from '../asin/asin-batch-create-result';
 import {
   readAsinBatchReceipt,
   removeAsinBatchReceipt,
+  removeUnprotectedAsinBatchReceipt,
   saveAsinBatchReceipt,
   type AsinBatchReceipt,
 } from '../asin/asin-batch-receipt';
@@ -1084,6 +1085,10 @@ export function CatalogPage({
     persisted: boolean;
     recoveredFromOwner?: string;
   } | null>(null);
+  const batchResultRef = useRef(batchResult);
+  // A permission-only transition hides the result, but its original receipt
+  // still needs cleanup if this session is subsequently logged out/replaced.
+  if (batchResult) batchResultRef.current = batchResult;
   const knownBatchReceipts = useRef(
     new Map<string, { receipt: AsinBatchReceipt; persisted: boolean }>(),
   );
@@ -1279,6 +1284,23 @@ export function CatalogPage({
   }, [action]);
   useEffect(() => {
     batchReceiptRecoveryEpoch.current++;
+    const previous = batchResultRef.current;
+    if (previous && previous.owner !== batchOwner && navigator.locks) {
+      const receipt = previous.receipt;
+      batchResultRef.current = null;
+      const originalUser = JSON.parse(receipt.owner)[1] as string;
+      // The next identity must not choose the lock/storage key for the previous
+      // session. Retain receipts referenced by an active or unreadable gate.
+      void navigator.locks
+        .request(catalogSafetyKey(originalUser, 'asin'), async () => {
+          if (removeUnprotectedAsinBatchReceipt(originalUser, receipt)) {
+            const memory = knownBatchReceipts.current.get(receipt.operationId);
+            if (memory?.receipt.owner === receipt.owner)
+              knownBatchReceipts.current.delete(receipt.operationId);
+          }
+        })
+        .catch(() => undefined);
+    }
     setBatchReceiptWarning(null);
     setBatchRecoveryNotice(null);
     setRecoveringBatchReceipt(false);
@@ -1670,6 +1692,7 @@ export function CatalogPage({
     setActionSerial((previous) => previous + 1);
     if (next.type === 'batch-create-asins') {
       if (batchResult) removeAsinBatchReceipt(ownerId, batchResult.receipt);
+      batchResultRef.current = null;
       knownBatchReceipts.current.clear();
       setBatchResult(null);
     }
@@ -1992,6 +2015,10 @@ export function CatalogPage({
 
   async function retryAfterWrite(narrow = false) {
     if (safety?.phase !== 'refresh') return;
+    const guardedBatchResult =
+      batchResult?.receipt.operationId === safety.operationId
+        ? batchResult
+        : null;
     const { message, detailId, createUncertain } = safety;
     const targetQuery = narrow ? { ...query, current: 1, pageSize: 1 } : query;
     const recoveryRevision = runtime.session.revision;
@@ -2008,7 +2035,7 @@ export function CatalogPage({
               currentIdentity.identity.sessionId ?? null,
             ]) !== batchOwner ||
             !createAccess(currentIdentity.identity).canReadASIN ||
-            (batchResult?.recoveredFromOwner &&
+            (guardedBatchResult?.recoveredFromOwner &&
               (!createAccess(currentIdentity.identity).canWriteASIN ||
                 createAccess(currentIdentity.identity).mustChangePassword))
           )
@@ -2021,7 +2048,7 @@ export function CatalogPage({
         guardRecovery?.();
         const memory = knownBatchReceipts.current.get(safety.operationId ?? '');
         const receipt =
-          batchResult?.receipt ??
+          guardedBatchResult?.receipt ??
           (memory?.receipt.owner === batchOwner ? memory.receipt : null) ??
           readAsinBatchReceipt(ownerId, batchOwner, safety.operationId)
             ?.receipt;
@@ -2031,7 +2058,7 @@ export function CatalogPage({
           (receipt.operationId !== safety.operationId ||
             (receipt.owner !== batchOwner &&
               !(
-                batchResult?.recoveredFromOwner === receipt.owner &&
+                guardedBatchResult?.recoveredFromOwner === receipt.owner &&
                 safety.batchCreateOwner === receipt.owner
               )) ||
             receipt.groupId !== detailId)
@@ -2048,7 +2075,7 @@ export function CatalogPage({
         if (
           receipt &&
           (receipt.owner === batchOwner ||
-            batchResult?.recoveredFromOwner === receipt.owner) &&
+            guardedBatchResult?.recoveredFromOwner === receipt.owner) &&
           receipt.operationId === safety.operationId &&
           !saveAsinBatchReceipt(ownerId, receipt)
         ) {
@@ -2227,6 +2254,7 @@ export function CatalogPage({
           dismiss={() => {
             if (safety) return;
             if (removeAsinBatchReceipt(ownerId, batchResult.receipt)) {
+              batchResultRef.current = null;
               knownBatchReceipts.current.delete(
                 batchResult.receipt.operationId,
               );

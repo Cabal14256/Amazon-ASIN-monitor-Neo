@@ -58,6 +58,18 @@
 
 ## 浏览器验收
 
+### 本轮回执审查修复（评论 4200536701 / 4200536711）
+
+完成结果仍打开时，owner/session 变化或退出会在原用户的 catalog Web Lock 内重新检查原共享门禁，精确移除不再受保护的原 operation 回执与 head；写权限先撤回而隐藏结果、随后退出也执行相同清理。仍引用原 operation、缺少 operation 绑定、损坏或不可读的门禁及不可访问存储均保留回执，清理流程不删除门禁、不提交请求。显式关闭结果或开始新批次会释放最后一个内存引用。
+
+跨标签门禁由操作 A 变为 B 时，重读仅使用与 B operationId 一致的内存结果，再读取 B 的原 owner/operation 存储记录；未知 B 进入 GET-only 核实，B 的持久回执晚到也能继续恢复，不会被已完成 A 的结果或原会话授权标记误挡。
+
+- 新增 6 个 mounted 场景在原源码执行时为 5 failed / 1 protected 对照通过；修复后全部 GREEN。最初 logout 夹具返回非缓存 snapshot 的夹具错误已修正后重新执行 RED，最终产品 RED 日志在 Temp `neo-206-ui-receipt-red.log`。
+- 后续“撤权隐藏结果再 logout”实际 mounted 单场景先 1 failed，修复后 GREEN；加上原 owner 锁排队时再次出现原 gate 的保留场景，本轮共新增 8 个 mounted 场景及 9 个门禁/存储单元场景。
+- 两个受影响完整文件实际 107 passed / 0 skipped（CatalogPage 61、receipt 46），保留原会话显式恢复、不可读回执、迟到身份/403、跨标签 gate 和 GET-only 回归。名称筛选的 RED/GREEN 探针有 skipped，未计为完整验收。
+- Web strict `tsc -p tsconfig.json --noEmit`、4 个源码/测试文件的 ESLint、5 个本轮文件的 Prettier 与 `git diff --check` 通过；URL 兼容 3 项和格式脚本 5 项通过。
+- 本轮只执行轻量受影响测试与静态检查，未重复完整 Web/build；完整重型窗口用于其它迁移门禁，最新 CI 和 Review 仍须由 PR 核验。真实浏览器结论沿用下述“尚未执行”，没有把 mounted 测试写成浏览器证据。
+
 2026-10-07 本轮实际浏览器验收未能执行。子代理的可见 IAB 返回 `IAB visibility is not supported in a subagent thread`；隐藏 IAB 及根代理 IAB 均在等待 webview attach 时超时，根代理 Edge 连接也失败。未沿用历史截图或旧浏览器操作作为本轮证据。上面的 mounted 组件、实际 HttpClient 与 loopback 网络测试已通过，但不替代真实浏览器布局、键盘和像素验收。
 
 当前源码的 `/asin` 预览和独立本地 HTTP fixture 已准备好，供恢复浏览器工具后或人工继续验收。HTTP 数据不是生产账号、数据库或 Amazon 实测；不得把夹具验收写成生产 15 页面已全部通过。

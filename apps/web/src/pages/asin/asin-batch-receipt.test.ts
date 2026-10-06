@@ -4,10 +4,12 @@ import {
   addBatchAsinSuccess,
   prepareBatchAsins,
 } from '../../../../../packages/db/src/domain/asin-batch-create';
+import { catalogSafetyKey } from '../catalog/catalog-safety-gate';
 import {
   parseAsinBatchReceipt,
   readAsinBatchReceipt,
   removeAsinBatchReceipt,
+  removeUnprotectedAsinBatchReceipt,
   saveAsinBatchReceipt,
   type AsinBatchReceipt,
 } from './asin-batch-receipt';
@@ -79,6 +81,97 @@ function receipt(
   };
 }
 describe('strict owner/session/operation-bound primary batch receipts', () => {
+  it.each([
+    null,
+    JSON.stringify({ phase: 'inspection', operationId: 'operation-other' }),
+  ])(
+    'retires an old session receipt only when raw gate %j proves it unprotected',
+    (gate) => {
+      const local = new MemoryStorage(),
+        session = new MemoryStorage();
+      const expected = receipt();
+      expect(
+        saveAsinBatchReceipt('operator', expected, { local, session }),
+      ).toBe(true);
+      if (gate !== null)
+        local.setItem(catalogSafetyKey('operator', 'asin'), gate);
+      expect(
+        removeUnprotectedAsinBatchReceipt('operator', expected, {
+          local,
+          session,
+        }),
+      ).toBe(true);
+      expect(
+        readAsinBatchReceipt('operator', owner, expected.operationId, {
+          local,
+          session,
+        }),
+      ).toBeNull();
+      expect(local.getItem(catalogSafetyKey('operator', 'asin'))).toBe(gate);
+    },
+  );
+  it.each([
+    '',
+    '{broken',
+    'null',
+    JSON.stringify({ phase: 'inspection' }),
+    JSON.stringify({ phase: 'inspection', operationId: 'operation-1' }),
+    JSON.stringify({ phase: 'unknown', operationId: 'operation-other' }),
+  ])(
+    'preserves all exact recovery evidence behind an unreadable or potentially referencing gate %j',
+    (gate) => {
+      const local = new MemoryStorage(),
+        session = new MemoryStorage();
+      const expected = receipt();
+      saveAsinBatchReceipt('operator', expected, { local, session });
+      local.setItem(catalogSafetyKey('operator', 'asin'), gate);
+      expect(
+        removeUnprotectedAsinBatchReceipt('operator', expected, {
+          local,
+          session,
+        }),
+      ).toBe(false);
+      expect(
+        readAsinBatchReceipt('operator', owner, expected.operationId, {
+          local,
+          session,
+        })?.receipt,
+      ).toEqual(expected);
+      expect(local.getItem(catalogSafetyKey('operator', 'asin'))).toBe(gate);
+    },
+  );
+  it('fails closed on inaccessible storage or the wrong original user without mutating their receipt', () => {
+    const local = new MemoryStorage(),
+      session = new MemoryStorage();
+    const expected = receipt();
+    saveAsinBatchReceipt('operator', expected, { local, session });
+    expect(
+      removeUnprotectedAsinBatchReceipt('other', expected, { local, session }),
+    ).toBe(false);
+    expect(
+      removeUnprotectedAsinBatchReceipt('operator', expected, {
+        local: null,
+        session,
+      }),
+    ).toBe(false);
+    expect(
+      removeUnprotectedAsinBatchReceipt('operator', expected, {
+        local: {
+          ...local,
+          getItem: () => {
+            throw new Error('inaccessible');
+          },
+        },
+        session,
+      }),
+    ).toBe(false);
+    expect(
+      readAsinBatchReceipt('operator', owner, expected.operationId, {
+        local,
+        session,
+      })?.receipt,
+    ).toEqual(expected);
+  });
   it.each([' Raw Ś ', '   ', '😺'.repeat(50)])(
     'persists the actual Neo producer literal parentId %j',
     (groupId) => {
