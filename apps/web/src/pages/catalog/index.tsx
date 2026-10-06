@@ -41,6 +41,7 @@ import { useTaskQuery } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
 import { isBulkDeleteId } from '../../services/catalog-batch-delete';
 import { isTerminalTask } from '../../services/tasks';
+import { importGateKey } from '../asin/asin-import-gate';
 import { CatalogActionPanel } from './catalog-actions';
 import {
   useCatalogBatchDelete,
@@ -66,7 +67,10 @@ import {
   statusOf,
   statusSource,
 } from './catalog-data';
+import { CATALOG_GATE_CHANGED } from './catalog-gate-events';
+import { runWithCatalogOperationLock } from './catalog-operation-lock';
 import {
+  catalogImportBlocksWrite,
   catalogSafetyKey,
   catalogSafetyStorage,
   readCatalogSafetyGate,
@@ -944,6 +948,8 @@ export function CatalogPage({
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
   const ownerId = auth.status === 'authenticated' ? auth.identity.user.id : '';
+  const peerSessionId =
+    auth.status === 'authenticated' ? auth.identity.sessionId : undefined;
   const safetyKey = useMemo(
     () => ['catalog-write-safety', ownerId, config.id] as const,
     [config.id, ownerId],
@@ -952,6 +958,21 @@ export function CatalogPage({
     typeof safetyKey | null
   >(null);
   const safetyHydrated = !config.writes || hydratedSafetyKey === safetyKey;
+  const importSafetyKey = useMemo(
+    () => ['catalog-import-safety', ownerId, config.id] as const,
+    [ownerId, config.id],
+  );
+  const importBlocked = useQuery({
+    queryKey: importSafetyKey,
+    queryFn: () => false,
+    enabled: false,
+    initialData: () => {
+      if (!ownerId || !config.writes) return false;
+      const stored = catalogSafetyStorage();
+      return !stored || catalogImportBlocksWrite(stored, ownerId, config.id);
+    },
+    gcTime: Infinity,
+  }).data;
   const [storageUnavailable, setStorageUnavailable] = useState(() =>
     Boolean(ownerId && config.writes && !catalogSafetyStorage()),
   );
@@ -959,6 +980,7 @@ export function CatalogPage({
     string | null
   >(null);
   const [recoveringStorage, setRecoveringStorage] = useState(false);
+  const [peerRefreshRetry, setPeerRefreshRetry] = useState(0);
   const safety = useQuery<CatalogSafetyGate | null>({
     queryKey: safetyKey,
     queryFn: () => null,
@@ -1008,7 +1030,12 @@ export function CatalogPage({
         'INVALID_INPUT',
         '浏览器不支持安全的跨标签写入锁，请使用支持 Web Locks 的浏览器。',
       );
-    await navigator.locks.request(catalogSafetyKey(ownerId, config.id), work);
+    await runWithCatalogOperationLock(
+      navigator.locks,
+      ownerId,
+      config.id,
+      work,
+    );
   };
   const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {
     const stored = catalogSafetyStorage();
@@ -1020,6 +1047,13 @@ export function CatalogPage({
       );
     }
     const existing = readCatalogSafetyGate(stored, ownerId, config.id);
+    if (catalogImportBlocksWrite(stored, ownerId, config.id)) {
+      runtime.queryClient.setQueryData(importSafetyKey, true);
+      throw new ApiError(
+        'INVALID_INPUT',
+        '已有导入请求待核实，导入保护解除前不能写入目录。',
+      );
+    }
     if (existing) {
       runtime.queryClient.setQueryData(safetyKey, existing);
       throw new ApiError('INVALID_INPUT', '已有写入结果待核实，请先重读目录。');
@@ -1052,6 +1086,7 @@ export function CatalogPage({
       safetyHydrated &&
       access.canWriteASIN &&
       !safety &&
+      !importBlocked &&
       !storageUnavailable,
   );
   const canDelete = Boolean(
@@ -1061,6 +1096,7 @@ export function CatalogPage({
         ? access.canWriteASIN
         : access.canDeleteASIN) &&
       !safety &&
+      !importBlocked &&
       !storageUnavailable,
   );
   const canCheck = Boolean(config.checks && access.canReadASIN);
@@ -1173,7 +1209,13 @@ export function CatalogPage({
     const syncSafety = (event?: StorageEvent) => {
       // The writable-storage probe broadcasts its own set/remove events to
       // other tabs. Ignore unrelated keys before any probe can broadcast again.
-      if (event && event.key !== catalogSafetyKey(ownerId, config.id)) return;
+      if (
+        event &&
+        event.key !== null &&
+        event.key !== catalogSafetyKey(ownerId, config.id) &&
+        event.key !== importGateKey(config.id, ownerId)
+      )
+        return;
       const stored = catalogSafetyStorage();
       if (!stored) {
         setStorageUnavailable(true);
@@ -1181,6 +1223,10 @@ export function CatalogPage({
       }
       if (event && event.storageArea !== stored) return;
       const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
+      const importing = catalogImportBlocksWrite(stored, ownerId, config.id);
+      const currentImportBlocked =
+        runtime.queryClient.getQueryData<boolean>(importSafetyKey);
+      if (importing) runtime.queryClient.setQueryData(importSafetyKey, true);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {
         runtime.queryClient.setQueryData(safetyKey, incoming);
@@ -1194,13 +1240,11 @@ export function CatalogPage({
       }
       const currentSafety =
         runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
-      if (
-        currentSafety?.phase !== 'refresh' &&
-        currentSafety?.phase !== 'inspection'
-      ) {
+      if (!currentSafety && !currentImportBlocked) {
         runtime.queryClient.setQueryData(safetyKey, null);
         return;
       }
+      if (importing) return;
       void (async () => {
         try {
           await clearCatalogCache();
@@ -1220,7 +1264,17 @@ export function CatalogPage({
           if (
             !active ||
             revision !== crossTabSafetyRevision.current ||
-            readCatalogSafetyGate(stored, ownerId, config.id)
+            readCatalogSafetyGate(stored, ownerId, config.id) ||
+            catalogImportBlocksWrite(stored, ownerId, config.id)
+          )
+            return;
+          const currentIdentity = identity.getSnapshot();
+          if (
+            currentIdentity.status !== 'authenticated' ||
+            currentIdentity.identity.user.id !== ownerId ||
+            currentIdentity.identity.sessionId !== peerSessionId ||
+            !createAccess(currentIdentity.identity).canReadASIN ||
+            createAccess(currentIdentity.identity).mustChangePassword
           )
             return;
           runtime.queryClient.setQueryData(
@@ -1229,20 +1283,45 @@ export function CatalogPage({
           );
           if (correctedQuery !== query) setQuery(correctedQuery);
           runtime.queryClient.setQueryData(safetyKey, null);
+          runtime.queryClient.setQueryData(importSafetyKey, false);
         } catch {
           // Keep the safety gate until this tab can reread the catalog.
+          if (active && revision === crossTabSafetyRevision.current)
+            setNotice(
+              '目录重读失败，操作保护仍保留；可再次重读，不能重新提交旧操作。',
+            );
         }
       })();
     };
     // The disabled query may cache null while the page misses storage events.
     syncSafety();
     setHydratedSafetyKey(safetyKey);
+    const changed = (event: Event) => {
+      if (
+        (event as CustomEvent<string>).detail ===
+        importGateKey(config.id, ownerId)
+      )
+        syncSafety();
+    };
     window.addEventListener('storage', syncSafety);
+    window.addEventListener(CATALOG_GATE_CHANGED, changed);
     return () => {
       active = false;
       window.removeEventListener('storage', syncSafety);
+      window.removeEventListener(CATALOG_GATE_CHANGED, changed);
     };
-  }, [clearCatalogCache, config, ownerId, query, runtime, safetyKey]);
+  }, [
+    clearCatalogCache,
+    config,
+    ownerId,
+    query,
+    runtime,
+    safetyKey,
+    importSafetyKey,
+    peerRefreshRetry,
+    peerSessionId,
+    identity,
+  ]);
   useEffect(() => {
     if (!action) return;
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -1257,7 +1336,12 @@ export function CatalogPage({
     query,
     groups: data?.list ?? [],
     safety,
-    enabled: safetyHydrated && !storageUnavailable && !writing && !accessDenied,
+    enabled:
+      safetyHydrated &&
+      !storageUnavailable &&
+      !importBlocked &&
+      !writing &&
+      !accessDenied,
     onQuery: setQuery,
     onDenied: () => reportAccessDenied(),
   });
@@ -1818,6 +1902,10 @@ export function CatalogPage({
             readCatalogSafetyGate(stored, ownerId, config.id),
           );
         }
+        runtime.queryClient.setQueryData(
+          importSafetyKey,
+          catalogImportBlocksWrite(stored, ownerId, config.id),
+        );
         setStorageUnavailable(false);
       });
     } catch (cause) {
@@ -1936,6 +2024,20 @@ export function CatalogPage({
           </div>
         )}
         {extra}
+        {importBlocked && (
+          <div className="space-y-2">
+            <p role="status">
+              导入请求待核实，目录写入与批量删除已暂停；请先核实导入任务。
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => setPeerRefreshRetry((value) => value + 1)}
+            >
+              重读目录并核实导入保护（不提交）
+            </Button>
+          </div>
+        )}
 
         {notice && (
           <p

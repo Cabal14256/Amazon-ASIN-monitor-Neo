@@ -2,6 +2,7 @@ import type { TaskInfo } from '@asin-monitor/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
 import { deferred } from '../../lib/transport-fixtures';
+import { importGateKey } from '../asin/asin-import-gate';
 import { CatalogBatchDeleteRecovery } from './catalog-batch-delete-recovery';
 import {
   catalogSafetyKey,
@@ -41,11 +42,14 @@ const task = (status: string, domain = 'asin', result: unknown = counts) =>
 function fixture(domain: 'asin' | 'competitor' = 'asin') {
   const local = new MemoryStorage();
   const session = new MemoryStorage();
-  let tail: Promise<unknown> = Promise.resolve();
+  const tails = new Map<string, Promise<unknown>>();
   const locks = {
-    request: (_key: string, work: () => unknown) => {
-      const result = tail.then(work);
-      tail = result.catch(() => undefined);
+    request: (key: string, work: () => unknown) => {
+      const result = (tails.get(key) ?? Promise.resolve()).then(work);
+      tails.set(
+        key,
+        result.catch(() => undefined),
+      );
       return result;
     },
   } as unknown as Pick<LockManager, 'request'>;
@@ -247,13 +251,9 @@ describe('catalog batch deletion durable recovery', () => {
   it('cannot overwrite a replacement cross-tab claim with a late accepted receipt', async () => {
     const f = fixture();
     const response = deferred<typeof counts>();
-    const pending = f.recovery.submit(
-      ['group-1'],
-      () => response.promise,
-      f.current,
-      f.publish,
-    );
-    await Promise.resolve();
+    const send = vi.fn(() => response.promise);
+    const pending = f.recovery.submit(['group-1'], send, f.current, f.publish);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
     const replacement = { phase: 'inspection', operationId: 'replacement' };
     f.local.setItem(f.recovery.key, JSON.stringify(replacement));
     response.resolve(counts);
@@ -470,14 +470,15 @@ describe('catalog batch deletion durable recovery', () => {
   it('serializes two tabs and persists a late receipt for the original owner without publishing stale UI', async () => {
     const f = fixture();
     const response = deferred<typeof counts>();
+    const send = vi.fn(() => response.promise);
     let current = true;
     const first = f.recovery.submit(
       ['group-1'],
-      () => response.promise,
+      send,
       () => current,
       f.publish,
     );
-    await Promise.resolve();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
     const secondSend = vi.fn(async () => counts);
     const second = f.recovery.submit(
       ['group-2'],
@@ -501,6 +502,16 @@ describe('catalog batch deletion durable recovery', () => {
     const gate = await accepted(f, 'sync');
     const changed = { ...gate, operationId: 'replacement' };
     f.local.setItem(f.recovery.key, JSON.stringify(changed));
+    f.local.setItem(
+      importGateKey('asin', 'owner'),
+      JSON.stringify({
+        phase: 'uncertain',
+        taskId: null,
+        savedAt: changed.submittedAt,
+        operationId: changed.operationId,
+        catalogOperation: 'batch-delete',
+      }),
+    );
     expect(
       (await f.recovery.reconcile(gate, vi.fn(), vi.fn(), f.current)).kind,
     ).toBe('changed');

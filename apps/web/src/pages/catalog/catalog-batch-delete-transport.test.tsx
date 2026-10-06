@@ -19,9 +19,13 @@ import {
   sessionFixture,
 } from '../../lib/transport-fixtures';
 import { createTransportRuntime } from '../../services/runtime';
+import { taskKeys } from '../../services/task-queries';
+import { importGateKey } from '../asin/asin-import-gate';
+import { AsinImportPanel } from '../asin/asin-import-panel';
 import { ASIN_CATALOG } from '../asin/config';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { catalogSafetyKey } from './catalog-safety-gate';
+import { writeImportGate as writeMainImport } from './fixtures/main-197-asin-import-gate';
 import { CatalogPage } from './index';
 
 vi.mock('../../components/app-shell', () => ({
@@ -46,13 +50,16 @@ const counts = {
 };
 const runtimes: ReturnType<typeof createTransportRuntime>[] = [];
 beforeEach(() => {
-  let tail: Promise<unknown> = Promise.resolve();
+  const tails = new Map<string, Promise<unknown>>();
   Object.defineProperty(navigator, 'locks', {
     configurable: true,
     value: {
-      request: (_name: string, work: () => unknown) => {
-        const result = tail.then(work);
-        tail = result.catch(() => undefined);
+      request: (name: string, work: () => unknown) => {
+        const result = (tails.get(name) ?? Promise.resolve()).then(work);
+        tails.set(
+          name,
+          result.catch(() => undefined),
+        );
         return result;
       },
     },
@@ -75,15 +82,20 @@ function fixture(
     response?: () => Promise<Response>;
     taskStatus?: string;
     listFailureAfterDelete?: boolean;
+    withImport?: boolean;
+    importResponse?: () => Promise<Response>;
   } = {},
 ) {
   let submitted = false;
   let taskStatus = options.taskStatus ?? 'processing';
   let listFailure = options.listFailureAfterDelete ?? false;
-  const ids = options.ids ?? ['Grüp-1', 'missing'];
+  let ids = options.ids ?? ['Grüp-1', 'missing'];
+  let listResponse: (() => Promise<Response>) | undefined;
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(String(input));
     if (init?.method === 'POST') {
+      if (url.pathname.endsWith('/import-excel'))
+        return options.importResponse!();
       submitted = true;
       return options.response
         ? options.response()
@@ -93,8 +105,10 @@ function fixture(
       return jsonResponse({
         success: true,
         data: {
-          taskId: 'task-1',
-          taskType: 'batch-delete',
+          taskId: url.pathname.split('/').at(-1),
+          taskType: url.pathname.endsWith('/task-1')
+            ? 'batch-delete'
+            : 'import',
           taskSubType:
             domain === 'asin'
               ? 'variant-group-delete'
@@ -119,6 +133,7 @@ function fixture(
               : null,
         },
       });
+    if (listResponse) return listResponse();
     if (submitted && listFailure) throw new Error('list offline');
     return jsonResponse({
       success: true,
@@ -172,7 +187,10 @@ function fixture(
   const element = () => (
     <AuthContext.Provider value={{ runtime, identity, announce: vi.fn() }}>
       <QueryClientProvider client={runtime.queryClient}>
-        <CatalogPage config={configs[domain]} />
+        <CatalogPage
+          config={configs[domain]}
+          extra={options.withImport && <AsinImportPanel domain={domain} />}
+        />
       </QueryClientProvider>
     </AuthContext.Provider>
   );
@@ -180,6 +198,12 @@ function fixture(
   return {
     fetcher,
     runtime,
+    setIds: (next: string[]) => {
+      ids = next;
+    },
+    setListResponse: (next: (() => Promise<Response>) | undefined) => {
+      listResponse = next;
+    },
     setTaskStatus: (status: string) => {
       taskStatus = status;
     },
@@ -225,8 +249,304 @@ async function confirm() {
 }
 const mutations = (f: ReturnType<typeof fixture>) =>
   f.fetcher.mock.calls.filter((call) => call[1]?.method === 'POST');
+function expectSelectionBlocked() {
+  const button = screen.queryByRole('button', { name: '选择本页可删除组' });
+  expect(!button || (button as HTMLButtonElement).disabled).toBe(true);
+}
 
 describe('mounted primary and competitor bulk-delete real HTTP transport', () => {
+  it.each(['asin', 'competitor'] as const)(
+    'recovers a known %s import receipt from its shared envelope after an old tab clears only the original import key',
+    async (domain) => {
+      const taskId = 'b2b5894c-5802-4c9f-a1bd-9a20263d270a';
+      const f = fixture(domain, {
+        withImport: true,
+        importResponse: async () =>
+          jsonResponse({ success: true, data: { taskId, status: 'pending' } }),
+      });
+      await screen.findAllByText('Group Grüp-1');
+      fireEvent.click(screen.getByRole('button', { name: '导入 CSV / XLSX' }));
+      const file = new File(['变体组名称,国家\nGroup,US'], 'fixture.csv');
+      fireEvent.change(screen.getByLabelText('选择文件'), {
+        target: { files: { length: 1, item: () => file } },
+      });
+      fireEvent.click(
+        screen.getByRole('button', { name: '上传并创建导入任务' }),
+      );
+      await screen.findByText(`任务编号：${taskId}`);
+      f.unmount();
+      expect(writeMainImport(localStorage, domain, 'operator', null)).toBe(
+        true,
+      );
+      f.remount();
+      await screen.findByText(`任务编号：${taskId}`);
+      expectSelectionBlocked();
+      f.setTaskStatus('completed');
+      await act(async () => {
+        await f.runtime.queryClient.invalidateQueries({
+          queryKey: taskKeys.detail(taskId),
+          exact: true,
+        });
+      });
+      await screen.findByText(
+        '导入任务已完成，请核对任务中心的成功、失败行与报告。',
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: '选择本页可删除组' }),
+        ).toHaveProperty('disabled', false),
+      );
+      expect(
+        localStorage.getItem(catalogSafetyKey('operator', domain)),
+      ).toBeNull();
+      expect(mutations(f)).toHaveLength(1);
+    },
+  );
+  it.each(['asin', 'competitor'] as const)(
+    'retains a removed %s peer import gate until actual fresh rows load and provides a GET-only retry',
+    async (domain) => {
+      const f = fixture(domain);
+      await screen.findAllByText('Group Grüp-1');
+      const key = importGateKey(domain, 'operator');
+      act(() => {
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            phase: 'accepted',
+            taskId: 'b2b5894c-5802-4c9f-a1bd-9a20263d270a',
+            savedAt: 100,
+          }),
+        );
+        window.dispatchEvent(
+          new StorageEvent('storage', { key, storageArea: localStorage }),
+        );
+      });
+      await waitFor(expectSelectionBlocked);
+      const read = deferred<Response>();
+      f.setListResponse(() => read.promise);
+      act(() => {
+        localStorage.removeItem(key);
+        window.dispatchEvent(
+          new StorageEvent('storage', { key, storageArea: localStorage }),
+        );
+      });
+      expectSelectionBlocked();
+      await act(async () => read.reject(new Error('peer import read offline')));
+      await screen.findByText(/目录重读失败，操作保护仍保留/);
+      expectSelectionBlocked();
+      f.setListResponse(undefined);
+      f.setIds(['new-imported']);
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: '重读目录并核实导入保护（不提交）',
+        }),
+      );
+      await screen.findAllByText('Group new-imported');
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: '选择本页可删除组' }),
+        ).toHaveProperty('disabled', false),
+      );
+      expect(screen.queryByText('Group Grüp-1')).toBeNull();
+      expect(mutations(f)).toHaveLength(0);
+    },
+  );
+  it.each(['asin', 'competitor'] as const)(
+    'rereads stale %s peer rows before unlocking a removed bulk-delete claim and remains guarded on read failure',
+    async (domain) => {
+      const f = fixture(domain);
+      await screen.findAllByText('Group Grüp-1');
+      const key = catalogSafetyKey('operator', domain);
+      const peer = {
+        phase: 'batch-delete',
+        operationId: 'peer-delete',
+        groupIds: ['Grüp-1'],
+        submittedAt: 100,
+        state: 'task',
+        taskId: 'task-1',
+      };
+      act(() => {
+        localStorage.setItem(key, JSON.stringify(peer));
+        window.dispatchEvent(
+          new StorageEvent('storage', { key, storageArea: localStorage }),
+        );
+      });
+      await screen.findByRole('heading', {
+        name: '批量删除任务已受理，等待核实结果',
+      });
+      const read = deferred<Response>();
+      f.setListResponse(() => read.promise);
+      act(() => {
+        localStorage.removeItem(key);
+        window.dispatchEvent(
+          new StorageEvent('storage', { key, storageArea: localStorage }),
+        );
+      });
+      expectSelectionBlocked();
+      await act(async () => read.reject(new Error('peer reread offline')));
+      expectSelectionBlocked();
+      expect(
+        f.runtime.queryClient.getQueryData([
+          'catalog-write-safety',
+          'operator',
+          domain,
+        ]),
+      ).toEqual(peer);
+      f.setListResponse(undefined);
+      f.setIds(['missing']);
+      fireEvent.click(
+        screen.getByRole('button', { name: '查询任务并重读目录' }),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: '选择本页可删除组' }),
+        ).toHaveProperty('disabled', false),
+      );
+      expect(screen.queryByText('Group Grüp-1')).toBeNull();
+      expect(mutations(f)).toHaveLength(0);
+    },
+  );
+
+  it.each(
+    (['asin', 'competitor'] as const).flatMap((domain) =>
+      (['import', 'delete'] as const).flatMap((first) =>
+        (['accepted', 'unknown'] as const).map((outcome) => ({
+          domain,
+          first,
+          outcome,
+        })),
+      ),
+    ),
+  )(
+    'serializes queued $domain $first before the other mutation and keeps $outcome exclusion after ACK and remount',
+    async ({ domain, first, outcome }) => {
+      const barrier = deferred<void>();
+      const response = deferred<Response>();
+      const tails = new Map<string, Promise<unknown>>();
+      const lock = vi.fn((name: string, work: () => unknown) => {
+        const result = (tails.get(name) ?? barrier.promise).then(work);
+        tails.set(
+          name,
+          result.catch(() => undefined),
+        );
+        return result;
+      });
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: { request: lock },
+      });
+      const f = fixture(domain, {
+        withImport: true,
+        response: first === 'delete' ? () => response.promise : undefined,
+        importResponse:
+          first === 'import'
+            ? () => response.promise
+            : async () =>
+                jsonResponse({
+                  success: true,
+                  data: {
+                    taskId: 'b2b5894c-5802-4c9f-a1bd-9a20263d270a',
+                    status: 'pending',
+                  },
+                }),
+      });
+      await selectAll();
+      fireEvent.click(screen.getByRole('button', { name: '批量删除所选组' }));
+      fireEvent.click(screen.getByRole('button', { name: '导入 CSV / XLSX' }));
+      const file = new File(['变体组名称,国家\nGroup,US'], 'fixture.csv');
+      fireEvent.change(screen.getByLabelText('选择文件'), {
+        target: { files: { length: 1, item: () => file } },
+      });
+      const submitImport = () =>
+        fireEvent.click(
+          screen.getByRole('button', { name: '上传并创建导入任务' }),
+        );
+      const submitDelete = () =>
+        fireEvent.click(screen.getByRole('button', { name: '确认批量删除' }));
+      if (first === 'import') {
+        submitImport();
+        submitDelete();
+      } else {
+        submitDelete();
+        submitImport();
+      }
+      expect(lock.mock.calls.map(([name]) => name)).toEqual([
+        catalogSafetyKey('operator', domain),
+        catalogSafetyKey('operator', domain),
+      ]);
+      expect(mutations(f)).toHaveLength(0);
+      await act(async () => barrier.resolve());
+      await waitFor(() => expect(mutations(f)).toHaveLength(1));
+      expect(String(mutations(f)[0][0])).toContain(
+        first === 'import' ? '/import-excel' : '/batch-delete',
+      );
+      await act(async () => {
+        if (outcome === 'unknown') response.reject(new Error('response lost'));
+        else
+          response.resolve(
+            jsonResponse({
+              success: true,
+              data:
+                first === 'import'
+                  ? {
+                      taskId: 'b2b5894c-5802-4c9f-a1bd-9a20263d270a',
+                      status: 'pending',
+                    }
+                  : {
+                      mode: 'async',
+                      taskId: 'task-1',
+                      status: 'pending',
+                      totalRequested: 2,
+                    },
+            }),
+          );
+      });
+      await act(async () => {
+        const settled = await Promise.allSettled(
+          lock.mock.results.map(({ value }) => value),
+        );
+        const rejected = settled.filter(
+          (result) => result.status === 'rejected',
+        );
+        expect(rejected).toHaveLength(0);
+        if (first === 'import')
+          expect(
+            settled.some(
+              (result) =>
+                result.status === 'fulfilled' && result.value?.kind === 'stale',
+            ),
+          ).toBe(true);
+      });
+      const key =
+        first === 'import'
+          ? importGateKey(domain, 'operator')
+          : catalogSafetyKey('operator', domain);
+      expect(localStorage.getItem(key)).toContain(
+        outcome === 'unknown'
+          ? first === 'import'
+            ? 'uncertain'
+            : 'unknown'
+          : first === 'import'
+          ? 'accepted'
+          : 'task',
+      );
+      f.unmount();
+      f.remount();
+      await screen.findAllByText('Group Grüp-1');
+      expectSelectionBlocked();
+      if (first === 'delete') {
+        fireEvent.click(
+          screen.getByRole('button', { name: '导入 CSV / XLSX' }),
+        );
+        expect(screen.getByLabelText('选择文件')).toHaveProperty(
+          'disabled',
+          true,
+        );
+      }
+      expect(mutations(f)).toHaveLength(1);
+    },
+  );
+
   it('retains original-session unknown deletion protection after explicit GET-only recovery until manual audit', async () => {
     const f = fixture('asin', {
       response: async () => {

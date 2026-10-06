@@ -57,7 +57,7 @@ function fixture(
   createAsin?: ReturnType<typeof vi.fn>,
   permissions = ['asin:read', 'asin:write', 'asin:delete'],
 ) {
-  let prior = Promise.resolve();
+  const tails = new Map<string, Promise<void>>();
   Object.defineProperty(window.navigator, 'locks', {
     configurable: true,
     value: {
@@ -65,11 +65,14 @@ function fixture(
         _name: string,
         callback: () => Promise<T> | T,
       ): Promise<T> => {
-        const before = prior;
+        const before = tails.get(_name) ?? Promise.resolve();
         let release!: () => void;
-        prior = new Promise<void>((resolve) => {
-          release = resolve;
-        });
+        tails.set(
+          _name,
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        );
         await before;
         try {
           return await callback();

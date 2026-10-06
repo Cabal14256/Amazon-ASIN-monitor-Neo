@@ -5,7 +5,11 @@ import {
   type CatalogBatchDeleteOutcome,
 } from '../../services/catalog-batch-delete';
 import { isTerminalTask } from '../../services/tasks';
+import { importGateKey, writeImportGate } from '../asin/asin-import-gate';
+import { notifyCatalogGateChanged } from './catalog-gate-events';
+import { runWithCatalogOperationLock } from './catalog-operation-lock';
 import {
+  catalogImportBlocksWrite,
   catalogSafetyKey,
   readCatalogSafetyGate,
   writeCatalogSafetyGate,
@@ -77,6 +81,21 @@ export class CatalogBatchDeleteRecovery {
       const current = this.read();
       if (expected && JSON.stringify(current) !== JSON.stringify(expected))
         return false;
+      const importRaw = this.local.getItem(
+        importGateKey(this.domain, this.owner),
+      );
+      if (importRaw !== null && !this.ownsImportBridge(importRaw, gate))
+        return false;
+      if (
+        !writeImportGate(this.local, this.domain, this.owner, {
+          phase: 'uncertain',
+          taskId: null,
+          savedAt: gate.submittedAt,
+          operationId: gate.operationId,
+          catalogOperation: 'batch-delete',
+        })
+      )
+        throw new Error('无法保存旧版本导入阻断记录。');
       saved =
         writeCatalogSafetyGate(this.local, this.owner, this.domain, gate) &&
         JSON.stringify(this.read()) === JSON.stringify(gate);
@@ -100,88 +119,126 @@ export class CatalogBatchDeleteRecovery {
       current.state !== expected.state
     )
       return false;
+    const importRaw = this.local.getItem(
+      importGateKey(this.domain, this.owner),
+    );
+    if (importRaw !== null && !this.ownsImportBridge(importRaw, expected))
+      return false;
     try {
       this.session?.removeItem(this.fallbackKey);
       if (this.session?.getItem(this.fallbackKey)) return false;
     } catch {
       return false;
     }
+    if (
+      importRaw !== null &&
+      !writeImportGate(this.local, this.domain, this.owner, null)
+    )
+      return false;
     if (!writeCatalogSafetyGate(this.local, this.owner, this.domain, null))
       return false;
+    notifyCatalogGateChanged(importGateKey(this.domain, this.owner));
     return this.read() === null;
+  }
+  private ownsImportBridge(raw: string, gate: CatalogBatchDeleteGate): boolean {
+    try {
+      const bridge = JSON.parse(raw) as Record<string, unknown>;
+      return (
+        bridge.catalogOperation === 'batch-delete' &&
+        bridge.operationId === gate.operationId &&
+        bridge.savedAt === gate.submittedAt &&
+        bridge.phase === 'uncertain' &&
+        bridge.taskId === null
+      );
+    } catch {
+      return false;
+    }
   }
   submit(
     groupIds: string[],
     send: () => Promise<CatalogBatchDeleteOutcome>,
     current: () => boolean,
     publish: (gate: CatalogBatchDeleteGate | null) => void,
+    beforeClaim: () => boolean = current,
   ) {
-    return this.locks.request(this.key, async () => {
-      if (!current()) return { kind: 'stale' as const };
-      const existing = this.read();
-      if (existing) return { kind: 'blocked' as const, gate: existing };
-      const claim: CatalogBatchDeleteGate = {
-        phase: 'batch-delete',
-        operationId: this.uuid(),
-        groupIds: [...groupIds],
-        submittedAt: Date.now(),
-        state: 'unknown',
-        ...(this.ownerScope ? { ownerScope: this.ownerScope } : {}),
-      };
-      if (!this.remember(claim))
-        throw new Error('无法保存删除状态，尚未发送请求。');
-      if (!current()) {
-        this.clear(claim);
-        return { kind: 'stale' as const };
-      }
-      publish(claim);
-      try {
-        const result = await send();
-        const gate: CatalogBatchDeleteGate =
-          result.mode === 'async'
-            ? {
-                ...claim,
-                state: 'task',
-                taskId: result.taskId,
-                message:
-                  result.status === 'unknown'
-                    ? '任务提交结果尚未确认，请查询任务状态；不会再次提交。'
-                    : '批量删除任务已受理，尚未完成删除。',
-              }
-            : {
-                ...claim,
-                state: 'refresh',
-                message: summarizeBatchDelete(result),
-              };
-        const persisted = this.remember(gate, claim);
-        let matching = true;
-        try {
-          const stored = this.read();
-          matching =
-            stored?.phase === 'batch-delete' &&
-            stored.operationId === claim.operationId;
-        } catch {
-          // The mounted accepted receipt remains visible while the durable guard is unreadable.
-        }
-        if (current() && matching) publish(gate);
-        return { kind: 'accepted' as const, gate, persisted };
-      } catch (error) {
-        const rejected =
-          error instanceof ApiError &&
-          (['INVALID_INPUT', 'AUTH', 'CAPACITY', 'CLOSED'].includes(
-            error.kind,
-          ) ||
-            (['HTTP', 'BUSINESS'].includes(error.kind) &&
-              [400, 401, 403, 404, 409, 413, 429].includes(error.status ?? 0)));
-        const cleared = rejected && this.clear(claim);
-        if (current()) publish(cleared ? null : claim);
-        return {
-          kind: cleared ? ('rejected' as const) : ('unknown' as const),
-          gate: claim,
-          error,
+    return runWithCatalogOperationLock(
+      this.locks,
+      this.owner,
+      this.domain,
+      async () => {
+        if (!beforeClaim()) return { kind: 'stale' as const };
+        const existing = this.read();
+        if (existing) return { kind: 'blocked' as const, gate: existing };
+        if (catalogImportBlocksWrite(this.local, this.owner, this.domain))
+          throw new ApiError(
+            'INVALID_INPUT',
+            '已有导入请求待核实，导入保护解除前不能删除。',
+          );
+        const claim: CatalogBatchDeleteGate = {
+          phase: 'batch-delete',
+          operationId: this.uuid(),
+          groupIds: [...groupIds],
+          submittedAt: Date.now(),
+          state: 'unknown',
+          ...(this.ownerScope ? { ownerScope: this.ownerScope } : {}),
         };
-      }
-    });
+        if (!this.remember(claim))
+          throw new Error('无法保存删除状态，尚未发送请求。');
+        if (!current()) {
+          this.clear(claim);
+          return { kind: 'stale' as const };
+        }
+        publish(claim);
+        try {
+          const result = await send();
+          const gate: CatalogBatchDeleteGate =
+            result.mode === 'async'
+              ? {
+                  ...claim,
+                  state: 'task',
+                  taskId: result.taskId,
+                  message:
+                    result.status === 'unknown'
+                      ? '任务提交结果尚未确认，请查询任务状态；不会再次提交。'
+                      : '批量删除任务已受理，尚未完成删除。',
+                }
+              : {
+                  ...claim,
+                  state: 'refresh',
+                  message: summarizeBatchDelete(result),
+                };
+          const persisted = this.remember(gate, claim);
+          let matching = true;
+          try {
+            const stored = this.read();
+            matching =
+              stored?.phase === 'batch-delete' &&
+              stored.operationId === claim.operationId;
+          } catch {
+            // The mounted accepted receipt remains visible while the durable guard is unreadable.
+          }
+          if (current() && matching) publish(gate);
+          return { kind: 'accepted' as const, gate, persisted };
+        } catch (error) {
+          const rejected =
+            error instanceof ApiError &&
+            (['INVALID_INPUT', 'AUTH', 'CAPACITY', 'CLOSED'].includes(
+              error.kind,
+            ) ||
+              (['HTTP', 'BUSINESS'].includes(error.kind) &&
+                [400, 401, 403, 404, 409, 413, 429].includes(
+                  error.status ?? 0,
+                )));
+          const cleared = rejected && this.clear(claim);
+          if (current()) publish(cleared ? null : claim);
+          return {
+            kind: cleared ? ('rejected' as const) : ('unknown' as const),
+            gate: claim,
+            error,
+          };
+        }
+      },
+    );
   }
   /** A 404 is not proof that an uncertain job cannot appear later. */
   reconcile(
@@ -191,59 +248,64 @@ export class CatalogBatchDeleteRecovery {
     current: () => boolean,
     acknowledgeUnknown = false,
   ) {
-    return this.locks.request(this.key, async () => {
-      if (!current()) return { kind: 'stale' as const };
-      const stored = this.read();
-      if (JSON.stringify(stored) !== JSON.stringify(expected))
-        return { kind: 'changed' as const };
-      let gate = expected;
-      if (expected.state === 'task' && expected.taskId) {
-        const task = await readTask(expected.taskId);
-        const subtype =
-          this.domain === 'competitor'
-            ? 'competitor-variant-group-delete'
-            : 'variant-group-delete';
-        if (
-          task.taskId !== expected.taskId ||
-          task.taskType !== 'batch-delete' ||
-          task.taskSubType !== subtype ||
-          (!isTerminalTask(task.status) &&
-            !['pending', 'processing', 'cancelling'].includes(task.status))
-        )
-          throw new Error('任务标识或类型不匹配，保留删除保护。');
-        if (!isTerminalTask(task.status))
-          return { kind: 'active' as const, task };
-        gate = {
-          ...expected,
-          state: 'refresh',
-          message: `${
-            task.status === 'completed'
-              ? '任务已完成。'
-              : task.status === 'cancelled'
-              ? '任务已取消，可能已部分删除。'
-              : '任务失败，可能已部分删除。'
-          } ${
-            task.result
-              ? summarizeBatchDelete(task.result)
-              : '请核对目录与任务详情。'
-          }`.slice(0, 500),
+    return runWithCatalogOperationLock(
+      this.locks,
+      this.owner,
+      this.domain,
+      async () => {
+        if (!current()) return { kind: 'stale' as const };
+        const stored = this.read();
+        if (JSON.stringify(stored) !== JSON.stringify(expected))
+          return { kind: 'changed' as const };
+        let gate = expected;
+        if (expected.state === 'task' && expected.taskId) {
+          const task = await readTask(expected.taskId);
+          const subtype =
+            this.domain === 'competitor'
+              ? 'competitor-variant-group-delete'
+              : 'variant-group-delete';
+          if (
+            task.taskId !== expected.taskId ||
+            task.taskType !== 'batch-delete' ||
+            task.taskSubType !== subtype ||
+            (!isTerminalTask(task.status) &&
+              !['pending', 'processing', 'cancelling'].includes(task.status))
+          )
+            throw new Error('任务标识或类型不匹配，保留删除保护。');
+          if (!isTerminalTask(task.status))
+            return { kind: 'active' as const, task };
+          gate = {
+            ...expected,
+            state: 'refresh',
+            message: `${
+              task.status === 'completed'
+                ? '任务已完成。'
+                : task.status === 'cancelled'
+                ? '任务已取消，可能已部分删除。'
+                : '任务失败，可能已部分删除。'
+            } ${
+              task.result
+                ? summarizeBatchDelete(task.result)
+                : '请核对目录与任务详情。'
+            }`.slice(0, 500),
+          };
+        }
+        if (!current()) return { kind: 'stale' as const };
+        if (gate.state !== 'unknown' && !this.remember(gate, expected))
+          return { kind: 'unsaved' as const };
+        await refresh();
+        if (!current()) return { kind: 'stale' as const };
+        if (gate.state === 'unknown' && !acknowledgeUnknown)
+          return { kind: 'unknown' as const };
+        if (!this.clear(gate)) return { kind: 'changed' as const };
+        return {
+          kind: 'cleared' as const,
+          message:
+            gate.message ??
+            '已人工核实目录及待执行任务，删除保护已解除；未重发删除。',
         };
-      }
-      if (!current()) return { kind: 'stale' as const };
-      if (gate.state !== 'unknown' && !this.remember(gate, expected))
-        return { kind: 'unsaved' as const };
-      await refresh();
-      if (!current()) return { kind: 'stale' as const };
-      if (gate.state === 'unknown' && !acknowledgeUnknown)
-        return { kind: 'unknown' as const };
-      if (!this.clear(gate)) return { kind: 'changed' as const };
-      return {
-        kind: 'cleared' as const,
-        message:
-          gate.message ??
-          '已人工核实目录及待执行任务，删除保护已解除；未重发删除。',
-      };
-    });
+      },
+    );
   }
 }
 

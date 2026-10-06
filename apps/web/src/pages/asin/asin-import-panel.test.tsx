@@ -13,6 +13,7 @@ import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
 import { ApiError } from '../../lib/http';
 import type { createTransportRuntime } from '../../services/runtime';
+import { catalogSafetyKey } from '../catalog/catalog-safety-gate';
 import { asinImportGateKey, writeAsinImportGate } from './asin-import-gate';
 import { AsinImportPanel } from './asin-import-panel';
 
@@ -110,14 +111,17 @@ function fixture(
 }
 
 function installLocks() {
-  let prior = Promise.resolve();
+  const tails = new Map<string, Promise<void>>();
   const request = vi.fn(
-    async <T,>(_name: string, callback: () => Promise<T> | T) => {
-      const before = prior;
+    async <T,>(name: string, callback: () => Promise<T> | T) => {
+      const before = tails.get(name) ?? Promise.resolve();
       let release!: () => void;
-      prior = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      tails.set(
+        name,
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
       await before;
       try {
         return await callback();
@@ -441,9 +445,10 @@ describe('primary ASIN import page', () => {
       configurable: true,
       value: {
         request: async <T,>(_name: string, callback: () => T) => {
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
+          if (_name === catalogSafetyKey('operator', 'asin'))
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
           return callback();
         },
       },
@@ -704,9 +709,10 @@ describe('primary ASIN import page', () => {
       let release!: () => void;
       const requested = vi.fn(
         async <T,>(_name: string, callback: () => Promise<T> | T) => {
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
+          if (_name === catalogSafetyKey('operator', 'asin'))
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
           return callback();
         },
       );

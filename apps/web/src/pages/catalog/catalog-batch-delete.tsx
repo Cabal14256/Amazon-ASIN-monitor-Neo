@@ -156,10 +156,10 @@ export function useCatalogBatchDelete(options: {
     setAcknowledged(false);
   }, [scope]);
   useLayoutEffect(() => {
-    if (!options.safety) return;
+    if (!options.safety && options.enabled) return;
     setSelection({ scope, ids: [] });
     setConfirmation(null);
-  }, [options.safety, scope]);
+  }, [options.safety, options.enabled, scope]);
   useEffect(() => {
     setAcknowledged(false);
   }, [gate?.operationId, gate?.state, gate?.taskId]);
@@ -288,6 +288,11 @@ export function useCatalogBatchDelete(options: {
         acknowledgeUnknown,
       );
       if (!active()) return;
+      if (result.kind === 'changed' && recovery.read() === null) {
+        // A peer cleared its durable claim. This tab still needs fresh rows.
+        await refresh();
+        if (!active()) return;
+      }
       publish(recovery.read());
       if (result.kind === 'cleared') {
         setMessage(result.message);
@@ -311,7 +316,8 @@ export function useCatalogBatchDelete(options: {
     } catch (error) {
       if (active()) {
         try {
-          publish(recovery.read());
+          const stored = recovery.read();
+          if (stored) publish(stored);
         } catch {
           // Preserve the mounted guard/known receipt while storage is unreadable.
         }
@@ -358,6 +364,18 @@ export function useCatalogBatchDelete(options: {
         (value) => {
           if (active(false)) publish(value);
         },
+        () =>
+          active(true) &&
+          !runtime.queryClient.getQueryData([
+            'catalog-import-safety',
+            owner,
+            options.config.id,
+          ]) &&
+          !runtime.queryClient.getQueryData([
+            'catalog-write-safety',
+            owner,
+            options.config.id,
+          ]),
       );
       if (!active(false)) return;
       if (result.kind === 'accepted') {
