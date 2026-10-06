@@ -30,13 +30,15 @@ export function parseAsinBatchInput(value: string) {
       cursor++;
     }
     position++;
-    const code = match[0].toUpperCase();
-    if (!/^[A-Z0-9]{10}$/.test(code))
+    if (!/^[A-Za-z0-9]{10}$/.test(match[0]))
       invalid.push({ value: match[0], position, line, column });
-    else if (seen.has(code)) duplicateCount++;
     else {
-      seen.add(code);
-      codes.push(code);
+      const code = match[0].toUpperCase();
+      if (seen.has(code)) duplicateCount++;
+      else {
+        seen.add(code);
+        codes.push(code);
+      }
     }
     cursor += match[0].length;
     column += match[0].length;

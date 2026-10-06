@@ -4,6 +4,16 @@ import { parseAsinBatchInput } from './asin-batch-input';
 const code = (index: number) => `B${String(index).padStart(9, '0')}`;
 
 describe('primary batch ASIN input', () => {
+  it.each(['B00000000ſ', 'B0000000ß'])(
+    'rejects original Unicode token %s before ASCII uppercase mapping',
+    (input) => {
+      expect(parseAsinBatchInput(input)).toMatchObject({
+        codes: [],
+        invalid: [{ value: input }],
+        canSubmit: false,
+      });
+    },
+  );
   it.each(['\n', '\r\n', '\r', ' ', '\t', ',', '，', ';', '；'])(
     'accepts delimiter %j and normalizes lowercase',
     (separator) => {

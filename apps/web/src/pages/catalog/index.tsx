@@ -43,6 +43,12 @@ import { ApiError } from '../../lib/http';
 import { isTerminalTask } from '../../services/tasks';
 import { AsinBatchCreatePanel } from '../asin/asin-batch-create-panel';
 import { AsinBatchCreateResult } from '../asin/asin-batch-create-result';
+import {
+  readAsinBatchReceipt,
+  removeAsinBatchReceipt,
+  saveAsinBatchReceipt,
+  type AsinBatchReceipt,
+} from '../asin/asin-batch-receipt';
 import { CatalogActionPanel } from './catalog-actions';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
@@ -78,7 +84,7 @@ import type {
   CatalogQuery,
 } from './catalog-types';
 
-const PAGE_SIZES = [10, 20, 50, 100] as const;
+const PAGE_SIZES = [1, 10, 20, 50, 100] as const;
 const CHILD_PAGE_SIZE = 50;
 const TABLE_FEATURES = tableFeatures({});
 type StatusFilter = 'ALL' | 'BROKEN' | 'NORMAL';
@@ -1017,6 +1023,7 @@ export function CatalogPage({
         candidate.type === 'create-asin' ||
         candidate.type === 'batch-create-asins',
       operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      ...(candidate.type === 'batch-create-asins' ? { batchCreate: true } : {}),
     };
     if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {
       setStorageUnavailable(true);
@@ -1071,7 +1078,15 @@ export function CatalogPage({
     owner: string;
     groupName: string;
     result: BatchCreateAsinsData;
+    receipt: AsinBatchReceipt;
+    persisted: boolean;
   } | null>(null);
+  const knownBatchReceipts = useRef(
+    new Map<string, { receipt: AsinBatchReceipt; persisted: boolean }>(),
+  );
+  const [batchReceiptWarning, setBatchReceiptWarning] = useState<string | null>(
+    null,
+  );
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -1277,6 +1292,33 @@ export function CatalogPage({
       );
     }
   }, [batchOwner, access.canWriteASIN]);
+  useLayoutEffect(() => {
+    if (config.id !== 'asin' || !ownerId || !access.canWriteASIN) return;
+    const recovered = readAsinBatchReceipt(
+      ownerId,
+      batchOwner,
+      safety?.operationId,
+    );
+    if (!recovered) return;
+    if (
+      safety?.phase === 'refresh' &&
+      safety.batchCreate &&
+      recovered.receipt.groupId !== safety.detailId
+    )
+      return;
+    setBatchResult((current) =>
+      current?.receipt.operationId === recovered.receipt.operationId &&
+      current.owner === batchOwner
+        ? current
+        : {
+            serial: 0,
+            owner: batchOwner,
+            groupName: recovered.receipt.groupName,
+            result: recovered.receipt.result,
+            ...recovered,
+          },
+    );
+  }, [config.id, ownerId, batchOwner, access.canWriteASIN, safety]);
   const data = groups.data;
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
@@ -1597,7 +1639,10 @@ export function CatalogPage({
     if (writingRef.current || runtime.queryClient.getQueryData(safetyKey))
       return;
     setActionSerial((previous) => previous + 1);
-    if (next.type === 'batch-create-asins') setBatchResult(null);
+    if (next.type === 'batch-create-asins') {
+      if (batchResult) removeAsinBatchReceipt(ownerId, batchResult.receipt);
+      setBatchResult(null);
+    }
     setAction(next);
   }
 
@@ -1649,6 +1694,9 @@ export function CatalogPage({
           uncertainAction.type === 'create-asin' ||
           uncertainAction.type === 'batch-create-asins',
         operationId: claim.operationId,
+        ...(uncertainAction.type === 'batch-create-asins'
+          ? { batchCreate: true }
+          : {}),
       },
       claim,
     );
@@ -1660,7 +1708,11 @@ export function CatalogPage({
       reportAccessDenied();
   }, [groups.error, groups.isError, reportAccessDenied]);
 
-  async function readAfterWrite(detailId: string | null, guard?: () => void) {
+  async function readAfterWrite(
+    detailId: string | null,
+    guard?: () => void,
+    recoveryQuery = query,
+  ) {
     guard?.();
     const detailRequest = detailId
       ? config.detail(runtime.http, detailId).then(
@@ -1669,7 +1721,7 @@ export function CatalogPage({
         )
       : Promise.resolve(null);
     const [firstPage, detailResult] = await Promise.all([
-      config.list(runtime.http, query),
+      config.list(runtime.http, recoveryQuery),
       detailRequest,
     ]);
     guard?.();
@@ -1678,9 +1730,11 @@ export function CatalogPage({
       Math.ceil(firstPage.total / firstPage.pageSize),
     );
     const correctedQuery =
-      firstPage.current > lastPage ? { ...query, current: lastPage } : query;
+      firstPage.current > lastPage
+        ? { ...recoveryQuery, current: lastPage }
+        : recoveryQuery;
     const fresh =
-      correctedQuery === query
+      correctedQuery === recoveryQuery
         ? firstPage
         : await config.list(runtime.http, correctedQuery);
     guard?.();
@@ -1731,8 +1785,13 @@ export function CatalogPage({
       detailId,
       createUncertain: false,
       operationId: claim.operationId,
+      ...(savedAction.type === 'batch-create-asins'
+        ? { batchCreate: true }
+        : {}),
     };
     if (!setSafety(refreshedGate, claim)) return;
+    const known = knownBatchReceipts.current.get(claim.operationId ?? '');
+    if (savedAction.type === 'batch-create-asins' && !known?.persisted) return;
     try {
       await clearCatalogCache(guard);
       await readAfterWrite(detailId, guard);
@@ -1791,12 +1850,70 @@ export function CatalogPage({
     }
   }
 
-  async function retryAfterWrite() {
+  async function retryAfterWrite(narrow = false) {
     if (safety?.phase !== 'refresh') return;
     const { message, detailId, createUncertain } = safety;
+    const targetQuery = narrow ? { ...query, current: 1, pageSize: 1 } : query;
+    const recoveryRevision = runtime.session.revision;
+    const guardRecovery = safety.batchCreate
+      ? () => {
+          const currentIdentity = identity.getSnapshot();
+          if (
+            !mounted.current ||
+            runtime.session.revision !== recoveryRevision ||
+            currentIdentity.status !== 'authenticated' ||
+            JSON.stringify([
+              config.id,
+              currentIdentity.identity.user.id,
+              currentIdentity.identity.sessionId ?? null,
+            ]) !== batchOwner ||
+            !createAccess(currentIdentity.identity).canReadASIN
+          )
+            throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+        }
+      : undefined;
     let refreshed = false;
     try {
       await runWithCatalogLock(async () => {
+        guardRecovery?.();
+        const memory = knownBatchReceipts.current.get(safety.operationId ?? '');
+        const receipt =
+          batchResult?.receipt ??
+          (memory?.receipt.owner === batchOwner ? memory.receipt : null) ??
+          readAsinBatchReceipt(ownerId, batchOwner, safety.operationId)
+            ?.receipt;
+        if (
+          receipt &&
+          safety.batchCreate &&
+          (receipt.operationId !== safety.operationId ||
+            receipt.owner !== batchOwner ||
+            receipt.groupId !== detailId)
+        ) {
+          setBatchReceiptWarning('已知回执与原操作不匹配，写入保护仍保留。');
+          return;
+        }
+        if (safety.batchCreate && !safety.createUncertain && !receipt) {
+          setBatchReceiptWarning(
+            '已知逐行回执不可读取，写入保护仍保留。请恢复浏览器存储或核实原操作；勿重发成功项。',
+          );
+          return;
+        }
+        if (
+          receipt &&
+          receipt.owner === batchOwner &&
+          receipt.operationId === safety.operationId &&
+          !saveAsinBatchReceipt(ownerId, receipt)
+        ) {
+          setBatchResult((current) =>
+            current ? { ...current, persisted: false } : current,
+          );
+          return;
+        }
+        setBatchReceiptWarning(null);
+        if (receipt)
+          setBatchResult((current) =>
+            current ? { ...current, persisted: true } : current,
+          );
         const stored = catalogSafetyStorage();
         const current = stored
           ? readCatalogSafetyGate(stored, ownerId, config.id)
@@ -1806,7 +1923,8 @@ export function CatalogPage({
           return;
         }
         if (!current) {
-          await readAfterWrite(detailId);
+          await readAfterWrite(detailId, guardRecovery, targetQuery);
+          guardRecovery?.();
           const latest = readCatalogSafetyGate(stored, ownerId, config.id);
           runtime.queryClient.setQueryData(safetyKey, latest);
           refreshed = !latest;
@@ -1816,7 +1934,8 @@ export function CatalogPage({
           runtime.queryClient.setQueryData(safetyKey, current);
           return;
         }
-        await readAfterWrite(detailId);
+        await readAfterWrite(detailId, guardRecovery, targetQuery);
+        guardRecovery?.();
         refreshed = setSafety(
           createUncertain
             ? { phase: 'inspection', operationId: safety.operationId }
@@ -1825,11 +1944,24 @@ export function CatalogPage({
         );
       });
       if (!refreshed) return;
-      if (message) {
-        setNotice(message);
-        announce(message);
+      guardRecovery?.();
+      if (message || narrow) {
+        const report = `${message ?? ''}${
+          narrow
+            ? ' 已将目录改为每页 1 组，并按新范围成功重读。原大页读取未完成。'
+            : ''
+        }`;
+        setNotice(report);
+        announce(report);
       }
     } catch (cause) {
+      if (guardRecovery) {
+        try {
+          guardRecovery();
+        } catch {
+          return;
+        }
+      }
       if (catalogAccessDenied(cause)) reportAccessDenied();
     }
   }
@@ -1924,6 +2056,33 @@ export function CatalogPage({
       </Button>
     </div>
   );
+  const batchReceiptPanel = batchResult &&
+    batchResult.owner === batchOwner &&
+    access.canWriteASIN &&
+    (!safety || safety.operationId === batchResult.receipt.operationId) && (
+      <div className="space-y-3">
+        {(!batchResult.persisted || batchReceiptWarning) && (
+          <p role="alert">
+            {batchReceiptWarning ||
+              '逐行回执尚未保存到本地，写入保护继续保留。请保留页面并修复存储，勿重新提交成功项。'}
+          </p>
+        )}
+        <AsinBatchCreateResult
+          key={batchResult.receipt.operationId}
+          result={batchResult.result}
+          groupName={batchResult.groupName}
+          operationId={batchResult.receipt.operationId}
+          protected={Boolean(safety)}
+          dismiss={() => {
+            if (safety) return;
+            if (removeAsinBatchReceipt(ownerId, batchResult.receipt))
+              setBatchResult(null);
+            else
+              setBatchReceiptWarning('无法清理已保存回执，请恢复存储后重试。');
+          }}
+        />
+      </div>
+    );
 
   if (accessDenied)
     return (
@@ -1961,7 +2120,18 @@ export function CatalogPage({
           >
             重新读取目录
           </Button>
+          {safety.batchCreate && (
+            <Button
+              variant="secondary"
+              disabled={storageUnavailable}
+              onClick={() => void retryAfterWrite(true)}
+            >
+              改为每页 1 组重读（不重发）
+            </Button>
+          )}
+          {batchReceiptWarning && <p role="status">{batchReceiptWarning}</p>}
         </div>
+        {batchReceiptPanel}
       </AppShell>
     );
 
@@ -2166,6 +2336,9 @@ export function CatalogPage({
                       owner: batchOwner,
                       groupName: completedAction.group.name,
                       result,
+                      ...knownBatchReceipts.current.get(
+                        claim.operationId ?? '',
+                      )!,
                     });
                     setAction((current) =>
                       current === action ? null : current,
@@ -2176,6 +2349,23 @@ export function CatalogPage({
                       claim,
                       guard,
                     );
+                  }}
+                  rememberReceipt={(result, completedAction, claim, input) => {
+                    if (!claim.operationId) return;
+                    const receipt: AsinBatchReceipt = {
+                      operationId: claim.operationId,
+                      owner: batchOwner,
+                      groupId: completedAction.group.id,
+                      groupName: completedAction.group.name,
+                      submittedAt: Number(claim.operationId.split('-')[0]),
+                      items: input.items.map((item) => ({ ...item })),
+                      result,
+                    };
+                    const known = {
+                      receipt,
+                      persisted: saveAsinBatchReceipt(ownerId, receipt),
+                    };
+                    knownBatchReceipts.current.set(claim.operationId, known);
                   }}
                   denied={reportAccessDenied}
                   uncertain={(uncertainAction, claim) =>
@@ -2216,18 +2406,7 @@ export function CatalogPage({
               )}
             </div>
           )}
-        {batchResult &&
-          batchResult.owner === batchOwner &&
-          access.canWriteASIN &&
-          !writing &&
-          !safety && (
-            <AsinBatchCreateResult
-              key={batchResult.serial}
-              result={batchResult.result}
-              groupName={batchResult.groupName}
-              dismiss={() => setBatchResult(null)}
-            />
-          )}
+        {batchReceiptPanel}
 
         <Card>
           <CardHeader

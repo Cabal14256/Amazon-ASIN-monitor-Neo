@@ -26,6 +26,7 @@ export function AsinBatchCreatePanel({
   http,
   close,
   completed,
+  rememberReceipt,
   denied,
   uncertain,
   writingChange,
@@ -42,6 +43,12 @@ export function AsinBatchCreatePanel({
     action: BatchCreateAction,
     claim: CatalogSafetyGate,
   ) => Promise<void>;
+  rememberReceipt: (
+    result: BatchCreateAsinsData,
+    action: BatchCreateAction,
+    claim: CatalogSafetyGate,
+    input: AsinBatchCreateInput,
+  ) => void;
   denied: () => void;
   uncertain: (
     action: BatchCreateAction,
@@ -104,6 +111,14 @@ export function AsinBatchCreatePanel({
         guard();
         if (!catalogActionSourceCurrent(action, source))
           throw new ApiError('HTTP', '记录已变化', 409);
+        if (
+          !source.children ||
+          source.children.length + input.items.length > 5000
+        )
+          throw new ApiError(
+            'INVALID_INPUT',
+            '本次添加可能超过变体组 5000 个 ASIN 的读取上限，请减少本次编码数量；尚未提交。',
+          );
         claim = beginWrite(action);
         attempted = true;
         const result = await config.writes!.batchCreateAsins!(
@@ -111,6 +126,7 @@ export function AsinBatchCreatePanel({
           input,
           controller.signal,
         );
+        rememberReceipt(result, action, claim, input);
         guard();
         await completed(result, action, claim);
       });

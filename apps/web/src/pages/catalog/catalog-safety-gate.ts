@@ -5,6 +5,7 @@ export type CatalogSafetyGate =
       detailId: string | null;
       createUncertain: boolean;
       operationId?: string;
+      batchCreate?: boolean;
     }
   | { phase: 'inspection'; operationId?: string };
 
@@ -59,7 +60,8 @@ export function readCatalogSafetyGate(
       (gate.detailId !== null &&
         (typeof gate.detailId !== 'string' ||
           [...gate.detailId].length > 50)) ||
-      typeof gate.createUncertain !== 'boolean'
+      typeof gate.createUncertain !== 'boolean' ||
+      (gate.batchCreate !== undefined && typeof gate.batchCreate !== 'boolean')
     )
       throw new Error('invalid');
     return {
@@ -68,6 +70,7 @@ export function readCatalogSafetyGate(
       detailId: gate.detailId,
       createUncertain: gate.createUncertain,
       ...operationId,
+      ...(gate.batchCreate === true ? { batchCreate: true } : {}),
     };
   } catch {
     try {

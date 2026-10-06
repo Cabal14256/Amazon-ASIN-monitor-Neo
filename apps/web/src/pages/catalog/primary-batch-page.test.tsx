@@ -89,6 +89,7 @@ function fixture(
   let outcomes = [true, false];
   let responseMode: 'ready' | 'invalid' | '403' | '500' | 'network' = 'ready';
   let failReads = false;
+  let pageOverflow = false;
   let readFailureStatus = 400;
   let postGate: ReturnType<typeof deferred<void>> | undefined;
   let readGate: ReturnType<typeof deferred<void>> | undefined;
@@ -165,6 +166,19 @@ function fixture(
           readFailureStatus,
         );
     }
+    if (
+      posted &&
+      pageOverflow &&
+      path.endsWith('/variant-groups') &&
+      Number(new URL(String(input)).searchParams.get('pageSize')) > 1
+    )
+      return jsonResponse(
+        {
+          success: false,
+          errorMessage: '查询包含过多 ASIN，请缩小筛选范围或使用导出',
+        },
+        413,
+      );
     return jsonResponse({
       success: true,
       data:
@@ -175,7 +189,9 @@ function fixture(
               total: 1,
               totalASINs: group.children.length,
               current: 1,
-              pageSize: 10,
+              pageSize: Number(
+                new URL(String(input)).searchParams.get('pageSize') || 10,
+              ),
             }
           : snapshot,
     });
@@ -225,6 +241,9 @@ function fixture(
     failReads: (value: boolean, status = 400) => {
       failReads = value;
       readFailureStatus = status;
+    },
+    pageOverflow: () => {
+      pageOverflow = true;
     },
     holdPost: () => {
       postGate = deferred<void>();
@@ -283,6 +302,156 @@ const guardKey = catalogSafetyKey('operator', 'asin');
 const fiftyPointGroupId = ` ${'😀'.repeat(48)} `;
 
 describe('actual primary batch-create catalog integration', () => {
+  it('keeps an unreadable or mismatched known receipt protected after remount rather than discarding successful row evidence', async () => {
+    const f = fixture();
+    f.failReads(true);
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('button', { name: '重新读取目录' });
+    for (let index = 0; index < window.localStorage.length; index++) {
+      const key = window.localStorage.key(index)!;
+      if (!key.startsWith('neo:asin-batch-create-receipt:')) continue;
+      const raw = window.localStorage.getItem(key)!;
+      if (!raw.startsWith('{')) continue;
+      const saved = JSON.parse(raw);
+      saved.groupId = 'different-group';
+      saved.items = saved.items.map((item: { parentId: string }) => ({
+        ...item,
+        parentId: 'different-group',
+      }));
+      window.localStorage.setItem(key, JSON.stringify(saved));
+    }
+    f.unmount();
+    f.remount();
+    f.failReads(false);
+    fireEvent.click(
+      await screen.findByRole('button', { name: '重新读取目录' }),
+    );
+    await screen.findByText(/回执与原操作不匹配/);
+    expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+    expect(window.localStorage.getItem(guardKey)).not.toBeNull();
+    expect(f.posts()).toHaveLength(1);
+  });
+  it.each(['B00000000ſ', 'B0000000ß'])(
+    'rejects pasted original Unicode token %s without POST',
+    async (code) => {
+      const f = fixture();
+      await openBatch();
+      fireEvent.change(screen.getByRole('textbox', { name: 'ASIN 编码列表' }), {
+        target: { value: code },
+      });
+      const submit = screen.getByRole('button', { name: '确认添加 0 个 ASIN' });
+      expect(submit).toHaveProperty('disabled', true);
+      fireEvent.submit(submit.closest('form')!);
+      expect(f.posts()).toHaveLength(0);
+    },
+  );
+  it.each(['ready', 'network'] as const)(
+    'recovers an aggregate-page 413 with explicit pageSize 1 GET only and keeps %s semantics',
+    async (mode) => {
+      const f = fixture();
+      f.mode(mode);
+      f.pageOverflow();
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('button', { name: '重新读取目录' });
+      fireEvent.click(
+        screen.getByRole('button', { name: '改为每页 1 组重读（不重发）' }),
+      );
+      if (mode === 'network')
+        await screen.findByRole('button', {
+          name: '已核实原操作，重读目录并恢复写入',
+        });
+      else
+        await waitFor(() =>
+          expect(window.localStorage.getItem(guardKey)).toBeNull(),
+        );
+      expect(screen.getByRole('combobox', { name: '每页数量' })).toHaveProperty(
+        'value',
+        '1',
+      );
+      expect(screen.getByText(/已将目录改为每页 1 组/)).toBeTruthy();
+      expect(f.posts()).toHaveLength(1);
+      if (mode === 'network')
+        expect(
+          JSON.parse(window.localStorage.getItem(guardKey)!),
+        ).toMatchObject({ phase: 'inspection' });
+    },
+  );
+  it('keeps visible known rows and the guard when receipt storage fails, restores the session fallback, and never reposts', async () => {
+    const f = fixture();
+    const original = Storage.prototype.setItem;
+    const blocked = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(function (this: Storage, key, value) {
+        if (
+          this === window.localStorage &&
+          key.startsWith('neo:asin-batch-create-receipt:')
+        )
+          throw new Error('receipt quota');
+        original.call(this, key, value);
+      });
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('button', { name: '重新读取目录' });
+    expect(await screen.findByText(/逐行回执尚未保存到本地/)).toBeTruthy();
+    expect(
+      within(screen.getByRole('region', { name: '批量添加结果' })).getByText(
+        'Fixture duplicate',
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: '关闭结果' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    f.unmount();
+    f.remount();
+    await screen.findByRole('region', { name: '批量添加结果' });
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    expect(window.localStorage.getItem(guardKey)).not.toBeNull();
+    blocked.mockRestore();
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    expect(f.posts()).toHaveLength(1);
+  });
+  it('rejects a fresh source whose worst-case new rows exceed the readable group cap before claiming or posting', async () => {
+    const f = fixture();
+    await openBatch();
+    f.group.children = Array.from({ length: 4999 }, (_, index) => ({
+      id: `existing-${index}`,
+      asin: `B${String(index).padStart(9, '0')}`,
+      country: 'US',
+    }));
+    fireEvent.submit(fillBatch());
+    await screen.findByText(/超过.*5000.*读取上限/);
+    expect(f.posts()).toHaveLength(0);
+    expect(window.localStorage.getItem(guardKey)).toBeNull();
+  });
+  it('rehydrates partial row receipts after refresh failure and remount before GET-only recovery', async () => {
+    const f = fixture();
+    f.failReads(true);
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('button', { name: '重新读取目录' });
+    f.unmount();
+    f.remount();
+    const protectedResult = within(
+      await screen.findByRole('region', { name: '批量添加结果' }),
+    );
+    expect(protectedResult.getByText('B000000001')).toBeTruthy();
+    expect(protectedResult.getByText('Fixture duplicate')).toBeTruthy();
+    f.failReads(false);
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    const result = within(screen.getByRole('region', { name: '批量添加结果' }));
+    expect(result.getByText('B000000001')).toBeTruthy();
+    expect(result.getByText('Fixture duplicate')).toBeTruthy();
+    expect(f.posts()).toHaveLength(1);
+  });
   it.each([
     { base: '/api/', outcomes: [true, true], success: 2, failed: 0 },
     {
@@ -452,13 +621,17 @@ describe('actual primary batch-create catalog integration', () => {
     },
   );
 
-  it('keeps the claim and hides results until a failed post-write refresh is retried with GET only', async () => {
+  it('keeps the claim and known rows visible until a failed post-write refresh is retried with GET only', async () => {
     const f = fixture();
     f.failReads(true);
     await openBatch();
     fireEvent.submit(fillBatch());
     await screen.findByRole('button', { name: '重新读取目录' });
-    expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+    expect(
+      within(screen.getByRole('region', { name: '批量添加结果' })).getByText(
+        'Fixture duplicate',
+      ),
+    ).toBeTruthy();
     expect(JSON.parse(window.localStorage.getItem(guardKey)!)).toMatchObject({
       createUncertain: false,
       detailId: f.group.id,
@@ -702,7 +875,7 @@ describe('actual primary batch-create catalog integration', () => {
     expect(f.posts()).toHaveLength(1);
   });
 
-  it('does not let a late refresh 403 from a revoked batch deny the restored same-owner session or release its persisted claim', async () => {
+  it('restores prior known receipts while a late refresh 403 cannot deny the restored same-owner session or release its persisted claim', async () => {
     const f = fixture();
     const reads = f.holdRead();
     f.failReads(true, 403);
@@ -720,13 +893,21 @@ describe('actual primary batch-create catalog integration', () => {
       phase: 'refresh',
       createUncertain: false,
     });
-    expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+    expect(
+      within(screen.getByRole('region', { name: '批量添加结果' })).getByText(
+        'Fixture duplicate',
+      ),
+    ).toBeTruthy();
     f.failReads(false);
     fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
     await waitFor(() =>
       expect(window.localStorage.getItem(guardKey)).toBeNull(),
     );
-    expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+    expect(
+      within(screen.getByRole('region', { name: '批量添加结果' })).getByText(
+        'Fixture duplicate',
+      ),
+    ).toBeTruthy();
     expect(f.posts()).toHaveLength(1);
   });
 

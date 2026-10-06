@@ -9,10 +9,14 @@ export function AsinBatchCreateResult({
   result,
   groupName,
   dismiss,
+  protected: protectedReceipt = false,
+  operationId,
 }: {
   result: BatchCreateAsinsData;
   groupName: string;
   dismiss: () => void;
+  protected?: boolean;
+  operationId?: string;
 }) {
   const [failedOnly, setFailedOnly] = useState(false);
   const [page, setPage] = useState(1);
@@ -27,12 +31,22 @@ export function AsinBatchCreateResult({
         title="批量添加结果"
         description={`变体组「${groupName}」 · 共 ${result.total} 个，成功 ${result.successCount} 个，失败 ${result.failedCount} 个。`}
         action={
-          <Button variant="ghost" size="small" onClick={dismiss}>
+          <Button
+            variant="ghost"
+            size="small"
+            disabled={protectedReceipt}
+            onClick={dismiss}
+          >
             关闭结果
           </Button>
         }
       />
       <CardContent className="space-y-4">
+        {operationId && (
+          <p className="neo-mono break-all text-xs text-muted-foreground">
+            操作 ID：{operationId}
+          </p>
+        )}
         <p role="status" className="text-sm">
           {result.failedCount
             ? '失败项可逐项核对原因，已成功的编码无需重新提交。'
