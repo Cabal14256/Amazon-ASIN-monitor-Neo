@@ -57,6 +57,31 @@ function legacySerializer() {
   ).fixtureSerialize;
 }
 describe('task query values and actual Legacy public model', () => {
+  it('recursively removes competitor private completion evidence without changing stored results', () => {
+    const result = {
+      success: true,
+      totalChecked: 1,
+      _competitorMonitorCommit: { version: 1, requestHash: 'private-proof' },
+      details: [
+        {
+          total: 1,
+          _competitorMonitorCommit: { requestHash: 'nested-private' },
+        },
+      ],
+    };
+    const task = taskFixture({
+      taskType: 'competitor-monitor',
+      taskSubType: 'competitor',
+      result,
+    });
+    expect(serializeTask(task).result).toEqual({
+      success: true,
+      totalChecked: 1,
+      details: [{ total: 1 }],
+    });
+    expect(task.result).toEqual(result);
+    expect(JSON.stringify(publicTaskResult(result))).not.toContain('private');
+  });
   const legacy = legacySerializer();
   it.each([
     'pending',

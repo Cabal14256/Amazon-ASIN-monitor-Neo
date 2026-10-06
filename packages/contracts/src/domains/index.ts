@@ -4,6 +4,7 @@ export * from './audit-neo';
 export * from './auth';
 export * from './backup';
 export * from './competitor';
+export * from './competitor-monitor';
 export * from './dashboard';
 export * from './export';
 export * from './feishu';

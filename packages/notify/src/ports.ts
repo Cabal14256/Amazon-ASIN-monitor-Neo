@@ -32,6 +32,9 @@ export interface NotificationResult {
 }
 export interface CountryNotificationResult extends NotificationResult {
   skipped: false;
+  /** Competitor prepared delivery attempted a POST but its acceptance could not
+   * be confirmed. Keep the durable claim; automatic redelivery is unsafe. */
+  unconfirmed?: true;
 }
 export interface BatchNotificationResult {
   total: number;

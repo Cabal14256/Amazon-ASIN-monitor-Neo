@@ -42,7 +42,7 @@ export function parseTaskQuery(raw: unknown) {
   return { status: value.data.status || 'all', limit: value.data.limit ?? 50 };
 }
 const privateKey =
-  /password|token|secret|authorization|cookie|credential|file.?path|^path$|directory|^stack$|^backupCreationCommit$|^__proto__$|^constructor$|^prototype$/i;
+  /password|token|secret|authorization|cookie|credential|file.?path|^path$|directory|^stack$|^backupCreationCommit$|^_competitorMonitorCommit$|^__proto__$|^constructor$|^prototype$/i;
 /** Preserve structured business results while excluding server-only fields at every depth. */
 export function publicTaskResult(raw: unknown): unknown {
   if (!raw) return null;

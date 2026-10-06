@@ -8,9 +8,12 @@ import {
   catalogAccessDenied,
   catalogActionSourceCurrent,
   catalogWriteError,
+  catalogWriteOutcomeUncertain,
+  competitorAsinCode,
   singleAsinCode,
   statusSource,
 } from './catalog-data';
+import type { CatalogSafetyGate } from './catalog-safety-gate';
 import type {
   CatalogAction,
   CatalogChild,
@@ -20,6 +23,17 @@ import type {
 
 function flag(value: boolean | 0 | 1 | null | undefined): boolean {
   return value === true || value === 1;
+}
+function competitorText(value: string, max: number): boolean {
+  if (value.length > max * 2) return false;
+  const characters = [...value];
+  return (
+    characters.length <= max &&
+    characters.every((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code >= 32 && code !== 127;
+    })
+  );
 }
 function manualExpectedGroup(group: CatalogGroup) {
   return {
@@ -36,6 +50,25 @@ function manualExpectedAsin(child: CatalogChild, group: CatalogGroup) {
     manualExcludedFromGroup: flag(child.manualExcludedFromGroup),
     manualExcludedReason: child.manualExcludedReason ?? null,
     parentManualBroken: flag(group.manualBroken),
+  };
+}
+function competitorExpectedGroup(group: CatalogGroup) {
+  return {
+    name: group.name,
+    country: group.country,
+    brand: group.brand,
+    updateTime: group.updateTime,
+  };
+}
+function competitorExpectedAsin(child: CatalogChild, group: CatalogGroup) {
+  return {
+    variantGroupId: group.id,
+    asin: child.asin,
+    name: child.name ?? null,
+    country: child.country,
+    brand: child.brand ?? null,
+    asinType: child.asinType == null ? null : String(child.asinType),
+    updateTime: child.updateTime,
   };
 }
 
@@ -82,17 +115,33 @@ export function CatalogActionPanel({
   close,
   saved,
   denied,
+  uncertain,
   writingChange,
+  runExclusive,
+  beginWrite,
+  releaseWrite,
 }: {
   action: CatalogAction;
   config: CatalogConfig;
   http: Pick<HttpClient, 'request'>;
   close: () => void;
-  saved: (message: string, action: CatalogAction) => Promise<void>;
+  saved: (
+    message: string,
+    action: CatalogAction,
+    claim: CatalogSafetyGate,
+  ) => Promise<void>;
   denied: () => void;
+  uncertain: (
+    action: CatalogAction,
+    claim: CatalogSafetyGate,
+  ) => Promise<void> | void;
   writingChange: (writing: boolean) => void;
+  runExclusive: (work: () => Promise<void>) => Promise<void>;
+  beginWrite: (action: CatalogAction) => CatalogSafetyGate;
+  releaseWrite: (claim: CatalogSafetyGate) => void;
 }) {
   const writes = config.writes;
+  const mainWrites = config.id === 'asin' ? config.writes : undefined;
   const group = 'group' in action ? action.group : undefined;
   const child = 'child' in action ? action.child : undefined;
   const groupForm =
@@ -153,10 +202,17 @@ export function CatalogActionPanel({
     try {
       const result = await config.list(http, {
         keyword: targetSearch.trim() || undefined,
+        country: config.id === 'competitor' ? group?.country : undefined,
         current: 1,
         pageSize: 20,
       });
-      setTargets(result.list.filter((item) => item.id !== group?.id));
+      setTargets(
+        result.list.filter(
+          (item) =>
+            item.id !== group?.id &&
+            (config.id !== 'competitor' || item.country === group?.country),
+        ),
+      );
     } catch (cause) {
       if (catalogAccessDenied(cause)) denied();
       setError(catalogWriteError(cause));
@@ -169,15 +225,44 @@ export function CatalogActionPanel({
     event.preventDefault();
     if (!writes || pending) return;
     setError(null);
-    if (
-      moving &&
-      (!targetGroupId.trim() || targetGroupId.trim() === group?.id)
-    ) {
+    if (moving && (!targetGroupId.trim() || targetGroupId === group?.id)) {
       setError('请选择不同的目标变体组。');
       return;
     }
-    if (action.type === 'create-asin' && !singleAsinCode(asin)) {
-      setError('ASIN 应为 10 位字母或数字。');
+    if (config.id === 'competitor' && (groupForm || asinForm)) {
+      if (groupForm && (!name.trim() || !competitorText(name, 255))) {
+        setError('竞品变体组名称应为 1–255 个非控制字符。');
+        return;
+      }
+      if (asinForm && !competitorText(name, 500)) {
+        setError('竞品 ASIN 名称不能超过 500 个字符或包含控制字符。');
+        return;
+      }
+      if (!brand.trim() || !competitorText(brand, 100)) {
+        setError('竞品品牌应为 1–100 个非控制字符。');
+        return;
+      }
+      if (
+        groupForm &&
+        (country.length > 20 ||
+          !competitorText(country, 20) ||
+          !country.trim() ||
+          !competitorText(country.trim().toUpperCase(), 10))
+      ) {
+        setError('竞品国家代码应为 1–10 个非控制字符。');
+        return;
+      }
+    }
+    const normalizedAsin =
+      config.id === 'competitor'
+        ? competitorAsinCode(asin)
+        : singleAsinCode(asin);
+    if (action.type === 'create-asin' && !normalizedAsin) {
+      setError(
+        config.id === 'competitor'
+          ? '竞品 ASIN 应为 1–20 个非控制字符。'
+          : 'ASIN 应为 10 位字母或数字。',
+      );
       return;
     }
     if (
@@ -192,94 +277,203 @@ export function CatalogActionPanel({
     }
     setPending(true);
     writingChange(true);
+    let mutationAttempted = false;
+    let claim: CatalogSafetyGate | null = null;
     try {
-      if ('group' in action) {
-        const latest = await config.detail(http, action.group.id);
-        if (!catalogActionSourceCurrent(action, latest))
-          throw new ApiError('HTTP', '记录已变化', 409);
-      }
-      switch (action.type) {
-        case 'create-group':
-          await writes.createGroup(http, {
-            name: name.trim(),
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-          });
-          break;
-        case 'edit-group':
-          await writes.updateGroup(http, action.group.id, {
-            name: name.trim(),
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-          });
-          break;
-        case 'delete-group':
-          await writes.deleteGroup(http, action.group.id);
-          break;
-        case 'create-asin':
-          await writes.createAsin(http, {
-            asin: singleAsinCode(asin)!,
-            name: name.trim() || null,
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-            parentId: action.group.id,
-            asinType: asinType ? (asinType as '1' | '2') : null,
-          });
-          break;
-        case 'edit-asin':
-          await writes.updateAsin(http, action.child.id, {
-            asin: action.child.asin,
-            name: name.trim() || null,
-            country: country.trim().toUpperCase(),
-            site: site.trim(),
-            brand: brand.trim(),
-            asinType: asinType ? (asinType as '1' | '2') : null,
-          });
-          break;
-        case 'move-asin':
-          await writes.moveAsin(http, action.child.id, {
-            targetGroupId: targetGroupId.trim(),
-          });
-          break;
-        case 'delete-asin':
-          await writes.deleteAsin(http, action.child.id);
-          break;
-        case 'group-notify':
-          await writes.updateGroupNotify(
-            http,
-            action.group.id,
-            !action.group.feishuNotifyEnabled,
-          );
-          break;
-        case 'group-manual':
-          await writes.updateGroupManual(http, action.group.id, {
-            markedBroken: !action.group.manualBroken,
-            reason: reason.trim() || undefined,
-            expectedManualState: manualExpectedGroup(action.group),
-          });
-          break;
-        case 'asin-notify':
-          await writes.updateAsinNotify(
-            http,
-            action.child.id,
-            !action.child.feishuNotifyEnabled,
-          );
-          break;
-        case 'asin-manual':
-          await writes.updateAsinManual(http, action.child.id, {
-            action: action.action,
-            reason: reason.trim() || undefined,
-            expectedManualState: manualExpectedAsin(action.child, action.group),
-          });
-          break;
-      }
-      await saved(`${title(action)}已完成。`, action);
-      close();
+      await runExclusive(async () => {
+        try {
+          if ('group' in action) {
+            const latest = await config.detail(http, action.group.id);
+            if (!catalogActionSourceCurrent(action, latest))
+              throw new ApiError('HTTP', '记录已变化', 409);
+          }
+          let confirmedTarget: CatalogGroup | undefined;
+          if (moving) {
+            const target = await config.detail(http, targetGroupId);
+            if (
+              !targets?.some(
+                (item) =>
+                  item.id === target.id &&
+                  item.country === target.country &&
+                  item.name === target.name &&
+                  item.brand === target.brand,
+              )
+            )
+              throw new ApiError('HTTP', '记录已变化', 409);
+            confirmedTarget = target;
+          }
+          claim = beginWrite(action);
+          mutationAttempted = true;
+          switch (action.type) {
+            case 'create-group':
+              if (config.id === 'competitor')
+                await config.writes!.createGroup(http, {
+                  name,
+                  country: country.trim().toUpperCase(),
+                  brand,
+                });
+              else
+                await config.writes!.createGroup(http, {
+                  name: name.trim(),
+                  country: country.trim().toUpperCase(),
+                  site: site.trim(),
+                  brand: brand.trim(),
+                });
+              break;
+            case 'edit-group':
+              if (config.id === 'competitor')
+                await config.writes!.updateGroup(http, action.group.id, {
+                  name,
+                  country: country.trim().toUpperCase(),
+                  brand,
+                  expectedSource: competitorExpectedGroup(action.group),
+                });
+              else
+                await config.writes!.updateGroup(http, action.group.id, {
+                  name: name.trim(),
+                  country: country.trim().toUpperCase(),
+                  site: site.trim(),
+                  brand: brand.trim(),
+                });
+              break;
+            case 'delete-group':
+              if (config.id === 'competitor')
+                await config.writes!.deleteGroup(
+                  http,
+                  action.group.id,
+                  (action.group.children ?? []).map((item) => item.id),
+                  competitorExpectedGroup(action.group),
+                );
+              else await config.writes!.deleteGroup(http, action.group.id);
+              break;
+            case 'create-asin':
+              if (config.id === 'competitor')
+                await config.writes!.createAsin(http, {
+                  asin: normalizedAsin!,
+                  name: name || null,
+                  country: action.group.country,
+                  brand,
+                  parentId: action.group.id,
+                  asinType: asinType ? (asinType as '1' | '2') : null,
+                  expectedParent: competitorExpectedGroup(action.group),
+                });
+              else
+                await config.writes!.createAsin(http, {
+                  asin: normalizedAsin!,
+                  name: name.trim() || null,
+                  country: country.trim().toUpperCase(),
+                  site: site.trim(),
+                  brand: brand.trim(),
+                  parentId: action.group.id,
+                  asinType: asinType ? (asinType as '1' | '2') : null,
+                });
+              break;
+            case 'edit-asin':
+              if (config.id === 'competitor')
+                await config.writes!.updateAsin(http, action.child.id, {
+                  asin: action.child.asin,
+                  name: name || null,
+                  country: action.group.country,
+                  brand,
+                  asinType: asinType ? (asinType as '1' | '2') : null,
+                  expectedSource: competitorExpectedAsin(
+                    action.child,
+                    action.group,
+                  ),
+                });
+              else
+                await config.writes!.updateAsin(http, action.child.id, {
+                  asin: action.child.asin,
+                  name: name.trim() || null,
+                  country: country.trim().toUpperCase(),
+                  site: site.trim(),
+                  brand: brand.trim(),
+                  asinType: asinType ? (asinType as '1' | '2') : null,
+                });
+              break;
+            case 'move-asin':
+              if (config.id === 'competitor') {
+                if (!confirmedTarget)
+                  throw new ApiError('INVALID_INPUT', '请重新确认目标组');
+                await config.writes!.moveAsin(http, action.child.id, {
+                  targetGroupId,
+                  expectedSourceGroup: action.group.id,
+                  expectedTargetSnapshot: {
+                    id: confirmedTarget.id,
+                    ...competitorExpectedGroup(confirmedTarget),
+                  },
+                });
+              } else
+                await writes.moveAsin(http, action.child.id, { targetGroupId });
+              break;
+            case 'delete-asin':
+              if (config.id === 'competitor')
+                await writes.deleteAsin(
+                  http,
+                  action.child.id,
+                  competitorExpectedAsin(action.child, action.group),
+                );
+              else await writes.deleteAsin(http, action.child.id);
+              break;
+            case 'group-notify':
+              if (!mainWrites)
+                throw new ApiError('INVALID_INPUT', '不支持此操作');
+              await mainWrites.updateGroupNotify(
+                http,
+                action.group.id,
+                !action.group.feishuNotifyEnabled,
+              );
+              break;
+            case 'group-manual':
+              if (!mainWrites)
+                throw new ApiError('INVALID_INPUT', '不支持此操作');
+              await mainWrites.updateGroupManual(http, action.group.id, {
+                markedBroken: !action.group.manualBroken,
+                reason: reason.trim() || undefined,
+                expectedManualState: manualExpectedGroup(action.group),
+              });
+              break;
+            case 'asin-notify':
+              if (!mainWrites)
+                throw new ApiError('INVALID_INPUT', '不支持此操作');
+              await mainWrites.updateAsinNotify(
+                http,
+                action.child.id,
+                !action.child.feishuNotifyEnabled,
+              );
+              break;
+            case 'asin-manual':
+              if (!mainWrites)
+                throw new ApiError('INVALID_INPUT', '不支持此操作');
+              await mainWrites.updateAsinManual(http, action.child.id, {
+                action: action.action,
+                reason: reason.trim() || undefined,
+                expectedManualState: manualExpectedAsin(
+                  action.child,
+                  action.group,
+                ),
+              });
+              break;
+          }
+          await saved(`${title(action)}已完成。`, action, claim);
+          close();
+        } catch (cause) {
+          if (catalogAccessDenied(cause)) {
+            if (claim) releaseWrite(claim);
+            denied();
+          } else if (
+            mutationAttempted &&
+            claim &&
+            catalogWriteOutcomeUncertain(cause, config.id)
+          )
+            await uncertain(action, claim);
+          else {
+            if (claim) releaseWrite(claim);
+            setError(catalogWriteError(cause));
+          }
+        }
+      });
     } catch (cause) {
-      if (catalogAccessDenied(cause)) denied();
       setError(catalogWriteError(cause));
     } finally {
       setPending(false);
@@ -370,7 +564,7 @@ export function CatalogActionPanel({
                 <Input
                   {...control}
                   value={name}
-                  maxLength={255}
+                  maxLength={config.id === 'competitor' ? 510 : 255}
                   onChange={(event) => setName(event.target.value)}
                 />
               )}
@@ -383,7 +577,7 @@ export function CatalogActionPanel({
                   <Input
                     {...control}
                     value={asin}
-                    maxLength={10}
+                    maxLength={config.id === 'competitor' ? 40 : 10}
                     disabled={action.type === 'edit-asin'}
                     onChange={(event) => setAsin(event.target.value)}
                   />
@@ -394,7 +588,7 @@ export function CatalogActionPanel({
                   <Input
                     {...control}
                     value={name}
-                    maxLength={500}
+                    maxLength={config.id === 'competitor' ? 1000 : 500}
                     onChange={(event) => setName(event.target.value)}
                   />
                 )}
@@ -402,33 +596,44 @@ export function CatalogActionPanel({
             </>
           )}
           {(groupForm || asinForm) && (
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div
+              className={`grid gap-4 ${
+                config.showSite ? 'sm:grid-cols-3' : 'sm:grid-cols-2'
+              }`}
+            >
               <Field label="国家代码" required>
                 {(control) => (
                   <Input
                     {...control}
-                    value={country}
-                    maxLength={10}
+                    value={
+                      config.id === 'competitor' && asinForm
+                        ? group?.country ?? ''
+                        : country
+                    }
+                    maxLength={config.id === 'competitor' ? 20 : 10}
+                    disabled={config.id === 'competitor' && asinForm}
                     onChange={(event) => setCountry(event.target.value)}
                   />
                 )}
               </Field>
-              <Field label="站点" hint="填写店铺代号，例如 12。" required>
-                {(control) => (
-                  <Input
-                    {...control}
-                    value={site}
-                    maxLength={100}
-                    onChange={(event) => setSite(event.target.value)}
-                  />
-                )}
-              </Field>
+              {config.showSite && (
+                <Field label="站点" hint="填写店铺代号，例如 12。" required>
+                  {(control) => (
+                    <Input
+                      {...control}
+                      value={site}
+                      maxLength={100}
+                      onChange={(event) => setSite(event.target.value)}
+                    />
+                  )}
+                </Field>
+              )}
               <Field label="品牌" required>
                 {(control) => (
                   <Input
                     {...control}
                     value={brand}
-                    maxLength={100}
+                    maxLength={config.id === 'competitor' ? 200 : 100}
                     onChange={(event) => setBrand(event.target.value)}
                   />
                 )}
@@ -490,8 +695,8 @@ export function CatalogActionPanel({
                       className="w-full justify-start"
                       onClick={() => setTargetGroupId(target.id)}
                     >
-                      {target.name} · {target.country} · {target.site} ·{' '}
-                      {target.id}
+                      {target.name} · {target.country}
+                      {config.showSite && ` · ${target.site}`} · {target.id}
                     </Button>
                   ))}
                 </div>

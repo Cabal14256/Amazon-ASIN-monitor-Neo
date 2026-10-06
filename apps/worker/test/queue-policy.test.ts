@@ -104,8 +104,9 @@ describe('Legacy to BullMQ queue policy parity', () => {
             ...(baseline.options.defaultJobOptions as object),
             // Neo terminal monitor jobs also serve as task recovery receipts.
             ...(name === 'monitor' ||
-            name === 'variant-check' ||
-            name === 'batch-check'
+              name === 'competitor-monitor' ||
+              name === 'variant-check' ||
+              name === 'batch-check'
               ? {
                   removeOnComplete: { age: 604_800 },
                   removeOnFail: { age: 604_800 },
@@ -161,7 +162,17 @@ describe('Legacy to BullMQ queue policy parity', () => {
       ).toEqual({ age: expectedAge });
       expect(
         getQueuePolicy('competitor-monitor', env).defaultJobOptions,
-      ).toMatchObject({ removeOnComplete: { age: 3600 } });
+      ).toMatchObject({
+        removeOnComplete: { age: expectedAge },
+        removeOnFail: { age: expectedAge },
+      });
+      expect(
+        getQueueOptions('competitor-monitor', env, { host: 'localhost' })
+          .defaultJobOptions,
+      ).toMatchObject({
+        removeOnComplete: { age: expectedAge },
+        removeOnFail: { age: expectedAge },
+      });
     },
   );
 

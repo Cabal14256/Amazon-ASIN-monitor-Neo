@@ -404,6 +404,7 @@ const envObjectSchema = z.object({
   WORKER_ENABLED_QUEUES: z.string().optional(),
   MONITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   COMPETITOR_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
+  COMPETITOR_MONITOR_ENABLED: booleanFlagSchema(true),
   EXPORT_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   BATCH_CHECK_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,
   BATCH_DELETE_QUEUE_WORKER_CONCURRENCY: queueConcurrencySchema,

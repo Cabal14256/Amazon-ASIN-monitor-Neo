@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   competitorBatchCheckResultSchema,
   competitorCheckResultSchema,
+  competitorCreateAsinRequestSchema,
   competitorDeleteAsinResultSchema,
+  competitorDeleteGroupRequestSchema,
   competitorDeleteGroupResultSchema,
   competitorGroupListResultSchema,
   competitorGroupUpsertRequestSchema,
   competitorMonitorHistoryListResultSchema,
   competitorMonitorTriggerResultSchema,
+  competitorMoveAsinRequestSchema,
 } from '../src/domains/competitor';
 
 /**
@@ -16,6 +19,80 @@ import {
  */
 
 describe('competitor 域', () => {
+  it('keeps Legacy create requests and exact optional persisted parent snapshots', () => {
+    const input = {
+      asin: 'B000000121',
+      country: 'US',
+      brand: 'Own brand',
+      parentId: 'g1',
+    };
+    expect(competitorCreateAsinRequestSchema.parse(input)).toEqual(input);
+    const expectedParent = {
+      name: '\n',
+      country: '',
+      brand: ' ',
+      updateTime: null,
+    };
+    expect(
+      competitorCreateAsinRequestSchema.parse({ ...input, expectedParent }),
+    ).toEqual({ ...input, expectedParent });
+    expect(
+      competitorCreateAsinRequestSchema.safeParse({
+        ...input,
+        expectedParent: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      competitorCreateAsinRequestSchema.safeParse({
+        ...input,
+        expectedParent: { ...expectedParent, extra: true },
+      }).success,
+    ).toBe(false);
+  });
+  it('keeps the Legacy move shape and preserves an optional confirmed source group', () => {
+    expect(
+      competitorMoveAsinRequestSchema.parse({ targetGroupId: 'g2' }),
+    ).toEqual({ targetGroupId: 'g2' });
+    expect(
+      competitorMoveAsinRequestSchema.parse({
+        targetGroupId: 'g2',
+        expectedSourceGroup: 'g1',
+      }),
+    ).toEqual({ targetGroupId: 'g2', expectedSourceGroup: 'g1' });
+    expect(
+      competitorMoveAsinRequestSchema.safeParse({
+        targetGroupId: 'g2',
+        expectedSourceGroup: '',
+      }).success,
+    ).toBe(false);
+  });
+  it('retains the optional full target snapshot and exact persisted identity on move', () => {
+    const expectedTargetSnapshot = {
+      id: ' Gróup ',
+      name: '\n',
+      country: 'US',
+      brand: '',
+      updateTime: null,
+    };
+    const body = {
+      targetGroupId: ' Gróup ',
+      expectedSourceGroup: 'g1',
+      expectedTargetSnapshot,
+    };
+    expect(competitorMoveAsinRequestSchema.parse(body)).toEqual(body);
+    for (const target of [
+      null,
+      {},
+      { ...expectedTargetSnapshot, id: '' },
+      { ...expectedTargetSnapshot, extra: true },
+    ])
+      expect(
+        competitorMoveAsinRequestSchema.safeParse({
+          ...body,
+          expectedTargetSnapshot: target,
+        }).success,
+      ).toBe(false);
+  });
   it('竞对变体组列表：无 site，children 无人工异常装饰', () => {
     const parsed = competitorGroupListResultSchema.parse({
       success: true,
@@ -149,6 +226,34 @@ describe('competitor 域', () => {
   });
 
   it('竞对组与 ASIN 单项删除返回字符串 data', () => {
+    expect(
+      competitorDeleteGroupRequestSchema.parse({
+        expectedChildIds: ['ca1', 'ca2'],
+      }),
+    ).toEqual({ expectedChildIds: ['ca1', 'ca2'] });
+    expect(competitorDeleteGroupRequestSchema.safeParse({}).success).toBe(true);
+    const expectedSource = {
+      name: 'Confirmed group',
+      country: 'DE',
+      brand: 'Rival',
+      updateTime: '2020-01-01T00:00:00.000Z',
+    };
+    expect(
+      competitorDeleteGroupRequestSchema.parse({
+        expectedChildIds: ['ca1'],
+        expectedSource,
+      }),
+    ).toEqual({ expectedChildIds: ['ca1'], expectedSource });
+    expect(
+      competitorDeleteGroupRequestSchema.safeParse({ expectedSource: null })
+        .success,
+    ).toBe(false);
+    expect(
+      competitorDeleteGroupRequestSchema.safeParse({
+        expectedChildIds: [],
+        site: 'DE',
+      }).success,
+    ).toBe(false);
     expect(
       competitorDeleteGroupResultSchema.parse({
         success: true,

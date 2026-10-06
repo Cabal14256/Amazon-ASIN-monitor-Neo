@@ -23,9 +23,12 @@ import { mapCompetitorAsinWrite } from './competitor-write-mapper';
 import {
   CompetitorWriteInputError,
   parseCompetitorAsinCreate,
+  parseCompetitorAsinDelete,
   parseCompetitorAsinMove,
   parseCompetitorAsinUpdate,
   parseCompetitorBatchCreate,
+  parseCompetitorGroupDelete,
+  parseCompetitorGroupUpdate,
   parseCompetitorGroupWrite,
   parseCompetitorNotify,
   parseCompetitorWriteId,
@@ -117,6 +120,10 @@ export class CompetitorWriteService implements OnModuleDestroy {
           fail(409, '该 ASIN 在此国家中已存在，请刷新后重试');
         if (error.code === 'parent-changed')
           fail(409, 'ASIN 所属竞品组已改变，请刷新后重试');
+        if (error.code === 'source-changed')
+          fail(409, '竞品记录已变化，请刷新后重试');
+        if (error.code === 'members-changed')
+          fail(409, '竞品组成员已变化，请刷新后重新确认删除');
         if (error.code === 'timestamp-policy') {
           this.logger.warn('竞品写入策略未就绪', 'CompetitorWriteService', {
             reason: 'competitor_write_policy_required',
@@ -157,31 +164,36 @@ export class CompetitorWriteService implements OnModuleDestroy {
     );
   }
   updateGroup(principal: AuthPrincipal, id: unknown, body: unknown) {
-    return this.write(principal, 'update-group', async (unit) =>
-      groupResult(
+    return this.write(principal, 'update-group', async (unit) => {
+      const { expectedSource, ...fields } = parseCompetitorGroupUpdate(body);
+      return groupResult(
         await unit.updateGroup(
           parseCompetitorWriteId(id),
-          parseCompetitorGroupWrite(body),
+          fields,
+          expectedSource,
         ),
-      ),
-    );
+      );
+    });
   }
   createAsin(principal: AuthPrincipal, body: unknown) {
-    return this.write(principal, 'create-asin', async (unit) =>
-      mapCompetitorAsinWrite(
-        await unit.createAsin(parseCompetitorAsinCreate(body)),
-      ),
-    );
+    return this.write(principal, 'create-asin', async (unit) => {
+      const { expectedParent, ...fields } = parseCompetitorAsinCreate(body);
+      return mapCompetitorAsinWrite(
+        await unit.createAsin(fields, expectedParent),
+      );
+    });
   }
   updateAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
-    return this.write(principal, 'update-asin', async (unit) =>
-      mapCompetitorAsinWrite(
+    return this.write(principal, 'update-asin', async (unit) => {
+      const { expectedSource, ...fields } = parseCompetitorAsinUpdate(body);
+      return mapCompetitorAsinWrite(
         await unit.updateAsin(
           parseCompetitorWriteId(id),
-          parseCompetitorAsinUpdate(body),
+          fields,
+          expectedSource,
         ),
-      ),
-    );
+      );
+    });
   }
   batchCreateAsins(principal: AuthPrincipal, body: unknown) {
     return this.write(principal, 'batch-create', async (unit) => {
@@ -200,24 +212,37 @@ export class CompetitorWriteService implements OnModuleDestroy {
     });
   }
   moveAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
-    return this.write(principal, 'move-asin', async (unit) =>
-      mapCompetitorAsinWrite(
+    return this.write(principal, 'move-asin', async (unit) => {
+      const { targetGroupId, expectedSourceGroup, expectedTargetSnapshot } =
+        parseCompetitorAsinMove(body);
+      return mapCompetitorAsinWrite(
         await unit.moveAsin(
           parseCompetitorWriteId(id),
-          parseCompetitorAsinMove(body).targetGroupId,
+          targetGroupId,
+          expectedSourceGroup,
+          expectedTargetSnapshot,
         ),
-      ),
-    );
+      );
+    });
   }
-  deleteGroup(principal: AuthPrincipal, id: unknown) {
+  deleteGroup(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'delete-group', async (unit) => {
-      await unit.deleteGroup(parseCompetitorWriteId(id));
+      const { expectedChildIds, expectedSource } =
+        parseCompetitorGroupDelete(body);
+      await unit.deleteGroup(
+        parseCompetitorWriteId(id),
+        expectedChildIds,
+        expectedSource,
+      );
       return '删除成功';
     });
   }
-  deleteAsin(principal: AuthPrincipal, id: unknown) {
+  deleteAsin(principal: AuthPrincipal, id: unknown, body: unknown) {
     return this.write(principal, 'delete-asin', async (unit) => {
-      await unit.deleteAsin(parseCompetitorWriteId(id));
+      await unit.deleteAsin(
+        parseCompetitorWriteId(id),
+        parseCompetitorAsinDelete(body).expectedSource,
+      );
       return '删除成功';
     });
   }

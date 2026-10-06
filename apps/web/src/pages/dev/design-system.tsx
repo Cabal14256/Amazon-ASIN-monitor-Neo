@@ -33,6 +33,7 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
+import { ChartPreview } from './chart-preview';
 
 /** Development-only component specimens, never a source of business data. */
 export default function DesignSystemPreview() {
@@ -411,6 +412,7 @@ export default function DesignSystemPreview() {
               </div>
             </div>
           </div>
+          <ChartPreview />
         </main>
         <footer className="mt-10 flex flex-wrap justify-between gap-3 border-t border-border py-5 text-xs text-muted-foreground">
           <span>Neo · 组件基础预览</span>

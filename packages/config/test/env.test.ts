@@ -9,6 +9,7 @@ import {
   getBackupStorageDirectory,
   getDefaultEnvironmentFiles,
   getImportStorageDirectory,
+  getQueuePolicy,
   LEGACY_RECOMMENDED_ENV_VARS,
   LEGACY_REQUIRED_ENV_VARS,
   loadEnv,
@@ -39,6 +40,26 @@ describe('loadEnv', () => {
     expect(() =>
       assertBackupTaskRetention({ TASK_META_TTL_SECONDS: 604800 }),
     ).not.toThrow();
+  });
+  it('keeps competitor manual monitoring default compatible while retaining terminal jobs for metadata lifetime', () => {
+    const env = loadEnv({
+      ...validEnv,
+      TASK_META_TTL_SECONDS: '864000',
+      COMPETITOR_QUEUE_WORKER_CONCURRENCY: '2',
+    });
+    expect(env.COMPETITOR_MONITOR_ENABLED).toBe(true);
+    expect(
+      loadEnv({ ...validEnv, COMPETITOR_MONITOR_ENABLED: 'false' })
+        .COMPETITOR_MONITOR_ENABLED,
+    ).toBe(false);
+    expect(() =>
+      loadEnv({ ...validEnv, COMPETITOR_MONITOR_ENABLED: 'invalid' }),
+    ).toThrow(EnvValidationError);
+    const policy = getQueuePolicy('competitor-monitor', env);
+    expect(policy.concurrency).toBe(2);
+    expect(policy.defaultJobOptions.attempts).toBe(3);
+    expect(policy.defaultJobOptions.removeOnComplete).toEqual({ age: 864000 });
+    expect(policy.defaultJobOptions.removeOnFail).toEqual({ age: 864000 });
   });
   it('preserves public announcement text and Legacy empty-type fallback', () => {
     expect(loadEnv(validEnv)).toMatchObject({

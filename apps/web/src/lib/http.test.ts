@@ -82,6 +82,21 @@ describe('fetch and download transport boundary', () => {
     expect(f.fetcher.mock.calls[0][0]).toBe(expected);
     expect(expected).not.toContain('/api/api');
   });
+  it('preserves encoded identifier spaces in requests and downloads under the same gateway root', async () => {
+    const f = setup('https://api.test/gateway/api/');
+    const path = '/api/v1/competitor/variant-groups/Gr%C3%B3up%20';
+    const expected = `https://api.test/gateway${path}`;
+    expect(f.client.url(path)).toBe(expected);
+    await f.client.request(path);
+    await f.client.download(path);
+    expect(f.fetcher.mock.calls.map(([url]) => url)).toEqual([
+      expected,
+      expected,
+    ]);
+    expect(
+      decodeURIComponent(new URL(expected).pathname.split('/').at(-1)!),
+    ).toBe('Gróup ');
+  });
   it.each([
     '/../outside',
     '/%2e%2e/outside',
@@ -89,6 +104,12 @@ describe('fetch and download transport boundary', () => {
     '/x%2fy',
     '/x%5cy',
     '/x\\y',
+    '/x y',
+    '/x\u007fy',
+    '/x%00y',
+    '/x%1fy',
+    '/x%7fy',
+    '/x%2509y',
     '//foreign.test/api',
     'https://foreign.test/api',
     '/bad/%ZZ',
