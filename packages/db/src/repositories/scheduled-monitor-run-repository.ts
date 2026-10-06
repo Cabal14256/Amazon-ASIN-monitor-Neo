@@ -601,18 +601,30 @@ export class PgScheduledMonitorRunRepository {
         result.data.totalMembers !== run.totalMembers
       )
         throw new ScheduledMonitorRunError('identity');
-      const receipts = await tx.query(
-        `SELECT * FROM ${this.receipts} WHERE task_id=$1 ORDER BY ordinal LIMIT $2`,
-        [job.taskId, SCHEDULED_MONITOR_MAX_GROUPS + 1],
+      const receiptCount = await tx.query(
+        `SELECT count(*)::text AS receipt_count FROM ${this.receipts} WHERE task_id=$1`,
+        [job.taskId],
       );
-      if (receipts.length !== run.groups.length)
+      if (
+        receiptCount.length !== 1 ||
+        receiptCount[0].receipt_count !== String(run.groups.length)
+      )
         throw new ScheduledMonitorRunError('state');
       const now = await this.now(tx);
       if (Date.parse(job.expiresAt) <= Date.parse(now))
         throw new ScheduledMonitorRunError('expired');
       let brokenGroups = 0,
         brokenMembers = 0;
-      for (const [ordinal, row] of receipts.entries()) {
+      // The unique (task_id, ordinal) index supports seeking without loading
+      // every result. Keep only one full receipt (at most 32 MiB) in the driver;
+      // COUNT and all pages retain the same repeatable-read snapshot/run lock.
+      for (let ordinal = 0; ordinal < run.groups.length; ordinal++) {
+        const receipts = await tx.query(
+          `SELECT * FROM ${this.receipts} WHERE task_id=$1 AND ordinal > $2 ORDER BY ordinal LIMIT 1`,
+          [job.taskId, ordinal - 1],
+        );
+        if (receipts.length !== 1) throw new ScheduledMonitorRunError('state');
+        const row = receipts[0];
         const operation = scheduledMonitorGroupOperation(
           job,
           run.groups[ordinal],

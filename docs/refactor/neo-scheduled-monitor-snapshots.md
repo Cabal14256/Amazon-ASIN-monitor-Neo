@@ -29,6 +29,10 @@
 
 业务完成边界同时复核每张收据完成时间在原任务创建与本次完成时间之间，并在实际 UPDATE 中用数据库 `clock_timestamp()` 检查保留期。先前读到未过期不能使跨越保留期后的写入继续成功；该失败回滚新完成边界，保留原组收据以供对账。
 
+收据核验先读取 `COUNT` 元数据，再利用 `(task_id,ordinal)` 唯一索引逐行 seek；每次 SQL 最多返回一张完整收据。计数、所有页和最终一次完成 UPDATE 共享原 repeatable-read 快照及 run 锁，每张原始结果即时完整解析、核对身份/成员/完成时间并累计计数，不在数组中保留整个任务的结果。单收据原有 32 MiB 上限继续生效，不增加任务累计字节限制，也不先用 `SUM(result::text)` 全量转换结果。
+
+此边界避免合法 1000 张收据在一次驱动查询中累计到约 32 GiB；它不承诺该极端任务能在原 15 秒默认总时限内完成，也不提高原有时限。核验超时或末页损坏时不写部分完成状态，原 run 与已提交业务收据继续供 `read()` 核验；修复读取条件后只能重试完成边界，不能因此重抓商品或重写历史。COMMIT 已发出后的错误仍按原 `commit-uncertain` 流程核验，不能假定回滚。
+
 `followUp=true` 只适用于 US 主营。仓库使用实际业务完成时间一次性构建严格 system competitor child，保留父 slot、interval、batch，完整保存 child payload、digest、requestedAt，与父 `business-completed` 在同一事务内提交。child 的 requestedAt 和 createdAt 必须精确等于原 businessCompletedAt，expiresAt 必须等于父值；即使替换后的 payload 和 digest 相互匹配，也不能刷新时钟或更改 TTL。重放返回原 child，不能用当前时间重建。竞品或非 US 主营不能递归保存 child。保留期结束前无法构造有效 child 时拒绝新的完成边界，不能延长原任务 TTL。
 
 后续消费者应先检查业务回执/完成边界，再判断是否还可以执行未提交组。已有 `business-completed` 只恢复原 child 的投递；Queue.add ACK 不明时只用同一个原 jobId/payload 对账或重投。通知 ACK 不明仍使用私有 claimed 收据待核实，不能盲目再次发送。
@@ -44,7 +48,7 @@ repeatable-read 的视图可能在 advisory lock 等待前建立。需要已有 
 纯域测试覆盖原始 Unicode ID、六位微秒、固定成员/人工状态、污染、容量、批次和 child 摘要。事务测试覆盖时限、容量、迟到连接、取消、断连及不确定 COMMIT。真实 PostgreSQL 回归使用显式 `RUN_NEO_SCHEDULED_MONITOR_INTEGRATION=1`、两个不同 database 中随机私有 schema；只写自有 schema，结束时清理。缺少连接配置或连接失败会令已启用回归失败；未启用会明确 skip，不代表真实服务验收。
 
 ```sh
-corepack pnpm --filter db exec vitest run test/scheduled-monitor-run.test.ts test/scheduled-monitor-transaction.test.ts --maxWorkers=1
+corepack pnpm --filter db exec vitest run test/scheduled-monitor-run.test.ts test/scheduled-monitor-transaction.test.ts test/scheduled-monitor-receipt-pages.test.ts --maxWorkers=1
 corepack pnpm --filter db exec vitest run test/scheduled-monitor-run.integration.test.ts --no-file-parallelism
 ```
 
