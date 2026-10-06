@@ -359,10 +359,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           },
           { taskId },
         ),
-      ).rejects.toThrow();
+      ).rejects.toThrow('备份任务失败，请核实数据库状态和备份文件');
       expect(states.get(taskId)).toMatchObject({
-        status: 'processing',
+        status: 'failed',
         result: null,
+        error: '备份任务失败，请核实数据库状态和备份文件',
+        message: '备份任务失败，请核实数据库状态和备份文件',
       });
       expect(
         (await readdir(directory)).filter((name) =>
