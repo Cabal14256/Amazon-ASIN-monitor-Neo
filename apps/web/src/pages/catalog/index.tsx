@@ -1,3 +1,4 @@
+import type { BatchCreateAsinsData } from '@asin-monitor/contracts';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { tableFeatures, useTable, type ColumnDef } from '@tanstack/react-table';
@@ -40,6 +41,8 @@ import {
 import { useTaskQuery } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
 import { isTerminalTask } from '../../services/tasks';
+import { AsinBatchCreatePanel } from '../asin/asin-batch-create-panel';
+import { AsinBatchCreateResult } from '../asin/asin-batch-create-result';
 import { CatalogActionPanel } from './catalog-actions';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
@@ -281,6 +284,8 @@ function GroupDetail({
             group: fresh,
             child,
           });
+      } else if (type === 'batch-create-asins') {
+        onAction({ type, group: fresh });
       } else {
         onAction({
           type: type as
@@ -420,6 +425,18 @@ function GroupDetail({
                     </Button>
                     {config.id === 'asin' && (
                       <>
+                        {config.writes?.batchCreateAsins && (
+                          <Button
+                            variant="secondary"
+                            size="small"
+                            disabled={preparingAction || actionsDisabled}
+                            onClick={() =>
+                              void prepareAction('batch-create-asins')
+                            }
+                          >
+                            批量添加 ASIN
+                          </Button>
+                        )}
                         <Button
                           variant="secondary"
                           size="small"
@@ -996,7 +1013,9 @@ export function CatalogPage({
           ? null
           : candidate.group.id,
       createUncertain:
-        candidate.type === 'create-group' || candidate.type === 'create-asin',
+        candidate.type === 'create-group' ||
+        candidate.type === 'create-asin' ||
+        candidate.type === 'batch-create-asins',
       operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     };
     if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {
@@ -1035,6 +1054,24 @@ export function CatalogPage({
   const writingRef = useRef(false);
   const actionRef = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const batchOwner = JSON.stringify([
+    config.id,
+    ownerId,
+    auth.status === 'authenticated' ? auth.identity.sessionId ?? null : null,
+  ]);
+  const batchPending = useRef<{
+    serial: number;
+    owner: string;
+    userId: string;
+    source: 'asin' | 'competitor';
+    queryClient: typeof runtime.queryClient;
+  } | null>(null);
+  const [batchResult, setBatchResult] = useState<{
+    serial: number;
+    owner: string;
+    groupName: string;
+    result: BatchCreateAsinsData;
+  } | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -1045,13 +1082,18 @@ export function CatalogPage({
   const [query, setQuery] = useState<CatalogQuery>(INITIAL_QUERY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const crossTabSafetyRevision = useRef(0);
-  const clearCatalogCache = useCallback(async () => {
-    await runtime.queryClient
-      .cancelQueries({ queryKey: [config.id] })
-      .catch(() => undefined);
-    runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
-    runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
-  }, [config.id, runtime.queryClient]);
+  const clearCatalogCache = useCallback(
+    async (guard?: () => void) => {
+      guard?.();
+      await runtime.queryClient
+        .cancelQueries({ queryKey: [config.id] })
+        .catch(() => undefined);
+      guard?.();
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+    },
+    [config.id, runtime.queryClient],
+  );
   const [forceRefresh, setForceRefresh] = useState(true);
   const [checkState, setCheckState] = useState<CheckState | null>(null);
   const checkBusyRef = useRef(false);
@@ -1212,6 +1254,29 @@ export function CatalogPage({
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     actionRef.current?.focus();
   }, [action]);
+  useEffect(() => {
+    setBatchResult((current) =>
+      current?.owner === batchOwner && access.canWriteASIN ? current : null,
+    );
+    const pending = batchPending.current;
+    if (pending && (pending.owner !== batchOwner || !access.canWriteASIN)) {
+      const stored = catalogSafetyStorage();
+      const gate = stored
+        ? readCatalogSafetyGate(stored, pending.userId, pending.source)
+        : null;
+      if (gate)
+        pending.queryClient.setQueryData(
+          ['catalog-write-safety', pending.userId, pending.source],
+          gate,
+        );
+      batchPending.current = null;
+      writingRef.current = false;
+      setWriting(false);
+      setAction((current) =>
+        current?.type === 'batch-create-asins' ? null : current,
+      );
+    }
+  }, [batchOwner, access.canWriteASIN]);
   const data = groups.data;
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
@@ -1532,6 +1597,7 @@ export function CatalogPage({
     if (writingRef.current || runtime.queryClient.getQueryData(safetyKey))
       return;
     setActionSerial((previous) => previous + 1);
+    if (next.type === 'batch-create-asins') setBatchResult(null);
     setAction(next);
   }
 
@@ -1563,7 +1629,9 @@ export function CatalogPage({
   async function reportUncertainWrite(
     uncertainAction: CatalogAction,
     claim: CatalogSafetyGate,
+    guard?: () => void,
   ) {
+    guard?.();
     setSelectedId(null);
     setAction(null);
     setNotice(null);
@@ -1578,12 +1646,13 @@ export function CatalogPage({
             : uncertainAction.group.id,
         createUncertain:
           uncertainAction.type === 'create-group' ||
-          uncertainAction.type === 'create-asin',
+          uncertainAction.type === 'create-asin' ||
+          uncertainAction.type === 'batch-create-asins',
         operationId: claim.operationId,
       },
       claim,
     );
-    await clearCatalogCache();
+    await clearCatalogCache(guard);
   }
 
   useEffect(() => {
@@ -1591,7 +1660,8 @@ export function CatalogPage({
       reportAccessDenied();
   }, [groups.error, groups.isError, reportAccessDenied]);
 
-  async function readAfterWrite(detailId: string | null) {
+  async function readAfterWrite(detailId: string | null, guard?: () => void) {
+    guard?.();
     const detailRequest = detailId
       ? config.detail(runtime.http, detailId).then(
           (value) => ({ ok: true as const, value }),
@@ -1602,6 +1672,7 @@ export function CatalogPage({
       config.list(runtime.http, query),
       detailRequest,
     ]);
+    guard?.();
     const lastPage = Math.max(
       1,
       Math.ceil(firstPage.total / firstPage.pageSize),
@@ -1612,6 +1683,7 @@ export function CatalogPage({
       correctedQuery === query
         ? firstPage
         : await config.list(runtime.http, correctedQuery);
+    guard?.();
     const stillListed = Boolean(
       detailId && fresh.list.some((item) => item.id === detailId),
     );
@@ -1642,9 +1714,16 @@ export function CatalogPage({
     message: string,
     savedAction: CatalogAction,
     claim: CatalogSafetyGate,
+    guard?: () => void,
   ) {
+    guard?.();
     if (savedAction.type === 'delete-group') setSelectedId(null);
-    const detailId = savedAction.type === 'delete-group' ? null : selectedId;
+    const detailId =
+      savedAction.type === 'delete-group'
+        ? null
+        : savedAction.type === 'batch-create-asins'
+        ? savedAction.group.id
+        : selectedId;
     setNotice(null);
     const refreshedGate: CatalogSafetyGate = {
       phase: 'refresh',
@@ -1655,17 +1734,60 @@ export function CatalogPage({
     };
     if (!setSafety(refreshedGate, claim)) return;
     try {
-      await clearCatalogCache();
-      await readAfterWrite(detailId);
+      await clearCatalogCache(guard);
+      await readAfterWrite(detailId, guard);
+      guard?.();
       setSafety(null, refreshedGate);
       if (message) {
         setNotice(message);
         announce(message);
       }
     } catch (cause) {
+      guard?.();
       if (catalogAccessDenied(cause)) {
         reportAccessDenied();
       }
+    }
+  }
+
+  function guardBatch(serial: number, owner: string) {
+    const latest = identity.getSnapshot();
+    const latestOwner =
+      latest.status === 'authenticated'
+        ? JSON.stringify([
+            config.id,
+            latest.identity.user.id,
+            latest.identity.sessionId ?? null,
+          ])
+        : '';
+    if (
+      !mounted.current ||
+      batchPending.current?.serial !== serial ||
+      batchPending.current.owner !== owner ||
+      latestOwner !== owner ||
+      latest.status !== 'authenticated' ||
+      !createAccess(latest.identity).canWriteASIN
+    )
+      throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+  }
+
+  function batchWritingChange(serial: number, owner: string, pending: boolean) {
+    if (!mounted.current) return;
+    if (pending) {
+      batchPending.current = {
+        serial,
+        owner,
+        userId: ownerId,
+        source: config.id,
+        queryClient: runtime.queryClient,
+      };
+      writingChange(true);
+    } else if (
+      batchPending.current?.serial === serial &&
+      batchPending.current.owner === owner
+    ) {
+      batchPending.current = null;
+      writingChange(false);
     }
   }
 
@@ -2025,25 +2147,86 @@ export function CatalogPage({
           config.writes &&
           catalogActionAllowed(action, canWrite, canDelete) && (
             <div ref={actionRef} tabIndex={-1}>
-              <CatalogActionPanel
-                key={actionSerial}
-                action={action}
-                config={config}
-                http={runtime.http}
-                close={() =>
-                  setAction((current) => (current === action ? null : current))
-                }
-                saved={afterWrite}
-                denied={reportAccessDenied}
-                uncertain={reportUncertainWrite}
-                writingChange={writingChange}
-                runExclusive={runWithCatalogLock}
-                beginWrite={beginWrite}
-                releaseWrite={(claim) => {
-                  setSafety(null, claim);
-                }}
-              />
+              {action.type === 'batch-create-asins' && config.id === 'asin' ? (
+                <AsinBatchCreatePanel
+                  key={actionSerial}
+                  action={action}
+                  config={config}
+                  http={runtime.http}
+                  close={() =>
+                    setAction((current) =>
+                      current === action ? null : current,
+                    )
+                  }
+                  completed={async (result, completedAction, claim) => {
+                    const guard = () => guardBatch(actionSerial, batchOwner);
+                    guard();
+                    setBatchResult({
+                      serial: actionSerial,
+                      owner: batchOwner,
+                      groupName: completedAction.group.name,
+                      result,
+                    });
+                    setAction((current) =>
+                      current === action ? null : current,
+                    );
+                    await afterWrite(
+                      `批量添加已核实：成功 ${result.successCount} 个，失败 ${result.failedCount} 个。`,
+                      completedAction,
+                      claim,
+                      guard,
+                    );
+                  }}
+                  denied={reportAccessDenied}
+                  uncertain={(uncertainAction, claim) =>
+                    reportUncertainWrite(uncertainAction, claim, () =>
+                      guardBatch(actionSerial, batchOwner),
+                    ).catch(() => undefined)
+                  }
+                  writingChange={(pending) =>
+                    batchWritingChange(actionSerial, batchOwner, pending)
+                  }
+                  runExclusive={runWithCatalogLock}
+                  beginWrite={beginWrite}
+                  releaseWrite={(claim) => {
+                    setSafety(null, claim);
+                  }}
+                />
+              ) : (
+                <CatalogActionPanel
+                  key={actionSerial}
+                  action={action}
+                  config={config}
+                  http={runtime.http}
+                  close={() =>
+                    setAction((current) =>
+                      current === action ? null : current,
+                    )
+                  }
+                  saved={afterWrite}
+                  denied={reportAccessDenied}
+                  uncertain={reportUncertainWrite}
+                  writingChange={writingChange}
+                  runExclusive={runWithCatalogLock}
+                  beginWrite={beginWrite}
+                  releaseWrite={(claim) => {
+                    setSafety(null, claim);
+                  }}
+                />
+              )}
             </div>
+          )}
+        {batchResult &&
+          batchResult.owner === batchOwner &&
+          access.canWriteASIN &&
+          !writing &&
+          !safety && (
+            <AsinBatchCreateResult
+              key={batchResult.serial}
+              result={batchResult.result}
+              groupName={batchResult.groupName}
+              dismiss={() => setBatchResult(null)}
+            />
           )}
 
         <Card>
