@@ -26,6 +26,8 @@
 
 本轮 literal/capacity/内存修复的最新前端专项（NODE heap 1536 MB、单 worker）：182 passed / 7 files / 0 skipped（mounted53、receipt37、input18、form6、batch transport37、gate9、canonical transport22）。首次新增全空格 mounted 场景 159 passed/1 failed，发现详情 GET 仍拒绝 canonical 全空格值，修复仅 GET 字面读取后全绿；不是删除用例或降低校验。Web strict、lint 零警告、URL/格式脚本 8、变更文件 Prettier/diff 通过。Backend deea75ae 专项 DB19、API48、Legacy unit55 及 expanded source strict 通过；21 实际 PG/MySQL 场景本地 opt-in 跳过，待 Integration CI。最新 full Web/build/graph 与后台全套由 root 协调或新 head CI 执行，历史 845/137 不移作当前全套结果。
 
+共享 normalizer 的 literal 行为已收窄为主营 HTTP batch-create，竞品和文件导入继续冻结 trim 口径；实际调用者 oracle 专项 DB23、API48、Legacy55、expanded source strict 通过。随后 Integration `37528062785` 的竞品 comparator 28 项通过，主营实际 PG/MySQL 21 项中 20 通过，PG 4500+500+500 的等待观察失败：同一观察事务中的 `pg_stat_activity` 可能缓存第二 HTTP 连接出现前的统计快照。夹具改为实时 `pg_locks` 未授予 transaction-ID 锁并精确证明第一批 PID 是 blocker，保持暂停第一批真实 insert、第二批真实等待、500/0 成功计数、500 行失败、最终 5000 和详情 GET 成功全部断言。该修复后本地 source strict/收集通过，21 项仍因未启 opt-in 跳过；实际锁证明须最新 Integration CI 21/21 验收，不能将本地 skip 称作恢复成功。
+
 ## 自动验证（修复前历史记录）
 
 所有命令从该 managed worktree 根执行，仅使用根 `pnpm-lock.yaml`；未改变服务等待门槛或测试超时。2026-10-07 接续时重新检查现有 diff 与新增文件，并重跑下表注明的完整前端与根级检查；历史专项和 RED 探针单独标注，不冒充本轮重跑。

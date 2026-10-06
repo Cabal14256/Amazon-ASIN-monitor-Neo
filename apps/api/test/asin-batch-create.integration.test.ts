@@ -216,7 +216,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await vi.waitFor(
           async () => {
             const waiting = await blocker.query(
-              "SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+              // pg_stat_activity can cache a backend snapshot in this observer
+              // transaction before the second HTTP connection exists. pg_locks
+              // reads the live lock manager and must prove a real transaction-ID
+              // waiter blocked by the first batch while its insert is suspended.
+              "SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND locktype='transactionid' AND $1=ANY(pg_blocking_pids(pid))",
               [firstPid],
             );
             expect(waiting.rows[0].n).toBeGreaterThan(0);
