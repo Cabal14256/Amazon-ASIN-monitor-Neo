@@ -1,4 +1,7 @@
-import type { VariantGroupCheckData } from '@asin-monitor/contracts';
+import {
+  isNeoCatalogId,
+  type VariantGroupCheckData,
+} from '@asin-monitor/contracts';
 import {
   decodeCatalogVariantResult,
   decodeGroupCatalogResult,
@@ -59,13 +62,7 @@ function sameAsin(current: Asin, expected: Asin): boolean {
   );
 }
 const id = (value: string) => {
-  if (
-    typeof value !== 'string' ||
-    !value ||
-    value.length > 50 ||
-    value.includes('\0')
-  )
-    throw new VariantCheckError('invalid-input');
+  if (!isNeoCatalogId(value)) throw new VariantCheckError('invalid-input');
 };
 
 export class DrizzleVariantCheckUnit
