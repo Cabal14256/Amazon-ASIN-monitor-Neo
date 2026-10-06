@@ -217,6 +217,7 @@ async function openDetails() {
 }
 describe('mounted existing Neo manual check endpoints with actual transport', () => {
   it('shares desktop/mobile selection, confirms the raw targets and submits one normalized async primary batch', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-07T00:00:00Z'));
     const f = fixture();
     await selectGroup();
     await selectGroup(second.name);
@@ -235,6 +236,9 @@ describe('mounted existing Neo manual check endpoints with actual transport', ()
     expect(confirm.getByText(/允许使用缓存/)).toBeTruthy();
     fireEvent.click(confirm.getByRole('button', { name: '确认提交检查' }));
     await screen.findByText('job-1');
+    expect(
+      screen.getByText('提交时间（北京时间）：2026-10-07 08:00:00'),
+    ).toBeTruthy();
     expect(f.checkCalls()).toHaveLength(1);
     expect(String(f.checkCalls()[0][0])).toBe(
       'https://api.test/api/v1/variant-groups/batch-check',

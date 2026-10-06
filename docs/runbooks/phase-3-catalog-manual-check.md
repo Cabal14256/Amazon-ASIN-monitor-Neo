@@ -33,8 +33,9 @@ Legacy 竞品批量检查菜单和契约登记已有，但 Neo 没有对应 cont
 - 最终新增接口验证：`corepack pnpm --filter web exec vitest run src/services/catalog-check.test.ts src/pages/catalog/catalog-manual-check-page.test.tsx --maxWorkers=1 --minWorkers=1`：28/28，通过（13 个传输、15 个挂载页面场景；7.93s）。
 - `corepack pnpm --filter web exec tsc -p tsconfig.json --noEmit --pretty false`、`corepack pnpm --filter web lint`：最终均通过，0 错误。
 - 全部 15 个变更文件 `prettier --check`、`npm run test:changed-format`（5/5）、`git diff --check`：通过。
-- `corepack pnpm --filter web exec vitest run --maxWorkers=1 --minWorkers=1`：799/799、61 文件全通过，0 skip，74.75s。
-- `corepack pnpm --filter web build`：通过（含 contracts build、Web strict 与 Vite；3255 模块，Vite 15.48s）。入口包 550.25 kB、ECharts 懒加载包 565.53 kB，保留现有 >500 kB 构建提示；本任务未宣称性能阶段门禁通过。
+- `corepack pnpm --filter web exec vitest run --maxWorkers=1 --minWorkers=1`：main `6079990` 基线，799/799、61 文件全通过，0 skip，74.75s。
+- 正常合入 #213 / main `197925d` 后，同时保留竞品导入和检查描述；7 个导入 / 目录受影响文件重跑 114/114（34.41s）。检查回执提交时间明确使用北京时间，并以 UTC instant → UTC+08 显示回归验证，和任务中心一致。
+- 最新 `corepack pnpm --filter web build`：通过（含 contracts build、Web strict 与 Vite；3255 模块，Vite 16.79s）。入口包 550.26 kB、ECharts 懒加载包 565.53 kB，保留现有 >500 kB 构建提示；本任务未宣称性能阶段门禁通过。
 - 本轮实际浏览器交互尚未执行：IAB / Edge 控制链路此前连接失败，不将历史截图或其他任务浏览器结果视为 #214 的证据。挂载组件测试不能替代移动端、键盘和实际跨标签交互验收。
 
 ## 人工验收

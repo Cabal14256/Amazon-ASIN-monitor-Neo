@@ -38,6 +38,7 @@ import {
   ModuleLabel,
 } from '../../components/ui/surfaces';
 import { useTaskQuery } from '../../hooks/tasks';
+import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 import { isCheckGroupId } from '../../services/catalog-check';
 import { isTerminalTask } from '../../services/tasks';
@@ -2145,10 +2146,8 @@ function CatalogPageBody({
                 )}
                 {checkState.gate && (
                   <p className="text-xs text-muted-foreground">
-                    提交时间：
-                    {new Date(checkState.gate.submittedAt).toLocaleString(
-                      'zh-CN',
-                    )}
+                    提交时间（北京时间）：
+                    {formatBeijing(checkState.gate.submittedAt)}
                   </p>
                 )}
               </div>
