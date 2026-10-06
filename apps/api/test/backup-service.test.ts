@@ -215,6 +215,62 @@ async function fixture(maxBytes = 1024 * 1024) {
 }
 
 describe('backup submission HTTP / global exception boundary', () => {
+  it('freezes the actual application-session schema for an unqualified selective table before enqueue', async () => {
+    const f = await fixture();
+    f.pools.primaryPool.query.mockImplementation(async (query) => ({
+      rows: query.text.includes('backup_table_selection')
+        ? [
+            {
+              schema: 'tenant.audit',
+              name: 'orders',
+              kind: 'r',
+              persistence: 'p',
+            },
+          ]
+        : [],
+    }));
+    await f.service.create(principal, { tables: ['orders'] });
+    expect(f.port.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: { tables: ['"tenant.audit"."orders"'] },
+      }),
+    );
+    expect(f.pools.primaryPool.query).toHaveBeenCalledWith(
+      expect.objectContaining({ query_timeout: 1500, values: [['"orders"']] }),
+    );
+  });
+  it('refuses an unresolved or name-truncated selective table before creating task metadata', async () => {
+    const f = await fixture();
+    f.pools.primaryPool.query.mockImplementation(async (query) => ({
+      rows: query.text.includes('backup_table_selection')
+        ? [{ schema: 'public', name: 'different', kind: 'r', persistence: 'p' }]
+        : [],
+    }));
+    await expect(
+      f.service.create(principal, { tables: ['requested'] }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(f.port.store.create).not.toHaveBeenCalled();
+    expect(f.port.enqueue).not.toHaveBeenCalled();
+  });
+  it('uses the same exact quoted schema and table from new sidecars during restore preflight', async () => {
+    const f = await fixture();
+    await writeFile(join(f.directory, filename), 'PGDMPfixture');
+    await writeMetadata(f.directory, 'postgresql', 3, 'selective');
+    const path = join(f.directory, `${filename}.meta.json`);
+    const metadata = JSON.parse(await readFile(path, 'utf8'));
+    metadata.tables = ['"tenant.audit""quoted"."orders"'];
+    await writeFile(path, JSON.stringify(metadata));
+    await f.service.restore(principal, { filename });
+    expect(f.pools.primaryPool.query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        values: [['orders'], ['tenant.audit"quoted']],
+        query_timeout: 1500,
+      }),
+    );
+    expect(f.port.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'restore', params: { filename } }),
+    );
+  });
   it('rejects selective restore before task creation when an unselected relation depends on the selection', async () => {
     const f = await fixture();
     await writeFile(join(f.directory, filename), 'PGDMPfixture');

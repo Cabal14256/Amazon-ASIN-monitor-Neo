@@ -14,6 +14,7 @@ import {
   backupFilenameCreatedAt,
   backupJobDataSchema,
   backupTimescaleManifestSchema,
+  parseBackupTableIdentifiers,
   sameBackupDatabaseLocale,
   type BackupArtifactMetadata,
   type BackupCreationReceipt,
@@ -25,9 +26,11 @@ import {
 import {
   backupCreationIdentity,
   backupSelectiveRestoreQuery,
+  backupTableSelectionQuery,
   createPgPool,
   isTerminalTaskStatus,
   RedisTaskRepository,
+  resolveBackupTableSelection,
   selectiveBackupRestoreBlocked,
   type TaskMutation,
   type TaskState,
@@ -233,15 +236,14 @@ function commandPath(value: string | undefined, fallback: string): string {
 }
 
 function validTable(value: string): boolean {
-  return /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?$/.test(value);
+  return parseBackupTableIdentifiers(value) !== null;
 }
 
 function literalTablePattern(value: string): string {
   if (!validTable(value)) throw new BackupCommandError('BACKUP_TABLES_INVALID');
   // pg_dump uses psql patterns; quote each identifier to prevent case folding.
-  return value
-    .split('.')
-    .map((identifier) => `"${identifier}"`)
+  return parseBackupTableIdentifiers(value)!
+    .map((identifier) => `"${identifier.replaceAll('"', '""')}"`)
     .join('.');
 }
 
@@ -656,6 +658,17 @@ export async function acquireBackupTargetLock(
             throw new BackupCommandError(
               'BACKUP_SELECTIVE_RESTORE_DEPENDENCIES',
             );
+        },
+        async resolveTables(tables: readonly string[]) {
+          if (released) throw new BackupCommandError('BACKUP_TARGET_LOCK_LOST');
+          try {
+            const result = await lockedClient.query(
+              backupTableSelectionQuery(tables),
+            );
+            return resolveBackupTableSelection(tables, result.rows);
+          } catch {
+            throw new BackupCommandError('BACKUP_TABLE_SELECTION_UNCONFIRMED');
+          }
         },
         async readDatabaseSettings(): Promise<BackupDatabaseSettings> {
           const result = await lockedClient.query(
@@ -1331,9 +1344,15 @@ export function createBackupProcessor(
         artifactPath = partial;
         const reservation = await open(partial, 'wx', 0o600);
         await reservation.close();
-        const tables = data.params.tables?.filter(validTable) ?? [];
-        if (data.params.tables && tables.length !== data.params.tables.length)
+        const requestedTables = data.params.tables?.filter(validTable) ?? [];
+        if (
+          data.params.tables &&
+          requestedTables.length !== data.params.tables.length
+        )
           throw new BackupCommandError('BACKUP_TABLES_INVALID');
+        const tables = requestedTables.length
+          ? await lock.resolveTables(requestedTables)
+          : [];
         const sourceManifest = lock.hasTimescale
           ? await lock.readTimescaleManifest()
           : undefined;

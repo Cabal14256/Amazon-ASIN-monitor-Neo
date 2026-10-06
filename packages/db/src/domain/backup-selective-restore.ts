@@ -1,15 +1,77 @@
+import {
+  backupCanonicalTableNameSchema,
+  backupQualifiedTableName,
+  parseBackupTableIdentifiers,
+} from '@asin-monitor/contracts';
 import type { QueryConfig } from 'pg';
 import { z } from 'zod';
 
-const tablesSchema = z
-  .array(
-    z
-      .string()
-      .max(130)
-      .regex(/^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?$/),
-  )
-  .min(1)
-  .max(512);
+const tablesSchema = z.array(backupCanonicalTableNameSchema).min(1).max(512);
+
+export class BackupTableSelectionError extends Error {
+  constructor(readonly reason: 'input' | 'unconfirmed') {
+    super('BACKUP_TABLE_SELECTION_INVALID');
+  }
+}
+/** Resolve all requested identities in one actual application/lock session.
+ * Every part is quoted before to_regclass: mixed case must never fold, and
+ * PGOPTIONS/URL options/role search_path stay entirely inside NodePG. */
+export function backupTableSelectionQuery(
+  tables: readonly string[],
+): QueryConfig & { query_timeout: number } {
+  const input = tablesSchema.parse(tables);
+  const literal = (table: string) =>
+    parseBackupTableIdentifiers(table)!
+      .map((part) => `"${part.replaceAll('"', '""')}"`)
+      .join('.');
+  return {
+    text: `/* backup_table_selection */ SELECT namespace.nspname AS schema, relation.relname AS name,
+      relation.relkind AS kind, relation.relpersistence AS persistence
+      FROM pg_catalog.unnest($1::pg_catalog.text[]) WITH ORDINALITY requested(name,position)
+      LEFT JOIN pg_catalog.pg_class relation ON relation.oid=pg_catalog.to_regclass(requested.name)
+      LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+      ORDER BY requested.position`,
+    values: [input.map(literal)],
+    query_timeout: 1500,
+  };
+}
+export function resolveBackupTableSelection(
+  tables: readonly string[],
+  rows: unknown,
+): string[] {
+  const input = tablesSchema.parse(tables);
+  const result = z
+    .array(
+      z
+        .object({
+          schema: z.string().nullable(),
+          name: z.string().nullable(),
+          kind: z.string().nullable(),
+          persistence: z.string().nullable(),
+        })
+        .strict(),
+    )
+    .length(input.length)
+    .safeParse(rows);
+  if (!result.success) throw new BackupTableSelectionError('unconfirmed');
+  return result.data.map((row, index) => {
+    const requested = parseBackupTableIdentifiers(input[index])!;
+    if (
+      !row.schema ||
+      !row.name ||
+      !['r', 'p', 'v', 'm', 'f', 'S'].includes(row.kind || '') ||
+      !['p', 'u'].includes(row.persistence || '') ||
+      row.name !== requested.at(-1) ||
+      (requested.length === 2 && row.schema !== requested[0])
+    )
+      throw new BackupTableSelectionError('input');
+    try {
+      return backupQualifiedTableName(row.schema, row.name);
+    } catch {
+      throw new BackupTableSelectionError('input');
+    }
+  });
+}
 
 /** Literal, case-sensitive names; ambiguous unqualified names fail closed.
  * pg_dump resolves unqualified patterns with source search-path visibility.
@@ -23,10 +85,9 @@ export function backupSelectiveRestoreQuery(
   tables: readonly string[],
 ): QueryConfig & { query_timeout: number } {
   const input = tablesSchema.parse(tables);
-  const names = input.map((table) => table.split('.').at(-1)!);
-  const schemas = input.map((table) =>
-    table.includes('.') ? table.split('.')[0]! : null,
-  );
+  const parts = input.map((table) => parseBackupTableIdentifiers(table)!);
+  const names = parts.map((table) => table.at(-1)!);
+  const schemas = parts.map((table) => (table.length === 2 ? table[0]! : null));
   return {
     text: `/* backup_selective_restore_dependencies */
       WITH RECURSIVE requested AS (

@@ -3,6 +3,7 @@ import {
   type BackupJobData,
 } from '@asin-monitor/contracts';
 import {
+  backupCreationIdentity,
   transitionTask,
   type TaskMutation,
   type TaskState,
@@ -93,6 +94,7 @@ afterEach(async () => {
       .map((path) => rm(path, { recursive: true, force: true })),
   );
   vi.resetAllMocks();
+  vi.unstubAllEnvs();
 });
 
 async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
@@ -123,29 +125,43 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
     cancelledAt: null,
     revision: 0,
   };
-  const query = vi.fn(async (input: string | { text: string }) => {
-    const text = typeof input === 'string' ? input : input.text;
-    return {
-      rows: text.includes('backup_selective_restore_dependencies')
-        ? [{ blocked: false }]
-        : text.includes('pg_try_advisory_lock')
-        ? [{ acquired: true }]
-        : text.includes('SELECT EXISTS')
-        ? [{ enabled: false }]
-        : text.includes('pg_encoding_to_char')
-        ? [
-            {
-              encoding: 'UTF8',
-              lcCollate: 'C',
-              lcCtype: 'C',
-              localeProvider: 'c',
-            },
-          ]
-        : text.includes('timezone')
-        ? [{ timezone: 'Asia/Shanghai' }]
-        : [],
-    };
-  });
+  const query = vi.fn(
+    async (input: string | { text: string; values?: unknown[] }) => {
+      const text = typeof input === 'string' ? input : input.text;
+      return {
+        rows: text.includes('backup_table_selection')
+          ? (input as { values: string[][] }).values[0].map((name) => {
+              const parts = [...name.matchAll(/"((?:[^"]|"")*)"/g)].map(
+                (part) => part[1].replaceAll('""', '"'),
+              );
+              return {
+                schema: parts.length === 2 ? parts[0] : 'application',
+                name: parts.at(-1),
+                kind: 'r',
+                persistence: 'p',
+              };
+            })
+          : text.includes('backup_selective_restore_dependencies')
+          ? [{ blocked: false }]
+          : text.includes('pg_try_advisory_lock')
+          ? [{ acquired: true }]
+          : text.includes('SELECT EXISTS')
+          ? [{ enabled: false }]
+          : text.includes('pg_encoding_to_char')
+          ? [
+              {
+                encoding: 'UTF8',
+                lcCollate: 'C',
+                lcCtype: 'C',
+                localeProvider: 'c',
+              },
+            ]
+          : text.includes('timezone')
+          ? [{ timezone: 'Asia/Shanghai' }]
+          : [],
+      };
+    },
+  );
   dependencies.pool.mockImplementation(() => ({
     connect: async () => ({ query, release: vi.fn() }),
     end: vi.fn(),
@@ -241,6 +257,49 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
 }
 
 describe('creation attempts and durable publication', () => {
+  it('resolves unqualified queued tables on the actual NodePG lock session, freezes canonical metadata and isolates CLI options', async () => {
+    const f = await fixture();
+    vi.stubEnv(
+      'PGOPTIONS',
+      '-c search_path=application -c statement_timeout=999999',
+    );
+    f.job.data = { ...f.data, params: { tables: ['Orders'] } };
+    await f.processor(f.job, 'lock');
+    expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
+      '--table-and-children="application"."Orders"',
+    );
+    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBeUndefined();
+    const filename = (f.state().result as { filename: string }).filename;
+    const metadata = JSON.parse(
+      await readFile(join(f.directory, `${filename}.meta.json`), 'utf8'),
+    );
+    expect(metadata.tables).toEqual(['application.Orders']);
+    expect(metadata.creationIdentity).toBe(backupCreationIdentity(f.job.data));
+    // The queued input stays unchanged; retries and older private identities
+    // must not be re-hashed against the resolved sidecar table list.
+    expect(f.job.data.params.tables).toEqual(['Orders']);
+  });
+  it('rejects a changed API-frozen namespace in the locked session before starting pg_dump', async () => {
+    const f = await fixture();
+    f.job.data = { ...f.data, params: { tables: ['expected.Orders'] } };
+    const query = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (input) => {
+      const text = typeof input === 'string' ? input : input.text;
+      return text.includes('backup_table_selection')
+        ? {
+            rows: [
+              { schema: 'other', name: 'Orders', kind: 'r', persistence: 'p' },
+            ],
+          }
+        : query(input);
+    });
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+      '备份任务失败，请核实数据库状态和备份文件',
+    );
+    expect(dependencies.spawn).not.toHaveBeenCalled();
+    expect(f.state().result).toBeNull();
+    expect(await readdir(f.directory)).toEqual([]);
+  });
   it('checks incoming dependency safety again under the target lease before any restore command', async () => {
     const f = await fixture();
     f.job.data = { ...f.data, params: { tables: ['public.OrderItems'] } };
@@ -431,19 +490,32 @@ describe('creation attempts and durable publication', () => {
       'private-volume-token',
     );
   });
-  it('replays an older v3 sidecar with an explicitly labeled filename-time fallback', async () => {
+  it('replays an older unqualified v3 sidecar without resolving again or changing its proof and filename-time fallback', async () => {
     const f = await fixture();
-    const current = (await f.processor(f.job, 'lock')) as { filename: string };
+    f.job.data = { ...f.data, params: { tables: ['Orders'] } };
+    const current = (await f.processor(f.job, 'lock')) as {
+      filename: string;
+      backupCreationCommit: unknown;
+    };
     const sidecarPath = join(f.directory, `${current.filename}.meta.json`);
     const metadata = JSON.parse(await readFile(sidecarPath, 'utf8'));
     delete metadata.execution;
-    await writeFile(sidecarPath, JSON.stringify(metadata));
+    metadata.tables = ['Orders'];
+    const originalSidecar = JSON.stringify(metadata);
+    await writeFile(sidecarPath, originalSidecar);
+    f.query.mockClear();
+    f.query.mockRejectedValue(new Error('private-catalog-unavailable'));
     f.setState({ ...f.state(), status: 'failed', result: null });
     const result = (await f.processor(f.job, 'lock')) as {
       execution?: unknown;
+      backupCreationCommit: unknown;
     };
     expect(result).toMatchObject({ timeSource: 'filename' });
     expect(result.execution).toBeUndefined();
+    expect(result.backupCreationCommit).toEqual(current.backupCreationCommit);
+    expect(await readFile(sidecarPath, 'utf8')).toBe(originalSidecar);
+    expect(f.job.data.params.tables).toEqual(['Orders']);
+    expect(f.query).not.toHaveBeenCalled();
     expect(dependencies.spawn).toHaveBeenCalledTimes(1);
   });
   it('records the actual delayed dump window and replays its original execution times', async () => {
@@ -510,7 +582,12 @@ describe('creation attempts and durable publication', () => {
     f.job.data = {
       ...f.data,
       params: {
-        tables: ['public.OrderItems', 'MixedSchema.MixedTable', 'Simple'],
+        tables: [
+          'public.OrderItems',
+          'MixedSchema.MixedTable',
+          'Simple',
+          '"schema.dot""quoted"."OrderItems"',
+        ],
       },
     };
     await f.processor(f.job, 'lock');
@@ -519,7 +596,8 @@ describe('creation attempts and durable publication', () => {
         '--strict-names',
         '--table-and-children="public"."OrderItems"',
         '--table-and-children="MixedSchema"."MixedTable"',
-        '--table-and-children="Simple"',
+        '--table-and-children="application"."Simple"',
+        '--table-and-children="schema.dot""quoted"."OrderItems"',
       ]),
     );
   });

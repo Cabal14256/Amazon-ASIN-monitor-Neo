@@ -20,7 +20,10 @@ import {
   BackupConfigError,
   backupConfigView,
   backupSelectiveRestoreQuery,
+  BackupTableSelectionError,
+  backupTableSelectionQuery,
   isTerminalTaskStatus,
+  resolveBackupTableSelection,
   selectiveBackupRestoreBlocked,
   type BackupConfigRepositoryPort,
   type TaskState,
@@ -267,13 +270,35 @@ export class BackupService implements OnModuleDestroy {
           409,
           'TimescaleDB 不支持通过 Neo 接口按表备份，请创建完整数据库备份',
         );
+      let tables = input.tables;
+      if (tables?.length) {
+        const pool =
+          target === 'primary'
+            ? this.pools.primaryPool
+            : this.pools.competitorPool;
+        try {
+          const selection = await pool.query(backupTableSelectionQuery(tables));
+          tables = resolveBackupTableSelection(tables, selection.rows);
+        } catch (error) {
+          if (
+            !(error instanceof BackupTableSelectionError) ||
+            error.reason !== 'input'
+          )
+            throw error;
+          this.logger.warn('备份表选择无效', 'BackupService', {
+            target,
+            reason: 'backup_table_selection_invalid',
+          });
+          return fail(400, '备份表不存在或名称无法安全解析');
+        }
+      }
       const task = await this.enqueue(principal, {
         taskType: 'backup',
         taskSubType: 'create',
         operation: 'create',
         target,
         params: {
-          tables: input.tables,
+          tables,
           description: input.description,
         },
       });

@@ -2,11 +2,14 @@ import type { Env } from '@asin-monitor/config';
 import type { BackupJobData } from '@asin-monitor/contracts';
 import {
   backupJobDataSchema,
+  backupQualifiedTableName,
   backupTaskResultDataSchema,
 } from '@asin-monitor/contracts';
 import {
   backupSelectiveRestoreQuery,
+  backupTableSelectionQuery,
   createPgPool,
+  resolveBackupTableSelection,
   selectiveBackupRestoreBlocked,
   transitionTask,
   type TaskMutation,
@@ -348,6 +351,125 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         (await scratchPool.query(`SELECT note FROM public.${folded}`)).rows,
       ).toEqual([{ note: 'folded-after' }]);
     }, 30000);
+    it.each(['url-options', 'inherited-options'] as const)(
+      'freezes the actual %s search path and restores only the selected same-named schema table',
+      async (mode) => {
+        const schema = `backup_path_${scratchName.slice(-12)}.quoted"${mode}`;
+        const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
+        const selected = backupQualifiedTableName(schema, tableA);
+        const view = `backup_path_view_${scratchName.slice(-12)}`;
+        const previousOptions = process.env.PGOPTIONS;
+        let applicationPool: ReturnType<typeof createPgPool> | undefined;
+        try {
+          await scratchPool.query(`CREATE SCHEMA ${quote(schema)}`);
+          await scratchPool.query(
+            `CREATE TABLE ${selected}(id integer PRIMARY KEY,note text NOT NULL)`,
+          );
+          await scratchPool.query(
+            `INSERT INTO ${selected} VALUES(1,'namespaced-original')`,
+          );
+          const options = `-c search_path=${quote(
+            schema,
+          )},public -c application_name=backup_path_fixture`;
+          const source = new URL(scratchUrl);
+          source.searchParams.delete('options');
+          if (mode === 'url-options')
+            source.searchParams.set('options', options);
+          else process.env.PGOPTIONS = options;
+          applicationPool = createPgPool(source.toString(), { max: 1 });
+          const apiSelection = await applicationPool.query(
+            backupTableSelectionQuery([tableA]),
+          );
+          const frozen = resolveBackupTableSelection(
+            [tableA],
+            apiSelection.rows,
+          );
+          expect(frozen).toEqual([selected]);
+          // Already-queued unqualified data keeps its original private identity,
+          // but the Worker freezes what its actual NodePG session resolved.
+          const original = await runJob(source.toString(), 'create', {
+            tables: [tableA],
+          });
+          const originalName = (original.result as { filename: string })
+            .filename;
+          expect(
+            JSON.parse(
+              await readFile(
+                join(directory, `${originalName}.meta.json`),
+                'utf8',
+              ),
+            ).tables,
+          ).toEqual(frozen);
+
+          // A new API-frozen job remains exact even if the Worker uses a different
+          // path. Neither pg_dump nor pg_restore receives arbitrary PGOPTIONS.
+          const worker = new URL(scratchUrl);
+          worker.searchParams.set('options', '-c search_path=public');
+          const created = await runJob(worker.toString(), 'create', {
+            tables: frozen,
+          });
+          const filename = (created.result as { filename: string }).filename;
+          const metadata = JSON.parse(
+            await readFile(join(directory, `${filename}.meta.json`), 'utf8'),
+          );
+          expect(metadata.tables).toEqual(frozen);
+          await scratchPool.query(
+            `UPDATE ${selected} SET note='namespaced-after' WHERE id=1`,
+          );
+          await scratchPool.query(
+            `UPDATE public.${tableA} SET note='public-after' WHERE id=1`,
+          );
+          await scratchPool.query(
+            `CREATE VIEW public.${view} AS SELECT id FROM public.${tableA}`,
+          );
+          // The other schema has an incoming view with the EXACT same base table
+          // name. API/Worker preflight must not mistake it for an archived target.
+          expect(
+            selectiveBackupRestoreBlocked(
+              (
+                await scratchPool.query(
+                  backupSelectiveRestoreQuery(metadata.tables),
+                )
+              ).rows,
+            ),
+          ).toBe(false);
+          expect(
+            selectiveBackupRestoreBlocked(
+              (await scratchPool.query(backupSelectiveRestoreQuery([tableA])))
+                .rows,
+            ),
+          ).toBe(true);
+          const restored = await runJob(worker.toString(), 'restore', {
+            filename,
+          });
+          expect(restored.state.status).toBe('completed');
+          expect(restored.result).toMatchObject({ verification: 'confirmed' });
+          expect(
+            (await scratchPool.query(`SELECT note FROM ${selected} WHERE id=1`))
+              .rows,
+          ).toEqual([{ note: 'namespaced-original' }]);
+          expect(
+            (
+              await scratchPool.query(
+                `SELECT note FROM public.${tableA} WHERE id=1`,
+              )
+            ).rows,
+          ).toEqual([{ note: 'public-after' }]);
+        } finally {
+          if (previousOptions === undefined) delete process.env.PGOPTIONS;
+          else process.env.PGOPTIONS = previousOptions;
+          await applicationPool?.end();
+          await scratchPool.query(`DROP VIEW IF EXISTS public.${view}`);
+          await scratchPool.query(
+            `DROP SCHEMA IF EXISTS ${quote(schema)} CASCADE`,
+          );
+          await scratchPool.query(
+            `UPDATE public.${tableA} SET note='original-a' WHERE id=1`,
+          );
+        }
+      },
+      30000,
+    );
     it('refuses a valid plus missing literal table instead of publishing a partial-selection archive', async () => {
       const taskId = randomUUID();
       await expect(

@@ -12,7 +12,13 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 已发布创建文件与已提交恢复结果优先保留：到期、退出、取消或旧租约丢失不能撤销真实完成点。未发布且清理已确认的最终失败通过绑定原任务身份的专用 CAS 重新读取共享状态，保留已接受的取消；隔离库创建或清理结果不确定、已观察到正式产物或临时文件清理失败时仍保留失败与人工核对提示，不能把不确定状态包装为安全取消。回滚本次生命周期限制前应先停止 Neo 备份生产者和消费者，核对所有长时间排队任务及未知恢复，不降低元数据保留配置作为回滚手段。
 
-按表参数继续仅接受一个表标识符或 `schema.table`，每一段单独转为双引号 literal pattern 交给 `pg_dump --table-and-children`；不能用未引用的混合大小写名称折叠到另一个小写表。sidecar 保存原请求表名，恢复时真实 CLI 仅改变该表，大小写冲突的其他表保持不变。参数规则依据 [PostgreSQL 16 pg_dump](https://www.postgresql.org/docs/16/app-pgdump.html) 和 [psql pattern 规则](https://www.postgresql.org/docs/16/app-psql.html#APP-PSQL-PATTERNS)。
+公开按表参数继续仅接受一个 ASCII 表标识符或 `schema.table`。API 在自己的实际 NodePG 会话中以参数化 catalog 查询解析，每段逐字引用，1500 毫秒查询预算内得到确切 schema/table 后才创建任务；入队参数冻结完整限定名。Worker 持有目标锁后再次核验名称及命名空间，再把每段单独转为双引号 literal pattern 交给 `pg_dump --table-and-children`；缺失、截断或临时表不能生成产物。混合大小写不折叠到另一个表，schema 中的点和双引号作为标识符内容处理。依据 [PostgreSQL 16 pg_dump](https://www.postgresql.org/docs/16/app-pgdump.html) 和 [psql pattern 规则](https://www.postgresql.org/docs/16/app-psql.html#APP-PSQL-PATTERNS)，双引号内的点和模式字符均逐字匹配，嵌入的双引号写成两个双引号。
+
+NodePG 正常应用 URL `options`、继承 `PGOPTIONS` 或数据库/角色配置中的 `search_path`；CLI 环境继续隔离任意 `PGOPTIONS`/startup options，使用已核验的完整限定名选择实际对象，不依赖 CLI 默认路径。新 v3 sidecar 的 `tables` 保存实际归档的限定范围，恢复预检按同一字面命名空间核查外部依赖。同名但位于其他 schema 的表及其依赖不算本次归档。内部 job/sidecar 可以用 SQL 双引号表示特殊 schema，公开请求语法及 sidecar 版本不变。
+
+此前已入队的非限定表任务在 Worker 的实际持锁会话中解析并写入新产物的限定范围，其 `creationIdentity` 仍以原不可变 job params 计算；不把解析后的范围重写进旧任务或旧 proof。已经发布的合法旧 sidecar 在重放时保持原值；旧非限定范围在目标库存在同名歧义时仍拒绝自动恢复。完整备份、默认数据库、连接凭据及已验证 TLS 策略沿用原实现。真实回归在独立 scratch PostgreSQL 内，用两个 schema 中完全同名的表分别验证 URL options/继承 PGOPTIONS、受理路径与 Worker 路径不同、含点/引号 schema、归档后原位恢复及未选中同名表外部 view 的保留；本机不启用真实服务时这些用例明确 skip。
+
+本次内部限定名扩展须同步部署 Neo API、Worker 与共享 contracts/db。回滚到只接受 ASCII 内部标识符的旧版本前，先停止新备份受理并排空或人工保留含双引号限定名的任务及归档；不能改写其原任务参数、sidecar 或证明来适配旧消费者。
 
 **当前支持边界：**完整 TimescaleDB 与普通 PostgreSQL custom dump 均恢复到同一 PostgreSQL 实例上的**新建隔离数据库**。Neo 不自动替换在线主库或竞品库，不修改 `DATABASE_URL`/`COMPETITOR_DATABASE_URL`，不执行生产切换。异步任务受理与完成结果分别标记 `restoreMode: isolated`；完成结果提供 `restoredDatabase` 和 `targetDatabaseChanged: false`，运维须独立验证并决定切换。仅 v3 `scope: selective` 的普通 PostgreSQL 按表归档执行原位部分恢复，标记 `restoreMode: in-place`。TimescaleDB 不支持按表 `pg_dump`；该模式缺少重建 hypertable 所需的目录元数据。`GET /api/v1/backup` 仅在备份来源、范围、当前目标库扩展类型与版本相符且文件未超过当前 `BACKUP_MAX_BYTES` 时返回 `restoreSupported: true`；未验证文件与早期缺少 Timescale 目录清单的文件返回 `false`。API 和 Worker 均会拒绝来源/目标类型不一致的任务。
 

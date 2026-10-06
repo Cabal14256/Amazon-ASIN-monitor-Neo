@@ -189,6 +189,59 @@ const backupTableNameSchema = z
   .string()
   .max(128)
   .regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/);
+
+/** Internal literal identity only. Public create requests keep their frozen
+ * ASCII syntax; a catalog-resolved schema may contain dots or double quotes. */
+export function parseBackupTableIdentifiers(value: string): string[] | null {
+  if (!value || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  const parts: string[] = [];
+  let offset = 0;
+  while (offset < value.length && parts.length < 2) {
+    let part = '';
+    if (value[offset] === '"') {
+      offset++;
+      let closed = false;
+      while (offset < value.length) {
+        if (value[offset] !== '"') part += value[offset++];
+        else if (value[offset + 1] === '"') {
+          part += '"';
+          offset += 2;
+        } else {
+          offset++;
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) return null;
+    } else {
+      const match = /^[A-Za-z_][A-Za-z0-9_]*/.exec(value.slice(offset));
+      if (!match) return null;
+      part = match[0];
+      offset += part.length;
+    }
+    if (!part) return null;
+    parts.push(part);
+    if (offset === value.length) return parts;
+    if (value[offset++] !== '.') return null;
+  }
+  return null;
+}
+export const backupCanonicalTableNameSchema = z
+  .string()
+  .max(260)
+  .refine(
+    (value) => parseBackupTableIdentifiers(value) !== null,
+    '备份表标识符无效',
+  );
+export function backupQualifiedTableName(schema: string, name: string): string {
+  const simple = (value: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+  const literal = (value: string) => `"${value.replaceAll('"', '""')}"`;
+  return backupCanonicalTableNameSchema.parse(
+    simple(schema) && simple(name)
+      ? `${schema}.${name}`
+      : `${literal(schema)}.${literal(name)}`,
+  );
+}
 export const backupArtifactMetadataSchema = z.union([
   backupArtifactMetadataV1Schema,
   z
@@ -248,7 +301,7 @@ export const backupArtifactMetadataSchema = z.union([
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),
       scope: z.literal('selective'),
-      tables: z.array(backupTableNameSchema).min(1).max(512),
+      tables: z.array(backupCanonicalTableNameSchema).min(1).max(512),
       archiveSha256: backupArchiveSha256Schema,
       databaseSettings: backupDatabaseSettingsSchema,
       description: z.string().max(500).optional(),
@@ -398,7 +451,7 @@ const backupJobIdentity = {
 };
 const backupCreateJobParamsSchema = z
   .object({
-    tables: createBackupRequestSchema.shape.tables,
+    tables: z.array(backupCanonicalTableNameSchema).max(512).optional(),
     description: createBackupRequestSchema.shape.description,
   })
   .strict();
