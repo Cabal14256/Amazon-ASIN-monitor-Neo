@@ -20,6 +20,26 @@ export const batchItem = {
   asinType: 'MAIN_LINK',
 };
 describe('batch ASIN values / complete actual Legacy service results', () => {
+  it('keeps a raw parent beside the trimmed neighbor in the actual Legacy service', async () => {
+    const result = await legacyAsinBatch([batchItem], {
+      groups: [
+        { id: ' g ', country: 'US' },
+        { id: 'g', country: 'US' },
+      ],
+    });
+    expect(result.result.results).toMatchObject([
+      { success: true, parentId: ' g ' },
+    ]);
+    expect(result.inserts[0][7]).toBe(' g ');
+  });
+  it('rejects a distinct Legacy batch against the current locked full parent', async () => {
+    const result = await legacyAsinBatch([{ ...batchItem, parentId: 'g' }], {
+      childCounts: { g: 5000 },
+    });
+    expect(result.result).toMatchObject({ successCount: 0, failedCount: 1 });
+    expect(result.inserts).toEqual([]);
+    expect(result.result.errors[0].message).toContain('5000');
+  });
   it.each(
     [
       [batchItem],

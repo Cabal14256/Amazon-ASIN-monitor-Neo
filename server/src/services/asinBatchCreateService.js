@@ -7,6 +7,7 @@ const logger = require('../utils/logger');
 
 const DEFAULT_CHUNK_SIZE = 100;
 const ASIN_CODE_PATTERN = /^[A-Z0-9]{10}$/;
+const MAX_READABLE_GROUP_CHILDREN = 5000;
 
 function getChunkSize() {
   const configured = Number(process.env.ASIN_BATCH_CREATE_CHUNK_SIZE);
@@ -44,6 +45,25 @@ function normalizeOptionalText(value) {
   }
   const normalized = String(value).trim();
   return normalized || null;
+}
+
+function literalParentId(value) {
+  return value == null ? null : String(value);
+}
+
+function safeParentId(value) {
+  let length = 0;
+  for (const character of value) {
+    const point = character.codePointAt(0);
+    if (
+      ++length > 50 ||
+      point <= 0x1f ||
+      (point >= 0x7f && point <= 0x9f) ||
+      (point >= 0xd800 && point <= 0xdfff)
+    )
+      return false;
+  }
+  return true;
 }
 
 function normalizeAsinType(asinType) {
@@ -135,7 +155,7 @@ function normalizeItems(items, config, result) {
       country: normalizeCountryCode(item.country),
       site: normalizeOptionalText(item.site),
       brand: normalizeOptionalText(item.brand),
-      parentId: normalizeOptionalText(item.parentId || item.variantGroupId),
+      parentId: literalParentId(item.parentId || item.variantGroupId),
     };
 
     if (!normalized.asin || !ASIN_CODE_PATTERN.test(normalized.asin)) {
@@ -158,6 +178,10 @@ function normalizeItems(items, config, result) {
       addFailure(result, normalized, '所属变体组不能为空');
       return;
     }
+    if (!safeParentId(normalized.parentId)) {
+      addFailure(result, normalized, '所属变体组ID格式无效');
+      return;
+    }
     if (item.asinType && !normalized.asinType) {
       addFailure(result, normalized, 'ASIN类型必须是 1（主链）或 2（副评）');
       return;
@@ -177,10 +201,10 @@ function normalizeItems(items, config, result) {
 
 async function findVariantGroups(queryExecutor, config, groupIds) {
   const groupMap = new Map();
-  for (const chunk of chunkArray(groupIds)) {
+  for (const chunk of chunkArray([...groupIds].sort())) {
     const placeholders = chunk.map(() => '?').join(', ');
     const rows = await queryExecutor(
-      `SELECT id, country FROM ${config.groupTable} WHERE id IN (${placeholders})`,
+      `SELECT id, country FROM ${config.groupTable} WHERE id IN (${placeholders}) ORDER BY id FOR UPDATE`,
       chunk,
     );
     for (const row of rows) {
@@ -355,7 +379,43 @@ async function batchCreateASINs({
       }
 
       const createdItems = [];
-      for (const chunk of chunkArray(insertItems)) {
+      const overCapacity = new Set();
+      // The HTTP controller uses clearCache=true. The existing full-file import
+      // explicitly uses false; preserve its separately bounded write contract.
+      if (config.domain === 'asin' && clearCache) {
+        const additions = new Map();
+        for (const item of insertItems)
+          additions.set(item.parentId, (additions.get(item.parentId) || 0) + 1);
+        for (const parentId of [...additions.keys()].sort()) {
+          // MySQL's default REPEATABLE READ may already have an older snapshot.
+          // A locking current read, after the parent lock, sees the last writer.
+          const children = await query(
+            `SELECT id FROM ${
+              config.asinTable
+            } WHERE variant_group_id=? ORDER BY id LIMIT ${
+              MAX_READABLE_GROUP_CHILDREN + 1
+            } FOR UPDATE`,
+            [parentId],
+          );
+          if (
+            children.length + additions.get(parentId) >
+            MAX_READABLE_GROUP_CHILDREN
+          )
+            overCapacity.add(parentId);
+        }
+      }
+      const writable = insertItems.filter(
+        (item) => !overCapacity.has(item.parentId),
+      );
+      for (const item of insertItems) {
+        if (overCapacity.has(item.parentId))
+          addFailure(
+            result,
+            item,
+            '变体组最多允许 5000 个 ASIN，本批新增未提交',
+          );
+      }
+      for (const chunk of chunkArray(writable)) {
         try {
           await insertAsinChunk(query, config, chunk);
           createdItems.push(...chunk);

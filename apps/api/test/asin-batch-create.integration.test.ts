@@ -12,6 +12,7 @@ import {
   vi,
 } from 'vitest';
 import { legacyAsinBatch } from './helpers/asin-batch-legacy';
+import { legacyAsinBatchDatabase } from './helpers/asin-batch-legacy-database';
 import { asinWriteApp } from './helpers/asin-write-app';
 
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
@@ -134,6 +135,127 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         { timeout: 1000, interval: 10 },
       );
     }
+    it.each([true, false])(
+      'keeps a literal whitespace parent when trimmed neighbor exists=%s',
+      async (withNeighbor) => {
+        await group(' g ');
+        if (withNeighbor) await group('g');
+        const response = await write([item(1, ' g ')]);
+        expect(response.statusCode).toBe(200);
+        expect(response.json().data).toMatchObject({
+          successCount: 1,
+          results: [{ success: true, parentId: ' g ' }],
+        });
+        expect(await rows('asins')).toMatchObject([
+          { variant_group_id: ' g ' },
+        ]);
+        if (withNeighbor)
+          expect(
+            (await rows('variant_groups')).find((row) => row.id === 'g')
+              .update_time,
+          ).toBe('2020-01-01T08:00:00');
+      },
+    );
+    it('creates under a canonical all-space PostgreSQL parent and rejects unsafe IDs before SQL', async () => {
+      await group('   ');
+      const response = await write([
+        item(1, '   '),
+        item(2, ''),
+        item(3, 'g\0x'),
+        item(4, 'g\u0085x'),
+        item(5, 'g\ud800x'),
+        item(6, 'g'.repeat(51)),
+      ]);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        successCount: 1,
+        failedCount: 5,
+        results: expect.arrayContaining([
+          {
+            index: 0,
+            id: expect.any(String),
+            asin: code(1),
+            country: 'US',
+            success: true,
+            parentId: '   ',
+          },
+        ]),
+      });
+      expect(await rows('asins')).toMatchObject([{ variant_group_id: '   ' }]);
+    });
+    it('serializes distinct 500-row batches at 4500 children and rejects the later group in full', async () => {
+      await group();
+      await f.pools.primaryPool
+        .query(`INSERT INTO asins(id,asin,country,site,brand,variant_group_id)
+        SELECT 'seed-'||n::text, 'S'||lpad(n::text,9,'0'),'US','amazon.com','Fixture','g' FROM generate_series(1,4500) n`);
+      const firstHeaders = { ...headers };
+      await login();
+      await f.pools.primaryPool.query(
+        'INSERT INTO batch_barrier_fixture VALUES(true)',
+      );
+      const blocker = await f.pools.primaryPool.connect();
+      const pending: Promise<unknown>[] = [];
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query('SELECT pg_advisory_xact_lock(1095977294,193001)');
+        const first = write(
+          Array.from({ length: 500 }, (_, index) => item(index)),
+          firstHeaders,
+        );
+        pending.push(Promise.resolve(first).catch(() => {}));
+        await blockedBy(blocker, 'advisory');
+        const firstPid = (
+          await blocker.query(
+            "SELECT pid FROM pg_locks WHERE NOT granted AND locktype='advisory' AND pg_backend_pid()=ANY(pg_blocking_pids(pid))",
+          )
+        ).rows[0].pid;
+        const second = write(
+          Array.from({ length: 500 }, (_, index) => item(index + 500)),
+        );
+        pending.push(Promise.resolve(second).catch(() => {}));
+        await vi.waitFor(
+          async () => {
+            const waiting = await blocker.query(
+              "SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+              [firstPid],
+            );
+            expect(waiting.rows[0].n).toBeGreaterThan(0);
+          },
+          { timeout: 1000, interval: 10 },
+        );
+        await blocker.query('COMMIT');
+        const responses = await Promise.all([first, second]);
+        expect(responses.map((response) => response.statusCode)).toEqual([
+          200, 200,
+        ]);
+        expect(
+          responses.map((response) => response.json().data.successCount),
+        ).toEqual([500, 0]);
+        expect(responses[1].json().data.failedCount).toBe(500);
+        expect(
+          responses[1]
+            .json()
+            .data.errors.every((row: any) => row.message.includes('5000')),
+        ).toBe(true);
+        const count = await f.pools.primaryPool.query(
+          "SELECT count(*)::int AS n FROM asins WHERE variant_group_id='g'",
+        );
+        expect(count.rows[0].n).toBe(5000);
+        expect(
+          (
+            await f.http.inject({
+              method: 'GET',
+              url: '/api/v1/variant-groups/g',
+              headers,
+            })
+          ).statusCode,
+        ).toBe(200);
+      } finally {
+        await blocker.query('ROLLBACK');
+        await Promise.all(pending);
+        blocker.release();
+      }
+    }, 15000);
     it('matches complete Legacy mixed-result phase ordering, counters and normalized inserts', async () => {
       await group();
       await group('uk', 'UK');
@@ -475,5 +597,133 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         blocker.release();
       }
     });
+  },
+);
+
+describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
+  'actual Legacy MySQL batch canonical parents and locking current capacity',
+  () => {
+    let legacy: Awaited<ReturnType<typeof legacyAsinBatchDatabase>>;
+    beforeAll(async () => {
+      legacy = await legacyAsinBatchDatabase();
+    });
+    afterAll(async () => {
+      if (legacy) await legacy.close();
+    });
+    beforeEach(async () => {
+      await legacy.query('DELETE FROM asins');
+      await legacy.query('DELETE FROM variant_groups');
+    });
+    const item = (index: number, parentId = 'g') => ({
+      asin: `B${String(index).padStart(9, '0')}`,
+      country: 'US',
+      site: 'amazon.com',
+      brand: 'Fixture',
+      parentId,
+    });
+    const group = (id: string) =>
+      legacy.query(
+        "INSERT INTO variant_groups(id,name,country,site,brand,update_time) VALUES(?,?,'US','amazon.com','Fixture','2020-01-01 08:00:00')",
+        [id, id],
+      );
+    it.each([true, false])(
+      'keeps the raw MySQL parent when trimmed neighbor exists=%s',
+      async (neighbor) => {
+        await group(' g ');
+        if (neighbor) await group('g');
+        const result = await legacy.batch([item(1, ' g ')]);
+        expect(result).toMatchObject({
+          successCount: 1,
+          results: [{ success: true, parentId: ' g ' }],
+        });
+        expect(
+          await legacy.query('SELECT variant_group_id FROM asins'),
+        ).toMatchObject([{ variant_group_id: ' g ' }]);
+        if (neighbor) {
+          const rows = await legacy.query(
+            "SELECT update_time FROM variant_groups WHERE id='g'",
+          );
+          expect(rows[0].update_time.getTime()).toBe(
+            new Date('2020-01-01T00:00:00Z').getTime(),
+          );
+        }
+      },
+    );
+    it('creates under a canonical all-space MySQL parent and rejects unsafe IDs before SQL', async () => {
+      await group('   ');
+      const result = await legacy.batch([
+        item(1, '   '),
+        item(2, ''),
+        item(3, 'g\0x'),
+        item(4, 'g\u0085x'),
+        item(5, 'g\ud800x'),
+        item(6, 'g'.repeat(51)),
+      ]);
+      expect(result).toMatchObject({ successCount: 1, failedCount: 5 });
+      expect(result.results.find((row) => row.success)).toMatchObject({
+        parentId: '   ',
+      });
+      expect(
+        await legacy.query('SELECT variant_group_id FROM asins'),
+      ).toMatchObject([{ variant_group_id: '   ' }]);
+    });
+    it('recounts after a real parent-lock wait despite an older RR snapshot and rejects 4500+500+500 overflow', async () => {
+      await group('g');
+      const values = Array.from({ length: 4500 }, (_, index) => [
+        `seed-${index}`,
+        `S${String(index).padStart(9, '0')}`,
+        'US',
+        'amazon.com',
+        'Fixture',
+        'g',
+      ]);
+      await legacy.query(
+        'INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES ?',
+        [values],
+      );
+      const pause = legacy.pauseFirstInsert();
+      const pending: Promise<unknown>[] = [];
+      try {
+        const first = legacy.batch(
+          Array.from({ length: 500 }, (_, index) => item(index)),
+        );
+        pending.push(first.catch(() => {}));
+        await Promise.race([
+          pause.ready,
+          first.then(() => {
+            throw new Error('Expected first transaction to reach insertion');
+          }),
+        ]);
+        const second = legacy.batch(
+          Array.from({ length: 500 }, (_, index) => item(index + 500)),
+        );
+        pending.push(second.catch(() => {}));
+        await vi.waitFor(
+          async () => {
+            expect(await legacy.parentIsBlocked()).toBe(true);
+          },
+          { timeout: 1000, interval: 10 },
+        );
+        pause.release();
+        const results = await Promise.all([first, second]);
+        expect(results.map((result) => result.successCount)).toEqual([500, 0]);
+        expect(results[1].failedCount).toBe(500);
+        expect(
+          results[1].errors.every((row) => row.message.includes('5000')),
+        ).toBe(true);
+        expect(
+          Number(
+            (
+              await legacy.query(
+                "SELECT COUNT(*) AS n FROM asins WHERE variant_group_id='g'",
+              )
+            )[0].n,
+          ),
+        ).toBe(5000);
+      } finally {
+        pause.release();
+        await Promise.all(pending);
+      }
+    }, 15000);
   },
 );
