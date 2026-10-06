@@ -195,6 +195,9 @@ jobs:
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
 
+      - name: Verify durable catalog identity and physical commit fencing
+        run: pnpm --filter @asin-monitor/db exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
+
       - name: Verify scheduled ledgers on both PostgreSQL databases and batch policy against real MySQL
         env:
           RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'
@@ -387,6 +390,9 @@ jobs:
 
       - name: Compare competitor batch deletion with Legacy and verify shared compiled Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-delete.integration.test.ts
+
+      - name: Verify catalog server fencing survives discarded browser receipts
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
 
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts

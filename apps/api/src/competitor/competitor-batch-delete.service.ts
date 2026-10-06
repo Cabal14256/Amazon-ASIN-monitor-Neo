@@ -18,6 +18,10 @@ import {
 import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import {
+  ApplicationCatalogOperations,
+  type CatalogOperationSubmission,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
@@ -54,8 +58,25 @@ export class CompetitorBatchDeleteService implements OnModuleDestroy {
     private readonly repository: CompetitorBatchDeleteRepositoryPort,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async execute(principal: AuthPrincipal, body: unknown) {
+    if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
+      fail(503, '鉴权权威源尚未切换，请使用现有竞品入口');
+    return this.catalog.execute(
+      principal,
+      'competitor',
+      'batch-delete',
+      'asin:delete',
+      (submission) => this.executeReserved(principal, body, submission),
+    );
+  }
+  private async executeReserved(
+    principal: AuthPrincipal,
+    body: unknown,
+    submission: CatalogOperationSubmission,
+  ) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有竞品入口');
     if (this.active >= 8) fail(429, '竞品写入繁忙，请稍后再试');
@@ -101,10 +122,14 @@ export class CompetitorBatchDeleteService implements OnModuleDestroy {
         taskSubType: 'competitor-variant-group-delete' as const,
         title: '批量删除竞品变体组' as const,
       };
-      const task = await port.store.create({
-        ...identity,
-        message: '批量删除任务已创建，等待处理',
-      });
+      submission.retain();
+      const task = await port.store.create(
+        {
+          ...identity,
+          message: '批量删除任务已创建，等待处理',
+        },
+        (prepared) => submission.bindTask(prepared),
+      );
       // Acceptance above captures authorization. Workers preserve accepted work
       // after logout, and verify task identity/cancellation/lease on every chunk.
       await port.enqueue({

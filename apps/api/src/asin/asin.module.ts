@@ -6,6 +6,7 @@ import {
 } from '@asin-monitor/db';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CatalogOperationModule } from '../catalog/catalog-operation.module';
 import { DatabaseModule } from '../database/database.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { ImportStorageModule } from '../import/import-storage.module';
@@ -26,7 +27,13 @@ import { AsinWriteController } from './asin-write.controller';
 import { ASIN_WRITE_REPOSITORY, AsinWriteService } from './asin-write.service';
 
 @Module({
-  imports: [AuthModule, DatabaseModule, TaskQueryModule, ImportStorageModule],
+  imports: [
+    AuthModule,
+    DatabaseModule,
+    CatalogOperationModule,
+    TaskQueryModule,
+    ImportStorageModule,
+  ],
   controllers: [
     AsinQueryController,
     AsinWriteController,

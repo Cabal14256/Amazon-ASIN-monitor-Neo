@@ -169,6 +169,38 @@ describe('four variant-check HTTP endpoints', () => {
     expect(
       f.unit.operatorPermissionCodes.mock.calls.length,
     ).toBeGreaterThanOrEqual(3);
+    expect(f.catalog.execute).not.toHaveBeenCalled();
+  });
+  it('reserves the authenticated parent query receipt and prepares its binding before enqueue', async () => {
+    const response = await post(parent, {
+      asins: ['B000000001'],
+      country: 'US',
+    });
+    expect(response.statusCode).toBe(200);
+    expect(f.catalog.execute).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ userId: f.auth.user.id }),
+      'asin',
+      'check',
+      'asin:read',
+      expect.any(Function),
+    );
+    expect(f.producer.store.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: response.json().data.taskId,
+        taskType: 'variant-check',
+        taskSubType: 'parent-asin-query',
+        userId: f.auth.user.id,
+      }),
+      expect.any(Function),
+    );
+    expect(f.producer.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskType: 'variant-check',
+        taskSubType: 'parent-asin-query',
+        taskId: response.json().data.taskId,
+      }),
+    );
+    expect(f.parents.query).not.toHaveBeenCalled();
   });
   it.each([group, single, batch, parent])(
     'denies current permission loss before accepting or running %s',

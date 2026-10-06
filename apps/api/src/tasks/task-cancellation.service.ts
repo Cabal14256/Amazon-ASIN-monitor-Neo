@@ -2,6 +2,7 @@ import type { Env } from '@asin-monitor/config';
 import { isTerminalTaskStatus, TaskRegistryError } from '@asin-monitor/db';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { AuthPrincipal } from '../auth/auth.types';
+import { ApplicationCatalogOperations } from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { CANCELLABLE_TASK_TYPES } from './task-cancellation-script';
@@ -25,6 +26,8 @@ export class TaskCancellationService {
     @Inject(ENV) private readonly env: Env,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async cancel(principal: AuthPrincipal, raw: unknown) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -76,6 +79,8 @@ export class TaskCancellationService {
       if (next.userId !== principal.userId) fail(403, '无权取消此任务');
       if (next.status === 'completed' || next.status === 'failed')
         fail(400, '任务已结束，无法取消');
+      if (outcome === 'removed' && next.status === 'cancelled')
+        await this.catalog.settleRemovedTask(next, deadline);
       this.logger.info('任务取消请求已处理', 'TaskCancellationService', {
         status: next.status,
       });

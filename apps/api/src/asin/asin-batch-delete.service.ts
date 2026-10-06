@@ -11,6 +11,10 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import {
+  ApplicationCatalogOperations,
+  type CatalogOperationSubmission,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
@@ -51,8 +55,25 @@ export class AsinBatchDeleteService {
     private readonly repository: AsinBatchDeleteRepositoryPort,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async execute(principal: AuthPrincipal, body: unknown) {
+    if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
+      fail(503, '鉴权权威源尚未切换，请使用现有 ASIN 入口');
+    return this.catalog.execute(
+      principal,
+      'asin',
+      'batch-delete',
+      'asin:delete',
+      (submission) => this.executeReserved(principal, body, submission),
+    );
+  }
+  private async executeReserved(
+    principal: AuthPrincipal,
+    body: unknown,
+    submission: CatalogOperationSubmission,
+  ) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有 ASIN 入口');
     if (this.active >= 8) fail(429, 'ASIN 写入繁忙，请稍后再试');
@@ -88,14 +109,18 @@ export class AsinBatchDeleteService {
           throw new Error('BATCH_DELETE_ENQUEUE_DEADLINE');
       });
       taskId = randomUUID();
-      const task = await port.store.create({
-        taskId,
-        userId: principal.userId,
-        taskType: 'batch-delete',
-        taskSubType: 'variant-group-delete',
-        title: '批量删除变体组',
-        message: '批量删除任务已创建，等待处理',
-      });
+      submission.retain();
+      const task = await port.store.create(
+        {
+          taskId,
+          userId: principal.userId,
+          taskType: 'batch-delete',
+          taskSubType: 'variant-group-delete',
+          title: '批量删除变体组',
+          message: '批量删除任务已创建，等待处理',
+        },
+        (prepared) => submission.bindTask(prepared),
+      );
       await port.enqueue({
         taskId,
         userId: principal.userId,
