@@ -268,7 +268,179 @@ describe('ASIN workbook authenticated bounded file saves', () => {
     aborting.resolve();
     await vi.advanceTimersByTimeAsync(0);
   });
+  it.each(['timeout', 'session'] as const)(
+    'retains 64 physical file aborts after timely %s results and releases only a settled slot',
+    async (reason) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      f.fetcher.mockImplementation(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({}, { highWaterMark: 0 }),
+            {
+              headers: { 'content-type': mime },
+            },
+          ),
+      );
+      const aborts = Array.from({ length: 64 }, () => deferred<void>());
+      const sinks = aborts.map((gate) => ({
+        write: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        abort: vi.fn(() => gate.promise),
+      }));
+      const options = {
+        timeoutMs: 10,
+        minBytes: 4,
+        maxBytes: 4,
+        expectedType: mime,
+      };
+      const calls = sinks.map((sink) =>
+        f.http
+          .downloadTo(`/api/v1/tasks/${id}/download`, sink, options)
+          .catch((error: unknown) => error),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      if (reason === 'session') f.http.cancelAll();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(
+        (await Promise.all(calls)).every(
+          (error) =>
+            error instanceof Error &&
+            'kind' in error &&
+            error.kind === (reason === 'timeout' ? 'TIMEOUT' : 'CANCELLED'),
+        ),
+      ).toBe(true);
+      for (const sink of sinks) expect(sink.abort).toHaveBeenCalledOnce();
+      const overflow = f.http
+        .downloadTo('/api/v1/overflow', f.sink, options)
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await overflow).toMatchObject({ kind: 'CAPACITY' });
+      expect(f.fetcher).toHaveBeenCalledTimes(64);
+      if (reason === 'session')
+        aborts[0].reject(new Error('Native abort refused'));
+      else aborts[0].resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      const replacement = f.http
+        .downloadTo('/api/v1/replacement', f.sink, {
+          ...options,
+          timeoutMs: 1000,
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.fetcher).toHaveBeenCalledTimes(65);
+      await expect(
+        f.http.downloadTo('/api/v1/second-overflow', f.sink, options),
+      ).rejects.toMatchObject({ kind: 'CAPACITY' });
+      f.http.cancelAll();
+      for (const gate of aborts) gate.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await replacement;
+      for (const sink of sinks) expect(sink.abort).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([
+    ['write', 'operation'],
+    ['close', 'operation'],
+    ['write', 'abort'],
+    ['close', 'abort'],
+  ] as const)(
+    'retains native %s and abort until both settle when %s finishes first',
+    async (phase, first) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const operations = Array.from({ length: 64 }, () => deferred<void>());
+      const aborts = Array.from({ length: 64 }, () => deferred<void>());
+      const sinks = operations.map((operation, index) => ({
+        write: vi.fn(() =>
+          phase === 'write' ? operation.promise : Promise.resolve(),
+        ),
+        close: vi.fn(() =>
+          phase === 'close' ? operation.promise : Promise.resolve(),
+        ),
+        abort: vi.fn(() => aborts[index].promise),
+      }));
+      const options = {
+        timeoutMs: 10,
+        minBytes: 4,
+        maxBytes: 4,
+        expectedType: mime,
+      };
+      const callers = sinks.map((sink) =>
+        f.http
+          .downloadTo('/api/v1/download', sink, options)
+          .catch((error: unknown) => error),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      for (const sink of sinks) expect(sink[phase]).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(
+        (await Promise.all(callers)).every(
+          (error) =>
+            error instanceof Error &&
+            'kind' in error &&
+            error.kind === 'TIMEOUT',
+        ),
+      ).toBe(true);
+      if (first === 'operation')
+        for (const operation of operations) operation.resolve();
+      else for (const gate of aborts) gate.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      const overflow = f.http
+        .downloadTo('/api/v1/overflow', f.sink, options)
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await overflow).toMatchObject({ kind: 'CAPACITY' });
+      expect(f.fetcher).toHaveBeenCalledTimes(64);
+      if (first === 'operation') aborts[0].resolve();
+      else operations[0].resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        f.http.downloadTo('/api/v1/released', f.sink, options),
+      ).resolves.toBe(4);
+      for (const gate of aborts) gate.resolve();
+      for (const operation of operations) operation.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      for (const sink of sinks) expect(sink.abort).toHaveBeenCalledOnce();
+      if (phase === 'write')
+        for (const sink of sinks) expect(sink.close).not.toHaveBeenCalled();
+    },
+  );
+  it('preserves AUTH during session reset and retains its outstanding native abort', async () => {
+    const f = fixture(),
+      aborting = deferred<void>();
+    vi.mocked(f.sink.abort).mockReturnValueOnce(aborting.promise);
+    f.fetcher.mockResolvedValueOnce(jsonResponse({ success: false }, 401));
+    f.unauthorized.mockImplementation(() => f.http.cancelAll());
+    await expect(
+      f.tasks.downloadAsinExportTo(exported(), f.sink),
+    ).rejects.toMatchObject({ kind: 'AUTH', status: 401 });
+    expect(f.unauthorized).toHaveBeenCalledOnce();
+    expect(f.sink.abort).toHaveBeenCalledOnce();
+    aborting.resolve();
+  });
+  it('does not start a second abort after final close physically finishes with a stale scope', async () => {
+    const f = fixture();
+    let current = true;
+    vi.mocked(f.sink.close).mockImplementation(async () => {
+      current = false;
+    });
+    await expect(
+      saveToFile(
+        { createWritable: async () => f.sink },
+        new AbortController().signal,
+        () => current,
+        async (sink) =>
+          (
+            await f.tasks.downloadAsinExportTo(exported(), sink)
+          ).bytes,
+      ),
+    ).rejects.toMatchObject({ kind: 'CANCELLED' });
+    expect(f.sink.close).toHaveBeenCalledOnce();
+    expect(f.sink.abort).not.toHaveBeenCalled();
+  });
   it('aborts a late acquired writable before GET after caller cancellation', async () => {
+    vi.useFakeTimers();
     const f = fixture(),
       opening = deferred<DownloadSink>(),
       controller = new AbortController();
@@ -279,12 +451,99 @@ describe('ASIN workbook authenticated bounded file saves', () => {
       async (sink) =>
         (await f.tasks.downloadAsinExportTo(exported(), sink)).bytes,
     );
+    await vi.advanceTimersByTimeAsync(0);
     controller.abort();
     opening.resolve(f.sink);
     await expect(work).rejects.toMatchObject({ kind: 'CANCELLED' });
+    await vi.advanceTimersByTimeAsync(0);
     expect(f.fetcher).not.toHaveBeenCalled();
     expect(f.sink.abort).toHaveBeenCalledOnce();
     expect(f.sink.close).not.toHaveBeenCalled();
+  });
+  it.each(['resolve', 'reject'] as const)(
+    'cancels promptly during 64 native opens and releases only a physically %s opening',
+    async (settlement) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const openings = Array.from({ length: 64 }, () =>
+        deferred<DownloadSink>(),
+      );
+      const controllers = openings.map(() => new AbortController());
+      const creators = openings.map((gate) => vi.fn(() => gate.promise));
+      const saves = openings.map((_, index) =>
+        saveToFile(
+          { createWritable: creators[index] },
+          controllers[index].signal,
+          () => true,
+          async (sink, signal) =>
+            (await f.tasks.downloadAsinExportTo(exported(), sink, signal))
+              .bytes,
+        ).catch((error: unknown) => error),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      for (const controller of controllers) controller.abort();
+      expect(
+        (await Promise.all(saves)).every(
+          (error) =>
+            error instanceof Error &&
+            'kind' in error &&
+            error.kind === 'CANCELLED',
+        ),
+      ).toBe(true);
+      const extra = vi.fn(async () => f.sink);
+      await expect(
+        saveToFile(
+          { createWritable: extra },
+          new AbortController().signal,
+          () => true,
+          async () => 4,
+        ),
+      ).rejects.toMatchObject({ kind: 'CAPACITY' });
+      expect(extra).not.toHaveBeenCalled();
+      expect(f.fetcher).not.toHaveBeenCalled();
+      if (settlement === 'resolve') openings[0].resolve(f.sink);
+      else openings[0].reject(new Error('late native opening rejection'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.sink.abort).toHaveBeenCalledTimes(
+        settlement === 'resolve' ? 1 : 0,
+      );
+      await expect(
+        saveToFile(
+          { createWritable: extra },
+          new AbortController().signal,
+          () => true,
+          async (sink) => {
+            await sink.close();
+            return 4;
+          },
+        ),
+      ).resolves.toBe(4);
+      expect(extra).toHaveBeenCalledOnce();
+      for (const opening of openings.slice(1))
+        opening.reject(new Error('fixture shutdown'));
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+  it('returns the 30 minute deadline while a native opening ignores cancellation and aborts its late writable once', async () => {
+    vi.useFakeTimers();
+    const f = fixture(),
+      opening = deferred<DownloadSink>();
+    const saved = saveToFile(
+      { createWritable: () => opening.promise },
+      new AbortController().signal,
+      () => true,
+      async (sink, signal) =>
+        (await f.tasks.downloadAsinExportTo(exported(), sink, signal)).bytes,
+    );
+    const rejected = expect(saved).rejects.toMatchObject({ kind: 'TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    await rejected;
+    expect(f.fetcher).not.toHaveBeenCalled();
+    opening.resolve(f.sink);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.sink.abort).toHaveBeenCalledOnce();
+    expect(f.sink.close).not.toHaveBeenCalled();
+    expect(f.fetcher).not.toHaveBeenCalled();
   });
   it('does not close a file if the live owner/permission guard changes during write', async () => {
     const f = fixture();

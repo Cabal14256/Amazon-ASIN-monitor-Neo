@@ -14,6 +14,7 @@ import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
+import { saveToFile } from '../../lib/file-save';
 import {
   deferred,
   jsonResponse,
@@ -197,6 +198,121 @@ describe('task center ASIN export fallback download', () => {
     expect(picker).toHaveBeenCalledOnce();
     expect(f.files()).toHaveLength(1);
     expect(f.objectURL).not.toHaveBeenCalled();
+  });
+  it('retains the actual TaskDetails file abort in the shared physical budget after UI cancellation and session reset', async () => {
+    const aborts = Array.from({ length: 64 }, () => deferred<void>());
+    const sinks = aborts.map((gate) => ({
+      write: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+      abort: vi.fn(() => gate.promise),
+    }));
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: true,
+    });
+    const opening = vi.fn(async () => sinks[0]);
+    const picker = vi.fn(async () => ({ createWritable: opening }));
+    Object.defineProperty(window, 'showSaveFilePicker', {
+      configurable: true,
+      value: picker,
+    });
+    const f = fixture({
+      download: async () =>
+        new Response(new ReadableStream<Uint8Array>({}, { highWaterMark: 0 }), {
+          headers: { 'content-type': mime },
+        }),
+    });
+    const options = {
+      timeoutMs: 10000,
+      minBytes: 4,
+      maxBytes: 4,
+      expectedType: mime,
+    };
+    const pending: Promise<unknown>[] = [];
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: '详情' }));
+      const detail = await screen.findByLabelText('任务详情');
+      fireEvent.click(
+        await within(detail).findByRole('button', { name: '下载结果' }),
+      );
+      await waitFor(() => expect(f.files()).toHaveLength(1));
+      fireEvent.click(screen.getByRole('button', { name: '取消文件下载' }));
+      await waitFor(() => expect(sinks[0].abort).toHaveBeenCalledOnce());
+      expect(screen.queryByText(/下载失败/)).toBeNull();
+      for (const sink of sinks.slice(1))
+        pending.push(
+          saveToFile(
+            { createWritable: async () => sink },
+            new AbortController().signal,
+            () => true,
+            async (guarded, saveSignal) =>
+              (
+                await f.runtime.tasks.downloadAsinExportTo(
+                  exported(),
+                  guarded,
+                  saveSignal,
+                )
+              ).bytes,
+          ).catch((error: unknown) => error),
+        );
+      await waitFor(() => expect(f.files()).toHaveLength(64));
+      await act(async () => {
+        f.runtime.http.cancelAll();
+        await Promise.all(pending);
+      });
+      await waitFor(() => {
+        for (const sink of sinks) expect(sink.abort).toHaveBeenCalledOnce();
+      });
+      // Retry the real detail action at capacity: picker remains in the user
+      // gesture, but no 65th native writable/abort or authenticated GET starts.
+      fireEvent.click(
+        await within(detail).findByRole('button', { name: '下载结果' }),
+      );
+      await screen.findByText(/文件保存并发过多/);
+      expect(picker).toHaveBeenCalledTimes(2);
+      expect(opening).toHaveBeenCalledOnce();
+      expect(f.files()).toHaveLength(64);
+      await act(async () => {
+        f.runtime.reset();
+      });
+      const probe = {
+        write: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        abort: vi.fn(async () => undefined),
+      };
+      await expect(
+        f.runtime.http.downloadTo(`/api/v1/tasks/${id}/download`, probe, {
+          ...options,
+          timeoutMs: 10,
+        }),
+      ).rejects.toMatchObject({ kind: 'CAPACITY' });
+      expect(f.files()).toHaveLength(64);
+      expect(probe.abort).not.toHaveBeenCalled();
+      await act(async () => {
+        aborts[0].resolve();
+      });
+      const replacement = f.runtime.http
+        .downloadTo(`/api/v1/tasks/${id}/download`, probe, options)
+        .catch((error: unknown) => error);
+      await waitFor(() => expect(f.files()).toHaveLength(65));
+      await expect(
+        f.runtime.http.downloadTo(`/api/v1/tasks/${id}/download`, probe, {
+          ...options,
+          timeoutMs: 10,
+        }),
+      ).rejects.toMatchObject({ kind: 'CAPACITY' });
+      f.runtime.http.cancelAll();
+      await replacement;
+      expect(sinks[0].abort).toHaveBeenCalledOnce();
+      for (const sink of sinks) expect(sink.close).not.toHaveBeenCalled();
+      expect(f.objectURL).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => {
+        f.runtime.http.cancelAll();
+        for (const gate of aborts) gate.resolve();
+        await Promise.all(pending);
+      });
+    }
   });
   it.each(['owner', 'session', 'permission', 'password'] as const)(
     'aborts the native file stream on %s changes while disk write is pending and never closes it',

@@ -525,12 +525,13 @@ export class HttpClient {
     const token = this.options.session.getLegacyToken();
     if (token) headers.set('authorization', `Bearer ${token}`);
     this.active.add(controller);
-    let sinkAborted = false,
-      received: Response | undefined;
+    let abortingSink: Promise<void> | undefined, received: Response | undefined;
     const abortSink = (reason: unknown) => {
-      if (sinkAborted) return;
-      sinkAborted = true;
-      void sink.abort(reason).catch(() => undefined);
+      // Assign before calling the native method, including synchronous throws
+      // and reentrant cancellation. This one promise owns physical settlement.
+      return (abortingSink ??= Promise.resolve()
+        .then(() => sink.abort(reason))
+        .catch(() => undefined));
     };
     const onAbort = () => abortSink(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });
@@ -558,15 +559,18 @@ export class HttpClient {
           /* HTTP status is authoritative. */
         }
         if (response.status === 401) {
+          const failure = new ApiError('AUTH', '未认证或认证已过期', 401, 401);
           if (revision === this.options.session.revision) {
-            this.active.delete(controller);
+            // Session reset may cancelAll. Preserve this request's AUTH reason
+            // while its physical sink remains in admission until settled.
+            controller.abort(failure);
             try {
               this.options.onUnauthorized?.();
             } catch {
               /* Preserve authentication failure. */
             }
           }
-          throw new ApiError('AUTH', '未认证或认证已过期', 401, 401);
+          throw failure;
         }
         throw new ApiError(
           'HTTP',
@@ -596,10 +600,15 @@ export class HttpClient {
         if (!signal.aborted) controller.abort(failure);
         throw failure;
       })
-      .finally(() => {
+      .finally(async () => {
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);
         signal.removeEventListener('abort', onAbort);
+        // Keep the internal reservation after the caller's prompt timeout.
+        // write/close already belong to work; abort is an independent native
+        // operation and may outlive a cancelled network read. Do not await an
+        // absent promise: success cleanup has no gap for a new untracked abort.
+        if (abortingSink) await abortingSink;
         this.active.delete(controller);
       });
     // Uncooperative fetch/disk work keeps its admission slot until it settles.

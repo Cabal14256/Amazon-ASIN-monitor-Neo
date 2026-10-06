@@ -386,13 +386,9 @@ export default function TaskCenterPage() {
             destination.handle,
             controller.signal,
             currentDownload,
-            async (sink) =>
+            async (sink, saveSignal) =>
               (
-                await runtime.tasks.downloadAsinExportTo(
-                  task,
-                  sink,
-                  controller.signal,
-                )
+                await runtime.tasks.downloadAsinExportTo(task, sink, saveSignal)
               ).bytes,
           );
           return;

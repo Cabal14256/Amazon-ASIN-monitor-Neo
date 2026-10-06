@@ -10,7 +10,7 @@
 
 没有该浏览器能力时，仅允许不超过 **32 MiB** 的 Blob 回退，实际读取上限进一步缩小到原回执字节数。更大文件在 GET 前提示使用支持选择保存位置的 Chrome/Edge、HTTPS 或本机可信地址，或缩小导出范围重新生成；没有提高原 Blob 限额。其他任务 JSON 下载保留原 125 秒默认。
 
-用户取消原生对话框、主动取消下载、撤权、改密要求、owner/session 或同 owner 会话 revision 改变、离开页面时，不发起迟到 GET，不显示业务失败，不关闭未完成文件。超时、网络、磁盘或完整性错误中止临时文件并呈现错误。磁盘若不响应 abort，页面的失败结果仍按截止返回；底层工作在真正结束前继续占用 HTTP 有界名额。`close()` 已完成的磁盘提交不能由后续 UI 取消撤销。
+用户取消原生对话框、主动取消下载、撤权、改密要求、owner/session 或同 owner 会话 revision 改变、离开页面时，不发起迟到 GET，不显示业务失败，不关闭未完成文件。超时、网络、磁盘或完整性错误中止临时文件并呈现错误。磁盘若不响应 abort，页面的失败结果仍按截止返回；底层工作在真正结束前继续占用 HTTP 有界名额。另有独立的 64 个文件生命周期名额，在 `createWritable()` 前预留；原生 open、write、close、abort 都真正结束后才归还。第 65 次保存在打开 writable 和 GET 前拒绝，已经显示的保存选择框不会因此打开更多文件。每个 writable 只调用一次 abort，迟到取得的 writable 也遵守同一名额和中止规则。`close()` 已完成的磁盘提交不能由后续 UI 取消撤销。
 
 ## 本轮实际验证
 
@@ -22,6 +22,14 @@
 - 真实浏览器 File System Access、真实磁盘原文件取消语义及大 XLSX 生产传输尚未执行；现有浏览器链路之前连接失败，mounted/流端口不能当作本轮浏览器证据。最新 CI 和 Review 仍由 PR 门禁核验。
 
 浏览器能力依据 [Chrome File System Access 文档](https://developer.chrome.com/docs/capabilities/web-apis/file-system-access) 和 [MDN createWritable 文档](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle/createWritable)。正式验收需复核用户激活、可信上下文、原生取消、实际磁盘背压与临时文件、完整 Excel 可打开性以及撤权中断。
+
+## 原生文件生命周期复审（评论 4200780138）
+
+- 真实 HttpClient 的超时和会话取消容量回归、write/close 与 abort 两种结束顺序，以及真实 mounted TaskDetails 的取消场景在旧实现上先失败。保持调用方及时返回后，HTTP 名额仍等待原生 abort 真正结束；401 触发会话重置时保留原 AUTH 原因。
+- 追加将 `file-save.ts` 临时恢复为 cb4dece 版本的对照：64 个未完成 open 的取消/拒绝两个场景、open 的 30 分钟截止和实际 TaskDetails 取消共 4 项 RED；恢复本轮源码后全部 GREEN。临时源码已恢复，没有变更其他模块。
+- 本轮 4 个受影响 focused 文件共 **144/144** 通过（HttpClient 44、TaskApi 46、文件流保存 29、实际 TaskCenter/TaskDetails mounted 25）。覆盖第 65 次不创建文件、一个原生 abort 结束仅释放一个名额、晚 open 拒绝、晚 open 成功后只 abort 一次且不 GET、最终 close 已提交后不再启动 abort，以及原有 owner/session/撤权/改密/离页边界。
+- 本轮 `corepack pnpm --filter web exec tsc -p tsconfig.json --noEmit`、完整 Web lint、6 个文件 Prettier、请求/导出 URL 去重 3 项、changed-format 5 项及 `git diff --check` 通过。
+- 本节结果来自本轮源码。上节完整 Web 846 项和构建属于前一轮 cb4dece 验收，不能当作本次复审源码的完整检查；本轮暂不重复 full/build，以避免与 #224 的重型检查并行。真实浏览器、实际文件系统和生产环境仍未执行。
 
 ## 回滚
 
