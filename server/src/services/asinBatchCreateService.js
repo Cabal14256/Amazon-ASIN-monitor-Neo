@@ -66,6 +66,21 @@ function safeParentId(value) {
   return true;
 }
 
+function fitsLegacyStorage(item, config) {
+  const fields = [
+    [item.name, 500],
+    [item.country, 10],
+    [config.hasSite ? item.site : null, 100],
+    [item.brand, 100],
+    [item.parentId, 50],
+  ];
+  return fields.every(([value, maximum]) => {
+    let length = 0;
+    for (const _character of value || '') if (++length > maximum) return false;
+    return true;
+  });
+}
+
 function normalizeAsinType(asinType) {
   if (!asinType) return null;
   const type = String(asinType).trim();
@@ -392,8 +407,30 @@ async function batchCreateASINs({
       // The HTTP controller uses clearCache=true. The existing full-file import
       // explicitly uses false; preserve its separately bounded write contract.
       if (config.domain === 'asin' && clearCache) {
+        let capacityItems = insertItems;
+        if (insertItems.some((item) => !fitsLegacyStorage(item, config))) {
+          // Strict MySQL rejects overlong values; exclude those definite row
+          // failures from capacity only. Non-strict truncation can succeed and
+          // must still count. Preserve actual INSERT fallback/error receipts.
+          const modeRows = await query('SELECT @@SESSION.sql_mode AS sql_mode');
+          const mode = modeRows[0]?.sql_mode;
+          if (typeof mode !== 'string')
+            throw new Error('ASIN_BATCH_STORAGE_MODE_UNAVAILABLE');
+          if (
+            mode
+              .split(',')
+              .some((entry) =>
+                ['STRICT_TRANS_TABLES', 'STRICT_ALL_TABLES'].includes(
+                  entry.trim().toUpperCase(),
+                ),
+              )
+          )
+            capacityItems = insertItems.filter((item) =>
+              fitsLegacyStorage(item, config),
+            );
+        }
         const additions = new Map();
-        for (const item of insertItems)
+        for (const item of capacityItems)
           additions.set(item.parentId, (additions.get(item.parentId) || 0) + 1);
         for (const parentId of [...additions.keys()].sort()) {
           // MySQL's default REPEATABLE READ may already have an older snapshot.

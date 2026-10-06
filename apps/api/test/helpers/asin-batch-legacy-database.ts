@@ -7,7 +7,9 @@ import vm from 'node:vm';
 
 /** Actual current Legacy batch service, original DDL and pooled transactions.
  * Logging/cache are isolated; every SQL statement uses real MySQL. */
-export async function legacyAsinBatchDatabase() {
+export async function legacyAsinBatchDatabase(
+  options: { sqlMode?: 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION' | '' } = {},
+) {
   const host = process.env.INTEGRATION_MYSQL_HOST ?? '127.0.0.1';
   if (
     process.env.RUN_INTEGRATION_TESTS !== 'true' ||
@@ -92,6 +94,8 @@ export async function legacyAsinBatchDatabase() {
       ) => {
         const connection = await pool.getConnection();
         try {
+          if (options.sqlMode !== undefined)
+            await connection.query('SET SESSION sql_mode=?', [options.sqlMode]);
           await connection.query(
             'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ',
           );

@@ -609,7 +609,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
   () => {
     let legacy: Awaited<ReturnType<typeof legacyAsinBatchDatabase>>;
     beforeAll(async () => {
-      legacy = await legacyAsinBatchDatabase();
+      legacy = await legacyAsinBatchDatabase({
+        sqlMode: 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION',
+      });
     });
     afterAll(async () => {
       if (legacy) await legacy.close();
@@ -630,6 +632,108 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO variant_groups(id,name,country,site,brand,update_time) VALUES(?,?,'US','amazon.com','Fixture','2020-01-01 08:00:00')",
         [id, id],
       );
+    it.each([
+      { field: 'name', maximum: 500 },
+      { field: 'site', maximum: 100 },
+      { field: 'brand', maximum: 100 },
+    ])(
+      'actual strict MySQL 4999 + valid + unwritable $field preserves partial success at 5000',
+      async ({ field, maximum }) => {
+        await group('g');
+        const values = Array.from({ length: 4999 }, (_, index) => [
+          `seed-${index}`,
+          `S${String(index).padStart(9, '0')}`,
+          'US',
+          'amazon.com',
+          'Fixture',
+          'g',
+        ]);
+        await legacy.query(
+          'INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES ?',
+          [values],
+        );
+        const result = await legacy.batch([
+          item(10000),
+          { ...item(10001), [field]: 'x'.repeat(maximum + 1) },
+        ]);
+        expect(result).toMatchObject({ successCount: 1, failedCount: 1 });
+        expect(result.results.filter((row) => row.success)).toMatchObject([
+          { index: 0, parentId: 'g' },
+        ]);
+        expect(result.errors).toMatchObject([{ index: 1 }]);
+        expect(result.errors[0].message).toContain(`column '${field}'`);
+        expect(result.errors[0].message).not.toContain('5000');
+        expect(
+          Number((await legacy.query('SELECT COUNT(*) AS n FROM asins'))[0].n),
+        ).toBe(5000);
+        expect(
+          await legacy.query('SELECT asin FROM asins WHERE asin IN (?,?)', [
+            item(10000).asin,
+            item(10001).asin,
+          ]),
+        ).toMatchObject([{ asin: item(10000).asin }]);
+      },
+      15000,
+    );
+    it('actual non-strict MySQL counts truncatable values and refuses overflow of a full group', async () => {
+      const nonStrict = await legacyAsinBatchDatabase({ sqlMode: '' });
+      try {
+        await nonStrict.query(
+          "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g','g','US','amazon.com','Fixture')",
+        );
+        await nonStrict.query(
+          'INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES ?',
+          [
+            Array.from({ length: 5000 }, (_, index) => [
+              `seed-${index}`,
+              `S${String(index).padStart(9, '0')}`,
+              'US',
+              'amazon.com',
+              'Fixture',
+              'g',
+            ]),
+          ],
+        );
+        const result = await nonStrict.batch([
+          { ...item(10000), name: 'x'.repeat(501) },
+        ]);
+        expect(result).toMatchObject({ successCount: 0, failedCount: 1 });
+        expect(result.errors[0].message).toContain('5000');
+        expect(
+          Number(
+            (await nonStrict.query('SELECT COUNT(*) AS n FROM asins'))[0].n,
+          ),
+        ).toBe(5000);
+      } finally {
+        await nonStrict.close();
+      }
+    }, 15000);
+    it('actual MySQL permits NUL in name, so that row still counts toward readable capacity', async () => {
+      await group('g');
+      const name = 'NUL\0content';
+      const first = await legacy.batch([{ ...item(10000), name }]);
+      expect(first.successCount).toBe(1);
+      expect((await legacy.query('SELECT name FROM asins'))[0].name).toBe(name);
+      await legacy.query(
+        'INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES ?',
+        [
+          Array.from({ length: 4999 }, (_, index) => [
+            `seed-${index}`,
+            `S${String(index).padStart(9, '0')}`,
+            'US',
+            'amazon.com',
+            'Fixture',
+            'g',
+          ]),
+        ],
+      );
+      const overflow = await legacy.batch([{ ...item(10001), name }]);
+      expect(overflow).toMatchObject({ successCount: 0, failedCount: 1 });
+      expect(overflow.errors[0].message).toContain('5000');
+      expect(
+        Number((await legacy.query('SELECT COUNT(*) AS n FROM asins'))[0].n),
+      ).toBe(5000);
+    }, 15000);
     it.each([true, false])(
       'keeps the raw MySQL parent when trimmed neighbor exists=%s',
       async (neighbor) => {
