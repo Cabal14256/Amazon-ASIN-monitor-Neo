@@ -103,6 +103,138 @@ async function fixture() {
 }
 
 describe('definitive export rejection is recoverable independently of API process and queue absence', () => {
+  it('retains the shared eight-operation budget after cancellation unlink deadlines expire', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    const finish: Array<() => void> = [];
+    const unlink = vi.fn(
+      () => new Promise<void>((resolve) => finish.push(resolve)),
+    );
+    const read = vi.spyOn(
+      ExportArtifactStore.prototype,
+      'readRejectedSubmission',
+    );
+    vi.useFakeTimers();
+    const pending = Array.from({ length: 8 }, (_, index) =>
+      runtime
+        .discardExport(`cancelled-${index}`, performance.now() + 10, unlink)
+        .catch((error: unknown) => error),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    for (const error of await Promise.all(pending))
+      expect(error).toMatchObject({ message: 'TASK_QUERY_FILE_DEADLINE' });
+    expect(unlink).toHaveBeenCalledTimes(8);
+    await expect(
+      runtime.discardExport('ninth', performance.now() + 10, unlink),
+    ).rejects.toThrow('TASK_QUERY_FILE_CAPACITY');
+    await expect(
+      runtime.open(() => {}).reconcileRejectedExport!(f.initial),
+    ).rejects.toThrow('TASK_QUERY_FILE_CAPACITY');
+    expect(read).not.toHaveBeenCalled();
+    finish.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    const recovered = runtime
+      .discardExport('ninth', performance.now() + 10, unlink)
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await recovered).toMatchObject({
+      message: 'TASK_QUERY_FILE_DEADLINE',
+    });
+    expect(unlink).toHaveBeenCalledTimes(9);
+    for (const resolve of finish) resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('ends the journal caller wait at its original deadline while retaining the native write', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    let finish!: () => void;
+    const writes = vi
+      .spyOn(ExportArtifactStore.prototype, 'recordRejectedSubmission')
+      .mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    vi.useFakeTimers();
+    const port = runtime.openExport(() => {});
+    const deadline = performance.now() + 10;
+    const first = port.recordRejected!(f.proof, deadline).catch(
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await first).toMatchObject({ message: 'TASK_QUERY_FILE_DEADLINE' });
+    const repeated = port.recordRejected!(
+      f.proof,
+      performance.now() + 10,
+    ).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await repeated).toMatchObject({
+      message: 'TASK_QUERY_FILE_DEADLINE',
+    });
+    expect(writes).toHaveBeenCalledTimes(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('starts one bounded durable journal write after an already-expired Redis deadline without extending the wait', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    let finish!: () => void;
+    const writes = vi
+      .spyOn(ExportArtifactStore.prototype, 'recordRejectedSubmission')
+      .mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    vi.useFakeTimers();
+    const pending = runtime.openExport(() => {}).recordRejected!(
+      f.proof,
+      performance.now() - 1,
+    ).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await pending).toMatchObject({
+      message: 'TASK_QUERY_FILE_DEADLINE',
+    });
+    expect(writes).toHaveBeenCalledTimes(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('does not merge final-artifact deletion with rejection-proof deletion for the same task', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    let finish!: () => void;
+    const final = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    vi.spyOn(
+      ExportArtifactStore.prototype,
+      'readRejectedSubmission',
+    ).mockResolvedValue(f.proof);
+    const proof = vi
+      .spyOn(ExportArtifactStore.prototype, 'discardRejectedSubmission')
+      .mockResolvedValue();
+    const pending = runtime.discardExport(
+      taskId,
+      performance.now() + 3000,
+      final,
+    );
+    expect(
+      await runtime.open(() => {}).reconcileRejectedExport!(f.initial),
+    ).toMatchObject({ status: 'failed' });
+    expect(final).toHaveBeenCalledExactlyOnceWith();
+    expect(proof).toHaveBeenCalledExactlyOnceWith(taskId);
+    finish();
+    await pending;
+  });
+
   it('releases all eight service query slots at the deadline even while a shared proof read remains stalled', async () => {
     const f = await fixture();
     const runtime = f.recreate();

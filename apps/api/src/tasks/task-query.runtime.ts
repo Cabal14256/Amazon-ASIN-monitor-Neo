@@ -80,7 +80,10 @@ export interface CheckProducerPort {
 export interface ExportProducerPort {
   store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
   enqueue(data: AsinExportJobData): Promise<void>;
-  recordRejected?(identity: ExportRejectionIdentity): Promise<void>;
+  recordRejected?(
+    identity: ExportRejectionIdentity,
+    deadline?: number,
+  ): Promise<void>;
 }
 export class ExportEnqueueRejected extends Error {
   constructor(readonly reason: 'unavailable' | 'invalid') {
@@ -333,9 +336,10 @@ export class TaskQueryRuntime implements OnModuleDestroy {
     key: string,
     operation: () => Promise<T>,
     deadline: number,
+    retainAfterDeadline = false,
   ): Promise<T> {
     const remaining = deadline - performance.now();
-    if (remaining <= 0)
+    if (remaining <= 0 && !retainAfterDeadline)
       throw new TaskQueryFileError('TASK_QUERY_FILE_DEADLINE');
     let pending = this.exportFileOperations.get(key) as Promise<T> | undefined;
     if (!pending) {
@@ -344,7 +348,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       // Request expiry cannot cancel lstat/open/unlink in the kernel. Retain
       // their budget until actual settlement, and share an in-flight same-key
       // read so repeated requests cannot accumulate orphaned filesystem work.
-      const actual = Promise.resolve().then(operation);
+      const actual = Promise.resolve().then(() => operation());
       pending = actual.finally(() => {
         if (this.exportFileOperations.get(key) === pending)
           this.exportFileOperations.delete(key);
@@ -358,13 +362,22 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new TaskQueryFileError('TASK_QUERY_FILE_DEADLINE')),
-            remaining,
+            Math.max(0, remaining),
           );
         }),
       ]);
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+  /** Cancellation shares query/journal capacity until the native unlink ends. */
+  async discardExport(
+    taskId: string,
+    deadline: number,
+    operation: () => Promise<void> = () =>
+      this.exportArtifacts.discardFinal(taskId),
+  ): Promise<void> {
+    await this.exportFile(`discard-final:${taskId}`, operation, deadline);
   }
   open(
     ensureOpen: () => void,
@@ -412,7 +425,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         );
         if (next && ['failed', 'cancelled', 'completed'].includes(next.status))
           await this.exportFile(
-            `discard:${task.taskId}`,
+            `discard-rejection:${task.taskId}`,
             () => this.exportArtifacts.discardRejectedSubmission(task.taskId),
             deadline,
           ).catch(() =>
@@ -550,8 +563,16 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   ): ExportProducerPort {
     return {
       store: this.createStore(ensureOpen, onCreateWriteStarted),
-      recordRejected: (identity) =>
-        this.exportArtifacts.recordRejectedSubmission(identity),
+      recordRejected: (identity, deadline = performance.now() + 3000) =>
+        this.exportFile(
+          `reject:${identity.taskId}:${identity.createdAt}`,
+          () => this.exportArtifacts.recordRejectedSubmission(identity),
+          deadline,
+          // The known pre-enqueue rejection must survive a Redis deadline.
+          // Start only within the shared budget; expiry ends the caller's wait,
+          // while the same identity's one native journal operation is retained.
+          true,
+        ),
       enqueue: async (input) => {
         const parsed = asinExportJobDataSchema.safeParse(input);
         if (!parsed.success) throw new ExportEnqueueRejected('invalid');

@@ -78,11 +78,13 @@ export class AsinExportTaskService implements OnModuleDestroy {
     let taskCreatedAt: string | undefined;
     let port: ExportProducerPort | undefined;
     let closed = false;
+    let submissionDeadline = performance.now() + 3000;
     try {
       await this.authorization.read(async (unit) => {
         await authorizeAdministration(unit, principal, 'asin:read');
       });
       const deadline = performance.now() + 3000;
+      submissionDeadline = deadline;
       port = this.tasks.openExport(
         () => {
           if (closed || performance.now() >= deadline)
@@ -157,7 +159,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
         // never called. Retain that fact on the shared private volume so query
         // or Worker recovery can release admission even after an API restart.
         try {
-          await port.recordRejected?.(rejectedIdentity);
+          await port.recordRejected?.(rejectedIdentity, submissionDeadline);
         } catch {
           this.logger.error('导出拒绝回执保存失败', 'AsinExportTaskService', {
             reason: 'export_rejection_journal_failed',

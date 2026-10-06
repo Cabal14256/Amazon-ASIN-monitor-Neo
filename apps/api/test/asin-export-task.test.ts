@@ -197,6 +197,7 @@ describe('ASIN export producer', () => {
         taskSubType: 'asin',
         createdAt,
       }),
+      expect.any(Number),
     );
     expect(logger.warn).not.toHaveBeenCalledWith(
       expect.anything(),
@@ -255,6 +256,7 @@ describe('ASIN export producer', () => {
         taskType: 'export',
         taskSubType: 'asin',
       }),
+      expect.any(Number),
     );
     expect(mutate).toHaveBeenCalledWith(
       expect.any(String),

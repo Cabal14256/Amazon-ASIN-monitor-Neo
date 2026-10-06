@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { finished } from 'node:stream/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppLogger } from '../src/logger/app-logger.service';
 import { ApplicationExportArtifacts } from '../src/tasks/export-storage.module';
 import {
   CANCELLABLE_TASK_TYPES,
@@ -37,11 +38,15 @@ describe('owned task cancellation HTTP', () => {
   let task: TaskState | null,
     outcome: CancellationOutcome,
     port: TaskCancellationPort;
-  let runtime: { openCancellation: ReturnType<typeof vi.fn> },
+  let runtime: {
+      openCancellation: ReturnType<typeof vi.fn>;
+      discardExport: ReturnType<typeof vi.fn>;
+    },
     ws: { sendTaskCancelled: ReturnType<typeof vi.fn> };
   let headers: { authorization: string };
   let artifacts: { discardFinal: ReturnType<typeof vi.fn> };
   let directory: string | undefined;
+  let fileRuntime: TaskQueryRuntime;
   beforeEach(async () => {
     auth = taskAuthFixture();
     task = taskFixture();
@@ -55,7 +60,12 @@ describe('owned task cancellation HTTP', () => {
       },
       cancelJob: vi.fn(async () => outcome),
     };
-    runtime = { openCancellation: vi.fn(() => port) };
+    runtime = {
+      openCancellation: vi.fn(() => port),
+      discardExport: vi.fn((id, deadline, operation) =>
+        fileRuntime.discardExport(id, deadline, operation),
+      ),
+    };
     artifacts = { discardFinal: vi.fn(async () => undefined) };
     ws = { sendTaskCancelled: vi.fn() };
     app = await sessionApp(
@@ -71,6 +81,10 @@ describe('owned task cancellation HTTP', () => {
           .useValue(artifacts),
       [TaskQueryModule],
     );
+    fileRuntime = new TaskQueryRuntime(
+      app.env,
+      app.logger as unknown as AppLogger,
+    );
     headers = {
       authorization: `Bearer ${jwt.sign(
         { userId: taskUserId, sessionId: taskSessionId },
@@ -80,6 +94,7 @@ describe('owned task cancellation HTTP', () => {
     };
   });
   afterEach(async () => {
+    await fileRuntime.onModuleDestroy();
     await app.app.close();
     if (directory) await rm(directory, { recursive: true, force: true });
     directory = undefined;

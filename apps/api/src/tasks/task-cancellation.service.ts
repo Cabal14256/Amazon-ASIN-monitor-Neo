@@ -94,22 +94,15 @@ export class TaskCancellationService {
         // A delayed retry may own an earlier published file even though no
         // Worker will run after atomic queue removal. Use only the verified
         // immutable task's deterministic path, never a request filename.
-        let timer: ReturnType<typeof setTimeout> | undefined;
         let removed = false;
         try {
-          const remaining = deadline - performance.now();
-          if (remaining > 0)
-            removed = await Promise.race([
-              this.artifacts.discardFinal(next.taskId).then(
-                () => true,
-                () => false,
-              ),
-              new Promise<false>((resolve) => {
-                timer = setTimeout(() => resolve(false), remaining);
-              }),
-            ]);
-        } finally {
-          if (timer) clearTimeout(timer);
+          await this.runtime.discardExport(next.taskId, deadline, () =>
+            this.artifacts.discardFinal(next.taskId),
+          );
+          removed = true;
+        } catch {
+          // The runtime retains the native-operation budget after this wait
+          // expires. Another cancellation cannot accumulate orphaned unlinks.
         }
         // Unlink cannot be aborted. A late completion remains safe for this
         // cancelled UUID; its rejection is consumed above. Cleanup must never
