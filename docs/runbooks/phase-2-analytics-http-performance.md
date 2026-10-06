@@ -1,6 +1,6 @@
 # 隔离 Legacy / Neo HTTP 分析性能门禁
 
-关联 #190。`Analytics Performance / analytics-performance` 使用独立 GitHub job 的 MySQL 8、TimescaleDB 2.29.2 / PostgreSQL 16、Redis 7 服务。它与 Integration 不共享服务或数据。本机不得伪造 GitHub 环境变量运行 launcher，也不得传入生产数据库、Redis 或现有服务；本机仅运行纯单元测试与静态检查。
+关联 #218，作为 #190 完整验收的一部分。`Analytics Performance / analytics-performance` 使用独立 GitHub job 的 MySQL 8、TimescaleDB 2.29.2 / PostgreSQL 16、Redis 7 服务。它与 Integration 不共享服务或数据。本机不得伪造 GitHub 环境变量运行 launcher，也不得传入生产数据库、Redis 或现有服务；本机仅运行纯单元测试与静态检查。
 
 `scripts/run-isolated-analytics-performance.js` 创建带 run ID / attempt 的四个数据库和仅授权该 MySQL namespace 的临时用户。普通 CREATE 遇到同名对象即失败；清理仅针对本次成功创建的对象，不覆盖或删除已有数据库。实际 Legacy 初始化 SQL 使用既有 SQL oracle 的 utf8mb4_unicode_ci 和非 ONLY_FULL_GROUP_BY 算术语义；Neo 使用该 revision 的 baseline 与已明确分类的真实升级 SQL。新迁移未分类时先拒绝运行，不猜测逻辑库。
 
