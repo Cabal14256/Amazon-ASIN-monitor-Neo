@@ -340,9 +340,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           '   ',
           '😺'.repeat(50),
         ];
-        const neighbors = ['Raw Ś', 'Lead Ś', 'Tail Ś', 'case', 'cafe'];
-        // CI MySQL cannot store all case/accent aliases together; this verifies
-        // PostgreSQL's actual migrated literal primary keys, not Legacy equivalence.
+        const neighbors = ['Raw Ś', 'Lead Ś'];
+        // The migrated ICU/rtrim lookup indexes reject trailing-space,
+        // case and accent aliases. Keep every actual uniqueness constraint.
         for (const [index, id] of [...selected, ...neighbors].entries()) {
           await f.pools.competitorPool.query(
             "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES($1,$1,'US','Fixture')",
@@ -354,6 +354,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               [`${id}-a0`, `B${String(index).padStart(9, '0')}`, id],
             );
         }
+        for (const alias of ['Tail Ś', 'case', 'cafe'])
+          await expect(
+            f.pools.competitorPool.query(
+              "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES($1,$1,'US','Fixture')",
+              [alias],
+            ),
+          ).rejects.toMatchObject({ code: '23505' });
         let result;
         if (useAsync) {
           const id = await accepted({ groupIds: selected });
@@ -374,6 +381,33 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(
           (await rows('competitor_variant_groups')).map((row) => row.id).sort(),
         ).toEqual(neighbors.sort());
+        const missingLiterals = ['Tail Ś ', 'Case', 'café'];
+        const aliasNeighbors = ['Tail Ś', 'case', 'cafe'];
+        for (const id of aliasNeighbors) await group(id, 0);
+        let missingResult;
+        if (useAsync) {
+          const id = await accepted({ groupIds: missingLiterals });
+          expect((await queue.getJob(id))?.data.groupIds).toEqual(
+            missingLiterals,
+          );
+          missingResult = (await terminal(id)).result;
+        } else {
+          const response = await request({
+            groupIds: missingLiterals,
+            useAsync,
+          });
+          expect(response.statusCode).toBe(200);
+          missingResult = response.json().data;
+        }
+        expect(missingResult).toMatchObject({
+          totalRequested: 3,
+          deletedGroupCount: 0,
+          deletedNestedAsinCount: 0,
+          skipped: { groupIds: missingLiterals, asinIds: [] },
+        });
+        expect(
+          (await rows('competitor_variant_groups')).map((row) => row.id).sort(),
+        ).toEqual([...neighbors, ...aliasNeighbors].sort());
         expect(
           (await rows('competitor_asins'))
             .map((row) => row.variant_group_id)
@@ -394,12 +428,22 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           '   ',
           '😺'.repeat(50),
         ];
-        const neighbors = ['Child Ś', 'Lead Ś', 'Tail Ś', 'case', 'cafe'];
+        const neighbors = ['Child Ś', 'Lead Ś'];
         for (const [index, id] of [...selected, ...neighbors].entries())
           await f.pools.competitorPool.query(
             "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
             [id, `B${String(index).padStart(9, '0')}`],
           );
+        for (const [index, alias] of ['Tail Ś', 'case', 'cafe'].entries())
+          await expect(
+            f.pools.competitorPool.query(
+              "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
+              [alias, `B${String(100 + index).padStart(9, '0')}`],
+            ),
+          ).rejects.toMatchObject({
+            code: '23505',
+            constraint: 'idx_neo_competitor_query_asin_id',
+          });
         let result;
         if (useAsync) {
           const id = await accepted({ asinIds: selected });
@@ -423,6 +467,37 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(
           (await rows('competitor_variant_groups')).map((row) => row.id),
         ).toEqual(['parent']);
+        const missingLiterals = ['Tail Ś ', 'Case', 'café'];
+        const aliasNeighbors = ['Tail Ś', 'case', 'cafe'];
+        for (const [index, id] of aliasNeighbors.entries())
+          await f.pools.competitorPool.query(
+            "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
+            [id, `B${String(100 + index).padStart(9, '0')}`],
+          );
+        let missingResult;
+        if (useAsync) {
+          const id = await accepted({ asinIds: missingLiterals });
+          expect((await queue.getJob(id))?.data.asinIds).toEqual(
+            missingLiterals,
+          );
+          missingResult = (await terminal(id)).result;
+        } else {
+          const response = await request({
+            asinIds: missingLiterals,
+            useAsync,
+          });
+          expect(response.statusCode).toBe(200);
+          missingResult = response.json().data;
+        }
+        expect(missingResult).toMatchObject({
+          totalRequested: 3,
+          deletedDirectAsinCount: 0,
+          deletedGroupCount: 0,
+          skipped: { groupIds: [], asinIds: missingLiterals },
+        });
+        expect(
+          (await rows('competitor_asins')).map((row) => row.id).sort(),
+        ).toEqual([...neighbors, ...aliasNeighbors].sort());
       },
     );
     it.each([false, true])(
