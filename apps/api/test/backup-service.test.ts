@@ -238,6 +238,117 @@ describe('backup submission HTTP / global exception boundary', () => {
     await app.getHttpAdapter().getInstance().ready();
     return app;
   }
+  it('returns the original execution window in list/download HTTP and accepts the timed archive for restore', async () => {
+    const f = await fixture();
+    await writeFile(join(f.directory, filename), 'PGDMPfixture');
+    await writeMetadata(f.directory, 'postgresql');
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt: '2026-09-30T01:00:00.123Z',
+      dumpCompletedAt: '2026-09-30T01:02:00.456Z',
+      publicationStartedAt: '2026-09-30T01:03:00.789Z',
+    };
+    const metadataPath = join(f.directory, `${filename}.meta.json`);
+    const oldMetadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+    await writeFile(
+      metadataPath,
+      JSON.stringify({ ...oldMetadata, execution }),
+    );
+    const app = await http(f.service);
+    try {
+      const list = await app.inject({ method: 'GET', url: '/api/v1/backup' });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().data).toMatchObject([
+        {
+          filename,
+          createdAt: execution.dumpStartedAt,
+          timeSource: 'dump-start',
+          execution,
+        },
+      ]);
+      const download = await app.inject({
+        method: 'GET',
+        url: `/api/v1/backup/${filename}/download`,
+      });
+      expect(download.statusCode).toBe(200);
+      expect(download.headers['content-type']).toContain('application/x-tar');
+      // One small dump occupies one padded tar data block. Read the second
+      // entry's advertised size rather than relying on JSON substring matching.
+      const metadataBytes = Number.parseInt(
+        download.rawPayload
+          .subarray(1148, 1160)
+          .toString('ascii')
+          .replaceAll('\0', '')
+          .trim(),
+        8,
+      );
+      expect(
+        JSON.parse(
+          download.rawPayload
+            .subarray(1536, 1536 + metadataBytes)
+            .toString('utf8'),
+        ),
+      ).toEqual({ ...oldMetadata, execution });
+      const restore = await app.inject({
+        method: 'POST',
+        url: '/api/v1/backup/restore',
+        payload: { filename },
+      });
+      expect(restore.statusCode).toBe(200);
+      expect(restore.json().data.restoreMode).toBe('isolated');
+    } finally {
+      await app.close();
+    }
+  });
+  it.each(['download', 'delete'] as const)(
+    'rejects malformed %s filenames with bounded HTTP 400 and warn logs',
+    async (operation) => {
+      const f = await fixture();
+      const app = await http(f.service);
+      try {
+        for (const invalid of [
+          'typo.dump',
+          `${filename}.partial`,
+          '../private-client-token',
+          `${filename} `,
+          'legacy.sql',
+        ]) {
+          const response = await app.inject({
+            method: operation === 'download' ? 'GET' : 'DELETE',
+            url: `/api/v1/backup/${encodeURIComponent(invalid)}${
+              operation === 'download' ? '/download' : ''
+            }`,
+          });
+          expect(response.statusCode).toBe(400);
+          expect(response.json()).toMatchObject({
+            success: false,
+            errorCode: 400,
+            errorMessage: '备份文件名无效',
+          });
+          expect(f.logger.warn).toHaveBeenLastCalledWith(
+            '备份文件名无效',
+            'BackupService',
+            { operation, reason: 'backup_filename_invalid' },
+          );
+          expect(f.logger.error).not.toHaveBeenCalled();
+          expect(JSON.stringify(f.logger.warn.mock.calls)).not.toContain(
+            invalid,
+          );
+          expect(response.body).not.toContain('private-client-token');
+        }
+        const missing = await app.inject({
+          method: operation === 'download' ? 'GET' : 'DELETE',
+          url: `/api/v1/backup/${filename}${
+            operation === 'download' ? '/download' : ''
+          }`,
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(f.logger.error).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
   it.each(['create', 'restore'] as const)(
     'rejects short retention with HTTP 503 before %s creates metadata or enqueues',
     async (operation) => {
@@ -437,6 +548,52 @@ describe('backup submission HTTP / global exception boundary', () => {
 });
 
 describe('scheduled backup queue reconciliation and sidecar storage errors', () => {
+  it('keeps delayed dump times in the public scheduled result while removing its unchanged private proof', async () => {
+    const f = await fixture();
+    const published = backupCreationFixture(
+      BACKUP_SCHEDULER_USER_ID,
+      createdAt,
+    );
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt: '2026-09-30T01:00:00.123Z',
+      dumpCompletedAt: '2026-09-30T01:02:00.456Z',
+      publicationStartedAt: '2026-09-30T01:03:00.789Z',
+    };
+    const result = {
+      ...published.result,
+      createdAt: execution.dumpStartedAt,
+      timeSource: 'dump-start',
+      execution,
+    };
+    let task = taskFixture({ ...published.data, status: 'failed' });
+    f.scheduledStore.listUser.mockResolvedValue([task]);
+    f.scheduledPort.findJob.mockResolvedValue({
+      ...task,
+      status: 'completed',
+      result,
+      backupData: published.data,
+    });
+    f.scheduledStore.mutate.mockImplementation(async (...args: unknown[]) => {
+      task = transitionTask(task, args[1] as never, new Date());
+      return task;
+    });
+    const rows = await f.service.scheduledTasks(principal);
+    expect(rows).toMatchObject([
+      {
+        status: 'completed',
+        result: {
+          createdAt: execution.dumpStartedAt,
+          timeSource: 'dump-start',
+          execution,
+        },
+      },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('backupCreationCommit');
+    expect(
+      (task.result as { backupCreationCommit: unknown }).backupCreationCommit,
+    ).toEqual(published.result.backupCreationCommit);
+  });
   it.each(['cancelling', 'cancelled', 'failed'] as const)(
     'recovers a scheduled durable creation from %s with shared receipt validation',
     async (status) => {

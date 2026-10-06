@@ -5,6 +5,7 @@ import {
   backupConfigResultSchema,
   backupCreationFilename,
   backupCreationReceiptSchema,
+  backupExecutionTimesSchema,
   backupFilenameCreatedAt,
   backupFilenameSchema,
   backupJobDataSchema,
@@ -82,6 +83,100 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('accepts strict ordered execution windows and rejects partial, reversed or misleading sources', () => {
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt: '2026-10-03T01:00:00.123Z',
+      dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+      publicationStartedAt: '2026-10-03T01:03:00.789Z',
+    };
+    expect(backupExecutionTimesSchema.parse(execution)).toEqual(execution);
+    for (const changed of [
+      { ...execution, timeSource: 'snapshot' },
+      { ...execution, dumpCompletedAt: undefined },
+      { ...execution, dumpStartedAt: execution.publicationStartedAt },
+      { ...execution, publicationStartedAt: execution.dumpStartedAt },
+      { ...execution, exactSnapshotAt: execution.dumpStartedAt },
+    ])
+      expect(backupExecutionTimesSchema.safeParse(changed).success).toBe(false);
+    const receipt = {
+      operation: 'create',
+      format: 'custom',
+      target: 'primary',
+      size: 12,
+      filename:
+        'backup_20261001-080000-10000000000040008000000000000161-primary.dump',
+      createdAt: execution.dumpStartedAt,
+      sourceEngine: 'postgresql',
+      restoreSupported: true,
+      timeSource: 'dump-start',
+      execution,
+      backupCreationCommit: {
+        version: 1,
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: 'owner',
+        taskCreatedAt: '2026-10-01T00:00:00.000Z',
+        creationIdentity: 'a'.repeat(64),
+        archiveSha256: 'b'.repeat(64),
+      },
+    };
+    expect(backupCreationReceiptSchema.parse(receipt)).toEqual(receipt);
+    for (const change of [
+      { createdAt: receipt.backupCreationCommit.taskCreatedAt },
+      { timeSource: 'filename' },
+      { execution: undefined },
+    ])
+      expect(
+        backupCreationReceiptSchema.safeParse({ ...receipt, ...change })
+          .success,
+      ).toBe(false);
+  });
+  it.each(['postgresql', 'timescaledb'] as const)(
+    'keeps old %s sidecars compatible and preserves a new execution window',
+    (sourceEngine) => {
+      const metadata = {
+        version: sourceEngine === 'postgresql' ? 3 : 4,
+        filename:
+          'backup_20261001-080000-10000000000040008000000000000161-primary.dump',
+        target: 'primary',
+        sourceEngine,
+        archiveSha256: 'a'.repeat(64),
+        creationIdentity: 'b'.repeat(64),
+        databaseSettings: {
+          encoding: 'UTF8',
+          lcCollate: 'C',
+          lcCtype: 'C',
+          localeProvider: 'libc',
+        },
+        ...(sourceEngine === 'postgresql'
+          ? { scope: 'full' }
+          : {
+              timescale: {
+                extensionVersion: '2.29.2',
+                hypertables: [],
+                continuousAggregates: [],
+              },
+            }),
+      };
+      expect(backupArtifactMetadataSchema.parse(metadata)).toEqual(metadata);
+      const timed = {
+        ...metadata,
+        execution: {
+          timeSource: 'dump-start',
+          dumpStartedAt: '2026-10-03T01:00:00.123Z',
+          dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+          publicationStartedAt: '2026-10-03T01:03:00.789Z',
+        },
+      };
+      expect(backupArtifactMetadataSchema.parse(timed)).toEqual(timed);
+      expect(
+        backupArtifactMetadataSchema.safeParse({
+          ...timed,
+          execution: { ...timed.execution, dumpStartedAt: 'invalid' },
+        }).success,
+      ).toBe(false);
+    },
+  );
   it('keeps Shanghai midnight filenames and rejects rolled calendar dates as recovery points', () => {
     const filename = backupCreationFilename(
       '10000000-0000-4000-8000-000000000161',

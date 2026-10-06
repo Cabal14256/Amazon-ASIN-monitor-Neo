@@ -18,6 +18,64 @@ import {
 } from '../src/backup/backup-files';
 
 describe('backup file boundary', () => {
+  it('uses the delayed dump window from its sidecar across file transfer and identifies historical fallback sources', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
+    const filename =
+      'backup_20261001-080000-10000000000040008000000000000161-primary.dump';
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt: '2026-10-03T01:00:00.123Z',
+      dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+      publicationStartedAt: '2026-10-03T01:03:00.789Z',
+    };
+    try {
+      await writeFile(join(directory, filename), 'PGDMPfixture');
+      await writeFile(
+        join(directory, `${filename}.meta.json`),
+        JSON.stringify({
+          version: 3,
+          filename,
+          target: 'primary',
+          sourceEngine: 'postgresql',
+          scope: 'full',
+          archiveSha256: 'a'.repeat(64),
+          databaseSettings: {
+            encoding: 'UTF8',
+            lcCollate: 'C',
+            lcCtype: 'C',
+            localeProvider: 'libc',
+          },
+          execution,
+        }),
+      );
+      await utimes(join(directory, filename), new Date(), new Date());
+      expect(await listBackupFiles(directory)).toMatchObject([
+        {
+          filename,
+          createdAt: execution.dumpStartedAt,
+          timeSource: 'dump-start',
+          execution,
+        },
+      ]);
+      const old = 'backup_20261002-000000-abcdef01-primary.dump';
+      const invalidDate = 'backup_20260230-000000-abcdef02-primary.dump';
+      await writeFile(join(directory, old), 'PGDMPfixture');
+      await writeFile(join(directory, invalidDate), 'PGDMPfixture');
+      const files = await listBackupFiles(directory);
+      expect(files.find((row) => row.filename === old)).toMatchObject({
+        timeSource: 'filename',
+        createdAt: '2026-10-01T16:00:00.000Z',
+      });
+      expect(files.find((row) => row.filename === invalidDate)).toMatchObject({
+        timeSource: 'mtime',
+      });
+      expect(
+        files.find((row) => row.filename === old)?.execution,
+      ).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('retains the Shanghai filename recovery point when an old archive is extracted today', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
     const filenames = [

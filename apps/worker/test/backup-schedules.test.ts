@@ -22,6 +22,50 @@ describe('backup scheduler', () => {
   });
   const at = (value: string) => new Date(value);
 
+  it.each([
+    { scheduleType: 'daily' as const, scheduleValue: null },
+    { scheduleType: 'weekly' as const, scheduleValue: 7 },
+    { scheduleType: 'monthly' as const, scheduleValue: 27 },
+  ])(
+    'matches real Intl midnight for $scheduleType and keeps the five-minute limit',
+    (config) => {
+      const midnight = { ...config, backupTime: '00:00' };
+      expect(backupScheduleKey(midnight, at('2026-09-26T16:00:00.000Z'))).toBe(
+        '2026-09-27T00:00',
+      );
+      expect(backupScheduleKey(midnight, at('2026-09-26T16:04:59.999Z'))).toBe(
+        '2026-09-27T00:00',
+      );
+      expect(
+        backupScheduleKey(midnight, at('2026-09-26T16:05:00.000Z')),
+      ).toBeNull();
+    },
+  );
+  it('normalizes an ICU h24 midnight without moving its calendar day', () => {
+    const original = Intl.DateTimeFormat.prototype.formatToParts;
+    const spy = vi
+      .spyOn(Intl.DateTimeFormat.prototype, 'formatToParts')
+      .mockImplementation(function (this: Intl.DateTimeFormat, date) {
+        return original
+          .call(this, date)
+          .map((part) =>
+            part.type === 'hour' && part.value === '00'
+              ? { ...part, value: '24' }
+              : part,
+          );
+      });
+    try {
+      expect(
+        backupScheduleKey(
+          { scheduleType: 'monthly', scheduleValue: 27, backupTime: '00:00' },
+          at('2026-09-26T16:00:00.000Z'),
+        ),
+      ).toBe('2026-09-27T00:00');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('matches daily schedules in Shanghai time', () => {
     expect(
       backupScheduleKey(

@@ -1,4 +1,7 @@
 import {
+  backupCreationFilename,
+  backupCreationReceiptSchema,
+  backupFilenameCreatedAt,
   taskInfoSchema,
   taskListQuerySchema,
   variantCheckResultReferenceSchema,
@@ -7,6 +10,7 @@ import {
 } from '@asin-monitor/contracts';
 import {
   isTerminalTaskStatus,
+  parseBackupCreationReceipt,
   TASK_RECORD_MAX_BYTES,
   type TaskState,
   type VariantCheckOperation,
@@ -74,6 +78,34 @@ function filename(value: unknown): string | null {
     return null;
   return value.split(/[\\/]/).pop() || null;
 }
+/** Historical completed tasks need no queue reconciliation. Their stored proof
+ * can establish filename-time provenance, never an observed dump timestamp. */
+function historicalBackupTimeSource(
+  task: TaskState | QueueTaskSnapshot,
+): 'filename' | 'unavailable' {
+  const parsed = backupCreationReceiptSchema.safeParse(task.result);
+  if (!parsed.success || typeof task.createdAt !== 'string')
+    return 'unavailable';
+  const value = parsed.data;
+  const proof = value.backupCreationCommit;
+  if (
+    proof.taskId !== task.taskId ||
+    proof.userId !== task.userId ||
+    proof.taskCreatedAt !== task.createdAt ||
+    value.filename !==
+      backupCreationFilename(task.taskId, task.createdAt, value.target) ||
+    value.createdAt !== backupFilenameCreatedAt(value.filename)
+  )
+    return 'unavailable';
+  if ('backupData' in task && task.backupData) {
+    try {
+      parseBackupCreationReceipt(task.backupData, task.result);
+    } catch {
+      return 'unavailable';
+    }
+  }
+  return 'filename';
+}
 export function serializeTask(task: TaskState | QueueTaskSnapshot): TaskInfo {
   const raw =
     task.result &&
@@ -96,6 +128,13 @@ export function serializeTask(task: TaskState | QueueTaskSnapshot): TaskInfo {
       : null;
   if (result && typeof result === 'object' && !Array.isArray(result)) {
     const data = result as Record<string, unknown>;
+    if (
+      task.taskType === 'backup' &&
+      task.taskSubType === 'create' &&
+      raw.timeSource === undefined &&
+      raw.execution === undefined
+    )
+      data.timeSource = historicalBackupTimeSource(task);
     if ('filename' in data) data.filename = publicFilename;
     if ('downloadUrl' in data) data.downloadUrl = downloadUrl;
   }

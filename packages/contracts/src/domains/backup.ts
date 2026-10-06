@@ -159,6 +159,32 @@ export type BackupDatabaseSettings = z.infer<
 /** Bounds metadata reads while accommodating the largest valid Timescale manifest. */
 export const BACKUP_ARTIFACT_METADATA_MAX_BYTES = 16 * 1024 * 1024;
 const backupArchiveSha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+/** Actual worker execution bounds; dump start is not an exact MVCC snapshot. */
+export const backupExecutionTimesSchema = z
+  .object({
+    timeSource: z.literal('dump-start'),
+    dumpStartedAt: z.string().datetime(),
+    dumpCompletedAt: z.string().datetime(),
+    publicationStartedAt: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (
+      Date.parse(value.dumpStartedAt) > Date.parse(value.dumpCompletedAt) ||
+      Date.parse(value.dumpCompletedAt) > Date.parse(value.publicationStartedAt)
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '备份执行时间顺序无效',
+      });
+  });
+export type BackupExecutionTimes = z.infer<typeof backupExecutionTimesSchema>;
+export const backupTimeSourceSchema = z.enum([
+  'dump-start',
+  'filename',
+  'mtime',
+  'unavailable',
+]);
 const backupTableNameSchema = z
   .string()
   .max(128)
@@ -189,6 +215,7 @@ export const backupArtifactMetadataSchema = z.union([
     .object({
       version: z.literal(4),
       creationIdentity: backupArchiveSha256Schema.optional(),
+      execution: backupExecutionTimesSchema.optional(),
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('timescaledb'),
@@ -202,6 +229,7 @@ export const backupArtifactMetadataSchema = z.union([
     .object({
       version: z.literal(3),
       creationIdentity: backupArchiveSha256Schema.optional(),
+      execution: backupExecutionTimesSchema.optional(),
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),
@@ -215,6 +243,7 @@ export const backupArtifactMetadataSchema = z.union([
     .object({
       version: z.literal(3),
       creationIdentity: backupArchiveSha256Schema.optional(),
+      execution: backupExecutionTimesSchema.optional(),
       filename: backupFilenameSchema,
       target: backupTargetSchema,
       sourceEngine: z.literal('postgresql'),
@@ -243,6 +272,8 @@ export const backupFileSchema = z
     target: backupTargetSchema,
     size: z.number().int().nonnegative(),
     createdAt: z.string(),
+    timeSource: backupTimeSourceSchema.optional(),
+    execution: backupExecutionTimesSchema.optional(),
     // False until the API verifies that the target is plain PostgreSQL.
     restoreSupported: z.boolean().default(false),
     restoreMode: backupRestoreModeSchema.optional(),
@@ -348,6 +379,8 @@ export const createBackupSyncDataSchema = z
     target: backupTargetSchema,
     size: z.number().int().nonnegative().optional(),
     createdAt: z.string().optional(),
+    timeSource: backupTimeSourceSchema.optional(),
+    execution: backupExecutionTimesSchema.optional(),
   })
   .passthrough();
 
@@ -418,6 +451,8 @@ export const backupCreationReceiptSchema = z
     size: z.number().int().min(5),
     createdAt: z.string().datetime(),
     sourceEngine: backupSourceEngineSchema,
+    timeSource: z.enum(['dump-start', 'filename']).optional(),
+    execution: backupExecutionTimesSchema.optional(),
     restoreSupported: z.literal(true),
     description: z.string().max(500).optional(),
     backupCreationCommit: z
@@ -431,7 +466,19 @@ export const backupCreationReceiptSchema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (
+      (value.execution &&
+        (value.timeSource !== 'dump-start' ||
+          value.createdAt !== value.execution.dumpStartedAt)) ||
+      (!value.execution && value.timeSource === 'dump-start')
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '备份时间来源与执行凭据不一致',
+      });
+  });
 export type BackupCreationReceipt = z.infer<typeof backupCreationReceiptSchema>;
 
 /** POST /backup、POST /backup/restore：同步结果或异步任务受理 */
@@ -483,6 +530,9 @@ export const backupTaskResultDataSchema = z
     verification: z.enum(['unconfirmed', 'confirmed']).optional(),
     description: z.string().max(500).optional(),
     sourceEngine: backupSourceEngineSchema.optional(),
+    createdAt: z.string().datetime().optional(),
+    timeSource: backupTimeSourceSchema.optional(),
+    execution: backupExecutionTimesSchema.optional(),
   })
   .passthrough()
   .superRefine((value, ctx) => {

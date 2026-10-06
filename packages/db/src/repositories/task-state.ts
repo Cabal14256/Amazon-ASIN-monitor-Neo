@@ -130,8 +130,11 @@ export function transitionTask(
           task.createdAt,
           change.result.target,
         ) ||
-      change.result.createdAt !==
-        backupFilenameCreatedAt(change.result.filename)
+      (change.result.execution
+        ? Date.parse(change.result.execution.dumpStartedAt) <
+          Date.parse(task.createdAt)
+        : change.result.createdAt !==
+          backupFilenameCreatedAt(change.result.filename))
     )
       throw new Error('BACKUP_CREATION_TASK_INVALID');
     // A later cancellation cannot undo the final archive rename. Idempotently

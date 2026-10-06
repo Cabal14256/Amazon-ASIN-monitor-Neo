@@ -61,6 +61,90 @@ function creationReceipt(task: {
   return { data, result };
 }
 
+describe('backup creation execution time proof', () => {
+  it('binds delayed execution to the original immutable task without changing its creation digest', () => {
+    const { data, result } = creationReceipt({
+      taskId: '10000000-0000-4000-8000-000000000161',
+      userId: 'owner',
+      createdAt: '2026-10-01T00:00:00.000Z',
+    });
+    const execution = {
+      timeSource: 'dump-start' as const,
+      dumpStartedAt: '2026-10-03T01:00:00.123Z',
+      dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+      publicationStartedAt: '2026-10-03T01:03:00.789Z',
+    };
+    const timed = {
+      ...result,
+      createdAt: execution.dumpStartedAt,
+      timeSource: 'dump-start',
+      execution,
+    };
+    expect(parseBackupCreationReceipt(data, timed)).toEqual(timed);
+    expect(timed.backupCreationCommit).toEqual(result.backupCreationCommit);
+    expect(parseBackupCreationReceipt(data, result)).toEqual(result);
+    const task = {
+      ...data,
+      title: 'backup fixture',
+      status: 'cancelled' as const,
+      progress: 0,
+      message: '',
+      error: null,
+      result: null,
+      updatedAt: data.createdAt,
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: data.createdAt,
+      cancelledAt: data.createdAt,
+      revision: 1,
+    };
+    const completed = transitionTask(
+      task,
+      {
+        kind: 'backup-create-committed',
+        result: parseBackupCreationReceipt(data, timed),
+      },
+      new Date(execution.publicationStartedAt),
+    );
+    expect(completed).toMatchObject({
+      status: 'completed',
+      createdAt: data.createdAt,
+      cancelledAt: null,
+      result: timed,
+    });
+    expect(
+      transitionTask(
+        completed,
+        {
+          kind: 'backup-create-committed',
+          result: parseBackupCreationReceipt(data, timed),
+        },
+        new Date('2026-10-04T00:00:00.000Z'),
+      ),
+    ).toEqual(completed);
+    for (const changed of [
+      { ...timed, createdAt: data.createdAt },
+      { ...timed, execution: undefined },
+      {
+        ...timed,
+        execution: { ...execution, dumpStartedAt: '2026-09-30T23:59:59.999Z' },
+        createdAt: '2026-09-30T23:59:59.999Z',
+      },
+    ]) {
+      expect(() => parseBackupCreationReceipt(data, changed)).toThrow(
+        'BACKUP_CREATION_RECEIPT_INVALID',
+      );
+      expect(() =>
+        transitionTask(
+          task,
+          { kind: 'backup-create-committed', result: changed as never },
+          new Date(execution.publicationStartedAt),
+        ),
+      ).toThrow();
+    }
+  });
+});
+
 const config = {
   BULL_PREFIX: 'fixture',
   TASK_META_TTL_SECONDS: 604800,

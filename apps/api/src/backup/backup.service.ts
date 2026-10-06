@@ -6,6 +6,7 @@ import {
 import {
   BACKUP_SCHEDULER_USER_ID,
   backupDatabaseSettingsSchema,
+  backupFilenameSchema,
   backupJobDataSchema,
   createBackupRequestSchema,
   restoreBackupRequestSchema,
@@ -98,6 +99,20 @@ export class BackupService implements OnModuleDestroy {
 
   private directory(): string {
     return getBackupStorageDirectory(this.env);
+  }
+
+  private validateFilename(filename: string, operation: 'download' | 'delete') {
+    const parsed = backupFilenameSchema.safeParse(filename);
+    // Path parameters are exact artifact names; never trim a typo into a
+    // different address or log raw caller-controlled input.
+    if (!parsed.success || parsed.data !== filename) {
+      this.logger.warn('备份文件名无效', 'BackupService', {
+        operation,
+        reason: 'backup_filename_invalid',
+      });
+      fail(400, '备份文件名无效');
+    }
+    return parsed.data;
   }
 
   private authorize(principal: AuthPrincipal) {
@@ -499,6 +514,7 @@ export class BackupService implements OnModuleDestroy {
   async download(principal: AuthPrincipal, filename: string) {
     return this.run('download', async () => {
       await this.authorize(principal);
+      this.validateFilename(filename, 'download');
       const path = resolveBackupPath(this.directory(), filename);
       try {
         await inspectBackupFile(path);
@@ -515,6 +531,7 @@ export class BackupService implements OnModuleDestroy {
   remove(principal: AuthPrincipal, filename: string) {
     return this.run('delete', async () => {
       await this.authorize(principal);
+      this.validateFilename(filename, 'delete');
       try {
         await deleteBackupFile(this.directory(), filename);
       } catch (error) {

@@ -62,6 +62,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       operation: 'create' | 'restore',
       params: { tables?: string[]; filename?: string; description?: string },
       options: {
+        createdAt?: string;
         taskId?: string;
         target?: 'primary' | 'competitor';
         cancelAtProgress?: number;
@@ -72,7 +73,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       } = {},
     ) {
       const taskId = options.taskId ?? randomUUID();
-      const createdAt = new Date().toISOString();
+      const createdAt = options.createdAt ?? new Date().toISOString();
       const shutdown = new AbortController();
       const data = backupJobDataSchema.parse({
         taskId,
@@ -256,6 +257,49 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(
         (await scratchPool.query(`SELECT note FROM public.${folded}`)).rows,
       ).toEqual([{ note: 'folded-after' }]);
+    }, 30000);
+    it('records a real delayed pg_dump execution window separately from its immutable acceptance timestamp', async () => {
+      const acceptedAt = new Date(Date.now() - 2 * 86400000).toISOString();
+      const beforeDump = Date.now();
+      const created = await runJob(
+        scratchUrl,
+        'create',
+        { tables: [`public.${tableA}`] },
+        { createdAt: acceptedAt },
+      );
+      const artifact = backupTaskResultDataSchema.parse(created.result);
+      expect(created.state.createdAt).toBe(acceptedAt);
+      expect(artifact.timeSource).toBe('dump-start');
+      expect(artifact.createdAt).toBe(artifact.execution?.dumpStartedAt);
+      if (!artifact.filename || !artifact.execution)
+        throw new Error('Missing execution window');
+      expect(
+        Date.parse(artifact.execution.dumpStartedAt),
+      ).toBeGreaterThanOrEqual(beforeDump);
+      expect(
+        Date.parse(artifact.execution.dumpCompletedAt),
+      ).toBeGreaterThanOrEqual(Date.parse(artifact.execution.dumpStartedAt));
+      expect(
+        Date.parse(artifact.execution.publicationStartedAt),
+      ).toBeGreaterThanOrEqual(Date.parse(artifact.execution.dumpCompletedAt));
+      expect(
+        Date.parse(artifact.execution.publicationStartedAt),
+      ).toBeLessThanOrEqual(Date.now());
+      const metadata = JSON.parse(
+        await readFile(
+          join(directory, `${artifact.filename}.meta.json`),
+          'utf8',
+        ),
+      );
+      expect(metadata.execution).toEqual(artifact.execution);
+      await runJob(scratchUrl, 'restore', { filename: artifact.filename });
+      expect(
+        (
+          await scratchPool.query(
+            `SELECT note FROM public.${tableA} WHERE id=1`,
+          )
+        ).rows,
+      ).toEqual([{ note: 'original-a' }]);
     }, 30000);
 
     it('serializes sessions, restores real data, and rolls back a failed restore', async () => {
@@ -675,6 +719,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
         expect(metadata).toMatchObject({
           version: 4,
+          execution: artifact.execution,
           archiveSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
           databaseSettings: { timeZone: 'Pacific/Auckland' },
           timescale: {
@@ -682,6 +727,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             continuousAggregates: expect.arrayContaining([`public.${cagg}`]),
           },
         });
+        expect(artifact.timeSource).toBe('dump-start');
+        expect(artifact.createdAt).toBe(metadata.execution.dumpStartedAt);
         await timescalePool.query(`UPDATE public.${hypertable} SET value = 99`);
         // A genuine different recovery point has the same Timescale catalog.
         // Pairing its digest with this archive must stop before CREATE DATABASE.

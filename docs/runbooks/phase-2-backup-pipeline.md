@@ -46,7 +46,9 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 恢复在提交前被确认取消时，Worker 返回的 `{ cancelled: true }` 会使 BullMQ 作业成为 completed，但这不是数据库已恢复的凭据。任务详情与列表在缺失、无效或仅含取消标记的队列结果下保留已确认的 cancelled/failed，不自动改为 completed；只有符合恢复完成契约、且队列身份与原任务一致的 commit 回执，才能沿专用 CAS 修正旧取消或失败状态。
 
-列表和创建任务结果统一把文件名中的上海时间作为恢复点，不使用复制、解压时生成的新 birthtime。兼容旧 Intl 以 `24` 表示当日零点的文件名；旧文件名日历无效时只回退到归档保存的 mtime，该值需由运维核对。不存在（ENOENT）或无效 custom 产物可省略/返回 404；EACCES、EIO、ESTALE 等读取异常返回固定 500 并记录最小错误码，不能误报为空列表或不存在。
+新 v3/v4 sidecar 的可选 `execution` 保存实际 `pg_dump` 启动前的 `dumpStartedAt`、成功退出后的 `dumpCompletedAt` 和归档/sidecar 原子发布开始前的 `publicationStartedAt`，并标明 `timeSource: dump-start`。列表、创建完成凭据与公开结果的 `createdAt` 使用该执行起点，重放和下载沿用原 sidecar 全部时间。`dump-start` 是 Legacy 同样采用的执行开始时刻，不能声称它是 PostgreSQL 精确 MVCC 快照瞬间；恢复点属于成功 dump 的执行窗口，`publicationStartedAt` 也不宣称文件 rename 已完成。队列不可变 `createdAt`、task identity、确定性文件名和 `creationIdentity` 摘要仍采用首次受理信息，执行时间不会重置六天期限或改变原私有 proof。
+
+旧 v3/v4 sidecar 和旧队列凭据仍兼容，缺少 `execution` 的归档时间明确显示 `timeSource: filename`；旧文件名日历无效时显示 `timeSource: mtime` 并需运维核对。已经完成且不再查询队列的旧创建任务，仅在原私有凭据与任务/所有者/受理时间、确定性文件名和原结果时间一致时，展示来源为 `filename`；无法验证的旧结果标为 `unavailable`。展示不修改终态、存储中的原凭据或 hash，也不重新采样时刻。兼容旧 Intl 以 `24` 表示当日零点的文件名，不使用复制、解压时生成的新 birthtime；这些回退时间不能被当作观测到的实际 dump 时间。不存在（ENOENT）或无效 custom 产物可省略/返回 404；非法下载/删除文件名在鉴权后的请求边界返回固定 400，并仅记录固定 warn reason，不记录原输入。EACCES、EIO、ESTALE 等读取异常仍返回固定 500 并记录最小错误码，不能误报为空列表或不存在。
 
 ## TimescaleDB 隔离恢复
 
@@ -59,7 +61,7 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 若 Legacy 迁移留下多行 `backup_config`，读取、保存和调度均沿用 Legacy 的最小 ID 行；保存只更新该行，保留后续行供运维核查，不因多行状态中断 API 或自动计划。
 
-`GET/POST /api/v1/backup/config` 保存 daily/weekly/monthly 和上海时间。启用 `SCHEDULER_ENABLED=true` 后，Worker 通过 Redis scheduler lease 选出调度器。计划时间与目标库生成稳定任务 ID；如某一目标入队失败，下次轮询会沿用该 ID 补齐任务，避免重复创建已成功的一项。调度配置在每次计划检查时读取，可热更新。
+`GET/POST /api/v1/backup/config` 保存 daily/weekly/monthly 和上海时间。时间格式化请求 `hourCycle: h23` 并将兼容 ICU 的午夜 `24` 归一化为同一日的 `00`，三种 `00:00` 计划均可触发并保留原五分钟补偿边界。启用 `SCHEDULER_ENABLED=true` 后，Worker 通过 Redis scheduler lease 选出调度器。计划时间与目标库生成稳定任务 ID；如某一目标入队失败，下次轮询会沿用该 ID 补齐任务，避免重复创建已成功的一项。调度配置在每次计划检查时读取，可热更新。
 
 有 `settings:write` 权限的管理员可在设置页“自动备份执行记录”或 `GET /api/v1/backup/scheduled-tasks` 查看最近 50 次计划任务的待执行、失败、取消与完成状态。该接口只读取系统计划所有者的备份任务，不授予取消或修改任务权限。列表依赖 Redis 任务元数据的保留期；过期记录须从独立审计或运维日志查找。
 

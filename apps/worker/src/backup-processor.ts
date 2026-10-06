@@ -1015,7 +1015,16 @@ export function createBackupProcessor(
       operation: 'create',
       filename: creationFilename!,
       size: details.size,
-      createdAt: backupFilenameCreatedAt(creationFilename!)!,
+      ...('execution' in metadata && metadata.execution
+        ? {
+            createdAt: metadata.execution.dumpStartedAt,
+            timeSource: 'dump-start' as const,
+            execution: metadata.execution,
+          }
+        : {
+            createdAt: backupFilenameCreatedAt(creationFilename!)!,
+            timeSource: 'filename' as const,
+          }),
       target: data.target,
       format: 'custom',
       sourceEngine: metadata.sourceEngine,
@@ -1169,6 +1178,7 @@ export function createBackupProcessor(
           : undefined;
         const databaseSettings = await lock.readDatabaseSettings();
         await progress(1, '正在创建 PostgreSQL 自定义格式备份');
+        const dumpStartedAt = new Date().toISOString();
         await processCommand(
           commandPath(options.env.PG_DUMP_PATH, 'pg_dump'),
           [
@@ -1198,6 +1208,7 @@ export function createBackupProcessor(
             },
           },
         );
+        const dumpCompletedAt = new Date().toISOString();
         const details = await assertCustomDump(partial, maxBytes);
         await lock.ensureHeld();
         if (
@@ -1219,11 +1230,18 @@ export function createBackupProcessor(
           maxBytes,
           controller.signal,
         );
+        const execution = {
+          timeSource: 'dump-start' as const,
+          dumpStartedAt,
+          dumpCompletedAt,
+          publicationStartedAt: new Date().toISOString(),
+        };
         const metadata = backupArtifactMetadataSchema.parse(
           sourceManifest
             ? {
                 version: 4,
                 creationIdentity,
+                execution,
                 filename,
                 target: data.target,
                 sourceEngine: 'timescaledb',
@@ -1237,6 +1255,7 @@ export function createBackupProcessor(
             : {
                 version: 3,
                 creationIdentity,
+                execution,
                 filename,
                 target: data.target,
                 sourceEngine: 'postgresql',

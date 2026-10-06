@@ -123,14 +123,26 @@ export async function listBackupFiles(
     }
     const target = backupFilenameTarget(entry.name);
     const metadata = await readBackupMetadata(directory, entry.name);
+    const execution =
+      metadata && 'execution' in metadata ? metadata.execution : undefined;
+    const filenameTime = backupFilenameCreatedAt(entry.name);
     files.push({
       ...backupFileSchema.parse({
         filename: entry.name,
         size: details.size,
-        // Re-extraction changes birthtime. Old non-calendar stamps can only
-        // fall back to the mtime retained by tar; they are not newly created.
+        // New sidecars preserve actual dump execution across replay/transfer.
+        // Older artifacts expose their fallback source instead of claiming an
+        // observed dump time. Re-extraction's birthtime is never a recovery point.
         createdAt:
-          backupFilenameCreatedAt(entry.name) ?? details.mtime.toISOString(),
+          execution?.dumpStartedAt ??
+          filenameTime ??
+          details.mtime.toISOString(),
+        timeSource: execution
+          ? 'dump-start'
+          : filenameTime
+          ? 'filename'
+          : 'mtime',
+        ...(execution ? { execution } : {}),
         target,
         format: 'custom',
         sourceEngine: metadata?.sourceEngine,

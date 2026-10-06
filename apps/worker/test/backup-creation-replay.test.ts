@@ -217,6 +217,64 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
 }
 
 describe('creation attempts and durable publication', () => {
+  it('replays an older v3 sidecar with an explicitly labeled filename-time fallback', async () => {
+    const f = await fixture();
+    const current = (await f.processor(f.job, 'lock')) as { filename: string };
+    const sidecarPath = join(f.directory, `${current.filename}.meta.json`);
+    const metadata = JSON.parse(await readFile(sidecarPath, 'utf8'));
+    delete metadata.execution;
+    await writeFile(sidecarPath, JSON.stringify(metadata));
+    f.setState({ ...f.state(), status: 'failed', result: null });
+    const result = (await f.processor(f.job, 'lock')) as {
+      execution?: unknown;
+    };
+    expect(result).toMatchObject({ timeSource: 'filename' });
+    expect(result.execution).toBeUndefined();
+    expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+  });
+  it('records the actual delayed dump window and replays its original execution times', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const acceptedAt = '2026-10-01T00:00:00.000Z';
+    const dumpStartedAt = '2026-10-03T01:00:00.123Z';
+    const dumpCompletedAt = '2026-10-03T01:02:00.456Z';
+    const publicationStartedAt = '2026-10-03T01:03:00.789Z';
+    vi.setSystemTime(new Date(dumpStartedAt));
+    const f = await fixture(acceptedAt);
+    const spawn = dependencies.spawn.getMockImplementation()!;
+    dependencies.spawn.mockImplementation((...args) => {
+      const child = spawn(...args);
+      vi.setSystemTime(new Date(dumpCompletedAt));
+      return child;
+    });
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'progress' && change.progress === 96)
+        vi.setSystemTime(new Date(publicationStartedAt));
+      return mutate(id, change);
+    });
+    const result = (await f.processor(f.job, 'lock')) as { filename: string };
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt,
+      dumpCompletedAt,
+      publicationStartedAt,
+    };
+    expect(result).toMatchObject({
+      createdAt: dumpStartedAt,
+      timeSource: 'dump-start',
+      execution,
+      backupCreationCommit: { taskCreatedAt: acceptedAt },
+    });
+    expect(result.filename).toContain('20261001-080000');
+    const sidecar = JSON.parse(
+      await readFile(join(f.directory, `${result.filename}.meta.json`), 'utf8'),
+    );
+    expect(sidecar).toMatchObject({ execution });
+    vi.setSystemTime(new Date('2026-10-04T12:00:00.000Z'));
+    f.setState({ ...f.state(), status: 'failed', result: null });
+    expect(await f.processor(f.job, 'lock')).toEqual(result);
+    expect(dependencies.spawn).toHaveBeenCalledTimes(1);
+  });
   it('rejects metadata retention shorter than the bounded backup lifecycle', async () => {
     await expect(fixture(undefined, 1)).rejects.toThrow(
       'BACKUP_TASK_RETENTION_TOO_SHORT',
@@ -627,7 +685,7 @@ describe('creation attempts and durable publication', () => {
     });
     expect(await f.processor(f.job, 'lock')).toEqual(result);
     expect(f.state().status).toBe('completed');
-    expect(result.createdAt).toBe('2026-09-01T16:00:00.000Z');
+    expect(result.createdAt).toBe('2026-09-01T16:00:00.123Z');
     expect(dependencies.spawn).toHaveBeenCalledTimes(1);
   });
   it('still cancels an unpublished creation without running a dump or database lease', async () => {

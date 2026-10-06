@@ -9,11 +9,13 @@ export function shanghaiParts(now = new Date()) {
     weekday: 'short',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   })
     .formatToParts(now)
     .reduce<Record<string, string>>((parts, item) => {
-      if (item.type !== 'literal') parts[item.type] = item.value;
+      if (item.type !== 'literal')
+        parts[item.type] =
+          item.type === 'hour' && item.value === '24' ? '00' : item.value;
       return parts;
     }, {});
 }
