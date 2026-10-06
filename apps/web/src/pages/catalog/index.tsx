@@ -1670,6 +1670,7 @@ export function CatalogPage({
     setActionSerial((previous) => previous + 1);
     if (next.type === 'batch-create-asins') {
       if (batchResult) removeAsinBatchReceipt(ownerId, batchResult.receipt);
+      knownBatchReceipts.current.clear();
       setBatchResult(null);
     }
     setAction(next);
@@ -1835,7 +1836,8 @@ export function CatalogPage({
       await clearCatalogCache(guard);
       await readAfterWrite(detailId, guard);
       guard?.();
-      setSafety(null, refreshedGate);
+      if (setSafety(null, refreshedGate))
+        knownBatchReceipts.current.delete(claim.operationId ?? '');
       if (message) {
         setNotice(message);
         announce(message);
@@ -2091,6 +2093,7 @@ export function CatalogPage({
       });
       if (!refreshed) return;
       guardRecovery?.();
+      knownBatchReceipts.current.delete(safety.operationId ?? '');
       if (message || narrow) {
         const report = `${message ?? ''}${
           narrow
@@ -2223,9 +2226,12 @@ export function CatalogPage({
           protected={Boolean(safety)}
           dismiss={() => {
             if (safety) return;
-            if (removeAsinBatchReceipt(ownerId, batchResult.receipt))
+            if (removeAsinBatchReceipt(ownerId, batchResult.receipt)) {
+              knownBatchReceipts.current.delete(
+                batchResult.receipt.operationId,
+              );
               setBatchResult(null);
-            else
+            } else
               setBatchReceiptWarning('无法清理已保存回执，请恢复存储后重试。');
           }}
         />
@@ -2534,7 +2540,15 @@ export function CatalogPage({
                       receipt,
                       persisted: saveAsinBatchReceipt(ownerId, receipt),
                     };
-                    knownBatchReceipts.current.set(claim.operationId, known);
+                    // Persist late receipts to their original owner, but only
+                    // the current operation needs an in-memory recovery copy.
+                    if (
+                      batchPending.current?.serial === actionSerial &&
+                      batchPending.current.owner === batchOwner
+                    ) {
+                      knownBatchReceipts.current.clear();
+                      knownBatchReceipts.current.set(claim.operationId, known);
+                    }
                   }}
                   denied={reportAccessDenied}
                   uncertain={(uncertainAction, claim) =>

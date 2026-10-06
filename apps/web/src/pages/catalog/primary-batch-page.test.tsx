@@ -133,7 +133,7 @@ function fixture(
         success: outcomes[index] ?? true,
         id: outcomes[index] ?? true ? `created-${receipt}-${index}` : undefined,
         // Both actual Legacy and Neo success producers include this field.
-        parentId: outcomes[index] ?? true ? item.parentId.trim() : undefined,
+        parentId: outcomes[index] ?? true ? item.parentId : undefined,
         message: outcomes[index] ?? true ? undefined : 'Fixture duplicate',
       }));
       for (const row of results)
@@ -643,36 +643,122 @@ describe('actual primary batch-create catalog integration', () => {
     expect(result.getByText('Fixture duplicate')).toBeTruthy();
     expect(f.posts()).toHaveLength(1);
   });
-  it('persists actual-shaped successful producer parentIds and restores the known result after a clean remount', async () => {
+  it.each(['group-1', ' Raw Ś ', '   ', '😺'.repeat(50)])(
+    'persists actual-shaped successful producer parentId %j and restores it after remount',
+    async (groupId) => {
+      const f = fixture('/api/', undefined, false, groupId);
+      f.outcomes([true, true]);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      const stored = readAsinBatchReceipt(
+        'operator',
+        JSON.stringify(['asin', 'operator', 'session-1']),
+      );
+      expect(stored?.persisted).toBe(true);
+      expect(stored?.receipt.result.results.map((row) => row.parentId)).toEqual(
+        [groupId, groupId],
+      );
+      f.unmount();
+      f.remount();
+      const result = within(
+        await screen.findByRole('region', { name: '批量添加结果' }),
+      );
+      expect(
+        result.getByText(
+          '变体组「Primary fixture」 · 共 2 个，成功 2 个，失败 0 个。',
+        ),
+      ).toBeTruthy();
+      expect(result.getByText('B000000001')).toBeTruthy();
+      expect(result.getByText('B000000002')).toBeTruthy();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+  it('releases each completed in-memory receipt while persisted rows survive remount and close', async () => {
+    const originalSet = Map.prototype.set;
+    let receipts: { map: Map<unknown, unknown> } | undefined;
+    vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key,
+      value,
+    ) {
+      const stored = originalSet.call(this, key, value);
+      if (
+        value &&
+        typeof value === 'object' &&
+        'receipt' in value &&
+        'persisted' in value
+      )
+        receipts = { map: this };
+      return stored;
+    });
     const f = fixture();
-    f.outcomes([true, true]);
+    for (const codes of ['B000000001 B000000002', 'B000000003 B000000004']) {
+      await openBatch();
+      fireEvent.submit(fillBatch(codes));
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      expect(receipts).toBeDefined();
+      expect(receipts?.map.size).toBe(0);
+      expect(screen.getByText('Fixture duplicate')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: '关闭结果' }));
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(receipts?.map.size).toBe(0);
+    }
+    expect(f.posts()).toHaveLength(2);
+  });
+  it('retains only the current failed-persistence receipt until GET-only recovery saves and releases it', async () => {
+    const originalSet = Map.prototype.set;
+    let receipts: { map: Map<unknown, unknown> } | undefined;
+    vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key,
+      value,
+    ) {
+      const stored = originalSet.call(this, key, value);
+      if (
+        value &&
+        typeof value === 'object' &&
+        'receipt' in value &&
+        'persisted' in value
+      )
+        receipts = { map: this };
+      return stored;
+    });
+    const originalStore = Storage.prototype.setItem;
+    const blocked = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(function (this: Storage, key, value) {
+        if (key.startsWith('neo:asin-batch-create-receipt:'))
+          throw new Error('synthetic quota');
+        originalStore.call(this, key, value);
+      });
+    const f = fixture();
     await openBatch();
     fireEvent.submit(fillBatch());
-    await screen.findByRole('region', { name: '批量添加结果' });
+    await screen.findByRole('button', { name: '重新读取目录' });
+    expect(receipts?.map.size).toBe(1);
+    expect(screen.getByText('Fixture duplicate')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '关闭结果' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    blocked.mockRestore();
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
     await waitFor(() =>
       expect(window.localStorage.getItem(guardKey)).toBeNull(),
     );
-    const stored = readAsinBatchReceipt(
-      'operator',
-      JSON.stringify(['asin', 'operator', 'session-1']),
-    );
-    expect(stored?.persisted).toBe(true);
-    expect(stored?.receipt.result.results.map((row) => row.parentId)).toEqual([
-      'group-1',
-      'group-1',
-    ]);
+    expect(receipts?.map.size).toBe(0);
+    expect(screen.getByText('Fixture duplicate')).toBeTruthy();
     f.unmount();
     f.remount();
-    const result = within(
-      await screen.findByRole('region', { name: '批量添加结果' }),
-    );
-    expect(
-      result.getByText(
-        '变体组「Primary fixture」 · 共 2 个，成功 2 个，失败 0 个。',
-      ),
-    ).toBeTruthy();
-    expect(result.getByText('B000000001')).toBeTruthy();
-    expect(result.getByText('B000000002')).toBeTruthy();
+    await screen.findByRole('region', { name: '批量添加结果' });
+    expect(screen.getByText('Fixture duplicate')).toBeTruthy();
     expect(f.posts()).toHaveLength(1);
   });
   it.each([

@@ -19,6 +19,20 @@ export const validBatchCreateText = (
       ) &&
       (!required || value.trim().length > 0);
 
+/** Canonical IDs are literal values; whitespace is not an empty ID. */
+export const validBatchCreateParentId = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length > 0 &&
+  [...value].length <= 50 &&
+  ![...value].some((char) => {
+    const point = char.codePointAt(0)!;
+    return (
+      point < 32 ||
+      (point >= 127 && point <= 159) ||
+      (point >= 0xd800 && point <= 0xdfff)
+    );
+  });
+
 export interface AsinBatchCreateInput {
   items: BatchCreateAsinsRequest['items'][number][];
 }
@@ -40,7 +54,7 @@ export async function batchCreateAsins(
         item.country !== item.country.trim().toUpperCase() ||
         !validBatchCreateText(item.site, 100, true) ||
         !validBatchCreateText(item.brand, 100, true) ||
-        !validBatchCreateText(item.parentId, 50, true) ||
+        !validBatchCreateParentId(item.parentId) ||
         !validBatchCreateText(item.name, 500),
     )
   )
@@ -77,7 +91,10 @@ export async function batchCreateAsins(
         !item ||
         row.asin !== item.asin ||
         row.country !== item.country ||
-        (!row.success && !row.message?.trim())
+        (!row.success && !row.message?.trim()) ||
+        (row.parentId !== undefined &&
+          (!validBatchCreateParentId(row.parentId) ||
+            row.parentId !== item.parentId))
       )
         return true;
       seen.add(row.index);

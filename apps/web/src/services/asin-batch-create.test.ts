@@ -98,6 +98,9 @@ describe('primary batch-create transport with the real HttpClient', () => {
     { items: [{ ...items[0], site: '' }] },
     { items: [{ ...items[0], brand: '' }] },
     { items: [{ ...items[0], parentId: '' }] },
+    { items: [{ ...items[0], parentId: '\u0085' }] },
+    { items: [{ ...items[0], parentId: '\ud800' }] },
+    { items: [{ ...items[0], parentId: '😺'.repeat(51) }] },
     { items: [{ ...items[0], name: '\0invalid' }] },
     { items: Array.from({ length: 1001 }, () => items[0]) },
   ])('rejects invalid form data before sending', async (input) => {
@@ -106,6 +109,50 @@ describe('primary batch-create transport with the real HttpClient', () => {
       batchCreateAsins(client(fetcher), input),
     ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([' Raw Ś ', '   ', '😺'.repeat(50)])(
+    'sends literal canonical parentId %j without normalization',
+    async (parentId) => {
+      const input = items.map((item) => ({ ...item, parentId }));
+      const data = result([true, false]);
+      const fetcher = vi.fn<typeof fetch>(async () =>
+        jsonResponse({
+          success: true,
+          data: {
+            ...data,
+            results: data.results.map((row) =>
+              row.success ? { ...row, parentId } : row,
+            ),
+          },
+        }),
+      );
+      await batchCreateAsins(client(fetcher), { items: input });
+      expect(
+        JSON.parse(String(fetcher.mock.calls[0][1]?.body)).items.map(
+          (item: { parentId: string }) => item.parentId,
+        ),
+      ).toEqual([parentId, parentId]);
+    },
+  );
+  it('treats a trimmed-neighbor receipt as unknown without retrying POST', async () => {
+    const input = items.map((item) => ({ ...item, parentId: ' Raw Ś ' }));
+    const data = result([true, false]);
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      jsonResponse({
+        success: true,
+        data: {
+          ...data,
+          results: data.results.map((row) =>
+            row.success ? { ...row, parentId: 'Raw Ś' } : row,
+          ),
+        },
+      }),
+    );
+    await expect(
+      batchCreateAsins(client(fetcher), { items: input }),
+    ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it.each([

@@ -77,9 +77,10 @@ function checkBody(input: CheckVariantGroupRequest): CheckVariantGroupRequest {
   });
 }
 
-function segment(id: string): string {
+function segment(id: string, literalRead = false): string {
   if (
-    !id.trim() ||
+    !id.length ||
+    (!literalRead && !id.trim()) ||
     id === '.' ||
     id === '..' ||
     [...id].length > 50 ||
@@ -138,7 +139,7 @@ export async function getVariantGroup(
 ): Promise<VariantGroup> {
   // Segment encoding prevents a record identifier from changing the route.
   const response = await http.request(
-    `${GROUPS}/${segment(id)}`,
+    `${GROUPS}/${segment(id, true)}`,
     { signal, timeoutMs: 120_000, maxResponseBytes: ASIN_RESPONSE_LIMIT },
     variantGroupResultSchema,
   );

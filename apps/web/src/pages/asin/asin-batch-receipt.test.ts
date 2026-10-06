@@ -62,7 +62,7 @@ function receipt(
           country: 'US',
           success: true,
           id: 'created-1',
-          parentId: 'Raw Ś',
+          parentId: ' Raw Ś ',
         },
         {
           index: 1,
@@ -79,31 +79,54 @@ function receipt(
   };
 }
 describe('strict owner/session/operation-bound primary batch receipts', () => {
-  it('persists the actual Neo successful producer shape including its normalized parentId', () => {
-    const value = receipt();
-    const plan = prepareBatchAsins(value.items, () => 'created-1');
-    addBatchAsinSuccess(plan.result, plan.items[0]);
-    addBatchAsinFailure(plan.result, plan.items[1], 'Duplicate');
-    value.result = plan.result;
-    expect(value.result.results[0]).toEqual({
-      index: 0,
-      id: 'created-1',
-      asin: 'B000000001',
-      country: 'US',
-      parentId: 'Raw Ś',
-      success: true,
-    });
-    const storage = { local: new MemoryStorage(), session: null };
-    expect(saveAsinBatchReceipt('operator', value, storage)).toBe(true);
-    expect(
-      readAsinBatchReceipt('operator', owner, 'operation-1', storage),
-    ).toEqual({ receipt: value, persisted: true });
-  });
-  it.each([null, 1, 'different-group', 'Raw Ś\u0000'])(
+  it.each([' Raw Ś ', '   ', '😺'.repeat(50)])(
+    'persists the actual Neo producer literal parentId %j',
+    (groupId) => {
+      const value = receipt();
+      value.groupId = groupId;
+      value.items = value.items.map((item) => ({ ...item, parentId: groupId }));
+      const plan = prepareBatchAsins(value.items, () => 'created-1');
+      addBatchAsinSuccess(plan.result, plan.items[0]);
+      addBatchAsinFailure(plan.result, plan.items[1], 'Duplicate');
+      value.result = plan.result;
+      expect(value.result.results[0]).toEqual({
+        index: 0,
+        id: 'created-1',
+        asin: 'B000000001',
+        country: 'US',
+        parentId: groupId,
+        success: true,
+      });
+      const storage = { local: new MemoryStorage(), session: null };
+      expect(saveAsinBatchReceipt('operator', value, storage)).toBe(true);
+      expect(
+        readAsinBatchReceipt('operator', owner, 'operation-1', storage),
+      ).toEqual({ receipt: value, persisted: true });
+    },
+  );
+  it.each([
+    null,
+    1,
+    'different-group',
+    'Raw Ś',
+    ' Raw Ś\u0000',
+    ' Raw Ś\u0085',
+    '\ud800',
+  ])(
     'rejects an invalid or unrelated successful producer parentId %j',
     (parentId) => {
       const value = receipt();
       value.result.results[0].parentId = parentId;
+      expect(parseAsinBatchReceipt(JSON.stringify(value))).toBeNull();
+    },
+  );
+  it.each(['', '\u0000', '\u0085', '\ud800', '\udc00', '😺'.repeat(51)])(
+    'rejects malformed literal parent IDs %j even when every row agrees',
+    (groupId) => {
+      const value = receipt();
+      value.groupId = groupId;
+      value.items = value.items.map((item) => ({ ...item, parentId: groupId }));
+      value.result.results[0].parentId = groupId;
       expect(parseAsinBatchReceipt(JSON.stringify(value))).toBeNull();
     },
   );

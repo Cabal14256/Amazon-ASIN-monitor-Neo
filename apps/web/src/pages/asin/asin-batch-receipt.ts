@@ -4,6 +4,7 @@ import {
   type BatchCreateAsinsData,
 } from '@asin-monitor/contracts';
 import {
+  validBatchCreateParentId,
   validBatchCreateText,
   type AsinBatchCreateInput,
 } from '../../services/asin-batch-create';
@@ -54,9 +55,7 @@ export function parseAsinBatchReceipt(
       !/^[a-z0-9-]{1,80}$/i.test(value.operationId) ||
       typeof value.owner !== 'string' ||
       value.owner.length > 1000 ||
-      typeof value.groupId !== 'string' ||
-      !value.groupId.trim() ||
-      [...value.groupId].length > 50 ||
+      !validBatchCreateParentId(value.groupId) ||
       typeof value.groupName !== 'string' ||
       [...value.groupName].length > 256 ||
       !Number.isSafeInteger(value.submittedAt) ||
@@ -113,7 +112,7 @@ export function parseAsinBatchReceipt(
         (item) =>
           !/^[A-Z0-9]{10}$/.test(item.asin) ||
           item.parentId !== value.groupId ||
-          !validBatchCreateText(item.parentId, 50, true) ||
+          !validBatchCreateParentId(item.parentId) ||
           !validBatchCreateText(item.country, 10, true) ||
           item.country !== item.country.trim().toUpperCase() ||
           !validBatchCreateText(item.site, 100, true) ||
@@ -150,10 +149,8 @@ export function parseAsinBatchReceipt(
         (!row.success && !row.message?.trim()) ||
         (row.id !== undefined && typeof row.id !== 'string') ||
         (row.parentId !== undefined &&
-          (typeof row.parentId !== 'string' ||
-            !validBatchCreateText(row.parentId, 50, true) ||
-            // Both producers normalize parentId before adding success rows.
-            row.parentId !== item.parentId?.trim()))
+          (!validBatchCreateParentId(row.parentId) ||
+            row.parentId !== item.parentId))
       )
         return null;
       seen.add(row.index);

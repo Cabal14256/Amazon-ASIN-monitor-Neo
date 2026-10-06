@@ -7,10 +7,12 @@
 - 主营变体组详情增加“批量添加 ASIN”，仅在 `asin:write`、共享写入保护及当前身份允许时显示或启用；竞品目录保持原入口。
 - 输入支持换行、空格、中英文逗号和分号，先验证原 token 为 10 位 ASCII 字母数字，再大写化并按首次出现顺序去重；显示有效数量、重复数量及无效项的原始项号、行、列。`ſ`/`ß` 等 Unicode 大写映射为 ASCII 的 token 必须拒绝，最多 1000 个唯一有效编码。
 - 继承选定组的国家和原始 `parentId`；站点、品牌、类型及可选统一名称使用普通表单。站点/品牌按 100 Unicode 码点、名称按 500 码点验证，禁止控制字符；HTML 输入容量允许合法 astral 字符。站点、品牌及非空名称发送原值，可选名称全空时发送 `null`；国家保留既有 trim/uppercase 处理。
-- 在现有目录 Web Lock 中重新读取原始组 ID 并核对打开表单时的完整源字段；记录变化或最新组内数加本次唯一输入的最坏成功数超过 Neo 查询的 5000 子项上限时，不创建 claim、不发送 POST。该保守限制可能拒绝实际会因重复而少成功的批次，用户应减少输入；它不表示服务端已回滚。只调用一次现有 `POST /api/v1/asins/batch-create`，复用根锁依赖和真实 `HttpClient` 的 URL 合并，不增加后端/数据库语义。
+- 在现有目录 Web Lock 中重新读取原始组 ID 并核对打开表单时的完整源字段；记录变化或最新组内数加本次唯一输入的最坏成功数超过 Neo 查询的 5000 子项上限时，不创建 claim、不发送 POST。该前端保守限制可能拒绝实际会因重复而少成功的批次，用户应减少输入。Neo 和 Legacy 还在实际写事务中持有父组锁并重新计数，避免不同用户的 4500+500+500 并发突破读取上限；超容量组本批新行按实际 HTTP 200 逐行 failure 回执呈现，并不伪装整批已回滚。只调用一次现有 `POST /api/v1/asins/batch-create`，复用真实 `HttpClient` 的 URL 合并。
+- 父组 ID 在两端写入、响应和收据中均保持字面原值，包括前后空格、非空全空格与 50 码点 astral ID。拒绝空串、控制字符、孤立 surrogate 与超长值；成功行的 parentId 必须精确等于原提交，trimmed 邻组回执视为未知，不重发。全空格组的详情 GET 同样保留编码原值，不改变其它单项写入的既有校验。
 - 响应必须完整对应每个输入 index/ASIN/国家，统计相符，失败行与 errors 的 index 和消息一一对应。全成功、全失败和部分成功均显示逐行结果，失败项可单独筛选；每页最多 50 行。
 - 写入入口保持保护，已知逐行回执在保护屏也可查看；目录与目标详情都重新读取且共享 claim 成功解除前不能关闭回执。回执按 owner/session、operationId、原始 groupId、完整 submitted items 与逐行结果严格校验并持久化；刷新或重新挂载后仍可查看失败原因，不会把成功行当作可重发项。已知回执的刷新失败只重试 GET，每次新 batch 关闭旧回执并使用独立提交身份，避免继承上次失败过滤。
 - localStorage 回执保存失败时保留共享 claim、可用的 sessionStorage 后备及保护屏的完整已知结果；修复存储并成功保存后才允许 GET-only 恢复解除保护。损坏或丢失的已知回执不能自动放行；不同 owner/session 或 operation 的回执不会串入当前操作。回执在恢复后继续保存，用户明确“关闭结果”或开始下一次操作才清理对应记录。
+- 内存恢复 Map 只保留当前未能完成保护解除的操作；完成目录核实、关闭结果或开始新批次清理旧内存引用。迟到原会话结果只写入原归属存储，不加入当前界面的 Map；已知行仍通过 mounted result 和持久收据展示，当前存储失败记录不会提前释放。
 - 同一用户重新登录时不自动展示原会话回执。“恢复原会话已知回执（不提交）”要求当前已验证身份有 `asin:write` 且无需强制改密，锁内再次核对当前用户共享 gate，仅读取 gate 绑定的原 session/operationId/groupId 精确回执，不枚举其他用户或历史操作。恢复保留原会话记录归属与写入保护，之后仅通过 GET 核实；缺失、篡改、存储失败或身份/权限变更继续阻断。排队期间换用户、换 session 或旧会话迟到的 GET/403 均不能发布到新会话界面。
 - list 查询的累计子项超过 5000 也会返回 413。“改为每页 1 组重读（不重发）”显式将实际目录范围更新为每页 1 组，并提示原大页未完成。未知结果缩小读取范围后仍进入原 inspection 核实步骤，不能以 GET 成功代替原 POST 结果，也不会重发。
 - 超时、网络错误、无效响应、取消及无法确认的 5xx 走现有 `createUncertain` 持续核验；重挂页面后仍需重新读取和显式核实，不能自动重发失败或未知项。
@@ -20,7 +22,9 @@
 
 2026-10-07 针对 PR #206 的两个 P1 与一个 P2，新增原始 Unicode 编码、4999+2 最坏容量和部分回执重挂四项测试，原 head 全部失败；修复后四项通过（定向筛选 45 skipped，仅筛选而非服务缺失）。增加两个实际 413 页容量恢复用例（已知/未知）、存储配额失败后备恢复、原组与输入一起篡改时保留 gate，以及严格 metadata/逐行回执测试。另补同一用户重新登录后的显式精确恢复、当前撤权/强制改密门槛、原会话迟到 GET/403、新会话排队取消及三类原绑定篡改测试；安全 gate 也覆盖外部用户/域/session 类型与损坏绑定。该轮专项命令为 `corepack pnpm --filter web exec vitest run src/pages/asin/asin-batch-input.test.ts src/pages/asin/asin-batch-create-form.test.tsx src/pages/asin/asin-batch-receipt.test.ts src/pages/catalog/primary-batch-page.test.tsx src/pages/catalog/catalog-safety-gate.test.ts src/services/asin-batch-create.test.ts --maxWorkers=1`：历史 131 passed / 6 files / 0 skipped（mounted 47、回执 storage 21、解析 18、表单/结果 6、传输 30、gate 9）；Web strict `tsc -p tsconfig.json --noEmit`、lint（0 warnings）、URL 与格式脚本单测（8 passed）、显式改动文件 Prettier 与 `git diff --check` 通过。本轮使用 NODE heap 1536 MB、单 worker。下表保留的是修复前的整套验收记录，修复后的完整 CI 仍须覆盖最新 head，不能把旧 845 项计作修复后全套通过。
 
-随后审查发现实际 Legacy `asinBatchCreateService.addSuccess` 和 Neo `addBatchAsinSuccess` 的成功行均含 `parentId`，原收据 allowlist 漏掉该字段。本次保留字段并严格验证它等于对应提交父组按两个 producer 既有规则规范化后的值，原始 group/items 和 owner/session/operation 绑定不变；不接受无关父组、非字符串或控制字符。storage test 直接调用 Neo 纯 producer 生成部分结果，mounted synthetic transport 成功行使用两个真实 producer 的字段形状，验证成功回执保存、正常重挂与原有 GET-only 恢复。修复前定向筛选复现三项失败（71 skipped 仅筛选）；修复后同一专项全量为 137 passed / 6 files / 0 skipped（mounted 48、storage 26，其余保持原数）。Web strict、lint、URL/格式和全部变更文件格式检查通过；本次未重复 full Web/build，交由最新 head CI 验证，之前 131/845 与其 CI 仅属于历史。
+随后审查发现实际 Legacy `asinBatchCreateService.addSuccess` 和 Neo `addBatchAsinSuccess` 的成功行均含 `parentId`，原收据 allowlist 漏掉该字段。历史 2de9d42 补齐 allowlist 后曾按两个 producer 当时的 trim 规则校验；之后审查定位该规则会指向 padded ID 的 trimmed 邻组，现已在两端和前端改为原提交的精确字面匹配。storage test 直接调用更新后的 Neo 纯 producer，mounted synthetic transport 使用实际字段形状并验证 padded/all-space/50 码点成功回执与 remount。历史 allowlist 修复前定向复现三项失败（71 skipped 仅筛选），当时 137 passed / 6 files 不代表当前 literal/capacity 修复的验收。
+
+本轮 literal/capacity/内存修复的最新前端专项（NODE heap 1536 MB、单 worker）：182 passed / 7 files / 0 skipped（mounted53、receipt37、input18、form6、batch transport37、gate9、canonical transport22）。首次新增全空格 mounted 场景 159 passed/1 failed，发现详情 GET 仍拒绝 canonical 全空格值，修复仅 GET 字面读取后全绿；不是删除用例或降低校验。Web strict、lint 零警告、URL/格式脚本 8、变更文件 Prettier/diff 通过。Backend deea75ae 专项 DB19、API48、Legacy unit55 及 expanded source strict 通过；21 实际 PG/MySQL 场景本地 opt-in 跳过，待 Integration CI。最新 full Web/build/graph 与后台全套由 root 协调或新 head CI 执行，历史 845/137 不移作当前全套结果。
 
 ## 自动验证（修复前历史记录）
 
@@ -40,7 +44,7 @@
 | `npm run test:changed-format` | 5 passed |
 | 显式 15 文件 Prettier / `git diff --check` | 成功；浏览器证据填入后再核对文档 |
 
-本地有意跳过的默认后台基线：`npm --prefix server run test:unit`、`npm run build`、`corepack pnpm --filter config test`、`corepack pnpm --filter db test`、`corepack pnpm --filter api test`、`corepack pnpm --filter worker test`、`corepack pnpm build:api`、`corepack pnpm build:worker`、`corepack pnpm build:db`。本 PR 未修改 Legacy、API、Worker、Notify、DB、Config、合同源码、依赖或根锁；它们的实际 CI/Integration 门禁仍须在本 PR 最新 head 上完成。这是未重跑的说明，不能记作本地通过，也不能把 prior PR 的后端计数移作本 PR 收据。
+上述历史全量验收未重复默认后台基线，当时尚未修改后端。后续 Review 的 literal/capacity 修复涉及 Neo repository/domain 与 Legacy service，对应最新专项和真实数据库 opt-in 验证以 PR `验证` 为准；本地没有把 skip 计作真实 SQL 通过。未修改数据库 schema、Worker、Notify、Config、公共 v1 合同、依赖或根锁。
 
 ## 红绿与竞态证据
 
@@ -62,6 +66,6 @@
 
 ## 范围、风险与回滚
 
-本次仅一个主营批量创建闭环，18 文件中包含分离的输入解析、合同响应适配、表单/结果/协调器、operation-bound 收据存储、实际挂载竞态与文档；文件数与变更行数超过警戒线。创建入口、容量与恢复、逐行回执保护必须作为同一次写入闭环验收，不能拆成缺少持久核验或会丢失部分成功结果的可发布入口。没有竞品批量、批量删除/检查、图表、虚拟任务提示或后端变更。
+本次仅一个主营批量创建闭环，包含输入解析、表单/结果/协调器、operation-bound 收据存储、Neo/Legacy 字面父组与事务容量保护、实际挂载和隔离 SQL 夹具及文档；文件数与变更行数超过警戒线。创建入口、两端容量与恢复、逐行回执保护必须作为同一次写入闭环验收，不能拆成缺少持久核验或会丢失部分成功结果的可发布入口。没有竞品批量、批量删除/检查、图表、数据库 schema 或生产切换。
 
 回滚普通 PR 提交即可恢复既有单项入口，已创建数据不会自动删除。共享 claim 使用已有 schema，已尝试但未知的写入仍须在目录中显式核实；用户应在确认回执/目录后再决定是否另外添加失败项。风险集中在权限/身份切换和 POST 后读失败，实际挂载竞态测试及浏览器 wire 应共同核对。
