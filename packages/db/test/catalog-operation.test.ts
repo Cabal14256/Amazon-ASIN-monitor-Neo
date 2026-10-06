@@ -130,6 +130,29 @@ describe('durable catalog identity and actual transaction scope', () => {
       ),
     ).toBe(true);
   });
+  it.each([
+    ['asin', 'variant-check', 'asin-check', true],
+    ['asin', 'variant-check', 'variant-group-check', true],
+    ['asin', 'variant-check', 'parent-asin-query', true],
+    ['asin', 'batch-check', 'variant-group', true],
+    ['competitor', 'variant-check', 'competitor-asin-check', true],
+    ['competitor', 'variant-check', 'competitor-variant-group-check', true],
+    ['asin', 'batch-check', 'parent-asin-query', false],
+    ['asin', 'variant-check', 'variant-group', false],
+    ['asin', 'batch-check', 'asin-check', false],
+    ['competitor', 'variant-check', 'parent-asin-query', false],
+    ['competitor', 'batch-check', 'competitor-asin-check', false],
+  ] as const)(
+    'matches only the real check task pair %s/%s/%s: %s',
+    (domain, taskType, taskSubType, accepted) => {
+      expect(
+        taskMatchesCatalogOperation(
+          { ...identity, domain },
+          { ...task, taskType, taskSubType },
+        ),
+      ).toBe(accepted);
+    },
+  );
   it('rejects a differently cased UUID spelling instead of aliasing immutable Redis task keys', () => {
     const uppercase = '00000000-0000-4000-8000-000000000ABC';
     expect(() =>

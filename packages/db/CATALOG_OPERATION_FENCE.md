@@ -13,7 +13,7 @@
 
 内部 `producer/rejected` proof 仅供已明确证明未入队的提交失败，且必须包含原 bound task；未知 ACK、通用 failed、超时不能冒充 definite rejection。取消与 Worker 的 `cancelled` 证明只有在五字段任务身份一致时允许幂等汇合，保留首份证明；其他矛盾 proof 均拒绝，未结算 pin 仍持续阻止解除。
 
-读取查询无需 scope。冻结的匿名检查和内部系统调度只能由可信调用点使用 `withCatalogOperationExemptExecution('anonymous-check'|'scheduled-system', action)`；其实际 check 事务仍有 lifetime guard。该作用域不能执行普通 CRUD/import/delete，也不能由请求参数指定。此保护按 owner/domain 排他；匿名检查、系统调度和其他 owner 不在同一互斥范围。
+读取查询无需 scope。认证的异步 `parent-asin-query` 会写持久检查收据，所以也必须绑定主营 check operation；真实 taskType/subtype 必须成对匹配，不能把 `batch-check/parent-asin-query` 或竞品域当成合法替代。冻结的匿名检查和内部系统调度只能由可信调用点使用 `withCatalogOperationExemptExecution('anonymous-check'|'scheduled-system', action)`；其实际 check 事务仍有 lifetime guard。该作用域不能执行普通 CRUD/import/delete，也不能由请求参数指定。此保护按 owner/domain 排他；匿名检查、系统调度和其他 owner 不在同一互斥范围。
 
 ## 未知状态与恢复
 

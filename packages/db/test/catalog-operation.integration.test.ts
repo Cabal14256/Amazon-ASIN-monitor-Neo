@@ -352,6 +352,36 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       });
       expect(await repository.release(identity)).toBe(true);
     });
+    it('binds a parent query with durable check receipt only to the primary check operation', async () => {
+      const parent = {
+        ...task,
+        taskType: 'variant-check' as const,
+        taskSubType: 'parent-asin-query',
+      };
+      const identity = await repository.reserve(
+        { ownerId: task.userId, domain: 'asin', kind: 'check' },
+        async () => undefined,
+      );
+      await repository.bindTask(identity, parent);
+      expect(await repository.findByTask(parent)).toEqual(identity);
+      await expect(
+        repository.bindTask(identity, { ...parent, taskType: 'batch-check' }),
+      ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_IDENTITY' });
+      const competitor = await repository.reserve(
+        { ownerId: task.userId, domain: 'competitor', kind: 'check' },
+        async () => undefined,
+      );
+      await expect(
+        repository.bindTask(competitor, parent),
+      ).rejects.toMatchObject({ code: 'CATALOG_OPERATION_IDENTITY' });
+      await repository.close(identity, {
+        source: 'worker',
+        status: 'completed',
+        task: parent,
+      });
+      expect(await repository.release(identity)).toBe(true);
+      await complete(competitor);
+    });
     it('binds a task allocated inside admission atomically once, while retaining its original operation', async () => {
       const identity = await repository.reserve(
         { ownerId: 'owner', domain: 'asin', kind: 'import' },
