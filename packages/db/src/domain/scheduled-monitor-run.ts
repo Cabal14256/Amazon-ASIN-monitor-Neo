@@ -322,6 +322,20 @@ export function createScheduledMonitorFollowUp(parent: ScheduledMonitorJob, busi
 /** Stable operation keys exclude the mutable request digest, so replacement
  * snapshots cannot create a second successful write under the same ordinal. */
 export function scheduledMonitorGroupOperation(job: ScheduledMonitorJob, group: ScheduledMonitorGroupSnapshot) {
+  job = parseScheduledMonitorJob(job);
+  const parsed = scheduledMonitorGroupSnapshotSchema.safeParse(group);
+  if (!parsed.success || scheduledMonitorStorageBytes(group) > SCHEDULED_MONITOR_MAX_SNAPSHOT_BYTES)
+    throw new ScheduledMonitorRunError('snapshot');
+  group = parsed.data;
+  const { snapshotDigest, ...content } = group;
+  if (group.domain !== job.domain || group.country !== job.country || country(group.group.country) !== job.country ||
+      ('is_competitor' in group.group && group.group.is_competitor === true) ||
+      scheduledMonitorGroupBatch(group.group.id,job.batchConfig.totalBatches) !== job.batchConfig.batchIndex ||
+      snapshotDigest !== scheduledMonitorGroupSnapshotDigest(content) ||
+      new Set(group.members.map((member) => member.id)).size !== group.members.length ||
+      group.members.some((member) => member.variant_group_id !== group.group.id || country(member.country) !== job.country) ||
+      orderedRows(group.members).some((member,index) => member.id !== group.members[index].id))
+    throw new ScheduledMonitorRunError('snapshot');
   const jobDigest = scheduledMonitorJobDigest(job);
   return {
     operationKey: sha(['scheduled-monitor-group', job.taskId, group.ordinal]),

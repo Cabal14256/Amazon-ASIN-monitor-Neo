@@ -102,6 +102,8 @@ describe.each(['primary','competitor'] as const)('%s scheduled complete frozen m
     const replaced = scheduledMonitorGroupOperation(job,replacement);
     expect(replaced.operationKey).toBe(operation.operationKey);
     expect(replaced.requestHash).not.toBe(operation.requestHash);
+    expect(() => scheduledMonitorGroupOperation(job,{ ...group,snapshotDigest:'a'.repeat(64) })).toThrow();
+    expect(() => scheduledMonitorGroupOperation(job,{ ...group,country:'UK' })).toThrow();
   });
 });
 describe('scheduled US follow-up identity boundary', () => {
