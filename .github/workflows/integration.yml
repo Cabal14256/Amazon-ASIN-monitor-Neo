@@ -195,6 +195,11 @@ jobs:
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
 
+      - name: Verify scheduled ledgers on both PostgreSQL databases and batch policy against real MySQL
+        env:
+          RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'
+        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism
+
       - name: Run authentication cleanup and audit archive PostgreSQL transactions
         run: pnpm --filter @asin-monitor/db exec vitest run test/auth-maintenance.integration.test.ts
 
@@ -428,6 +433,20 @@ jobs:
 
       - name: Run Neo audit query PostgreSQL and HTTP integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
+
+      - name: Smoke test scheduled ledger deployment upgrades and rollbacks twice in each logical database
+        run: |
+          docker cp packages/db/docker/apply-scheduled-monitor.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-scheduled-monitor.sh"
+          for domain in primary competitor; do
+            docker cp "packages/db/migrations/0016_scheduled_monitor_${domain}.sql" "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0016_scheduled_monitor_${domain}.sql"
+            docker cp "packages/db/migrations/0016_scheduled_monitor_${domain}.rollback.sql" "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0016_scheduled_monitor_${domain}.rollback.sql"
+            for attempt in 1 2; do
+              docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-scheduled-monitor.sh "$domain" "/tmp/0016_scheduled_monitor_${domain}.sql"
+            done
+            for attempt in 1 2; do
+              docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-scheduled-monitor.sh "$domain" "/tmp/0016_scheduled_monitor_${domain}.rollback.sql"
+            done
+          done
 
       - name: Smoke test primary monitor storage rollback twice
         run: |
