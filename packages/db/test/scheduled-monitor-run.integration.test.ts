@@ -329,7 +329,7 @@ suite.each(['primary', 'competitor'] as const)(
         }),
       ).rejects.toMatchObject({ code: 'identity' });
       await expect(
-        storage().read({ ...job, country: 'UK' }),
+        Promise.resolve().then(() => storage().read({ ...job, country: 'UK' })),
       ).rejects.toMatchObject({ code: 'input' });
       const corrupted = structuredClone(original.groups);
       corrupted[0].members[0].asin = 'B000000009';
@@ -482,8 +482,13 @@ suite.each(['primary', 'competitor'] as const)(
       expect(completed.followUpJob).toEqual(business.followUpJob);
       expect(await storage().complete(job)).toEqual(completed);
       await expect(
-        storage().completeBusiness(job, summary(run), domain !== 'primary'),
-      ).rejects.toThrow();
+        Promise.resolve().then(() =>
+          storage().completeBusiness(job, summary(run), domain !== 'primary'),
+        ),
+      ).rejects.toMatchObject({
+        code: domain === 'primary' ? 'identity' : 'input',
+      });
+      expect(await storage().read(job)).toEqual(completed);
     });
     if (domain === 'primary')
       it('rejects replaced US child clocks in SQL and a forged digest on read without losing the original child', async () => {
