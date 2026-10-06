@@ -1,4 +1,17 @@
+import { isValidTaskId } from '../../services/tasks';
+
+export interface CatalogBatchDeleteGate {
+  phase: 'batch-delete';
+  operationId: string;
+  groupIds: string[];
+  submittedAt: number;
+  state: 'unknown' | 'task' | 'refresh';
+  taskId?: string;
+  message?: string;
+}
+
 export type CatalogSafetyGate =
+  | CatalogBatchDeleteGate
   | {
       phase: 'refresh';
       message: string | null;
@@ -40,6 +53,39 @@ export function readCatalogSafetyGate(
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('invalid');
     const gate = value as Record<string, unknown>;
+    if (gate.phase === 'batch-delete') {
+      if (
+        typeof gate.operationId !== 'string' ||
+        !/^[a-z0-9-]{1,80}$/i.test(gate.operationId) ||
+        !Array.isArray(gate.groupIds) ||
+        gate.groupIds.length > 1000 ||
+        gate.groupIds.some(
+          (id) =>
+            typeof id !== 'string' ||
+            !id ||
+            [...id].length > 50 ||
+            /[\x00-\x1f\x7f]/.test(id),
+        ) ||
+        !Number.isSafeInteger(gate.submittedAt) ||
+        (gate.submittedAt as number) < 0 ||
+        !['unknown', 'task', 'refresh'].includes(String(gate.state)) ||
+        (gate.taskId !== undefined &&
+          (typeof gate.taskId !== 'string' || !isValidTaskId(gate.taskId))) ||
+        (gate.state === 'task' && !gate.taskId) ||
+        (gate.message !== undefined &&
+          (typeof gate.message !== 'string' || gate.message.length > 500))
+      )
+        // A damaged destructive-operation record must never reopen writes.
+        return {
+          phase: 'batch-delete',
+          operationId: 'invalid-record',
+          groupIds: [],
+          submittedAt: 0,
+          state: 'unknown',
+          message: '批量删除恢复记录损坏，请人工核实任务与目录。',
+        };
+      return gate as unknown as CatalogBatchDeleteGate;
+    }
     if (
       gate.operationId !== undefined &&
       (typeof gate.operationId !== 'string' ||

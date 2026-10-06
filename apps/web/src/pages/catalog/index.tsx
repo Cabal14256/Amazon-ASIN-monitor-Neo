@@ -39,8 +39,13 @@ import {
 } from '../../components/ui/surfaces';
 import { useTaskQuery } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
+import { isBulkDeleteId } from '../../services/catalog-batch-delete';
 import { isTerminalTask } from '../../services/tasks';
 import { CatalogActionPanel } from './catalog-actions';
+import {
+  useCatalogBatchDelete,
+  type CatalogSelection,
+} from './catalog-batch-delete';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
   browserCheckRecovery,
@@ -94,6 +99,30 @@ type CheckState = {
   message?: string;
 };
 const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
+function CatalogSelectionInput({
+  group,
+  selection,
+}: {
+  group: CatalogGroup;
+  selection?: CatalogSelection;
+}) {
+  if (!selection) return null;
+  const eligible = isBulkDeleteId(group.id);
+  return (
+    <label className="mb-2 flex items-center gap-2 text-xs">
+      <input
+        type="checkbox"
+        aria-label={`选择变体组 ${group.name || '未命名'}，ID ${JSON.stringify(
+          group.id,
+        )}`}
+        checked={selection.ids.includes(group.id)}
+        disabled={selection.disabled || !eligible}
+        onChange={() => selection.toggle(group.id)}
+      />
+      {eligible ? '选择' : '原始 ID 含空格或不兼容，请使用单项删除'}
+    </label>
+  );
+}
 function Notice({
   title,
   error,
@@ -123,17 +152,20 @@ function GroupCard({
   selected,
   onSelect,
   disabled,
+  selection,
 }: {
   group: CatalogGroup;
   config: CatalogConfig;
   selected: boolean;
   onSelect: () => void;
   disabled?: boolean;
+  selection?: CatalogSelection;
 }) {
   return (
     <li className="rounded-control border border-border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
+          <CatalogSelectionInput group={group} selection={selection} />
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="break-words font-semibold">
               {group.name || '未命名变体组'}
@@ -686,6 +718,7 @@ export function GroupRows({
   onAction,
   onCheck,
   onDenied,
+  selection,
 }: {
   groups: CatalogGroup[];
   config: CatalogConfig;
@@ -699,6 +732,7 @@ export function GroupRows({
   onAction?: (action: CatalogAction) => void;
   onCheck?: (target: CheckTarget) => void;
   onDenied?: () => void;
+  selection?: CatalogSelection;
 }) {
   // Both CSS layouts stay mounted; one parent page keeps rotation/resize stable.
   const [childPage, setChildPage] = useState(1);
@@ -716,6 +750,7 @@ export function GroupRows({
         header: '变体组',
         cell: ({ row }) => (
           <div className="min-w-0">
+            <CatalogSelectionInput group={row.original} selection={selection} />
             <p className="break-words font-semibold">
               {row.original.name || '未命名变体组'}
             </p>
@@ -786,7 +821,7 @@ export function GroupRows({
         ),
       },
     ],
-    [actionsDisabled, config, selectedId, toggleGroup],
+    [actionsDisabled, config, selectedId, toggleGroup, selection],
   );
   const table = useTable({
     features: TABLE_FEATURES,
@@ -806,6 +841,7 @@ export function GroupRows({
               selected={selectedId === row.id}
               onSelect={() => toggleGroup(row.id)}
               disabled={actionsDisabled}
+              selection={selection}
             />
             {selectedId === row.id && (
               <li>
@@ -1216,6 +1252,15 @@ export function CatalogPage({
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+  const batchDelete = useCatalogBatchDelete({
+    config,
+    query,
+    groups: data?.list ?? [],
+    safety,
+    enabled: safetyHydrated && !storageUnavailable && !writing && !accessDenied,
+    onQuery: setQuery,
+    onDenied: () => reportAccessDenied(),
+  });
 
   const recheckAccess = useCallback(async () => {
     if (recheckActive.current) return;
@@ -2189,6 +2234,7 @@ export function CatalogPage({
             }
           />
           <CardContent className="space-y-5">
+            {batchDelete.panel}
             {groups.isPending && (
               <div
                 aria-label={`正在加载${config.label}目录`}
@@ -2227,6 +2273,7 @@ export function CatalogPage({
                   <GroupRows
                     groups={data.list}
                     config={config}
+                    selection={batchDelete.selection}
                     selectedId={selectedId}
                     onSelect={(id) => {
                       if (writingRef.current) return;

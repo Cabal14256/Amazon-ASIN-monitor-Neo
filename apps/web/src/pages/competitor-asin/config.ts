@@ -1,4 +1,5 @@
 import {
+  batchDeleteCompetitorGroups,
   createCompetitorAsin,
   createCompetitorGroup,
   deleteCompetitorAsin,
@@ -17,12 +18,13 @@ export const COMPETITOR_CATALOG: CatalogConfig = {
   label: '竞品 ASIN',
   heading: '竞品变体组与 ASIN',
   description:
-    '查找竞品变体组，管理单项资料与归属。批量操作、检查、导入与导出仍在迁移。',
+    '查找竞品变体组，管理资料与归属，支持多选批量删除。批量检查、导入与导出仍在迁移。',
   showSite: false,
   showSource: false,
   showManual: false,
   list: getCompetitorGroups,
   detail: getCompetitorGroup,
+  batchDelete: batchDeleteCompetitorGroups,
   writes: {
     createGroup: createCompetitorGroup,
     updateGroup: updateCompetitorGroup,

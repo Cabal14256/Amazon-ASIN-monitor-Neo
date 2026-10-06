@@ -15,6 +15,7 @@ import {
   variantGroupListResultSchema,
   variantGroupResultSchema,
   variantGroupUpsertRequestSchema,
+  type BatchDeleteVariantGroupsRequest,
   type CheckVariantGroupRequest,
   type CreateAsinRequest,
   type MoveAsinRequest,
@@ -28,7 +29,16 @@ import {
   type VariantView,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
+import { submitCatalogBatchDelete } from './catalog-batch-delete';
 import { isValidTaskId } from './tasks';
+
+export function batchDeleteVariantGroups(
+  http: Pick<HttpClient, 'request'>,
+  input: BatchDeleteVariantGroupsRequest,
+  signal?: AbortSignal,
+) {
+  return submitCatalogBatchDelete(http, 'asin', input, signal);
+}
 
 const ASIN_RESPONSE_LIMIT = 32 * 1024 * 1024;
 const CHECK_RESPONSE_LIMIT = 40 * 1024 * 1024;
