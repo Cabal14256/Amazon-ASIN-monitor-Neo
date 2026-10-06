@@ -257,6 +257,7 @@ function fixture(
       id: string,
       nextPermissions = permissions,
       session = 'session-1',
+      mustChangePassword = false,
     ) => {
       await act(async () => {
         state = {
@@ -266,6 +267,7 @@ function fixture(
             user: { ...state.identity.user, id },
             permissions: nextPermissions,
             sessionId: session,
+            mustChangePassword,
           },
         };
         for (const listener of listeners) listener();
@@ -302,6 +304,184 @@ const guardKey = catalogSafetyKey('operator', 'asin');
 const fiftyPointGroupId = ` ${'😀'.repeat(48)} `;
 
 describe('actual primary batch-create catalog integration', () => {
+  it('requires explicit same-user original-session recovery and keeps the exact partial receipt through GET-only reconciliation', async () => {
+    const f = fixture();
+    f.failReads(true);
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('region', { name: '批量添加结果' });
+    const originalGate = window.localStorage.getItem(guardKey);
+    await f.identity('operator', ['asin:read', 'asin:write'], 'session-2');
+    expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await screen.findByText(/已知逐行回执不可读取/);
+    expect(window.localStorage.getItem(guardKey)).toBe(originalGate);
+    fireEvent.click(
+      screen.getByRole('button', { name: '恢复原会话已知回执（不提交）' }),
+    );
+    const recovered = within(
+      await screen.findByRole('region', { name: '批量添加结果' }),
+    );
+    expect(recovered.getByText('B000000001')).toBeTruthy();
+    expect(recovered.getByText('Fixture duplicate')).toBeTruthy();
+    expect(screen.getByText(/已显式恢复同一用户原会话/)).toBeTruthy();
+    expect(window.localStorage.getItem(guardKey)).toBe(originalGate);
+    expect(screen.getByRole('button', { name: '关闭结果' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    f.failReads(false);
+    fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+    await waitFor(() =>
+      expect(window.localStorage.getItem(guardKey)).toBeNull(),
+    );
+    expect(screen.getByRole('region', { name: '批量添加结果' })).toBeTruthy();
+    expect(f.posts()).toHaveLength(1);
+  });
+
+  it.each([
+    { permissions: ['asin:read'], mustChangePassword: false },
+    { permissions: ['asin:read', 'asin:write'], mustChangePassword: true },
+  ])(
+    'requires current write access and completed password policy before recovering original-session rows ($mustChangePassword)',
+    async ({ permissions, mustChangePassword }) => {
+      const f = fixture();
+      f.failReads(true);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await f.identity(
+        'operator',
+        permissions,
+        'session-2',
+        mustChangePassword,
+      );
+      const restore = screen.getByRole('button', {
+        name: '恢复原会话已知回执（不提交）',
+      });
+      expect(restore).toHaveProperty('disabled', true);
+      fireEvent.click(restore);
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(window.localStorage.getItem(guardKey)).not.toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps a late original-session refresh out of the same user new session before explicit recovery (denied=%s)',
+    async (denied) => {
+      const f = fixture();
+      const reads = f.holdRead();
+      if (denied) f.failReads(true, 403);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await screen.findByRole('button', { name: '重新读取目录' });
+      const originalGate = window.localStorage.getItem(guardKey);
+      await f.identity('operator', ['asin:read', 'asin:write'], 'session-2');
+      await act(async () => reads.resolve());
+      expect(window.localStorage.getItem(guardKey)).toBe(originalGate);
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(f.refresh).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByRole('button', { name: '恢复原会话已知回执（不提交）' }),
+      );
+      await screen.findByRole('region', { name: '批量添加结果' });
+      f.failReads(false);
+      fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { nextUser: 'other', nextSession: 'session-1' },
+    { nextUser: 'operator', nextSession: 'session-3' },
+  ])(
+    'does not publish a queued original-session recovery into $nextUser/$nextSession',
+    async ({ nextUser, nextSession }) => {
+      const f = fixture();
+      f.failReads(true);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      const originalGate = window.localStorage.getItem(guardKey);
+      await f.identity('operator', ['asin:read', 'asin:write'], 'session-2');
+      const lock = deferred<void>();
+      let queued = false;
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: {
+          request: async (_name: string, work: () => unknown) => {
+            queued = true;
+            await lock.promise;
+            return work();
+          },
+        },
+      });
+      fireEvent.click(
+        screen.getByRole('button', { name: '恢复原会话已知回执（不提交）' }),
+      );
+      await waitFor(() => expect(queued).toBe(true));
+      await f.identity(nextUser, ['asin:read', 'asin:write'], nextSession);
+      await act(async () => lock.resolve());
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(screen.queryByText(/已显式恢复同一用户原会话/)).toBeNull();
+      expect(window.localStorage.getItem(guardKey)).toBe(originalGate);
+      if (nextUser === 'operator')
+        expect(
+          screen.getByRole('button', { name: '恢复原会话已知回执（不提交）' }),
+        ).toHaveProperty('disabled', false);
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+
+  it.each(['owner', 'operation', 'group'] as const)(
+    'rejects tampered original-session $0 bindings without enumerating another user or resubmitting',
+    async (field) => {
+      const f = fixture();
+      f.failReads(true);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      const gate = JSON.parse(window.localStorage.getItem(guardKey)!);
+      if (field === 'owner')
+        gate.batchCreateOwner = JSON.stringify(['asin', 'other', 'session-1']);
+      if (field === 'operation')
+        gate.operationId = 'not-the-original-operation';
+      if (field === 'group') gate.detailId = 'not-the-original-group';
+      window.localStorage.setItem(guardKey, JSON.stringify(gate));
+      f.unmount();
+      await f.identity('operator', ['asin:read', 'asin:write'], 'session-2');
+      f.remount();
+      const reads = vi.spyOn(Storage.prototype, 'getItem');
+      if (field === 'owner') {
+        expect(
+          screen.queryByRole('button', {
+            name: '恢复原会话已知回执（不提交）',
+          }),
+        ).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: '重新读取目录' }));
+        await screen.findByText(/已知逐行回执不可读取/);
+      } else {
+        fireEvent.click(
+          screen.getByRole('button', { name: '恢复原会话已知回执（不提交）' }),
+        );
+        await screen.findByText(/原会话回执缺失、损坏或与原组不匹配/);
+      }
+      expect(
+        reads.mock.calls.some(([key]) =>
+          key.startsWith('neo:asin-batch-create-receipt:other'),
+        ),
+      ).toBe(false);
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(window.localStorage.getItem(guardKey)).not.toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+
   it('keeps an unreadable or mismatched known receipt protected after remount rather than discarding successful row evidence', async () => {
     const f = fixture();
     f.failReads(true);

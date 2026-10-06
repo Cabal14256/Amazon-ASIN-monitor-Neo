@@ -1023,7 +1023,9 @@ export function CatalogPage({
         candidate.type === 'create-asin' ||
         candidate.type === 'batch-create-asins',
       operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      ...(candidate.type === 'batch-create-asins' ? { batchCreate: true } : {}),
+      ...(candidate.type === 'batch-create-asins'
+        ? { batchCreate: true, batchCreateOwner: batchOwner }
+        : {}),
     };
     if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {
       setStorageUnavailable(true);
@@ -1080,6 +1082,7 @@ export function CatalogPage({
     result: BatchCreateAsinsData;
     receipt: AsinBatchReceipt;
     persisted: boolean;
+    recoveredFromOwner?: string;
   } | null>(null);
   const knownBatchReceipts = useRef(
     new Map<string, { receipt: AsinBatchReceipt; persisted: boolean }>(),
@@ -1087,6 +1090,11 @@ export function CatalogPage({
   const [batchReceiptWarning, setBatchReceiptWarning] = useState<string | null>(
     null,
   );
+  const [batchRecoveryNotice, setBatchRecoveryNotice] = useState<string | null>(
+    null,
+  );
+  const [recoveringBatchReceipt, setRecoveringBatchReceipt] = useState(false);
+  const batchReceiptRecoveryEpoch = useRef(0);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -1270,8 +1278,16 @@ export function CatalogPage({
     actionRef.current?.focus();
   }, [action]);
   useEffect(() => {
+    batchReceiptRecoveryEpoch.current++;
+    setBatchReceiptWarning(null);
+    setBatchRecoveryNotice(null);
+    setRecoveringBatchReceipt(false);
     setBatchResult((current) =>
-      current?.owner === batchOwner && access.canWriteASIN ? current : null,
+      current?.owner === batchOwner &&
+      access.canWriteASIN &&
+      !access.mustChangePassword
+        ? current
+        : null,
     );
     const pending = batchPending.current;
     if (pending && (pending.owner !== batchOwner || !access.canWriteASIN)) {
@@ -1291,9 +1307,15 @@ export function CatalogPage({
         current?.type === 'batch-create-asins' ? null : current,
       );
     }
-  }, [batchOwner, access.canWriteASIN]);
+  }, [batchOwner, access.canWriteASIN, access.mustChangePassword]);
   useLayoutEffect(() => {
-    if (config.id !== 'asin' || !ownerId || !access.canWriteASIN) return;
+    if (
+      config.id !== 'asin' ||
+      !ownerId ||
+      !access.canWriteASIN ||
+      access.mustChangePassword
+    )
+      return;
     const recovered = readAsinBatchReceipt(
       ownerId,
       batchOwner,
@@ -1318,7 +1340,14 @@ export function CatalogPage({
             ...recovered,
           },
     );
-  }, [config.id, ownerId, batchOwner, access.canWriteASIN, safety]);
+  }, [
+    config.id,
+    ownerId,
+    batchOwner,
+    access.canWriteASIN,
+    access.mustChangePassword,
+    safety,
+  ]);
   const data = groups.data;
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
@@ -1695,7 +1724,12 @@ export function CatalogPage({
           uncertainAction.type === 'batch-create-asins',
         operationId: claim.operationId,
         ...(uncertainAction.type === 'batch-create-asins'
-          ? { batchCreate: true }
+          ? {
+              batchCreate: true,
+              ...(claim.phase === 'refresh' && claim.batchCreateOwner
+                ? { batchCreateOwner: claim.batchCreateOwner }
+                : {}),
+            }
           : {}),
       },
       claim,
@@ -1786,7 +1820,12 @@ export function CatalogPage({
       createUncertain: false,
       operationId: claim.operationId,
       ...(savedAction.type === 'batch-create-asins'
-        ? { batchCreate: true }
+        ? {
+            batchCreate: true,
+            ...(claim.phase === 'refresh' && claim.batchCreateOwner
+              ? { batchCreateOwner: claim.batchCreateOwner }
+              : {}),
+          }
         : {}),
     };
     if (!setSafety(refreshedGate, claim)) return;
@@ -1850,6 +1889,105 @@ export function CatalogPage({
     }
   }
 
+  async function restorePreviousBatchReceipt() {
+    if (
+      config.id !== 'asin' ||
+      safety?.phase !== 'refresh' ||
+      !safety.batchCreate ||
+      !safety.batchCreateOwner ||
+      safety.batchCreateOwner === batchOwner ||
+      !safety.operationId ||
+      !safety.detailId ||
+      !access.canWriteASIN ||
+      access.mustChangePassword ||
+      storageUnavailable ||
+      recoveringBatchReceipt
+    )
+      return;
+    const originalOwner = safety.batchCreateOwner;
+    const recoveryRevision = runtime.session.revision;
+    const recoveryEpoch = batchReceiptRecoveryEpoch.current;
+    const guard = () => {
+      const current = identity.getSnapshot();
+      const permissions = createAccess(
+        current.status === 'authenticated' ? current.identity : undefined,
+      );
+      if (
+        !mounted.current ||
+        batchReceiptRecoveryEpoch.current !== recoveryEpoch ||
+        runtime.session.revision !== recoveryRevision ||
+        current.status !== 'authenticated' ||
+        JSON.stringify([
+          config.id,
+          current.identity.user.id,
+          current.identity.sessionId ?? null,
+        ]) !== batchOwner ||
+        !permissions.canWriteASIN ||
+        permissions.mustChangePassword
+      )
+        throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+    };
+    setRecoveringBatchReceipt(true);
+    try {
+      await runWithCatalogLock(async () => {
+        guard();
+        const stored = catalogSafetyStorage();
+        const current = stored
+          ? readCatalogSafetyGate(stored, ownerId, config.id)
+          : null;
+        if (!stored || JSON.stringify(current) !== JSON.stringify(safety))
+          throw new ApiError('INVALID_INPUT', '原操作保护已变化，请重新核实。');
+        // Read only the exact original session/operation bound by this user's gate.
+        const original: unknown = JSON.parse(originalOwner);
+        if (
+          !Array.isArray(original) ||
+          original[0] !== 'asin' ||
+          original[1] !== ownerId
+        )
+          throw new ApiError('INVALID_INPUT', '原会话归属不匹配。');
+        const recovered = readAsinBatchReceipt(
+          ownerId,
+          originalOwner,
+          safety.operationId,
+        );
+        guard();
+        if (!recovered || recovered.receipt.groupId !== safety.detailId)
+          throw new ApiError(
+            'INVALID_INPUT',
+            '原会话回执缺失、损坏或与原组不匹配。',
+          );
+        setBatchResult({
+          serial: 0,
+          owner: batchOwner,
+          groupName: recovered.receipt.groupName,
+          result: recovered.receipt.result,
+          recoveredFromOwner: originalOwner,
+          ...recovered,
+        });
+        setBatchReceiptWarning(null);
+        setBatchRecoveryNotice(
+          '已显式恢复同一用户原会话的已知回执。原操作写入保护仍保留，请重读目录核实；未重新提交。',
+        );
+      });
+    } catch (cause) {
+      try {
+        guard();
+      } catch {
+        return;
+      }
+      setBatchReceiptWarning(
+        `${catalogError(cause)} 写入保护仍保留；请核实原操作，勿重发成功项。`,
+      );
+    } finally {
+      try {
+        guard();
+        setRecoveringBatchReceipt(false);
+      } catch {
+        // A queued old-session recovery must not mutate the new session's UI.
+      }
+    }
+  }
+
   async function retryAfterWrite(narrow = false) {
     if (safety?.phase !== 'refresh') return;
     const { message, detailId, createUncertain } = safety;
@@ -1867,7 +2005,10 @@ export function CatalogPage({
               currentIdentity.identity.user.id,
               currentIdentity.identity.sessionId ?? null,
             ]) !== batchOwner ||
-            !createAccess(currentIdentity.identity).canReadASIN
+            !createAccess(currentIdentity.identity).canReadASIN ||
+            (batchResult?.recoveredFromOwner &&
+              (!createAccess(currentIdentity.identity).canWriteASIN ||
+                createAccess(currentIdentity.identity).mustChangePassword))
           )
             throw new ApiError('CANCELLED', '身份、权限或页面已变化');
         }
@@ -1886,7 +2027,11 @@ export function CatalogPage({
           receipt &&
           safety.batchCreate &&
           (receipt.operationId !== safety.operationId ||
-            receipt.owner !== batchOwner ||
+            (receipt.owner !== batchOwner &&
+              !(
+                batchResult?.recoveredFromOwner === receipt.owner &&
+                safety.batchCreateOwner === receipt.owner
+              )) ||
             receipt.groupId !== detailId)
         ) {
           setBatchReceiptWarning('已知回执与原操作不匹配，写入保护仍保留。');
@@ -1900,7 +2045,8 @@ export function CatalogPage({
         }
         if (
           receipt &&
-          receipt.owner === batchOwner &&
+          (receipt.owner === batchOwner ||
+            batchResult?.recoveredFromOwner === receipt.owner) &&
           receipt.operationId === safety.operationId &&
           !saveAsinBatchReceipt(ownerId, receipt)
         ) {
@@ -2059,8 +2205,10 @@ export function CatalogPage({
   const batchReceiptPanel = batchResult &&
     batchResult.owner === batchOwner &&
     access.canWriteASIN &&
+    !access.mustChangePassword &&
     (!safety || safety.operationId === batchResult.receipt.operationId) && (
       <div className="space-y-3">
+        {batchRecoveryNotice && <p role="status">{batchRecoveryNotice}</p>}
         {(!batchResult.persisted || batchReceiptWarning) && (
           <p role="alert">
             {batchReceiptWarning ||
@@ -2129,6 +2277,27 @@ export function CatalogPage({
               改为每页 1 组重读（不重发）
             </Button>
           )}
+          {safety.batchCreate &&
+            safety.batchCreateOwner &&
+            safety.batchCreateOwner !== batchOwner && (
+              <div className="space-y-2">
+                <p>
+                  原操作属于你之前的登录会话。写入保护仍保留；可显式读取原会话绑定的已知回执后核实目录，勿重新提交。
+                </p>
+                <Button
+                  variant="secondary"
+                  disabled={
+                    storageUnavailable ||
+                    !access.canWriteASIN ||
+                    access.mustChangePassword
+                  }
+                  pending={recoveringBatchReceipt}
+                  onClick={() => void restorePreviousBatchReceipt()}
+                >
+                  恢复原会话已知回执（不提交）
+                </Button>
+              </div>
+            )}
           {batchReceiptWarning && <p role="status">{batchReceiptWarning}</p>}
         </div>
         {batchReceiptPanel}
