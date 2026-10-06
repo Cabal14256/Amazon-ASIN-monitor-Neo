@@ -22,6 +22,7 @@ export {
   monitorIntervalDirty,
   monitorIntervalProjection,
 } from './monitor-interval-projection';
+export * from './scheduled-monitor';
 export { variantCheckReceipts } from './variant-check-receipts';
 
 const localTimestamp = sql`LOCALTIMESTAMP`;
