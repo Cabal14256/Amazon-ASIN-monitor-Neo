@@ -113,7 +113,7 @@ describe.each(domains)('private $domain scheduled schema', ({ domain }) => {
     expect(migration).toContain('scheduled ledger version marker mismatch');
     expect(migration).toContain('scheduled ledger catalog drift');
     expect(
-      [...rollback.matchAll(/DROP TABLE IF EXISTS public\.([a-z_]+)/g)].map(
+      [...rollback.matchAll(/DROP TABLE public\.([a-z_]+)/g)].map(
         (match) => match[1],
       ),
     ).toEqual([
@@ -122,5 +122,49 @@ describe.each(domains)('private $domain scheduled schema', ({ domain }) => {
       `${prefix}_runs`,
     ]);
     expect(rollback).not.toMatch(/\b(?:DELETE|TRUNCATE|ALTER TABLE|CASCADE)\b/);
+  });
+  it('verifies every existing ledger ownership marker under locks before any rollback drop', () => {
+    expect(rollback).toContain('DO $ledger_rollback_preflight$');
+    const preflight = rollback
+      .split('DO $ledger_rollback_preflight$')[1]
+      ?.split('$ledger_rollback_preflight$;')[0];
+    expect(preflight).toBeDefined();
+    expect(preflight).toContain(
+      `amazon-asin-monitor:scheduled-ledger:${domain}`,
+    );
+    expect(preflight).toContain('pg_advisory_xact_lock');
+    expect(preflight).toContain('IN ACCESS EXCLUSIVE MODE');
+    expect(preflight).toContain("obj_description(relation,'pg_class')");
+    expect(preflight).toContain(
+      `amazon-asin-monitor:scheduled-ledger:v1:${domain}:`,
+    );
+    expect(preflight).toContain("'[a-f0-9]{32}$'");
+    expect(preflight).toContain("relkind <> 'r'");
+    expect(preflight).toContain('scheduled ledger version marker mismatch');
+    expect(preflight).toContain(
+      'owned_relations := array_append(owned_relations,relation)',
+    );
+    for (const table of Object.values(tables))
+      expect(preflight).toContain(
+        `to_regclass('public.${getTableName(table)}')=ANY(owned_relations)`,
+      );
+    expect(
+      rollback.indexOf('scheduled ledger version marker mismatch'),
+    ).toBeLessThan(rollback.indexOf('DROP TABLE public.'));
+  });
+  it('rejects wrong logical catalogs for present ledgers while missing ledgers are a no-op', () => {
+    expect(rollback).toContain('IF NOT ledger_present THEN RETURN; END IF');
+    expect(rollback).toContain(
+      `to_regclass('public.${domain}_monitor_runs') IS NULL`,
+    );
+    expect(rollback).toContain(
+      `to_regclass('public.${
+        domain === 'primary' ? 'competitor_variant_groups' : 'variant_groups'
+      }') IS NOT NULL`,
+    );
+    expect(rollback).toContain(
+      'scheduled monitor target prerequisite mismatch',
+    );
+    expect(rollback).toContain('SET LOCAL search_path = pg_catalog, public');
   });
 });

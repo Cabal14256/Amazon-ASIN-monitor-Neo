@@ -40,6 +40,10 @@ SQL 在单个事务内执行，锁等待 5 秒、statement timeout 30 秒；同�
 
 回滚前停止对应 system producer/consumer，核对 pending run 和 claimed 通知，并独立备份私有账本。回滚会删除未完成任务、通知声明和组凭据；业务历史与手动任务身份保留。不能据此重新执行已经提交过的业务或重新发送未确认通知。
 
+回滚与升级使用同一 domain 的事务级 advisory lock。删除前对全部仍存在的账本取得排他锁，核验它们是普通表、版本标记严格匹配 `amazon-asin-monitor:scheduled-ledger:v1:<domain>:<table>:<32位十六进制指纹>`，并核对对应业务/手动监控 prerequisite、拒绝相反逻辑库；全部核验通过后才按子表、父表顺序删除。无标记同名表、foreign/mixed-domain 标记、非表对象或错误库均使整个事务拒绝，保留全部原表和数据。因此升级因命名碰撞失败后，不能使用回滚删除该外部对象。
+
+部分账本缺失时只删除仍具备正确归属标记的自有表；删除目标限定于 preflight 已锁定并核验的 relation OID，原先缺失的名字随后被并发创建时也不会删除新对象。全部缺失时回滚安全 no-op，不要求业务 prerequisite。这里校验首次迁移留下的所有权标记，不重新要求完整 catalog 指纹相等：已删除自有子表会改变父表内部外键 trigger，已删除父表也可能移除子表约束。升级仍严格拒绝 catalog 漂移；不能修改标记来使外部对象通过回滚。回滚不使用递归依赖删除，额外依赖会使事务拒绝并要求调查。
+
 Compose 使用同一脚本选择对应 rollback：
 
 ```sh
@@ -55,7 +59,7 @@ docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /op
 
 真实服务测试要求显式 `RUN_NEO_SCHEDULED_MONITOR_INTEGRATION=1`：
 
-- PG 使用 `DATABASE_URL` / `COMPETITOR_DATABASE_URL`，在两个不同 database 的随机私有 schema 中重复升级/回滚、验证 actor/digest/country/ordinal/follow-up/claim、主动制造 catalog 漂移后确认升级拒绝，结束时清理自有 schema。
+- PG 使用 `DATABASE_URL` / `COMPETITOR_DATABASE_URL`，在两个不同 database 的随机私有 schema 中重复升级/回滚、验证 actor/digest/country/ordinal/follow-up/claim、主动制造 catalog 漂移后确认升级拒绝；还覆盖三种同名 foreign 表升级失败后回滚拒绝并保留原数据、foreign 子表不能连带删除自有父表、错误 domain/table/version/hash 标记、非表对象、错误逻辑库、部分缺失和全缺失幂等。结束时清理自有 schema。
 - MySQL 使用 `INTEGRATION_MYSQL_HOST` / `INTEGRATION_MYSQL_PORT` / `INTEGRATION_MYSQL_USER` / `INTEGRATION_MYSQL_PASSWORD`，仅执行只读 SELECT；真实 `CRC32` 与 modulo 对照全部 UTF-8 golden，`DATETIME(6)` / binary ID 排序对照固定目录。
 - 不加载部署 `.env`，缺少配置或连接失败会使已启用测试失败；没有 opt-in 时明确 skip。Integration workflow 显式启用并运行两份测试，不能把本地 skip 当成服务验收。
 

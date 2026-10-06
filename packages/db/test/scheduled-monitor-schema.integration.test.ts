@@ -128,6 +128,27 @@ suite.each(domains)(
         await connection().query('RELEASE SAVEPOINT invalid_boundary');
       }
     };
+    const rejectMigration = async (migration: string) => {
+      try {
+        await expect(connection().query(migration)).rejects.toMatchObject({
+          code: 'P0001',
+        });
+      } finally {
+        await connection().query('ROLLBACK');
+      }
+    };
+    const ledgerNames = [
+      `${prefix}_runs`,
+      `${prefix}_notifications`,
+      `${prefix}_group_receipts`,
+    ];
+    const presentLedgers = async () =>
+      (
+        await connection().query<{ table_name: string }>(
+          'SELECT table_name FROM information_schema.tables WHERE table_schema=$1 AND table_name=ANY($2::text[]) ORDER BY table_name',
+          [schema, ledgerNames],
+        )
+      ).rows.map((row) => row.table_name);
     beforeAll(async () => {
       const url = process.env[env];
       if (!url) throw new Error(`Scheduled fixture requires ${env}`);
@@ -200,6 +221,263 @@ suite.each(domains)(
         'task_id',
         'user_id',
       ]);
+    });
+    it.each(ledgerNames)(
+      'preserves foreign %s and its data after both upgrade and rollback refuse an unmarked collision',
+      async (table) => {
+        await connection().query(sqlFile('.rollback'));
+        try {
+          await connection().query(
+            `CREATE TABLE ${qualified}.${table}(sentinel text PRIMARY KEY); INSERT INTO ${qualified}.${table} VALUES ('foreign-data')`,
+          );
+          await rejectMigration(sqlFile(''));
+          await rejectMigration(sqlFile('.rollback'));
+          expect(await presentLedgers()).toEqual([table]);
+          expect(
+            (
+              await connection().query(
+                `SELECT sentinel FROM ${qualified}.${table}`,
+              )
+            ).rows,
+          ).toEqual([{ sentinel: 'foreign-data' }]);
+        } finally {
+          await connection().query('ROLLBACK');
+          await connection().query(
+            `DROP TABLE IF EXISTS ${qualified}.${table}`,
+          );
+          await connection().query(sqlFile(''));
+        }
+      },
+    );
+    it('validates every child before dropping any owned sibling or parent', async () => {
+      const child = `${prefix}_notifications`;
+      await insert('runs', run());
+      try {
+        await connection().query(
+          `DROP TABLE ${qualified}.${child}; CREATE TABLE ${qualified}.${child}(sentinel text PRIMARY KEY); INSERT INTO ${qualified}.${child} VALUES ('foreign-child')`,
+        );
+        await rejectMigration(sqlFile('.rollback'));
+        expect(await presentLedgers()).toEqual([...ledgerNames].sort());
+        expect(
+          (
+            await connection().query(
+              `SELECT task_id FROM ${qualified}.${prefix}_runs`,
+            )
+          ).rows,
+        ).toEqual([{ task_id: job.taskId }]);
+        expect(
+          (
+            await connection().query(
+              `SELECT sentinel FROM ${qualified}.${child}`,
+            )
+          ).rows,
+        ).toEqual([{ sentinel: 'foreign-child' }]);
+      } finally {
+        await connection().query('ROLLBACK');
+        await connection().query(`DROP TABLE IF EXISTS ${qualified}.${child}`);
+        await connection().query(sqlFile('.rollback'));
+        await connection().query(sqlFile(''));
+      }
+    });
+    it.each([
+      {
+        label: 'another domain',
+        value: `amazon-asin-monitor:scheduled-ledger:v1:${
+          domain === 'primary' ? 'competitor' : 'primary'
+        }:${prefix}_runs:${'a'.repeat(32)}`,
+      },
+      {
+        label: 'another table',
+        value: `amazon-asin-monitor:scheduled-ledger:v1:${domain}:${prefix}_notifications:${'a'.repeat(
+          32,
+        )}`,
+      },
+      {
+        label: 'another migration version',
+        value: `amazon-asin-monitor:scheduled-ledger:v2:${domain}:${prefix}_runs:${'a'.repeat(
+          32,
+        )}`,
+      },
+      {
+        label: 'malformed fingerprint',
+        value: `amazon-asin-monitor:scheduled-ledger:v1:${domain}:${prefix}_runs:unknown`,
+      },
+    ])(
+      'preserves all ledgers when a marker belongs to $label',
+      async ({ value }) => {
+        const table = `${qualified}.${prefix}_runs`;
+        const marker = (
+          await connection().query<{ marker: string }>(
+            "SELECT obj_description($1::regclass,'pg_class') AS marker",
+            [table],
+          )
+        ).rows[0].marker;
+        await insert('runs', run());
+        try {
+          // All marker values above are test-owned constant strings.
+          await connection().query(`COMMENT ON TABLE ${table} IS '${value}'`);
+          await rejectMigration(sqlFile('.rollback'));
+          expect(await presentLedgers()).toEqual([...ledgerNames].sort());
+          expect(
+            (await connection().query(`SELECT task_id FROM ${table}`)).rows,
+          ).toEqual([{ task_id: job.taskId }]);
+        } finally {
+          await connection().query('ROLLBACK');
+          await connection().query(`COMMENT ON TABLE ${table} IS '${marker}'`);
+          await connection().query(sqlFile('.rollback'));
+          await connection().query(sqlFile(''));
+        }
+      },
+    );
+    it('refuses a marked non-table relation before dropping any owned table', async () => {
+      const child = `${prefix}_notifications`;
+      await insert('runs', run());
+      try {
+        await connection().query(
+          `DROP TABLE ${qualified}.${child}; CREATE VIEW ${qualified}.${child} AS SELECT 'foreign-view'::text AS sentinel; COMMENT ON VIEW ${qualified}.${child} IS 'amazon-asin-monitor:scheduled-ledger:v1:${domain}:${child}:${'a'.repeat(
+            32,
+          )}'`,
+        );
+        await rejectMigration(sqlFile('.rollback'));
+        expect(
+          (
+            await connection().query(
+              `SELECT task_id FROM ${qualified}.${prefix}_runs`,
+            )
+          ).rows,
+        ).toEqual([{ task_id: job.taskId }]);
+        expect(
+          (
+            await connection().query(
+              `SELECT sentinel FROM ${qualified}.${child}`,
+            )
+          ).rows,
+        ).toEqual([{ sentinel: 'foreign-view' }]);
+      } finally {
+        await connection().query('ROLLBACK');
+        await connection().query(`DROP VIEW IF EXISTS ${qualified}.${child}`);
+        await connection().query(sqlFile('.rollback'));
+        await connection().query(sqlFile(''));
+      }
+    });
+    it('rejects rollback on a wrong logical catalog and preserves every owned ledger', async () => {
+      const opposite =
+        domain === 'primary' ? 'competitor_variant_groups' : 'variant_groups';
+      await insert('runs', run());
+      try {
+        await connection().query(
+          `CREATE TABLE ${qualified}.${opposite}(id text)`,
+        );
+        await rejectMigration(sqlFile('.rollback'));
+        expect(await presentLedgers()).toEqual([...ledgerNames].sort());
+        expect(
+          (
+            await connection().query(
+              `SELECT task_id FROM ${qualified}.${prefix}_runs`,
+            )
+          ).rows,
+        ).toEqual([{ task_id: job.taskId }]);
+      } finally {
+        await connection().query('ROLLBACK');
+        await connection().query(
+          `DROP TABLE IF EXISTS ${qualified}.${opposite}`,
+        );
+        await connection().query(sqlFile('.rollback'));
+        await connection().query(sqlFile(''));
+      }
+    });
+    it.each([
+      domain === 'primary' ? 'variant_groups' : 'competitor_variant_groups',
+      domain === 'primary' ? 'monitor_history' : 'competitor_monitor_history',
+      `${domain}_monitor_runs`,
+    ])(
+      'preserves present ledgers when logical prerequisite %s is missing',
+      async (table) => {
+        const renamed = `${table}_temporarily_missing`;
+        await insert('runs', run());
+        try {
+          await connection().query(
+            `ALTER TABLE ${qualified}.${table} RENAME TO ${renamed}`,
+          );
+          await rejectMigration(sqlFile('.rollback'));
+          expect(await presentLedgers()).toEqual([...ledgerNames].sort());
+          expect(
+            (
+              await connection().query(
+                `SELECT task_id FROM ${qualified}.${prefix}_runs`,
+              )
+            ).rows,
+          ).toEqual([{ task_id: job.taskId }]);
+        } finally {
+          await connection().query('ROLLBACK');
+          await connection().query(
+            `ALTER TABLE ${qualified}.${renamed} RENAME TO ${table}`,
+          );
+          await connection().query(sqlFile('.rollback'));
+          await connection().query(sqlFile(''));
+        }
+      },
+    );
+    it.each([
+      { label: 'one child', tables: [`${prefix}_notifications`] },
+      {
+        label: 'both children',
+        tables: [`${prefix}_group_receipts`, `${prefix}_notifications`],
+      },
+      {
+        label: 'the parent and its dependent constraints',
+        tables: [`${prefix}_runs`],
+      },
+    ])(
+      'cleans only the remaining owned tables after losing $label',
+      async ({ tables }) => {
+        try {
+          for (const table of tables)
+            await connection().query(
+              `DROP TABLE ${qualified}.${table} CASCADE`,
+            );
+          await connection().query(sqlFile('.rollback'));
+          await connection().query(sqlFile('.rollback'));
+          expect(await presentLedgers()).toEqual([]);
+          expect(
+            (
+              await connection().query(
+                `SELECT id FROM ${qualified}.history_sentinel`,
+              )
+            ).rows,
+          ).toEqual([{ id: 1 }]);
+        } finally {
+          await connection().query('ROLLBACK');
+          await connection().query(sqlFile('.rollback'));
+          await connection().query(sqlFile(''));
+        }
+      },
+    );
+    it('does nothing when no ledger exists even on an unrelated logical catalog', async () => {
+      const opposite =
+        domain === 'primary' ? 'competitor_variant_groups' : 'variant_groups';
+      await connection().query(sqlFile('.rollback'));
+      try {
+        await connection().query(
+          `CREATE TABLE ${qualified}.${opposite}(sentinel text); INSERT INTO ${qualified}.${opposite} VALUES ('unrelated-data')`,
+        );
+        await connection().query(sqlFile('.rollback'));
+        await connection().query(sqlFile('.rollback'));
+        expect(await presentLedgers()).toEqual([]);
+        expect(
+          (
+            await connection().query(
+              `SELECT sentinel FROM ${qualified}.${opposite}`,
+            )
+          ).rows,
+        ).toEqual([{ sentinel: 'unrelated-data' }]);
+      } finally {
+        await connection().query('ROLLBACK');
+        await connection().query(
+          `DROP TABLE IF EXISTS ${qualified}.${opposite}`,
+        );
+        await connection().query(sqlFile(''));
+      }
     });
     it('stores the canonical complete system incarnation without borrowing a user/session', () =>
       transaction(async () => {

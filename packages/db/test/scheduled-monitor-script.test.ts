@@ -37,7 +37,7 @@ const fixture = (
   writeFileSync(migration, '-- isolated fixture SQL');
   writeFileSync(
     psql,
-    '#!/bin/sh\nprintf "%s\\n" "$@" > "$NEO_SCHEDULED_ARGS"\n',
+    '#!/bin/sh\nprintf "%s\\n" "$@" > "$NEO_SCHEDULED_ARGS"\nexit "${NEO_SCHEDULED_PSQL_EXIT:-0}"\n',
   );
   chmodSync(psql, 0o700);
   const invoke = (
@@ -89,6 +89,43 @@ suite('scheduled upgrade wrapper admission', () => {
           database,
         ]);
         expect(args[7]).toBe('--file');
+      }),
+  );
+  it.each([{ domain: 'primary' }, { domain: 'competitor' }])(
+    'dispatches the real $domain rollback with SQL error stop enabled',
+    ({ domain }) =>
+      fixture((invoke) => {
+        const migration = resolve(
+          __dirname,
+          `../migrations/0016_scheduled_monitor_${domain}.rollback.sql`,
+        );
+        expect(invoke(domain, {}, migration)).toEqual([
+          '-X',
+          '-v',
+          'ON_ERROR_STOP=1',
+          '--username',
+          'fixture_only',
+          '--dbname',
+          `${domain}_fixture`,
+          '--file',
+          migration,
+        ]);
+      }),
+  );
+  it.each([{ domain: 'primary' }, { domain: 'competitor' }])(
+    'propagates a rejected $domain rollback instead of reporting success',
+    ({ domain }) =>
+      fixture((invoke) => {
+        const migration = resolve(
+          __dirname,
+          `../migrations/0016_scheduled_monitor_${domain}.rollback.sql`,
+        );
+        try {
+          invoke(domain, { NEO_SCHEDULED_PSQL_EXIT: '23' }, migration);
+          throw new Error('Expected the SQL failure to propagate');
+        } catch (error) {
+          expect(error).toMatchObject({ status: 23 });
+        }
       }),
   );
   it.each([{ domain: '' }, { domain: 'manual' }, { domain: 'primary;other' }])(
