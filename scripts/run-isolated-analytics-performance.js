@@ -3,9 +3,15 @@
 
 const { execFile, spawn } = require('node:child_process');
 const { createHash, randomBytes, randomUUID } = require('node:crypto');
-const { mkdir, mkdtemp, readFile, writeFile } = require('node:fs/promises');
+const {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  writeFile,
+} = require('node:fs/promises');
 const { createRequire } = require('node:module');
-const { tmpdir } = require('node:os');
+const { availableParallelism, cpus, tmpdir, totalmem } = require('node:os');
 const path = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
 const { promisify } = require('node:util');
@@ -19,6 +25,10 @@ const {
   fixtureBatches,
   fixtureRow,
 } = require('./analytics-performance-fixture');
+const {
+  createStartupCapture,
+  migrationPlan,
+} = require('./analytics-performance-runtime');
 
 const exec = promisify(execFile);
 const root = path.resolve(__dirname, '..');
@@ -97,6 +107,11 @@ async function main() {
     ).stdout.trim(),
     node: process.version,
     platform: `${process.platform}/${process.arch}`,
+    hardware: {
+      availableCpuCount: availableParallelism(),
+      cpuModel: cpus()[0]?.model ?? 'unavailable',
+      totalMemoryBytes: totalmem(),
+    },
     runId: process.env.GITHUB_RUN_ID,
     runAttempt: process.env.GITHUB_RUN_ATTEMPT,
     databaseNames: config.names,
@@ -126,6 +141,8 @@ async function main() {
     gate: {
       warmupsPerTargetCase: config.warmup,
       measuredPairsPerCase: config.iterations,
+      requestTimeoutMs: 30_000,
+      benchmarkDeadlineMs: 900_000,
       requiredAggregateP95Speedup: config.requiredP95Speedup,
       aggregateCases: 24,
       adaptiveCorrectnessOnlyCases: 4,
@@ -153,6 +170,9 @@ async function main() {
 
   const serverRequire = createRequire(path.join(root, 'server/package.json'));
   const dbRequire = createRequire(path.join(root, 'packages/db/package.json'));
+  const migrations = migrationPlan(
+    await readdir(path.join(root, 'packages/db/migrations')),
+  );
   const mysql = serverRequire('mysql2/promise');
   const jwt = serverRequire('jsonwebtoken');
   const { Client } = dbRequire('pg');
@@ -164,11 +184,23 @@ async function main() {
   };
   const secrets = new Set(Object.values(credentials));
   const children = [];
+  const childClosures = new Map();
+  const trackChild = (child) => {
+    children.push(child);
+    childClosures.set(
+      child,
+      new Promise((resolve) => child.once('close', resolve)),
+    );
+    return child;
+  };
   const createdMysql = [];
   const createdPg = [];
   let mysqlUserCreated = false;
   let controlMysql, controlPg, primaryMysql, primaryPg, redis;
-  const logs = { legacy: '', neo: '' };
+  const logs = {
+    legacy: createStartupCapture(secrets),
+    neo: createStartupCapture(secrets),
+  };
   let failure;
   const command = async (name, args, options = {}) => {
     try {
@@ -185,12 +217,6 @@ async function main() {
       throw safe;
     }
   };
-  const collect = (label, chunk) => {
-    let text = String(chunk);
-    for (const secret of secrets) text = text.replaceAll(secret, '<redacted>');
-    text = text.replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer <redacted>');
-    logs[label] = (logs[label] + text).slice(-128 * 1024);
-  };
   const child = (label, entry, env, cwd) => {
     const process = spawn(global.process.execPath, [entry], {
       cwd,
@@ -198,12 +224,11 @@ async function main() {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     process.on('error', (error) =>
-      collect(label, `child error code ${safeCode(error)}\n`),
+      logs[label].write('error', `child error code ${safeCode(error)}\n`),
     );
-    process.stdout.on('data', (chunk) => collect(label, chunk));
-    process.stderr.on('data', (chunk) => collect(label, chunk));
-    children.push(process);
-    return process;
+    process.stdout.on('data', (chunk) => logs[label].write('stdout', chunk));
+    process.stderr.on('data', (chunk) => logs[label].write('stderr', chunk));
+    return trackChild(process);
   };
   try {
     redis = new Redis(config.redisUrl, {
@@ -322,28 +347,13 @@ async function main() {
       '--file',
       baseline,
     ]);
-    const { readdir } = require('node:fs/promises');
-    const migrations = (
-      await readdir(path.join(root, 'packages/db/migrations'))
-    )
-      .filter(
-        (name) => /^\d{4}_[^.]+\.sql$/.test(name) && !name.startsWith('0000_'),
-      )
-      .sort();
-    for (const filename of migrations) {
+    for (const { filename, domains } of migrations) {
       const target = `/tmp/analytics-190-${filename}`;
       await command('docker', [
         'cp',
         path.join(root, 'packages/db/migrations', filename),
         `${container}:${target}`,
       ]);
-      const domains = filename.startsWith('0009_')
-        ? ['primary', 'competitor']
-        : /^00(?:10|11|14|15)_/.test(filename)
-        ? ['competitor']
-        : filename.startsWith('0016_')
-        ? [filename.includes('.competitor') ? 'competitor' : 'primary']
-        : ['primary'];
       for (const domain of domains) {
         await psql(
           domain === 'primary'
@@ -448,6 +458,59 @@ async function main() {
     manifest.dataset.persistedRows = { legacy: mysqlCount, neo: pgCount };
     if (mysqlCount !== config.rows || pgCount !== config.rows)
       throw new Error('Persisted fixture row counts differ');
+    manifest.dataset.windowRowCounts = {};
+    for (const [window, range] of Object.entries(WINDOWS)) {
+      const mysqlRows = (
+        await primaryMysql.query(
+          'SELECT COUNT(*) AS total, SUM(CASE WHEN country=? AND site_snapshot=? AND brand_snapshot=? AND variant_group_id=? THEN 1 ELSE 0 END) AS filtered FROM monitor_history WHERE check_time>=? AND check_time<=?',
+          [
+            'US',
+            'store-0',
+            'brand-0',
+            'perf-group-0',
+            range.startTime,
+            range.endTime,
+          ],
+        )
+      )[0][0];
+      const pgRows = (
+        await primaryPg.query(
+          'SELECT COUNT(*) AS total, COUNT(*) FILTER(WHERE country=$1 AND site_snapshot=$2 AND brand_snapshot=$3 AND variant_group_id=$4) AS filtered FROM public.monitor_history WHERE check_time>=$5 AND check_time<=$6',
+          [
+            'US',
+            'store-0',
+            'brand-0',
+            'perf-group-0',
+            range.startTime,
+            range.endTime,
+          ],
+        )
+      ).rows[0];
+      const counts = {
+        legacy: {
+          total: Number(mysqlRows.total),
+          filtered: Number(mysqlRows.filtered),
+        },
+        neo: { total: Number(pgRows.total), filtered: Number(pgRows.filtered) },
+      };
+      manifest.dataset.windowRowCounts[window] = counts;
+      if (
+        counts.legacy.total !== counts.neo.total ||
+        counts.legacy.filtered !== counts.neo.filtered ||
+        counts.neo.total === 0 ||
+        counts.neo.filtered === 0
+      )
+        throw new Error(
+          'Window row counts or filtered fixture coverage differ',
+        );
+    }
+    manifest.dataset.rawChunkStorage = (
+      await primaryPg.query(
+        "SELECT COUNT(*) AS chunks, COUNT(*) FILTER(WHERE is_compressed) AS compressed_chunks FROM timescaledb_information.chunks WHERE hypertable_schema='public' AND hypertable_name='monitor_history'",
+      )
+    ).rows[0];
+    manifest.dataset.storageMeaning =
+      'fresh future-dated input; actual chunk/compression counts recorded, no claim of historical compressed-chunk performance';
     await primaryMysql.query('ANALYZE TABLE monitor_history');
     await primaryPg.query('ANALYZE public.monitor_history');
     manifest.phase = 'real-cagg-refresh';
@@ -588,6 +651,8 @@ async function main() {
       String(config.iterations),
       '--min-speedup',
       '3',
+      '--timeout-ms',
+      String(manifest.gate.requestTimeoutMs),
       '--output-dir',
       output,
     ];
@@ -597,10 +662,18 @@ async function main() {
       env: { ...shared, BENCH_TOKEN: token },
       stdio: ['ignore', 'inherit', 'inherit'],
     });
+    trackChild(benchmark);
+    let deadline;
     const code = await new Promise((resolve, reject) => {
+      deadline = setTimeout(() => {
+        benchmark.kill('SIGTERM');
+        const error = new Error('Benchmark exceeded its isolated deadline');
+        error.code = 'BENCHMARK_DEADLINE';
+        reject(error);
+      }, manifest.gate.benchmarkDeadlineMs);
       benchmark.once('error', reject);
-      benchmark.once('exit', (code) => resolve(code));
-    });
+      benchmark.once('close', (code) => resolve(code));
+    }).finally(() => clearTimeout(deadline));
     manifest.status = code === 0 ? 'passed' : 'failed';
     manifest.phase = 'completed';
     if (code !== 0)
@@ -618,13 +691,33 @@ async function main() {
         process.kill('SIGTERM');
     }
     for (const process of children) {
-      if (process.exitCode !== null || process.signalCode !== null) continue;
-      await Promise.race([
-        new Promise((resolve) => process.once('exit', resolve)),
-        delay(3000),
+      let closed = await Promise.race([
+        childClosures.get(process).then(() => true),
+        delay(3000).then(() => false),
       ]);
-      if (process.exitCode === null && process.signalCode === null)
+      if (!closed) {
         process.kill('SIGKILL');
+        closed = await Promise.race([
+          childClosures.get(process).then(() => true),
+          delay(3000).then(() => false),
+        ]);
+      }
+      if (!closed) {
+        failure ??= Object.assign(
+          new Error('Fixture child shutdown uncertain'),
+          {
+            code: 'CHILD_CLOSE_TIMEOUT',
+          },
+        );
+        manifest.status = 'failed';
+        manifest.failure = {
+          phase: 'child-cleanup',
+          code: 'CHILD_CLOSE_TIMEOUT',
+        };
+        logger.warn('Fixture child close could not be confirmed', {
+          code: 'CHILD_CLOSE_TIMEOUT',
+        });
+      }
     }
     await primaryMysql?.end().catch(() => undefined);
     await primaryPg?.end().catch(() => undefined);
@@ -652,8 +745,11 @@ async function main() {
     await controlPg?.end().catch(() => undefined);
     redis?.disconnect();
     await persist();
-    for (const [label, text] of Object.entries(logs))
-      await writeFile(path.join(output, `${label}-startup.log`), text);
+    for (const [label, capture] of Object.entries(logs))
+      await writeFile(
+        path.join(output, `${label}-startup.log`),
+        capture.finish(),
+      );
   }
   if (failure) process.exitCode = 1;
 }

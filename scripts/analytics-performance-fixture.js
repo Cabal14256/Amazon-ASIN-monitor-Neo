@@ -171,6 +171,8 @@ function datasetManifest(rows, digest) {
     rows,
     columns: COLUMNS,
     canonicalSha256: digest,
+    digestSource:
+      'generated canonical insert series; persisted row counts checked independently; actual HTTP response parity is gated',
     timestampSemantics: 'Shanghai wall-clock timestamp without time zone',
     startInclusive: '2040-01-01 00:00:00',
     endExclusive: '2040-03-01 00:00:00',
