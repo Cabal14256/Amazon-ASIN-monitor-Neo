@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import {
   batchDeleteSyncResult,
   buildBatchDeleteAnalysis,
-  parseBatchDeleteRequest,
+  parseNeoBatchDeleteRequest,
   type BatchDeleteAnalysis,
   type BatchDeleteIds,
 } from '../domain/asin-batch-delete';
@@ -75,7 +75,7 @@ class DrizzleAsinBatchDeleteUnit
     return count;
   }
   async analyze(raw: BatchDeleteIds): Promise<BatchDeleteAnalysis> {
-    const ids = parseBatchDeleteRequest(raw);
+    const ids = parseNeoBatchDeleteRequest(raw);
     const groups = await this.groups(ids.groupIds),
       rows = await this.requestedAsins(ids.asinIds);
     return buildBatchDeleteAnalysis(
@@ -86,7 +86,7 @@ class DrizzleAsinBatchDeleteUnit
     );
   }
   async execute(raw: BatchDeleteIds) {
-    const ids = parseBatchDeleteRequest(raw);
+    const ids = parseNeoBatchDeleteRequest(raw);
     const candidates = await this.requestedAsins(ids.asinIds);
     // All Neo business writers acquire group locks before child rows. Group
     // FOR UPDATE also blocks FK inserts, so nested deletion counts stay valid.

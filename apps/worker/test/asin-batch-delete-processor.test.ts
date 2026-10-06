@@ -147,6 +147,29 @@ describe.each(['asin', 'competitor'] as const)(
       expect(f.repository.transaction).toHaveBeenCalled();
       expect(f.other.transaction).not.toHaveBeenCalled();
     });
+    it('retains literal padded/space/Unicode targets after queue revalidation and into chunk execution', async () => {
+      const f = fixtureForDomain();
+      const targets = {
+        groupIds: [' Raw Ś ', '   ', '😺'.repeat(50)],
+        asinIds: [' Child Ś '],
+      };
+      Object.assign(f.data, targets);
+      f.unit.analyze.mockResolvedValue(
+        buildBatchDeleteAnalysis(
+          targets,
+          targets.groupIds,
+          [{ id: targets.asinIds[0], variantGroupId: 'separate-parent' }],
+          0,
+          domain,
+        ),
+      );
+      expect(await f.run()).toMatchObject({ verificationPassed: true });
+      expect(f.unit.analyze).toHaveBeenCalledWith(targets);
+      expect(f.unit.execute.mock.calls.map(([ids]) => ids)).toEqual([
+        ...targets.groupIds.map((id) => ({ groupIds: [id], asinIds: [] })),
+        { groupIds: [], asinIds: targets.asinIds },
+      ]);
+    });
     it('rejects changing a complete domain identity against stored task metadata', async () => {
       const f = fixtureForDomain();
       const otherDomain = domain === 'asin' ? 'competitor' : 'asin';
@@ -312,7 +335,9 @@ describe.each(['asin', 'competitor'] as const)(
     it.each([
       { taskId: 'bad' },
       { groupIds: [], asinIds: [] },
-      { groupIds: [' g1'] },
+      { groupIds: ['\ud800'] },
+      { groupIds: [''] },
+      { groupIds: ['g\u0085'] },
       { groupIds: ['g1', 'g1'] },
       { groupIds: ['x'.repeat(51)] },
       { domain: 'invalid-domain' },
