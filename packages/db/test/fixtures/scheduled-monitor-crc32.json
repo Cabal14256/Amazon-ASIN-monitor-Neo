@@ -1,0 +1,17 @@
+{
+  "provenance": "Frozen IEEE CRC32 UTF-8 values, independently generated with Python zlib.crc32; 123456789 is the standard check value. Real MySQL CRC32 comparison remains an integration gate, not a local service claim.",
+  "cases": [
+    { "id": "", "crc32": 0 },
+    { "id": "123456789", "crc32": 3421780262 },
+    { "id": "0", "crc32": 4108050209 },
+    { "id": "group-1", "crc32": 4145120104 },
+    { "id": " group-1 ", "crc32": 2871557832 },
+    { "id": "GROUP-1", "crc32": 1723758872 },
+    { "id": "变体组", "crc32": 1269453363 },
+    { "id": "é", "crc32": 235179326 },
+    { "id": "e\u0301", "crc32": 1286470445 },
+    { "id": "😀", "crc32": 88978756 },
+    { "id": "a\nb", "crc32": 4010250491 },
+    { "id": "00000000-0000-4000-8000-000000000000", "crc32": 1004537367 }
+  ]
+}
