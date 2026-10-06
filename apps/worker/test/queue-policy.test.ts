@@ -104,9 +104,9 @@ describe('Legacy to BullMQ queue policy parity', () => {
             ...(baseline.options.defaultJobOptions as object),
             // Neo terminal monitor jobs also serve as task recovery receipts.
             ...(name === 'monitor' ||
-              name === 'competitor-monitor' ||
-              name === 'variant-check' ||
-              name === 'batch-check'
+            name === 'competitor-monitor' ||
+            name === 'variant-check' ||
+            name === 'batch-check'
               ? {
                   removeOnComplete: { age: 604_800 },
                   removeOnFail: { age: 604_800 },
