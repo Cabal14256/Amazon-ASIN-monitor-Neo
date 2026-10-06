@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
 import { CatalogCheckRecovery } from './catalog-check-recovery';
+import { catalogSafetyKey, readCatalogSafetyGate } from './catalog-safety-gate';
 
 const target = { kind: 'group' as const, id: 'g1', label: 'Group' };
 function storage() {
@@ -15,7 +16,7 @@ function storage() {
     }),
   };
 }
-function fixture() {
+function fixture(shared = false) {
   const local = storage(),
     session = storage();
   let previous = Promise.resolve();
@@ -44,9 +45,142 @@ function fixture() {
       locks,
       () => 1000,
       () => `request-${++id}`,
+      shared ? { owner, catalog: 'asin' } : undefined,
     );
   return { local, session, create, store: create() };
 }
+
+describe('shared catalog check operation gate', () => {
+  it('claims the shared gate before dispatch and restores raw selected IDs with the accepted task', async () => {
+    const f = fixture(true);
+    const batch = {
+      kind: 'batch' as const,
+      id: 'batch' as const,
+      label: 'Selected groups',
+      groupIds: [' Mixed-É ', 'mixed-é', 'a/b'],
+    };
+    const result = await f.store.submit(batch, async () => {
+      expect(readCatalogSafetyGate(f.local, 'operator', 'asin')).toMatchObject({
+        phase: 'check',
+        check: { target: batch },
+      });
+      return { kind: 'task', taskId: 'batch-1', status: 'pending' };
+    });
+    expect(result.kind).toBe('task');
+    expect(f.create().read()).toMatchObject({
+      target: batch,
+      taskId: 'batch-1',
+    });
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')).toMatchObject({
+      phase: 'check',
+      check: { taskId: 'batch-1' },
+    });
+  });
+  it.each(['refresh', 'inspection'] as const)(
+    'blocks a new check when another %s catalog operation is outstanding',
+    async (phase) => {
+      const f = fixture(true),
+        send = vi.fn();
+      const record =
+        phase === 'inspection'
+          ? { phase }
+          : { phase, message: null, detailId: null, createUncertain: false };
+      f.local.setItem(
+        catalogSafetyKey('operator', 'asin'),
+        JSON.stringify(record),
+      );
+      await expect(f.store.submit(target, send)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+  it('does not release either gate if the current session changes while clear waits for its lock', async () => {
+    const f = fixture(true);
+    const result = await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'pending',
+    }));
+    if (result.kind !== 'task') throw new Error('task');
+    expect(await f.store.clear(result.gate, () => false)).toBe(false);
+    expect(f.store.read()?.taskId).toBe('task-1');
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')?.phase).toBe(
+      'check',
+    );
+  });
+  it('retains the shared guard if legacy receipt deletion fails', async () => {
+    const f = fixture(true);
+    const result = await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'pending',
+    }));
+    if (result.kind !== 'task') throw new Error('task');
+    f.local.removeItem.mockImplementation(() => {
+      throw new Error('quota');
+    });
+    expect(await f.store.clear(result.gate)).toBe(false);
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')?.phase).toBe(
+      'check',
+    );
+  });
+  it('keeps an active task and reread failures guarded before clearing both records after successful reconciliation', async () => {
+    const f = fixture(true);
+    const result = await f.store.submit(target, async () => ({
+      kind: 'task',
+      taskId: 'task-1',
+      status: 'unknown',
+    }));
+    if (result.kind !== 'task') throw new Error('task');
+    const reread = vi.fn(async () => {
+      throw new Error('read failed');
+    });
+    expect(
+      await f.store.reconcile(
+        result.gate,
+        async () => ({ taskId: 'task-1', status: 'processing' }),
+        reread,
+      ),
+    ).toBe('active');
+    expect(reread).not.toHaveBeenCalled();
+    await expect(
+      f.store.reconcile(
+        result.gate,
+        async () => ({ taskId: 'task-1', status: 'completed' }),
+        reread,
+      ),
+    ).rejects.toThrow('read failed');
+    expect(f.store.read()).not.toBeNull();
+    expect(
+      await f.store.reconcile(result.gate, async () => ({
+        taskId: 'task-1',
+        status: 'completed',
+      })),
+    ).toBe('cleared');
+    expect(f.store.read()).toBeNull();
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')).toBeNull();
+  });
+  it('keeps a malformed shared async guard fail closed without removing its raw bytes', async () => {
+    const f = fixture(true),
+      key = catalogSafetyKey('operator', 'asin'),
+      send = vi.fn();
+    const raw = JSON.stringify({
+      phase: 'check',
+      operationId: 'broken',
+      check: {},
+    });
+    f.local.setItem(key, raw);
+    expect(readCatalogSafetyGate(f.local, 'operator', 'asin')?.phase).toBe(
+      'check-invalid',
+    );
+    await expect(f.store.submit(target, send)).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    expect(f.local.getItem(key)).toBe(raw);
+    expect(send).not.toHaveBeenCalled();
+  });
+});
 
 describe('durable immediate check recovery', () => {
   it.each(['NETWORK', 'TIMEOUT', 'CANCELLED', 'INVALID_RESPONSE'] as const)(

@@ -1,4 +1,11 @@
+import {
+  validCatalogCheckGate,
+  type CatalogCheckGate,
+} from './catalog-check-types';
+
 export type CatalogSafetyGate =
+  | { phase: 'check-invalid'; operationId: string }
+  | { phase: 'check'; operationId: string; check: CatalogCheckGate }
   | {
       phase: 'refresh';
       message: string | null;
@@ -36,6 +43,7 @@ export function readCatalogSafetyGate(
   try {
     const raw = storage.getItem(key);
     if (!raw) return null;
+    if (raw.length > 128 * 1024) throw new Error('invalid');
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('invalid');
@@ -50,6 +58,18 @@ export function readCatalogSafetyGate(
       typeof gate.operationId === 'string'
         ? { operationId: gate.operationId }
         : {};
+    if (gate.phase === 'check') {
+      if (
+        !validCatalogCheckGate(gate.check) ||
+        gate.operationId !== gate.check.requestId
+      )
+        throw new Error('invalid');
+      return {
+        phase: 'check',
+        operationId: gate.check.requestId,
+        check: gate.check,
+      };
+    }
     if (gate.phase === 'inspection')
       return { phase: 'inspection', ...operationId };
     if (
@@ -70,6 +90,13 @@ export function readCatalogSafetyGate(
       ...operationId,
     };
   } catch {
+    // Never discard a malformed async-operation record and permit a duplicate.
+    try {
+      if (storage.getItem(key)?.includes('"check"'))
+        return { phase: 'check-invalid', operationId: 'invalid-check-record' };
+    } catch {
+      return { phase: 'check-invalid', operationId: 'unreadable-check-record' };
+    }
     try {
       storage.removeItem(key);
     } catch {

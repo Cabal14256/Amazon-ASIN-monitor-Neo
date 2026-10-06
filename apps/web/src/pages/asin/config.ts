@@ -15,6 +15,7 @@ import {
   updateVariantGroupManual,
   updateVariantGroupNotify,
 } from '../../services/asin';
+import { checkSelectedGroups } from '../../services/catalog-check';
 import type { CatalogConfig } from '../catalog/catalog-types';
 
 export const ASIN_CATALOG: CatalogConfig = {
@@ -29,7 +30,11 @@ export const ASIN_CATALOG: CatalogConfig = {
   showManual: true,
   list: getVariantGroups,
   detail: getVariantGroup,
-  checks: { group: checkVariantGroup, asin: checkAsin },
+  checks: {
+    group: checkVariantGroup,
+    asin: checkAsin,
+    batch: checkSelectedGroups,
+  },
   writes: {
     createGroup: createVariantGroup,
     updateGroup: updateVariantGroup,

@@ -199,6 +199,8 @@ describe('mounted immediate-check recovery', () => {
     await waitFor(() => expect(locks).toHaveBeenCalledTimes(1));
     act(() => f.setOwner('next-operator'));
     await act(async () => lock.resolve());
+    // A new identity no longer inherits the previous user's expanded detail.
+    await openDetails();
     await waitFor(() =>
       expect(
         (
@@ -246,6 +248,7 @@ describe('mounted immediate-check recovery', () => {
     act(() => f.setOwner('next-operator'));
     await act(async () => lock.resolve());
     await screen.findByText('next-task');
+    await openDetails();
     expect(JSON.parse(window.localStorage.getItem(nextKey)!)).toEqual(
       nextGuard,
     );
@@ -278,6 +281,7 @@ describe('mounted immediate-check recovery', () => {
         status: 'pending',
       }),
     );
+    await openDetails();
     await waitFor(() =>
       expect(
         (
