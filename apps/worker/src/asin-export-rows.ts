@@ -1,7 +1,7 @@
-import type { VariantGroup } from '@asin-monitor/contracts';
-import { formatShanghaiTimestamp } from '@asin-monitor/db';
+import type { AsinExportParams, VariantGroup } from '@asin-monitor/contracts';
+import { parseShanghaiTimestamp } from '@asin-monitor/db';
 
-export const ASIN_EXPORT_HEADER = [
+export const ASIN_EXPORT_DETAILED_HEADER = [
   '变体组名称',
   '变体组ID',
   '国家',
@@ -18,24 +18,46 @@ export const ASIN_EXPORT_HEADER = [
   '创建时间',
   '最后检查时间',
 ] as const;
-export const ASIN_EXPORT_WIDTHS = [
+export const ASIN_EXPORT_DETAILED_WIDTHS = [
   20, 40, 10, 10, 15, 10, 12, 15, 50, 15, 10, 12, 30, 20, 20,
 ];
 
-function shanghai(value: string | null | undefined): string {
+const TASK_COLUMN_INDICES = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14];
+export const ASIN_EXPORT_HEADER = TASK_COLUMN_INDICES.map(
+  (index) => ASIN_EXPORT_DETAILED_HEADER[index]!,
+);
+export const ASIN_EXPORT_WIDTHS = TASK_COLUMN_INDICES.map(
+  (index) => ASIN_EXPORT_DETAILED_WIDTHS[index]!,
+);
+export function asinExportFormat(layout?: AsinExportParams['layout']) {
+  return layout === 'detailed'
+    ? {
+        header: ASIN_EXPORT_DETAILED_HEADER,
+        widths: ASIN_EXPORT_DETAILED_WIDTHS,
+      }
+    : { header: ASIN_EXPORT_HEADER, widths: ASIN_EXPORT_WIDTHS };
+}
+export type AsinExportCell = string | Date;
+
+function excelInstant(value: string | null | undefined): Date | '' {
   if (!value) return '';
-  const date = new Date(value);
-  return Number.isFinite(date.getTime())
-    ? formatShanghaiTimestamp(date).slice(0, 19)
-    : '';
+  const date = parseShanghaiTimestamp(value);
+  if (!Number.isFinite(date.getTime()))
+    throw new RangeError('Invalid ASIN export timestamp');
+  return date;
 }
 const status = (broken: number | boolean | null | undefined) =>
   broken === 1 || broken === true ? '异常' : '正常';
 
-/** Legacy ASIN export's fifteen columns, with D8 Shanghai wall-clock dates. */
+/** Preserve each Legacy layout and the Date instants emitted by mysql2. */
 export function* asinExportRows(
   groups: readonly VariantGroup[],
-): Generator<string[]> {
+  layout: AsinExportParams['layout'] = 'task',
+): Generator<AsinExportCell[]> {
+  const select = (row: AsinExportCell[]) =>
+    layout === 'detailed'
+      ? row
+      : TASK_COLUMN_INDICES.map((index) => row[index]!);
   for (const group of groups) {
     const prefix: string[] = [
       group.name || '',
@@ -48,7 +70,7 @@ export function* asinExportRows(
     ];
     if (group.children?.length) {
       for (const asin of group.children)
-        yield [
+        yield select([
           ...prefix,
           asin.asin || '',
           asin.name || '',
@@ -56,11 +78,11 @@ export function* asinExportRows(
           status(asin.isBroken),
           asin.statusSource || '',
           asin.manualBrokenReason || group.manualBrokenReason || '',
-          shanghai(asin.createTime),
-          shanghai(asin.lastCheckTime),
-        ];
+          excelInstant(asin.createTime),
+          excelInstant(asin.lastCheckTime),
+        ]);
     } else {
-      yield [
+      yield select([
         ...prefix,
         '',
         '',
@@ -68,9 +90,9 @@ export function* asinExportRows(
         '',
         '',
         group.manualBrokenReason || '',
-        shanghai(group.createTime),
+        excelInstant(group.createTime),
         '',
-      ];
+      ]);
     }
   }
 }

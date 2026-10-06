@@ -63,7 +63,7 @@ export class TaskQueryService {
         throw new Error('TASK_QUERY_DEADLINE');
     };
     try {
-      return await action(this.runtime.open(ensureOpen), ensureOpen);
+      return await action(this.runtime.open(ensureOpen, deadline), ensureOpen);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       if (error instanceof TaskQueryInputError) fail(400, '任务查询参数无效');

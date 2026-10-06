@@ -14,6 +14,7 @@ const taskId = '10000000-0000-4000-8000-000000000166';
 const directories: string[] = [];
 const runtimes: TaskQueryRuntime[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const runtime of runtimes.splice(0)) await runtime.onModuleDestroy();
   vi.restoreAllMocks();
   for (const directory of directories.splice(0)) {
@@ -102,6 +103,120 @@ async function fixture() {
 }
 
 describe('definitive export rejection is recoverable independently of API process and queue absence', () => {
+  it('releases all eight service query slots at the deadline even while a shared proof read remains stalled', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    let finish!: (value: typeof f.proof) => void;
+    const reads = vi
+      .spyOn(ExportArtifactStore.prototype, 'readRejectedSubmission')
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const service = new TaskQueryService(
+      f.env,
+      runtime,
+      f.logger as unknown as AppLogger,
+      { isReference: () => false } as never,
+    );
+    vi.useFakeTimers();
+    const pending = Array.from({ length: 8 }, () =>
+      service
+        .detail({ userId: f.initial.userId } as never, taskId)
+        .catch((error: unknown) => error),
+    );
+    await vi.advanceTimersByTimeAsync(3000);
+    for (const error of await Promise.all(pending))
+      expect(error).toMatchObject({ status: 500 });
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(f.evalRedis).not.toHaveBeenCalled();
+    f.replace({ ...f.initial, status: 'completed', progress: 100 });
+    expect(
+      await service.detail({ userId: f.initial.userId } as never, taskId),
+    ).toMatchObject({ status: 'completed' });
+    finish(f.proof);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.evalRedis).not.toHaveBeenCalled();
+    expect(f.current()?.status).toBe('completed');
+  });
+  it('bounds a stalled proof read by the remaining request deadline and never mutates from its late reply', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    let finish!: (value: typeof f.proof) => void;
+    vi.spyOn(
+      ExportArtifactStore.prototype,
+      'readRejectedSubmission',
+    ).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    vi.useFakeTimers();
+    const deadline = performance.now() + 100;
+    let closed = false;
+    const port = runtime.open(() => {
+      if (closed || performance.now() >= deadline)
+        throw new Error('TASK_QUERY_DEADLINE');
+    }, deadline);
+    const pending = port.reconcileRejectedExport!(f.initial);
+    const rejected = expect(pending).rejects.toThrow(
+      'TASK_QUERY_FILE_DEADLINE',
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    await rejected;
+    closed = true;
+    finish(f.proof);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.evalRedis).not.toHaveBeenCalled();
+    expect(f.current()?.status).toBe('pending');
+  });
+
+  it('keeps stalled filesystem work bounded after requests expire and reuses a same-task read', async () => {
+    const f = await fixture();
+    const runtime = f.recreate();
+    const releases: ((value: null) => void)[] = [];
+    const reads = vi
+      .spyOn(ExportArtifactStore.prototype, 'readRejectedSubmission')
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            releases.push(resolve);
+          }),
+      );
+    vi.useFakeTimers();
+    const deadline = performance.now() + 100;
+    const port = runtime.open(() => {}, deadline);
+    const tasks = Array.from({ length: 8 }, (_, index) => ({
+      ...f.initial,
+      taskId: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    }));
+    const outcomes = tasks.map((task) =>
+      port.reconcileRejectedExport!(task).catch((error: unknown) => error),
+    );
+    const duplicate = port.reconcileRejectedExport!(tasks[0]!).catch(
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    for (const error of await Promise.all([...outcomes, duplicate]))
+      expect(error).toMatchObject({ message: 'TASK_QUERY_FILE_DEADLINE' });
+    expect(reads).toHaveBeenCalledTimes(8);
+    const next = runtime.open(() => {}, performance.now() + 100);
+    await expect(next.reconcileRejectedExport!(f.initial)).rejects.toThrow(
+      'TASK_QUERY_FILE_CAPACITY',
+    );
+    expect(reads).toHaveBeenCalledTimes(8);
+    releases[0]!(null);
+    await vi.advanceTimersByTimeAsync(0);
+    const retry = next.reconcileRejectedExport!(f.initial);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toHaveBeenCalledTimes(9);
+    releases.splice(1).forEach((release) => release(null));
+    expect(await retry).toBeNull();
+    expect(f.evalRedis).not.toHaveBeenCalled();
+  });
   it('releases a pending task using a durable immutable producer proof after recreating the API runtime', async () => {
     const f = await fixture();
     const old = f.recreate();

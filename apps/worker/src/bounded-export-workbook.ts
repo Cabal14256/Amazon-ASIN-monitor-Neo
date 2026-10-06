@@ -25,6 +25,7 @@ class WorksheetStream extends PassThrough {
   }
 }
 interface WorkbookInternals {
+  sharedStrings: { add(value: string): number };
   zip: Writable & {
     append(source: Readable, options: { name: string }): unknown;
     abort(): void;
@@ -56,6 +57,7 @@ export function createBoundedExportWorkbook(
   )
     throw new Error('EXPORT_WORKBOOK_STREAM_ADAPTER_UNAVAILABLE');
   const streams: PassThrough[] = [];
+  let emptyStringId: number | undefined;
   let stopped = false;
   internals.zip.on('error', onFailure);
   internals._openStream = (path) => {
@@ -76,6 +78,21 @@ export function createBoundedExportWorkbook(
   };
   return {
     workbook,
+    commitRow(
+      sheet: ExcelJS.Worksheet,
+      values: readonly (string | number | Date)[],
+    ) {
+      const row = sheet.addRow([...values]);
+      values.forEach((value, index) => {
+        if (value !== '') return;
+        // Inline empty <v> cells reload as null in ExcelJS. Keep exactly one
+        // shared string for blanks; all nonempty text remains uncached/streamed.
+        emptyStringId ??= internals.sharedStrings.add('');
+        (row.getCell(index + 1).model as unknown as { ssId: number }).ssId =
+          emptyStringId;
+      });
+      row.commit();
+    },
     async drain(signal: AbortSignal): Promise<void> {
       signal.throwIfAborted();
       if (stopped) throw new Error('EXPORT_WORKBOOK_STOPPED');

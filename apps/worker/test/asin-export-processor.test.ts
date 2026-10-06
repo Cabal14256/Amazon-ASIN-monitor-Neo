@@ -19,7 +19,10 @@ import { join } from 'node:path';
 import { finished } from 'node:stream/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAsinExportProcessor } from '../src/asin-export-processor';
-import { ASIN_EXPORT_HEADER, asinExportRows } from '../src/asin-export-rows';
+import {
+  ASIN_EXPORT_DETAILED_HEADER as ASIN_EXPORT_HEADER,
+  asinExportRows,
+} from '../src/asin-export-rows';
 import { startAsinExportRuntime } from '../src/asin-export-runtime';
 
 const taskId = '10000000-0000-4000-8000-000000000166';
@@ -31,7 +34,7 @@ const data: AsinExportJobData = {
   taskSubType: 'asin',
   exportType: 'asin',
   createdAt,
-  params: { country: 'US' },
+  params: { country: 'US', layout: 'detailed' },
 };
 const directories: string[] = [];
 afterEach(async () => {
@@ -567,8 +570,8 @@ describe('ASIN streaming export', () => {
         '异常',
         'AUTO+MANUAL',
         'ASIN 人工原因',
-        '2026-09-27 00:00:00',
-        '2026-09-27 09:02:03',
+        new Date('2026-09-26T16:00:00.000Z'),
+        new Date('2026-09-27T01:02:03.000Z'),
       ],
       [
         'Empty',
@@ -584,7 +587,7 @@ describe('ASIN streaming export', () => {
         '',
         '',
         '',
-        '2026-09-27 00:00:00',
+        new Date('2026-09-26T16:00:00.000Z'),
         '',
       ],
     ]);
@@ -952,20 +955,23 @@ describe('ASIN streaming export', () => {
   });
 });
 
-it('renders fixed Legacy records with Shanghai wall time before the streaming writer', () => {
+it('preserves Legacy direct-export Date instants before the streaming writer', () => {
   const rows = [
-    ...asinExportRows([
-      {
-        id: 'g',
-        name: 'Group',
-        country: 'US',
-        site: 'amazon.com',
-        brand: 'B',
-        isBroken: 0,
-        createTime: '2026-09-26T16:00:00.000Z',
-        children: [],
-      } as never,
-    ]),
+    ...asinExportRows(
+      [
+        {
+          id: 'g',
+          name: 'Group',
+          country: 'US',
+          site: 'amazon.com',
+          brand: 'B',
+          isBroken: 0,
+          createTime: '2026-09-26T16:00:00.000Z',
+          children: [],
+        } as never,
+      ],
+      'detailed',
+    ),
   ];
   expect(rows).toEqual([
     [
@@ -982,7 +988,7 @@ it('renders fixed Legacy records with Shanghai wall time before the streaming wr
       '',
       '',
       '',
-      '2026-09-27 00:00:00',
+      new Date('2026-09-26T16:00:00.000Z'),
       '',
     ],
   ]);

@@ -30,13 +30,15 @@ describe('actual ExcelJS worksheet backpressure', () => {
       () => 'stopped',
     );
     try {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const atPause = written;
-      expect(atPause).toBeGreaterThan(0);
-      expect(atPause).toBeLessThan(300);
-      expect(writer.worksheetBufferedBytes).toBeLessThan(256 * 1024);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(written).toBe(atPause);
+      // Compression may still fill its bounded intermediate queues after the
+      // first write stalls. Assert the capacity throughout, not an exact count
+      // after two wall-clock sleeps that depends on thread-pool scheduling.
+      for (let sample = 0; sample < 10; sample++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(written).toBeGreaterThan(0);
+        expect(written).toBeLessThan(300);
+        expect(writer.worksheetBufferedBytes).toBeLessThan(256 * 1024);
+      }
     } finally {
       controller.abort(new Error('fixture cancellation'));
       writer.stop(controller.signal.reason);

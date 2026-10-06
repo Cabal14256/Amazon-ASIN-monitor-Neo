@@ -55,6 +55,7 @@ export const TASK_QUERY_QUEUES = [
   'variant-check',
 ] as const satisfies readonly QueueName[];
 const MONITOR_QUEUE_MAX_IN_FLIGHT = 50;
+class TaskQueryFileError extends Error {}
 export interface TaskQueryPort {
   store: Pick<RedisTaskRepository, 'read' | 'listUser' | 'mutate'>;
   findJob(taskId: string, taskType?: string): Promise<QueueTaskSnapshot | null>;
@@ -200,6 +201,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private connecting?: Promise<void>;
   private closed = false;
   private lastNotificationWarning = -Infinity;
+  private readonly exportFileOperations = new Map<string, Promise<unknown>>();
   constructor(
     @Inject(ENV) private readonly env: Env,
     @Inject(AppLogger) private readonly logger: AppLogger,
@@ -327,7 +329,47 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         }),
     };
   }
-  open(ensureOpen: () => void): TaskQueryPort {
+  private async exportFile<T>(
+    key: string,
+    operation: () => Promise<T>,
+    deadline: number,
+  ): Promise<T> {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0)
+      throw new TaskQueryFileError('TASK_QUERY_FILE_DEADLINE');
+    let pending = this.exportFileOperations.get(key) as Promise<T> | undefined;
+    if (!pending) {
+      if (this.exportFileOperations.size >= 8)
+        throw new TaskQueryFileError('TASK_QUERY_FILE_CAPACITY');
+      // Request expiry cannot cancel lstat/open/unlink in the kernel. Retain
+      // their budget until actual settlement, and share an in-flight same-key
+      // read so repeated requests cannot accumulate orphaned filesystem work.
+      const actual = Promise.resolve().then(operation);
+      pending = actual.finally(() => {
+        if (this.exportFileOperations.get(key) === pending)
+          this.exportFileOperations.delete(key);
+      });
+      this.exportFileOperations.set(key, pending);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new TaskQueryFileError('TASK_QUERY_FILE_DEADLINE')),
+            remaining,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  open(
+    ensureOpen: () => void,
+    deadline = performance.now() + 3000,
+  ): TaskQueryPort {
     const command = this.command(ensureOpen);
     return {
       store: this.createStore(ensureOpen),
@@ -343,10 +385,13 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ensureOpen();
         let proof: ExportRejectionIdentity | null;
         try {
-          proof = await this.exportArtifacts.readRejectedSubmission(
-            task.taskId,
+          proof = await this.exportFile(
+            `read:${task.taskId}`,
+            () => this.exportArtifacts.readRejectedSubmission(task.taskId),
+            deadline,
           );
-        } catch {
+        } catch (error) {
+          if (error instanceof TaskQueryFileError) throw error;
           this.logger.warn('导出拒绝回执读取暂不可用', 'TaskQueryRuntime', {
             reason: 'export_rejection_read_failed',
           });
@@ -366,13 +411,15 @@ export class TaskQueryRuntime implements OnModuleDestroy {
           proof,
         );
         if (next && ['failed', 'cancelled', 'completed'].includes(next.status))
-          await this.exportArtifacts
-            .discardRejectedSubmission(task.taskId)
-            .catch(() =>
-              this.logger.warn('导出拒绝回执清理暂不可用', 'TaskQueryRuntime', {
-                reason: 'export_rejection_cleanup_failed',
-              }),
-            );
+          await this.exportFile(
+            `discard:${task.taskId}`,
+            () => this.exportArtifacts.discardRejectedSubmission(task.taskId),
+            deadline,
+          ).catch(() =>
+            this.logger.warn('导出拒绝回执清理暂不可用', 'TaskQueryRuntime', {
+              reason: 'export_rejection_cleanup_failed',
+            }),
+          );
         return next;
       },
       findJob: async (id, type) => {

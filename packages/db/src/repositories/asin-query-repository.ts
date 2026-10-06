@@ -27,7 +27,10 @@ import { DrizzleRoleUnit, type RoleWriteUnit } from './role-repository';
 export const MAX_ASIN_QUERY_CHILDREN = 5000;
 export const MAX_ASIN_EXPORT_GROUP_PAGE_SIZE = 50;
 export const ASIN_EXPORT_QUERY_TIMEOUT_MS = 60_000;
-const ASIN_EXPORT_TRANSACTION_TIMEOUT_MS = 65_000;
+// SQL work has its own 60-second statement timeout. The read-only MVCC
+// snapshot also contains bounded compression/drain pauses, so its lifetime
+// follows the export task deadline rather than a shorter storage-speed cap.
+const ASIN_EXPORT_TRANSACTION_TIMEOUT_MS = 30 * 60_000;
 export interface AsinGroupQuery {
   keyword?: string;
   country?: string;

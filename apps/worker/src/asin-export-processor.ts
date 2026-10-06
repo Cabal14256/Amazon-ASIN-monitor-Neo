@@ -20,9 +20,8 @@ import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import type { WriteStream } from 'node:fs';
 import { finished } from 'node:stream/promises';
 import {
-  ASIN_EXPORT_HEADER,
-  ASIN_EXPORT_WIDTHS,
   asinExportFilename,
+  asinExportFormat,
   asinExportRows,
 } from './asin-export-rows';
 import { createBoundedExportWorkbook } from './bounded-export-workbook';
@@ -232,8 +231,9 @@ export function createAsinExportProcessor(
       );
       const workbook = boundedWorkbook.workbook;
       const sheet = workbook.addWorksheet('ASIN数据');
-      sheet.columns = ASIN_EXPORT_WIDTHS.map((width) => ({ width }));
-      sheet.addRow([...ASIN_EXPORT_HEADER]).commit();
+      const format = asinExportFormat(data.params.layout);
+      sheet.columns = format.widths.map((width) => ({ width }));
+      boundedWorkbook.commitRow(sheet, format.header);
       await boundedWorkbook.drain(controller.signal);
       let total = 0;
       let processed = 0;
@@ -250,7 +250,7 @@ export function createAsinExportProcessor(
         const appendRows = async (
           group: ReturnType<typeof mapAsinQueryGroups>[number],
         ) => {
-          for (const row of asinExportRows([group])) {
+          for (const row of asinExportRows([group], data.params.layout)) {
             if (++rowCount > MAX_ROWS)
               throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
             if (
@@ -259,7 +259,7 @@ export function createAsinExportProcessor(
               )
             )
               throw new ExportCapacityError('EXPORT_CELL_LIMIT_EXCEEDED');
-            sheet.addRow(row).commit();
+            boundedWorkbook!.commitRow(sheet, row);
             await boundedWorkbook!.drain(controller.signal);
             if (rowCount % 500 === 0) await snapshotCheck();
           }

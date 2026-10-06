@@ -34,6 +34,7 @@ describe('first Neo ASIN export contract', () => {
       { keyword: 'x'.repeat(201) },
       { country: 'US\n' },
       { variantStatus: 'UNKNOWN' },
+      { layout: 'unknown' },
       { unexpected: true },
     ])
       expect(
@@ -41,6 +42,28 @@ describe('first Neo ASIN export contract', () => {
           .success,
       ).toBe(false);
   });
+
+  it.each(['task', 'detailed'] as const)(
+    'retains the requested %s layout in the immutable job contract',
+    (layout) => {
+      const request = asinExportTaskRequestSchema.parse({
+        exportType: 'asin',
+        params: { layout },
+      });
+      expect(request.params).toEqual({ layout });
+      expect(
+        asinExportJobDataSchema.parse({
+          taskId,
+          taskType: 'export',
+          taskSubType: 'asin',
+          exportType: 'asin',
+          userId: 'owner',
+          createdAt: '2026-09-27T00:00:00.000Z',
+          params: request.params,
+        }).params,
+      ).toEqual({ layout });
+    },
+  );
 
   it('accepts only a task-owned relative artifact and immutable ASIN job data', () => {
     const job = {

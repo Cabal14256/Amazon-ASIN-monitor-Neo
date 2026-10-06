@@ -132,9 +132,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('g-dense','Dense','CA','amazon.ca','Fixture')",
       );
       await f.pools.primaryPool.query(`
-        INSERT INTO asins(id,asin,name,asin_type,country,site,brand,variant_group_id)
+        INSERT INTO asins(id,asin,name,asin_type,country,site,brand,variant_group_id,create_time)
         SELECT 'a-dense-' || n, 'D' || lpad(n::text, 9, '0'), 'Dense ' || n,
-          '1', 'CA', 'amazon.ca', 'Fixture', 'g-dense'
+          '1', 'CA', 'amazon.ca', 'Fixture', 'g-dense', '2026-09-27 00:00:00'::timestamp
         FROM generate_series(1,5001) AS n
       `);
       worker = await compiled().startAsinExportRuntime(env, () => fatal());
@@ -306,6 +306,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const book = new ExcelJS.Workbook();
       await book.xlsx.load(download.rawPayload);
       expect(book.worksheets[0].rowCount).toBe(5002);
+      expect(book.worksheets[0].getRow(1).cellCount).toBe(12);
+      expect(book.worksheets[0].getRow(2).getCell(11).value).toBeInstanceOf(
+        Date,
+      );
+      expect(book.worksheets[0].getRow(2).getCell(11).value).toEqual(
+        new Date('2026-09-26T16:00:00.000Z'),
+      );
       expect(fatal).not.toHaveBeenCalled();
     }, 45_000);
 
@@ -321,7 +328,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         method: 'POST',
         url: '/api/v1/tasks/export',
         headers: ownerHeaders,
-        payload: { exportType: 'asin', params: { country: 'US' } },
+        payload: {
+          exportType: 'asin',
+          params: { country: 'US', layout: 'detailed' },
+        },
       });
       expect(created.statusCode).toBe(200);
       const taskId = created.json().data.taskId as string;
@@ -374,6 +384,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ),
       ).toBe(true);
       expect(rows.some((row) => row[0] === 'Other')).toBe(false);
+      const broken = rows.find((row) => row[7] === 'B000000001')!;
+      expect(broken[13]).toEqual(new Date('2026-09-26T16:00:00.000Z'));
+      expect(broken[14]).toEqual(new Date('2026-09-27T01:02:03.000Z'));
       expect(
         (await readdir(directory)).filter((name) => name.endsWith('.part')),
       ).toEqual([]);

@@ -67,6 +67,7 @@ export const asinExportParamsSchema = z
     variantStatus: z
       .union([z.enum(['BROKEN', 'NORMAL']), z.literal('')])
       .optional(),
+    layout: z.enum(['task', 'detailed']).optional(),
   })
   .strict();
 export type AsinExportParams = z.infer<typeof asinExportParamsSchema>;
