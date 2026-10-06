@@ -144,4 +144,5 @@ export type CompetitorFeishuConfig = typeof competitorFeishuConfig.$inferSelect;
 export type NewCompetitorFeishuConfig =
   typeof competitorFeishuConfig.$inferInsert;
 
+export * from './scheduled-monitor';
 export { competitorVariantCheckReceipts } from './variant-check-receipts';

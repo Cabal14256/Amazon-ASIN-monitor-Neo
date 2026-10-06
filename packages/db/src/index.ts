@@ -17,6 +17,7 @@ export * from './domain/monitor-duration-groups';
 export * from './domain/monitor-history-filters';
 export * from './domain/monitor-history-query';
 export * from './domain/monitor-status-interval-query';
+export * from './domain/scheduled-monitor-policy';
 export * from './domain/variant-check';
 export * from './domain/variant-check-receipt';
 export * from './domain/variant-status';

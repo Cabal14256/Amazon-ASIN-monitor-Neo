@@ -26,6 +26,8 @@
     "db:upgrade:monitor-intervals": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-monitor-intervals.sh",
     "db:upgrade:notification-collation": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-notification-country-collation.sh",
     "db:upgrade:primary-monitor": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-primary-monitor.sh",
+    "db:upgrade:scheduled-monitor:competitor": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-scheduled-monitor.sh competitor",
+    "db:upgrade:scheduled-monitor:primary": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-scheduled-monitor.sh primary",
     "db:upgrade:timescale": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /docker-entrypoint-initdb.d/030-apply-timescale-aggregates.sh",
     "db:upgrade:timescale-storage": "docker compose --env-file .env.neo -f compose.neo.yml exec -e TIMESCALE_RETENTION_DAYS -T timescaledb sh /docker-entrypoint-initdb.d/040-apply-timescale-storage-policies.sh",
     "db:upgrade:variant-check-receipts": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-variant-check-receipts.sh",
