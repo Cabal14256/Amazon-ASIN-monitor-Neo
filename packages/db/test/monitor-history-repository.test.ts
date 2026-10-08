@@ -60,8 +60,9 @@ describe('monitor history SQL and complete materialization', () => {
     expect(params).toContain(`%${input}%`);
     expect(params).toContain(4);
     expect(params).toContain(8);
-    expect(config.text).toContain('WITH page_keys AS MATERIALIZED');
-    expect(config.text).toContain('CASE WHEN size_bound.bytes::numeric');
+    expect(config.text).toContain('WITH RECURSIVE page_keys AS MATERIALIZED');
+    expect(config.text).toContain('WHERE previous.bytes<=');
+    expect(config.text).toContain('CASE WHEN measured.bytes<=');
     expect(config.text).toContain('mh.check_time DESC,mh.id DESC');
     expect(config.text).toContain(
       "rtrim(mh.country) COLLATE public.neo_import_group_ci IN ('UK','DE','FR','IT','ES')",
@@ -74,15 +75,20 @@ describe('monitor history SQL and complete materialization', () => {
     });
     expect(f.ensureOpen).toHaveBeenCalledTimes(2);
   });
-  it('rejects an entire oversized result before reading records', async () => {
+  it('rejects an entire oversized result before reading records or its unnecessary count', async () => {
     const f = fixture();
     const records = vi.fn(() => {
       throw new Error('Oversized payload must not be read');
     });
+    const total = vi.fn(() => {
+      throw new Error('Oversized page needs no total');
+    });
     f.execute.mockResolvedValueOnce({
       rows: [
         {
-          total: '1',
+          get total() {
+            return total();
+          },
           bytes: String(MAX_MONITOR_HISTORY_RESPONSE_BYTES + 1),
           get records() {
             return records();
@@ -94,6 +100,22 @@ describe('monitor history SQL and complete materialization', () => {
       f.unit.listHistory({ current: 1, pageSize: 10 }),
     ).rejects.toMatchObject({ code: 'too-large' });
     expect(records).not.toHaveBeenCalled();
+    expect(total).not.toHaveBeenCalled();
+  });
+  it('keeps a complete result at the exact capacity boundary', async () => {
+    const f = fixture();
+    f.execute.mockResolvedValueOnce({
+      rows: [
+        {
+          total: '1',
+          bytes: String(MAX_MONITOR_HISTORY_RESPONSE_BYTES),
+          records: [f.row],
+        },
+      ],
+    });
+    const result = await f.unit.listHistory({ current: 1, pageSize: 1 });
+    expect(result.total).toBe(1);
+    expect(result.list[0].checkResult).toBe(f.row.check_result);
   });
   it('returns null for missing detail and rejects ambiguous composite IDs', async () => {
     const f = fixture();
