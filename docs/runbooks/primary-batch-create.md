@@ -36,6 +36,17 @@ root 已执行两个生产解析器的独立原生回归，Legacy `server/test/j
 
 两项回归也完成实际 RED→GREEN：临时将 Legacy 恢复为默认 `express.json()`、Neo 移除 `bodyLimit` 时，各自的合法请求均得到 413，两个测试分别因 expected 200 而失败；`finally` 精确恢复修复源码后，各自 **1 passed**。本机 Temp `neo-206-bootstrap-verification/*default-parser-red.log` 与 `*parser-green.log` 保存解析层红绿日志。
 
+## 2026-10-09 最新完整基线
+
+普通同步正式 `main` 的 `3df5a2a` 后，对本树的身份刷新修复和两个生产 JSON 解析器改动串行执行完整基线，19 步全部通过。使用 `NODE_OPTIONS=--max-old-space-size=1536`、单 worker 和 `--no-file-parallelism`；保持原测试期限与数据库 opt-in 规则，没有连接本机未知数据库。
+
+- `corepack pnpm test:contracts`、`npm --prefix server run test:unit`（62 passed）、`npm run setup`、`npm run build`：通过。setup 生成正常忽略的 Umi 文件，没有提交生成物或改动锁文件。
+- `corepack pnpm --filter contracts test`：213 passed；config：41 passed；db：914 passed / 231 条件跳过；api：1713 passed / 562 条件跳过；worker：250 passed / 41 条件跳过；web：1048 passed / 69 files / 0 skipped。各测试命令均串行运行；条件跳过不算实际数据库验收。
+- `corepack pnpm --filter web lint`、`corepack pnpm --filter web build`、`corepack pnpm build:api`、`corepack pnpm build:worker`、`corepack pnpm build:db`、根 `tsc --noEmit --pretty false`、Web source/test strict：通过。保留既有 500 kB chunk 告警，没有提高阈值。
+- `npm run test:changed-format`（5 passed）和 `git diff --check`：通过；新解析器测试及全部 API source 的 expanded strict `.cache/pr206-api-body-tests.tsconfig.json` 另行通过。该临时配置被忽略，不提交。
+
+19 步原生输出、命令、起止时间及退出码保存在 `%TEMP%/neo-206-full-verification/results.jsonl` 和逐命令日志。检查时 HEAD 为 P2 提交 `25207e2`，另有本轮七个 P1 解析器文件尚未提交；测试实际执行了这些工作树源码，不能把 HEAD 单独当作该轮源码快照。下方历史数字保留原验收含义，不替代这次完整结果。最新推送后的 CI、真实 MySQL/PostgreSQL Integration、Codex Review 和实际浏览器仍需独立核验。
+
 ## 自动验证（修复前历史记录）
 
 所有命令从该 managed worktree 根执行，仅使用根 `pnpm-lock.yaml`；未改变服务等待门槛或测试超时。2026-10-07 接续时重新检查现有 diff 与新增文件，并重跑下表注明的完整前端与根级检查；历史专项和 RED 探针单独标注，不冒充本轮重跑。
