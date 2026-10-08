@@ -1289,12 +1289,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             ]),
           ],
         );
-        await pool.query(
-          `INSERT INTO public.monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id)
-          SELECT asin_code,'US',is_broken,'ASIN',check_time,'map-order-site','map-order-brand','analytics-109-a'
-          FROM jsonb_to_recordset($1::jsonb) AS seed(asin_code text,check_time timestamp,is_broken boolean)`,
-          [JSON.stringify(rows)],
-        );
+        // Keep the real per-row interval-dirty trigger enabled. Separate
+        // statements let PostgreSQL prune repeated updates to the same key;
+        // one 15881-row statement retains every dirty-row version until end.
+        for (let offset = 0; offset < rows.length; offset += 500)
+          await pool.query(
+            `INSERT INTO public.monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id)
+            SELECT asin_code,'US',is_broken,'ASIN',check_time,'map-order-site','map-order-brand','analytics-109-a'
+            FROM jsonb_to_recordset($1::jsonb) AS seed(asin_code text,check_time timestamp,is_broken boolean)`,
+            [JSON.stringify(rows.slice(offset, offset + 500))],
+          );
         await refreshAll();
         for (const [operation, method] of [
           ['all-countries-summary', 'getAllCountriesSummary'],
@@ -1343,10 +1347,19 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code IN (?)",
           [codes],
         );
-        await pool.query(
-          "DELETE FROM public.monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code=ANY($1::text[])",
-          [codes],
-        );
+        let removed: number;
+        do {
+          const result = await pool.query(
+            `WITH selected AS (
+              SELECT id,check_time FROM public.monitor_history
+              WHERE variant_group_id='analytics-109-a' AND asin_code=ANY($1::text[])
+              ORDER BY id,check_time LIMIT 500
+            ) DELETE FROM public.monitor_history history USING selected
+              WHERE history.id=selected.id AND history.check_time=selected.check_time`,
+            [codes],
+          );
+          removed = result.rowCount ?? 0;
+        } while (removed === 500);
         await refreshAll();
       }
     }, 30_000);
