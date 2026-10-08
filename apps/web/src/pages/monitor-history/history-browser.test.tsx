@@ -45,11 +45,29 @@ function fixture() {
     total: 0,
     list: [],
   }));
-  const source = { ...HISTORY_SOURCES.primary, getList, getIntervals };
+  const source = {
+    ...HISTORY_SOURCES.primary,
+    getList,
+    getIntervals,
+    getStatistics: undefined,
+    getPeakHours: undefined,
+  };
+  const state = {
+    status: 'authenticated',
+    identity: {
+      user: { id: 'history-reader', status: 'ACTIVE' },
+      sessionId: 'history-session',
+      permissions: ['monitor:read'],
+      roles: [],
+    },
+  };
   render(
     <AuthContext.Provider
       value={{
-        identity: {} as never,
+        identity: {
+          getSnapshot: () => state,
+          subscribe: () => () => undefined,
+        } as never,
         announce: vi.fn(),
         runtime: { queryClient: client, http: { url: vi.fn() } } as never,
       }}
