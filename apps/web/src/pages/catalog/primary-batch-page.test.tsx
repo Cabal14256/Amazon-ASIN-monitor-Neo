@@ -112,6 +112,7 @@ function fixture(
   let readFailureStatus = 400;
   let postGate: ReturnType<typeof deferred<void>> | undefined;
   let readGate: ReturnType<typeof deferred<void>> | undefined;
+  let nextReadGate: ReturnType<typeof deferred<void>> | undefined;
   let receiptSerial = 0;
   let posted = false;
   let identityResponse: ReturnType<typeof deferred<Response>> | undefined;
@@ -186,6 +187,9 @@ function fixture(
       });
     }
     if (posted) {
+      const once = nextReadGate;
+      nextReadGate = undefined;
+      await once?.promise;
       if (readOwner === 'operator') await readGate?.promise;
       if (failReads && readOwner === 'operator')
         return jsonResponse(
@@ -318,6 +322,10 @@ function fixture(
     holdRead: () => {
       readGate = deferred<void>();
       return readGate;
+    },
+    holdNextRead: () => {
+      nextReadGate = deferred<void>();
+      return nextReadGate;
     },
     identity: async (
       id: string,
@@ -1522,6 +1530,334 @@ describe('actual primary batch-create catalog integration', () => {
       phase: 'inspection',
     });
   });
+
+  it.each(['invalid', '500', 'network'] as const)(
+    'recreates inspection for a %s batch when its durable guard disappears before GET-only recovery',
+    async (mode) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+        true,
+      );
+      f.mode(mode);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      const retry = await screen.findByRole('button', {
+        name: '重新读取目录',
+      });
+      const claim = JSON.parse(window.localStorage.getItem(guardKey)!);
+      expect(claim).toMatchObject({
+        phase: 'refresh',
+        createUncertain: true,
+        batchCreate: true,
+      });
+      window.localStorage.removeItem(guardKey);
+      expect(
+        f.runtime.queryClient.getQueryData([
+          'catalog-write-safety',
+          'operator',
+          'asin',
+        ]),
+      ).toEqual(claim);
+      const readsBefore = f.fetcher.mock.calls.length;
+      fireEvent.click(retry);
+      await screen.findByRole('button', {
+        name: '已核实原操作，重读目录并恢复写入',
+      });
+      expect(JSON.parse(window.localStorage.getItem(guardKey)!)).toEqual({
+        phase: 'inspection',
+        operationId: claim.operationId,
+      });
+      expect(
+        screen.queryByRole('button', { name: '批量添加 ASIN' }),
+      ).toBeNull();
+      expect(f.fetcher.mock.calls.length).toBeGreaterThan(readsBefore);
+      expect(
+        f.fetcher.mock.calls
+          .slice(readsBefore)
+          .every(([, options]) => options?.method === 'GET'),
+      ).toBe(true);
+      expect(f.posts()).toHaveLength(1);
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: '已核实原操作，重读目录并恢复写入',
+        }),
+      );
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      await screen.findByRole('button', { name: '新建变体组' });
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    { stage: 'queued', change: 'owner' },
+    { stage: 'queued', change: 'session' },
+    { stage: 'queued', change: 'revision' },
+    { stage: 'held-GET', change: 'owner' },
+    { stage: 'held-GET', change: 'session' },
+    { stage: 'held-GET', change: 'revision' },
+  ] as const)(
+    'keeps a reconstructed inspection intact after $stage recovery crosses a real $change boundary',
+    async ({ stage, change }) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+        true,
+      );
+      f.mode('network');
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      const retry = await screen.findByRole('button', {
+        name: '重新读取目录',
+      });
+      window.localStorage.removeItem(guardKey);
+      fireEvent.click(retry);
+      const inspect = await screen.findByRole('button', {
+        name: '已核实原操作，重读目录并恢复写入',
+      });
+      const original = window.localStorage.getItem(guardKey);
+      expect(JSON.parse(original!)).toMatchObject({ phase: 'inspection' });
+      await waitFor(() => expect(f.runtime.queryClient.isFetching()).toBe(0));
+      const key = f.runtime.queryClient
+        .getQueryCache()
+        .getAll()
+        .find(
+          (entry) =>
+            entry.queryKey[0] === 'asin' && entry.queryKey[1] === 'groups',
+        )!.queryKey;
+      const catalogReads = () =>
+        f.fetcher.mock.calls.filter(
+          ([input, options]) =>
+            options?.method === 'GET' &&
+            !String(input).endsWith('/auth/current-user'),
+        ).length;
+      const release = deferred<void>();
+      const lock = vi.fn(async (_name: string, work: () => unknown) => {
+        if (stage === 'queued') await release.promise;
+        return work();
+      });
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: { request: lock },
+      });
+      const heldRead = stage === 'held-GET' ? f.holdNextRead() : undefined;
+      const before = catalogReads();
+      fireEvent.click(inspect);
+      await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+      if (heldRead)
+        await waitFor(() => expect(catalogReads()).toBeGreaterThan(before));
+
+      const nextOwner = change === 'owner' ? 'other' : 'operator';
+      const peerKey = catalogSafetyKey(nextOwner, 'asin');
+      const peer = { phase: 'inspection', operationId: 'new-actor-inspection' };
+      if (change === 'revision') {
+        f.runtime.session.refreshHints();
+      } else {
+        const response = f.holdIdentityResponse();
+        let verification = Promise.resolve(f.identityStore.getSnapshot());
+        act(() => {
+          verification = f.identityStore.refresh();
+        });
+        await screen.findByText('正在验证登录状态…');
+        if (change === 'owner')
+          window.localStorage.setItem(peerKey, JSON.stringify(peer));
+        const nextSession = change === 'session' ? 'session-2' : 'session-1';
+        await f.identity(nextOwner, ['asin:read', 'asin:write'], nextSession);
+        await act(async () => {
+          response.resolve(
+            jsonResponse({
+              success: true,
+              data: f.verifiedIdentity(nextOwner, nextSession),
+            }),
+          );
+          await verification;
+        });
+        await screen.findByRole('button', {
+          name: '已核实原操作，重读目录并恢复写入',
+        });
+        await screen.findAllByText(
+          change === 'owner' ? 'Other fixture' : 'Primary fixture',
+        );
+        await waitFor(() => expect(f.runtime.queryClient.isFetching()).toBe(0));
+      }
+      const replacement = {
+        list: [{ ...f.group, name: 'Replacement scope cache' }],
+        total: 1,
+        totalASINs: 0,
+        current: 1,
+        pageSize: 10,
+      };
+      await act(async () => {
+        f.runtime.queryClient.setQueryData(key, replacement);
+      });
+      const readsAfterChange = catalogReads();
+      await act(async () => {
+        release.resolve();
+        heldRead?.resolve();
+        await Promise.allSettled(
+          lock.mock.results.map((result) => result.value),
+        );
+      });
+      expect(catalogReads()).toBe(readsAfterChange);
+      expect(f.runtime.queryClient.getQueryData(key)).toEqual(replacement);
+      expect(window.localStorage.getItem(guardKey)).toBe(original);
+      if (change === 'owner')
+        expect(window.localStorage.getItem(peerKey)).toBe(JSON.stringify(peer));
+      expect(
+        screen.queryByText('目录已重新读取，请仅在确认原新建记录后继续写入。'),
+      ).toBeNull();
+      expect(screen.queryByRole('button', { name: '新建变体组' })).toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+
+  it('keeps cached uncertainty when a storage event reports a missing batch guard', async () => {
+    const f = fixture(
+      '/api/',
+      ['asin:read', 'asin:write'],
+      false,
+      'group-1',
+      true,
+      true,
+    );
+    f.mode('network');
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    await screen.findByRole('button', { name: '重新读取目录' });
+    const claim = JSON.parse(window.localStorage.getItem(guardKey)!);
+    window.localStorage.removeItem(guardKey);
+    await act(async () => {
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: guardKey,
+          storageArea: window.localStorage,
+          newValue: null,
+        }),
+      );
+      await Promise.allSettled(
+        f.fetcher.mock.results.map((result) => result.value),
+      );
+    });
+    expect(
+      f.runtime.queryClient.getQueryData([
+        'catalog-write-safety',
+        'operator',
+        'asin',
+      ]),
+    ).toEqual(claim);
+    expect(screen.getByRole('button', { name: '重新读取目录' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '批量添加 ASIN' })).toBeNull();
+    expect(f.posts()).toHaveLength(1);
+  });
+
+  it('preserves a peer inspection installed while a missing uncertain guard is being reread', async () => {
+    const f = fixture(
+      '/api/',
+      ['asin:read', 'asin:write'],
+      false,
+      'group-1',
+      true,
+      true,
+    );
+    f.mode('network');
+    await openBatch();
+    fireEvent.submit(fillBatch());
+    const retry = await screen.findByRole('button', {
+      name: '重新读取目录',
+    });
+    window.localStorage.removeItem(guardKey);
+    const reads = f.holdRead();
+    const before = f.fetcher.mock.calls.length;
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(f.fetcher.mock.calls.length).toBeGreaterThan(before),
+    );
+    const peer = { phase: 'inspection', operationId: 'peer-inspection' };
+    window.localStorage.setItem(guardKey, JSON.stringify(peer));
+    await act(async () => reads.resolve());
+    await screen.findByRole('button', {
+      name: '已核实原操作，重读目录并恢复写入',
+    });
+    expect(window.localStorage.getItem(guardKey)).toBe(JSON.stringify(peer));
+    expect(
+      f.runtime.queryClient.getQueryData([
+        'catalog-write-safety',
+        'operator',
+        'asin',
+      ]),
+    ).toEqual(peer);
+    expect(f.posts()).toHaveLength(1);
+  });
+
+  it.each(['owner', 'session'] as const)(
+    'does not rebuild a missing uncertain guard after a real %s change while waiting for its lock',
+    async (change) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+        true,
+      );
+      f.mode('network');
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      const retry = await screen.findByRole('button', {
+        name: '重新读取目录',
+      });
+      window.localStorage.removeItem(guardKey);
+      const release = deferred<void>();
+      const locks = vi.fn(async (_name: string, work: () => unknown) => {
+        await release.promise;
+        return work();
+      });
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: { request: locks },
+      });
+      fireEvent.click(retry);
+      await waitFor(() => expect(locks).toHaveBeenCalledTimes(1));
+      const response = f.holdIdentityResponse();
+      let verification = Promise.resolve(f.identityStore.getSnapshot());
+      act(() => {
+        verification = f.identityStore.refresh();
+      });
+      await screen.findByText('正在验证登录状态…');
+      const nextOwner = change === 'owner' ? 'other' : 'operator';
+      const peerKey = catalogSafetyKey(nextOwner, 'asin');
+      const peer = { phase: 'inspection', operationId: 'replacement-scope' };
+      window.localStorage.setItem(peerKey, JSON.stringify(peer));
+      await act(async () => {
+        response.resolve(
+          jsonResponse({
+            success: true,
+            data: f.verifiedIdentity(
+              nextOwner,
+              change === 'session' ? 'session-2' : 'session-1',
+            ),
+          }),
+        );
+        await verification;
+        release.resolve();
+        await Promise.allSettled(
+          locks.mock.results.map((result) => result.value),
+        );
+      });
+      expect(window.localStorage.getItem(peerKey)).toBe(JSON.stringify(peer));
+      if (change === 'owner')
+        expect(window.localStorage.getItem(guardKey)).toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
 
   it('protects one pending POST against repeated native submits and disabled close', async () => {
     const f = fixture();

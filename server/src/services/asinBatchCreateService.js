@@ -6,6 +6,7 @@ const CompetitorVariantGroup = require('../models/CompetitorVariantGroup');
 const logger = require('../utils/logger');
 
 const DEFAULT_CHUNK_SIZE = 100;
+const MAX_ASIN_BATCH_CREATE_ITEMS = 1000;
 const ASIN_CODE_PATTERN = /^[A-Z0-9]{10}$/;
 const MAX_READABLE_GROUP_CHILDREN = 5000;
 
@@ -518,6 +519,7 @@ async function batchCreateASINs({
 }
 
 module.exports = {
+  MAX_ASIN_BATCH_CREATE_ITEMS,
   batchCreateASINs,
   getAsinBatchCreateChunkSize: getChunkSize,
 };

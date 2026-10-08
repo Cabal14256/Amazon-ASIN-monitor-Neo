@@ -960,7 +960,7 @@ export function CatalogPage({
   }).data;
   const setSafety = (
     next: CatalogSafetyGate | null,
-    expected?: CatalogSafetyGate,
+    expected?: CatalogSafetyGate | null,
   ): boolean => {
     const stored = catalogSafetyStorage();
     if (!stored) {
@@ -974,7 +974,10 @@ export function CatalogPage({
     const current = stored
       ? readCatalogSafetyGate(stored, ownerId, config.id)
       : null;
-    if (expected && JSON.stringify(current) !== JSON.stringify(expected)) {
+    if (
+      expected !== undefined &&
+      JSON.stringify(current) !== JSON.stringify(expected)
+    ) {
       runtime.queryClient.setQueryData(
         safetyKey,
         current ?? { phase: 'inspection' },
@@ -1260,6 +1263,12 @@ export function CatalogPage({
         runtime.queryClient.setQueryData(safetyKey, null);
         return;
       }
+      if (
+        currentSafety.phase === 'refresh' &&
+        currentSafety.batchCreate &&
+        currentSafety.createUncertain
+      )
+        return;
       void (async () => {
         try {
           await clearCatalogCache();
@@ -2046,26 +2055,24 @@ export function CatalogPage({
     const { message, detailId, createUncertain } = safety;
     const targetQuery = narrow ? { ...query, current: 1, pageSize: 1 } : query;
     const recoveryRevision = runtime.session.revision;
-    const guardRecovery = safety.batchCreate
-      ? () => {
-          const currentIdentity = identity.getSnapshot();
-          if (
-            !mounted.current ||
-            runtime.session.revision !== recoveryRevision ||
-            currentIdentity.status !== 'authenticated' ||
-            JSON.stringify([
-              config.id,
-              currentIdentity.identity.user.id,
-              currentIdentity.identity.sessionId ?? null,
-            ]) !== batchOwner ||
-            !createAccess(currentIdentity.identity).canReadASIN ||
-            (guardedBatchResult?.recoveredFromOwner &&
-              (!createAccess(currentIdentity.identity).canWriteASIN ||
-                createAccess(currentIdentity.identity).mustChangePassword))
-          )
-            throw new ApiError('CANCELLED', '身份、权限或页面已变化');
-        }
-      : undefined;
+    const guardRecovery = () => {
+      const currentIdentity = identity.getSnapshot();
+      if (
+        !mounted.current ||
+        runtime.session.revision !== recoveryRevision ||
+        currentIdentity.status !== 'authenticated' ||
+        JSON.stringify([
+          config.id,
+          currentIdentity.identity.user.id,
+          currentIdentity.identity.sessionId ?? null,
+        ]) !== batchOwner ||
+        !createAccess(currentIdentity.identity).canReadASIN ||
+        (guardedBatchResult?.recoveredFromOwner &&
+          (!createAccess(currentIdentity.identity).canWriteASIN ||
+            createAccess(currentIdentity.identity).mustChangePassword))
+      )
+        throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+    };
     let refreshed = false;
     try {
       await runWithCatalogLock(async () => {
@@ -2125,8 +2132,15 @@ export function CatalogPage({
           await readAfterWrite(detailId, guardRecovery, targetQuery);
           guardRecovery?.();
           const latest = readCatalogSafetyGate(stored, ownerId, config.id);
-          runtime.queryClient.setQueryData(safetyKey, latest);
-          refreshed = !latest;
+          if (!latest && createUncertain) {
+            refreshed = setSafety(
+              { phase: 'inspection', operationId: safety.operationId },
+              null,
+            );
+          } else {
+            runtime.queryClient.setQueryData(safetyKey, latest);
+            refreshed = !latest;
+          }
           return;
         }
         if (JSON.stringify(current) !== JSON.stringify(safety)) {
@@ -2168,9 +2182,27 @@ export function CatalogPage({
 
   async function reconcileCreate() {
     if (safety?.phase !== 'inspection') return;
+    const recoveryRevision = runtime.session.revision;
+    const guard = () => {
+      const currentIdentity = identity.getSnapshot();
+      if (
+        !mounted.current ||
+        runtime.session.revision !== recoveryRevision ||
+        currentIdentity.status !== 'authenticated' ||
+        JSON.stringify([
+          config.id,
+          currentIdentity.identity.user.id,
+          currentIdentity.identity.sessionId ?? null,
+        ]) !== batchOwner ||
+        !createAccess(currentIdentity.identity).canReadASIN
+      )
+        throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+    };
     let reconciled = false;
     try {
+      guard();
       await runWithCatalogLock(async () => {
+        guard();
         const stored = catalogSafetyStorage();
         const current = stored
           ? readCatalogSafetyGate(stored, ownerId, config.id)
@@ -2180,22 +2212,32 @@ export function CatalogPage({
           return;
         }
         if (!current) {
-          await readAfterWrite(null);
+          await readAfterWrite(null, guard);
+          guard();
           const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+          guard();
           runtime.queryClient.setQueryData(safetyKey, latest);
           reconciled = !latest;
           return;
         }
         if (JSON.stringify(current) !== JSON.stringify(safety)) {
+          guard();
           runtime.queryClient.setQueryData(safetyKey, current);
           return;
         }
-        await readAfterWrite(null);
+        await readAfterWrite(null, guard);
+        guard();
         reconciled = setSafety(null, safety);
       });
+      guard();
       if (!reconciled) return;
       setNotice('目录已重新读取，请仅在确认原新建记录后继续写入。');
     } catch (cause) {
+      try {
+        guard();
+      } catch {
+        return;
+      }
       if (catalogAccessDenied(cause)) reportAccessDenied();
       else setNotice('目录重读失败，写入仍暂停，请稍后重试。');
     }

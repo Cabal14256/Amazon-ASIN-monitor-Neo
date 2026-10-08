@@ -69,6 +69,21 @@ root 已执行两个生产解析器的独立原生回归，Legacy `server/test/j
 
 ## 红绿与竞态证据
 
+### 1,000 行 HTTP 上限与未知结果保护丢失（评论 4222333551 / 4222333577）
+
+Legacy JSON parser 继续接受原生 UTF-8 的合法 1,000 行最大字段请求，并保留 4 MiB 总字节边界；主营与竞品两个 HTTP 控制器在进入规范化或数据库事务前拒绝超过 1,000 行的 `items`，返回原 v1 400 envelope。上限只作用于 HTTP 批量创建入口，共用的文件导入 service 仍按原分块语义执行，不新增导入行数限制。
+
+目录缓存仍记录未知批量创建结果而本地 gate 被清除时，storage event 不再根据一次 GET 自动解除该保护。用户发起 GET-only 重读后，在原 owner 的 Web Lock 内重新核对身份、session 与页面作用域；只有持久 gate 仍为空才按精确空值比较重建同一 operation 的 inspection。读期间出现的 peer gate 优先保留，排队期间身份变化不写旧 scope。仍须点击原显式核实按钮，再读目录后才能恢复写入，没有补发 POST。显式 inspection 恢复也在锁前、锁内、每个 GET await 后及缓存、gate、提示更新前校验 mounted、runtime revision 与已验证 owner/domain/session/read 权；失效的 catch 不更改当前会话。保留既有 inspection 与其它创建操作在 peer 清理后成功重读目录的同步语义。
+
+- 保存四个原生产文件的字节与 SHA256 后，在尚未改动的原源码执行真实 RED：实际 Express parser + 两个原控制器 + 实际批量 service（仅替换 SQL/UUID transport）两个用例 **2 failed**，均因 1,001 行返回 200 而非 400；原合法 1,000 行 UTF-8/4 MiB parser 用例 **1 passed**。修复后完整文件 **3 passed / 0 skipped**，另外验证 10,000 行拒绝、两种超限都没有 UUID/事务/SQL/插入，以及合法 1,000 行的完整成功回执。
+- 真实 IdentityStore/RouteGate 的 mounted RED 为 **4 failed / 3 peer/identity 对照 passed**；77 项只因名称筛选跳过。失败覆盖无效回执、500、网络断开后 gate 丢失，以及收到 missing-key storage event 后缓存被清空。修复后三个完整受影响文件 **137 passed / 0 skipped**（页面 84、存储 46、订阅生命周期 7），保留原所有逐行回执、GET-only、身份、peer 与 120 秒真实 HTTP timeout oracle，没有提高原测试期限。
+- 首次完整 Web 复核为 **1,053 passed / 2 failed**，发现新增 cache 保留范围影响原竞品非 batch 与 inspection 的 peer 清理后自动 GET 语义；保留原两个断言，将保留逻辑收窄为 `refresh + batchCreate + createUncertain` 后，四个完整相关文件 **167 passed / 0 skipped**，完整 Web **1,055 passed / 69 files / 0 skipped**，Web build 通过。
+- 新重建的 inspection 后续显式核实也属于恢复闭环。新增六个实际 IdentityStore/RouteGate 场景从 missing gate 经 GET 重建 inspection 后，再排队或等待单个显式 GET，并切换 owner、session 或实际 `SessionStore.revision`。用保存的无 inspection guard 源真实重跑 RED 为 **4 failed / 2 传输层取消保护对照 passed**，84 项仅名称筛选 skipped：三个排队场景多发 GET，held revision 的迟到结果覆盖新缓存；held owner/session 已由真实 runtime `clearUserWork → Http.cancelAll` 保护。夹具只等待该单个显式 GET，并等新会话正常目录读取落定，不把新会话正常查询混作旧请求。`finally` 按字节恢复修复源并核对 SHA256 后，六项与三个稳定身份显式解除对照全部 GREEN；四个完整相关文件 **173 passed / 0 skipped**（页面 90、存储 46、生命周期 7、原竞品页面 30）。日志位于 Temp `neo-206-round2-inspection-red/`。
+- inspection guard 最终源码的完整 Web 为 **1,061 passed / 69 files / 0 skipped**；Web strict（原生 `include: src` 覆盖全部产品和新增测试）、完整 lint 零警告、Web build、完整 Legacy unit **64 passed / 0 skipped**、URL 请求/导出/下载去重 **3 passed**、changed-format 脚本 **5 passed** 均通过。最终相关日志位于上述 inspection 目录；本轮仅文档记录追加后执行显式七文件 Prettier 检查及 `git diff --check`。没有重复未改动的 Contracts/Config/DB/API/Worker 全套与 Legacy 前端构建、根 tsc；保留既有完整 19 步基线及原 head 真 CI 证据，新增修复的实际 CI/Integration 仍须发布后重新确认。真实数据库与实际浏览器结论没有因 mounted/transport 通过而改变。
+- 最初 Legacy HTTP 与未知批量 cache 两组 RED 的日志和原源 manifest 位于本机 Temp `neo-206-round2-red-source/`；这两组在首次编辑四个生产文件之前执行，原四文件 SHA256 均匹配。后续 inspection RED 使用前条的无 inspection guard 源快照、SHA256 与 `finally` 字节恢复证明。没有把 transport fixture、mounted 页面或名称筛选 skip 当作真实数据库、实际浏览器或完整基线证据。
+
+### 既有输入、回执与权限竞态
+
 - 暂时使用原主线 CatalogPage 源，实际挂载“全成功”用例因不存在批量入口而 1 failed / 21 名称筛选 skipped；随后 `finally` 恢复新源。日志位于本机 Temp `neo-193-red-old-entry.log`。
 - 暂时恢复表单的 `site.trim()/brand.trim()/name.trim()`，两个 base 的原空格/astral 容量真实请求用例 2 failed / 20 名称筛选 skipped；`finally` 恢复原值提交。日志 `neo-193-red-field-trim.log`。
 - 暂时移除新增 `afterWrite` catch guard，旧 owner 的迟到 403 与同 session 撤权恢复的迟到 403 两例 2 failed / 27 名称筛选 skipped；`finally` 恢复 guard。日志 `neo-193-red-late-403.log`。
@@ -117,6 +132,6 @@ root 已执行两个生产解析器的独立原生回归，Legacy `server/test/j
 
 ## 范围、风险与回滚
 
-本次仅一个主营批量创建闭环，包含输入解析、表单/结果/协调器、operation-bound 收据存储、Neo/Legacy 字面父组与事务容量保护、实际挂载和隔离 SQL 夹具及文档；文件数与变更行数超过警戒线。创建入口、两端容量与恢复、逐行回执保护必须作为同一次写入闭环验收，不能拆成缺少持久核验或会丢失部分成功结果的可发布入口。没有竞品批量、批量删除/检查、图表、数据库 schema 或生产切换。
+本次仅一个主营批量创建闭环，包含输入解析、表单/结果/协调器、operation-bound 收据存储、Neo/Legacy 字面父组与事务容量保护、实际挂载和隔离 SQL 夹具及文档；文件数与变更行数超过警戒线。创建入口、两端容量与恢复、逐行回执保护必须作为同一次写入闭环验收，不能拆成缺少持久核验或会丢失部分成功结果的可发布入口。两个既有 Legacy HTTP 批量创建入口保持相同 1,000 行上限，没有新增竞品批量入口、批量删除/检查、图表、数据库 schema 或生产切换。
 
 回滚普通 PR 提交即可恢复既有单项入口，已创建数据不会自动删除。共享 claim 使用已有 schema，已尝试但未知的写入仍须在目录中显式核实；用户应在确认回执/目录后再决定是否另外添加失败项。风险集中在权限/身份切换和 POST 后读失败，实际挂载竞态测试及浏览器 wire 应共同核对。
