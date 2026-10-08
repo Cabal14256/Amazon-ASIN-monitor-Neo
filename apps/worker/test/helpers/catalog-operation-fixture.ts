@@ -57,9 +57,18 @@ export async function withCatalogFixtureTask<T>(
   work: () => Promise<T>,
 ): Promise<T> {
   const repository = new PgCatalogOperationRepository(pool);
+  // Job payloads structurally include this binding plus consumer-specific data.
+  // The production repository deliberately rejects those extra payload keys.
+  const binding = parseCatalogTaskBinding({
+    taskId: task.taskId,
+    userId: task.userId,
+    taskType: task.taskType,
+    taskSubType: task.taskSubType,
+    createdAt: task.createdAt,
+  });
   return withCatalogOperationExecution(
     repository,
-    await repository.findByTask(task),
+    await repository.findByTask(binding),
     work,
   );
 }
