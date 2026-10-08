@@ -1,0 +1,1132 @@
+import type { ScheduledMonitorJob } from '@asin-monitor/contracts';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import type { Pool, PoolClient } from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createPgPool } from '../src/client';
+import {
+  scheduledMonitorBatchIndex,
+  scheduledMonitorGroupBatch,
+  scheduledMonitorJobDigest,
+} from '../src/domain/scheduled-monitor-policy';
+import {
+  scheduledMonitorGroupOperation,
+  type ScheduledMonitorRun,
+} from '../src/domain/scheduled-monitor-run';
+import { PgScheduledMonitorRunRepository } from '../src/repositories/scheduled-monitor-run-repository';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from './helpers/scheduled-monitor-fixtures';
+
+// Explicit isolated-service opt-in. No deployment dotenv or live table writes.
+const suite =
+  process.env.RUN_NEO_SCHEDULED_MONITOR_INTEGRATION === '1'
+    ? describe
+    : describe.skip;
+const databases = new Map<string, string>();
+suite.each(['primary', 'competitor'] as const)(
+  '%s scheduled frozen run real PostgreSQL',
+  (domain) => {
+    const schema = `neo_scheduled_run_${domain}_${process.pid}_${randomUUID()
+      .replaceAll('-', '')
+      .slice(0, 8)}`;
+    if (
+      !/^neo_scheduled_run_(primary|competitor)_\d+_[a-f0-9]{8}$/.test(schema)
+    )
+      throw new Error('Invalid private fixture schema');
+    const qualified = `"${schema}"`;
+    const groupTable =
+      domain === 'primary' ? 'variant_groups' : 'competitor_variant_groups';
+    const memberTable = domain === 'primary' ? 'asins' : 'competitor_asins';
+    const runTable = `${domain}_scheduled_monitor_runs`;
+    const receiptTable = `${domain}_scheduled_monitor_group_receipts`;
+    let pool: Pool | undefined,
+      repository: PgScheduledMonitorRunRepository | undefined,
+      created = false;
+    const connection = () => {
+      if (!pool) throw new Error('Fixture pool not connected');
+      return pool;
+    };
+    const storage = () => {
+      if (!repository) throw new Error('Fixture repository not ready');
+      return repository;
+    };
+    const waitFor = async (probe: () => Promise<boolean>) => {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        if (await probe()) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(
+        'Fixture did not observe the required PostgreSQL lock wait',
+      );
+    };
+    const settled = <T>(promise: Promise<T>) =>
+      promise.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    const nowJob = async (
+      ageMinutes = 0,
+      totalBatches = 1,
+    ): Promise<ScheduledMonitorJob> => {
+      const rows = await connection().query<{ now: Date }>(
+        'SELECT clock_timestamp() AS now',
+      );
+      const requested = new Date(
+        rows.rows[0].now.getTime() - ageMinutes * 60000,
+      );
+      const plannedSlot = new Date(
+        Math.floor(requested.getTime() / 60000) * 60000,
+      ).toISOString();
+      return scheduledJob(domain, {
+        plannedSlot,
+        requestedAt: requested.toISOString(),
+        createdAt: requested.toISOString(),
+        expiresAt: new Date(
+          requested.getTime() + 7 * 24 * 60 * 60000,
+        ).toISOString(),
+        batchConfig: {
+          batchIndex: scheduledMonitorBatchIndex(
+            Date.parse(plannedSlot),
+            30,
+            totalBatches,
+          ),
+          totalBatches,
+        },
+      });
+    };
+    const insertRows = async (
+      table: string,
+      rows: Record<string, unknown>[],
+    ) => {
+      if (![groupTable, memberTable].includes(table))
+        throw new Error('Invalid fixture table');
+      await connection().query(
+        `INSERT INTO ${qualified}."${table}" SELECT * FROM jsonb_populate_recordset(NULL::${qualified}."${table}",$1::jsonb)`,
+        [JSON.stringify(rows)],
+      );
+    };
+    const insertReceipt = async (
+      run: ScheduledMonitorRun,
+      changes: Record<string, unknown> = {},
+      ordinal = 0,
+      raw?: string,
+      writer?: PoolClient,
+    ) => {
+      const group = run.groups[ordinal];
+      const operation = scheduledMonitorGroupOperation(run.job, group);
+      const result = {
+        isBroken: false,
+        brokenASINs: [],
+        brokenByType: { SP_API_ERROR: 0, NOT_FOUND: 0, NO_VARIANTS: 0 },
+        groupSnapshot: {
+          id: group.group.id,
+          name: group.group.name,
+          country: group.country,
+          children: group.members.map((member) => ({
+            id: member.id,
+            asin: member.asin,
+          })),
+        },
+        details: {
+          results: group.members.map((member) => ({
+            asin: member.asin,
+            hasVariants: true,
+            variantCount: 2,
+          })),
+        },
+        ...(raw === undefined ? {} : { raw }),
+      };
+      const row = {
+        ...Object.fromEntries(
+          Object.entries(operation).map(([key, value]) => [
+            key.replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`),
+            value,
+          ]),
+        ),
+        result: JSON.stringify(result),
+        ...changes,
+      };
+      const columns = Object.keys(row);
+      if (columns.some((column) => !/^[a-z_]+$/.test(column)))
+        throw new Error('Invalid receipt fixture field');
+      // A writer holding the run's FOR UPDATE lock must insert its FK receipt
+      // on this same connection, rather than waiting on itself through the pool.
+      await (writer ?? connection()).query(
+        `INSERT INTO ${qualified}."${receiptTable}" (${columns.join(
+          ',',
+        )}) VALUES (${columns.map((_, index) => `$${index + 1}`).join(',')})`,
+        Object.values(row),
+      );
+    };
+    const summary = (run: ScheduledMonitorRun) => ({
+      version: 1,
+      totalGroups: run.groups.length,
+      totalMembers: run.totalMembers,
+      brokenGroups: 0,
+      brokenMembers: 0,
+    });
+    // Observe the rows actually returned by PostgreSQL, never replace SQL data
+    // with fixtures or retain payloads in the observer. All connections still
+    // use the suite's private schema and the real transaction implementation.
+    const observeReceiptTransport = (timeoutOnSecondPage = false) => {
+      const pages: { after: number; rows: number; ordinal: unknown }[] = [];
+      const counts: unknown[] = [];
+      const statements: string[] = [];
+      let completions = 0;
+      const observedPool = new Proxy(connection(), {
+        get(target, property) {
+          if (property === 'connect')
+            return async () => {
+              const client = await target.connect();
+              return new Proxy(client, {
+                get(borrowed, member) {
+                  if (member === 'query')
+                    return async (text: string, values?: unknown[]) => {
+                      const receiptSelect =
+                        text.startsWith('SELECT *') &&
+                        text.includes(`."${receiptTable}"`);
+                      statements.push(text);
+                      // Execute a genuinely slow PostgreSQL statement on the
+                      // second page; only the fixture adds pg_sleep. Production
+                      // limits and SQL remain unchanged, and 57014 is real.
+                      const sql =
+                        timeoutOnSecondPage &&
+                        receiptSelect &&
+                        values?.[1] === 0
+                          ? `WITH pause AS MATERIALIZED (SELECT pg_sleep(0.2)) SELECT receipt.* FROM (${text}) AS receipt CROSS JOIN pause`
+                          : text;
+                      const result = await borrowed.query(sql, values);
+                      if (receiptSelect)
+                        pages.push({
+                          after: Number(values?.[1]),
+                          rows: result.rows.length,
+                          ordinal: result.rows[0]?.ordinal,
+                        });
+                      if (text.includes('AS receipt_count'))
+                        counts.push(result.rows[0]?.receipt_count);
+                      if (text.includes("SET state='business-completed'"))
+                        completions++;
+                      return result;
+                    };
+                  const value = Reflect.get(borrowed, member, borrowed);
+                  return typeof value === 'function'
+                    ? value.bind(borrowed)
+                    : value;
+                },
+              });
+            };
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const observed = new PgScheduledMonitorRunRepository(
+        observedPool,
+        domain,
+        {
+          schema,
+          ...(timeoutOnSecondPage
+            ? { durationMs: 1000, statementTimeoutMs: 100 }
+            : {}),
+        },
+      );
+      return {
+        repository: observed,
+        pages,
+        counts,
+        statements,
+        get completions() {
+          return completions;
+        },
+      };
+    };
+    beforeAll(async () => {
+      const variable =
+        domain === 'primary' ? 'DATABASE_URL' : 'COMPETITOR_DATABASE_URL';
+      const url = process.env[variable];
+      if (!url)
+        throw new Error(`Scheduled snapshot fixture requires ${variable}`);
+      pool = createPgPool(url, {
+        max: 4,
+        connectionTimeoutMillis: 5000,
+        idleTimeoutMillis: 1000,
+      });
+      const database = await pool.query<{ name: string }>(
+        'SELECT current_database() AS name',
+      );
+      databases.set(domain, database.rows[0].name);
+      if (databases.size === 2)
+        expect(databases.get('primary')).not.toBe(databases.get('competitor'));
+      await pool.query(`CREATE SCHEMA ${qualified}`);
+      created = true;
+      const columns = (row: Record<string, unknown>) =>
+        Object.entries(row)
+          .map(([key, value]) => {
+            if (!/^[a-z_]+$/.test(key))
+              throw new Error('Invalid catalog fixture field');
+            const type =
+              key === 'id'
+                ? 'varchar(50) PRIMARY KEY'
+                : key.endsWith('_time') || key.endsWith('_at')
+                ? 'timestamp(6) without time zone'
+                : typeof value === 'boolean'
+                ? 'boolean'
+                : 'text';
+            return `"${key}" ${type}`;
+          })
+          .join(',');
+      await pool.query(
+        `CREATE TABLE ${qualified}."${groupTable}" (${columns(
+          scheduledGroup(domain),
+        )})`,
+      );
+      await pool.query(
+        `CREATE TABLE ${qualified}."${memberTable}" (${columns(
+          scheduledMember(domain),
+        )},FOREIGN KEY(variant_group_id) REFERENCES ${qualified}."${groupTable}"(id) ON DELETE CASCADE)`,
+      );
+      await pool.query(
+        `CREATE TABLE ${qualified}."${
+          domain === 'primary'
+            ? 'monitor_history'
+            : 'competitor_monitor_history'
+        }" (id integer PRIMARY KEY); CREATE TABLE ${qualified}."${domain}_monitor_runs" (task_id text PRIMARY KEY,user_id text NOT NULL)`,
+      );
+      const migration = readFileSync(
+        resolve(
+          __dirname,
+          `../migrations/0016_scheduled_monitor_${domain}.sql`,
+        ),
+        'utf8',
+      ).replaceAll('public.', `${qualified}.`);
+      await pool.query(migration);
+      repository = new PgScheduledMonitorRunRepository(pool, domain, {
+        schema,
+      });
+      await repository.assertReady();
+    }, 30_000);
+    beforeEach(async () => {
+      await connection().query(
+        `TRUNCATE ${qualified}."${runTable}",${qualified}."${groupTable}" CASCADE`,
+      );
+    });
+    afterAll(async () => {
+      repository?.close();
+      try {
+        if (created && pool)
+          await pool.query(`DROP SCHEMA ${qualified} CASCADE`);
+      } finally {
+        await pool?.end();
+      }
+    });
+    it('freezes full native members once; rename, new members, deletion and recreation do not change replay', async () => {
+      const job = await nowJob();
+      const group = scheduledGroup(domain),
+        member = scheduledMember(domain);
+      await insertRows(groupTable, [group]);
+      await insertRows(memberTable, [member]);
+      const original = await storage().accept(job);
+      expect(original.state).toBe('pending');
+      expect(original.groups[0].group).toEqual(group);
+      expect(original.groups[0].members).toEqual([member]);
+      await connection().query(
+        `UPDATE ${qualified}."${groupTable}" SET name='changed' WHERE id=$1`,
+        [group.id],
+      );
+      await insertRows(memberTable, [
+        {
+          ...scheduledMember(domain, group.id as string, 'new member'),
+          asin: 'B000000002',
+        },
+      ]);
+      expect((await storage().accept(job)).groups).toEqual(original.groups);
+      await connection().query(
+        `DELETE FROM ${qualified}."${groupTable}" WHERE id=$1`,
+        [group.id],
+      );
+      await insertRows(groupTable, [
+        {
+          ...group,
+          name: 'recreated',
+          create_time: '2026-10-07 09:00:00.000002',
+        },
+      ]);
+      expect(await storage().read(job)).toEqual(original);
+    });
+    it('serializes concurrent acceptance under one slot identity and returns one original snapshot', async () => {
+      const job = await nowJob();
+      await insertRows(groupTable, [scheduledGroup(domain)]);
+      await insertRows(memberTable, [scheduledMember(domain)]);
+      const peer = new PgScheduledMonitorRunRepository(connection(), domain, {
+        schema,
+      });
+      try {
+        const runs = await Promise.all([
+          storage().accept(job),
+          peer.accept(job),
+        ]);
+        expect(runs[0]).toEqual(runs[1]);
+        expect(
+          (
+            await connection().query(
+              `SELECT count(*)::integer AS n FROM ${qualified}."${runTable}"`,
+            )
+          ).rows[0].n,
+        ).toBe(1);
+      } finally {
+        peer.close();
+      }
+    });
+    it.each(['start', 'requestCancellation', 'read'] as const)(
+      'refreshes the RR snapshot after %s actually waits for initial acceptance on another connection',
+      async (operation) => {
+        const job = await nowJob();
+        await insertRows(groupTable, [scheduledGroup(domain)]);
+        await insertRows(memberTable, [scheduledMember(domain)]);
+        const blocker = await connection().connect();
+        let released = false;
+        let acceptance:
+          | ReturnType<typeof settled<ScheduledMonitorRun>>
+          | undefined;
+        let transition:
+          | ReturnType<typeof settled<ScheduledMonitorRun | undefined>>
+          | undefined;
+        try {
+          await blocker.query('BEGIN');
+          await blocker.query(
+            `LOCK TABLE ${qualified}."${groupTable}" IN ACCESS EXCLUSIVE MODE`,
+          );
+          acceptance = settled(storage().accept(job));
+          let accepterPid: number | undefined;
+          await waitFor(async () => {
+            const waiting = await connection().query<{ pid: number }>(
+              `SELECT pid FROM pg_catalog.pg_locks WHERE relation=$1::regclass
+               AND NOT granted AND mode='AccessShareLock'`,
+              [`${qualified}."${groupTable}"`],
+            );
+            accepterPid = waiting.rows[0]?.pid;
+            return typeof accepterPid === 'number';
+          });
+          transition = settled(storage()[operation](job));
+          await waitFor(async () => {
+            const waiting = await connection().query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_locks waiter JOIN pg_catalog.pg_locks holder
+                  ON waiter.classid=holder.classid AND waiter.objid=holder.objid
+                  AND waiter.objsubid=holder.objsubid AND waiter.database=holder.database
+                WHERE holder.pid=$1 AND holder.locktype='advisory' AND holder.granted
+                  AND waiter.locktype='advisory' AND NOT waiter.granted
+              ) AS waiting`,
+              [accepterPid],
+            );
+            return waiting.rows[0]?.waiting === true;
+          });
+          await blocker.query('COMMIT');
+          blocker.release();
+          released = true;
+          const accepted = await acceptance;
+          if (!accepted.ok) throw accepted.error;
+          const changed = await transition;
+          if (!changed.ok) throw changed.error;
+          expect(changed.value).toBeDefined();
+          if (!changed.value)
+            throw new Error('Committed acceptance must be visible');
+          expect(changed.value.job).toEqual(accepted.value.job);
+          expect(changed.value.groups).toEqual(accepted.value.groups);
+          expect(changed.value.snapshotDigest).toBe(
+            accepted.value.snapshotDigest,
+          );
+          expect(changed.value.state).toBe(
+            operation === 'start' ? 'running' : 'pending',
+          );
+          if (operation === 'requestCancellation') {
+            expect(changed.value.cancelRequestedAt).not.toBeNull();
+            await expect(storage().start(job)).rejects.toMatchObject({
+              code: 'cancelled',
+            });
+          } else {
+            expect(changed.value.cancelRequestedAt).toBeNull();
+          }
+          expect(
+            (
+              await connection().query(
+                `SELECT count(*)::integer AS n FROM ${qualified}."${runTable}" WHERE task_id=$1`,
+                [job.taskId],
+              )
+            ).rows[0].n,
+          ).toBe(1);
+          expect(await storage().read(job)).toEqual(changed.value);
+        } finally {
+          if (!released) {
+            try {
+              await blocker.query('ROLLBACK');
+            } finally {
+              blocker.release();
+            }
+          }
+          await Promise.all([acceptance, transition].filter(Boolean));
+        }
+      },
+      30_000,
+    );
+    it('selects raw CRC32 batches before enforcing the selected group limit and preserves microsecond ordering', async () => {
+      const job = await nowJob(0, 3);
+      const groups = [' raw 😀 ', 'é', 'e\u0301', '😀', '\uE000', 'null'].map(
+        (id, index) => ({
+          ...scheduledGroup(domain, id),
+          id,
+          create_time:
+            index === 5
+              ? null
+              : `2026-09-27 08:30:00.${String(index + 1).padStart(6, '0')}`,
+        }),
+      );
+      await insertRows(groupTable, groups);
+      const run = await storage().accept(job);
+      const expected = groups
+        .filter(
+          (group) =>
+            scheduledMonitorGroupBatch(group.id as string, 3) ===
+            job.batchConfig.batchIndex,
+        )
+        .sort((a, b) =>
+          a.create_time === null
+            ? -1
+            : b.create_time === null
+            ? 1
+            : a.create_time.localeCompare(b.create_time),
+        );
+      expect(run.groups.map((group) => group.group.id)).toEqual(
+        expected.map((group) => group.id),
+      );
+    });
+    it('rejects identity replacements and tampered member data without overwriting the run', async () => {
+      const job = await nowJob();
+      await insertRows(groupTable, [scheduledGroup(domain)]);
+      await insertRows(memberTable, [scheduledMember(domain)]);
+      const original = await storage().accept(job);
+      await expect(
+        storage().accept({
+          ...job,
+          expiresAt: new Date(Date.parse(job.expiresAt) + 1).toISOString(),
+        }),
+      ).rejects.toMatchObject({ code: 'identity' });
+      await expect(
+        Promise.resolve().then(() => storage().read({ ...job, country: 'UK' })),
+      ).rejects.toMatchObject({ code: 'input' });
+      const corrupted = structuredClone(original.groups);
+      corrupted[0].members[0].asin = 'B000000009';
+      await connection().query(
+        `UPDATE ${qualified}."${runTable}" SET groups=$2::jsonb WHERE task_id=$1`,
+        [job.taskId, JSON.stringify(corrupted)],
+      );
+      await expect(storage().accept(job)).rejects.toMatchObject({
+        code: 'snapshot',
+      });
+    });
+    it('records first-stale jobs without catalog reads, status writes, history or member selection', async () => {
+      const job = await nowJob(26);
+      await connection().query(
+        `ALTER TABLE ${qualified}."${groupTable}" RENAME TO catalog_temporarily_unavailable`,
+      );
+      try {
+        const run = await storage().accept(job);
+        expect(run).toMatchObject({
+          state: 'skipped-expired',
+          groups: [],
+          totalMembers: 0,
+          result: null,
+          followUpJob: null,
+        });
+        expect(run.completedAt).not.toBeNull();
+        await expect(storage().start(job)).rejects.toMatchObject({
+          code: 'state',
+        });
+      } finally {
+        await connection().query(
+          `ALTER TABLE ${qualified}.catalog_temporarily_unavailable RENAME TO "${groupTable}"`,
+        );
+      }
+      expect(
+        (
+          await connection().query(
+            `SELECT count(*)::integer AS n FROM ${qualified}."${
+              domain === 'primary'
+                ? 'monitor_history'
+                : 'competitor_monitor_history'
+            }"`,
+          )
+        ).rows[0].n,
+      ).toBe(0);
+    });
+    it('rolls back an oversized catalog rather than saving a truncated snapshot', async () => {
+      const job = await nowJob();
+      await insertRows(
+        groupTable,
+        Array.from({ length: 1001 }, (_, index) =>
+          scheduledGroup(domain, `group-${index}`),
+        ),
+      );
+      await expect(storage().accept(job)).rejects.toMatchObject({
+        code: 'capacity',
+      });
+      expect(
+        (
+          await connection().query(
+            `SELECT count(*)::integer AS n FROM ${qualified}."${runTable}"`,
+          )
+        ).rows[0].n,
+      ).toBe(0);
+    });
+    it('requires a cancellation request, protects terminal state and never restarts a cancelled run', async () => {
+      const job = await nowJob();
+      await storage().accept(job);
+      await storage().start(job);
+      await expect(
+        storage().finishWithoutBusiness(job, 'cancelled'),
+      ).rejects.toMatchObject({ code: 'cancelled' });
+      await storage().requestCancellation(job);
+      await expect(storage().start(job)).rejects.toMatchObject({
+        code: 'cancelled',
+      });
+      const cancelled = await storage().finishWithoutBusiness(job, 'cancelled');
+      expect(cancelled.completedAt).not.toBeNull();
+      expect(await storage().finishWithoutBusiness(job, 'cancelled')).toEqual(
+        cancelled,
+      );
+      await expect(
+        storage().finishWithoutBusiness(job, 'failed'),
+      ).rejects.toMatchObject({ code: 'state' });
+    });
+    it.each(['schema', 'conservative-capacity'] as const)(
+      'classifies a persisted %s decoder violation as identity while keeping the original receipt and run',
+      async (violation) => {
+        const job = await nowJob();
+        await insertRows(groupTable, [scheduledGroup(domain)]);
+        await insertRows(memberTable, [scheduledMember(domain)]);
+        const run = await storage().accept(job);
+        await storage().start(job);
+        await insertReceipt(run);
+        if (violation === 'schema') {
+          await connection().query(
+            `UPDATE ${qualified}."${receiptTable}" SET result=result || jsonb_build_object('isBroken','corrupt'::text) WHERE task_id=$1`,
+            [job.taskId],
+          );
+        } else {
+          // PostgreSQL's physical size CHECK still permits this ~1.2 MiB JSON.
+          // JS decodes each numeric value to exponent form; the business decoder's
+          // conservative numeric expansion bound permanently rejects it. Do not
+          // remove a real size CHECK to manufacture an impossible oversized row.
+          await connection().query(
+            `UPDATE ${qualified}."${receiptTable}" SET result=result || jsonb_build_object('raw',
+              (SELECT jsonb_agg(0.0000001::numeric) FROM generate_series(1,110000))) WHERE task_id=$1`,
+            [job.taskId],
+          );
+        }
+        const fingerprint = async () =>
+          (
+            await connection().query(
+              `SELECT md5(result::text) AS digest,octet_length(result::text) AS bytes FROM ${qualified}."${receiptTable}" WHERE task_id=$1`,
+              [job.taskId],
+            )
+          ).rows;
+        const original = await fingerprint();
+        expect(original).toHaveLength(1);
+        expect(original[0].bytes).toBeLessThan(33554432);
+        const observed = observeReceiptTransport();
+        try {
+          await expect(
+            observed.repository.completeBusiness(job, summary(run)),
+          ).rejects.toMatchObject({ code: 'identity' });
+          expect(observed.pages).toEqual([{ after: -1, rows: 1, ordinal: 0 }]);
+          expect(
+            observed.statements.filter(
+              (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+            ),
+          ).toHaveLength(1);
+          expect(observed.completions).toBe(0);
+          expect(await fingerprint()).toEqual(original);
+          expect((await storage().read(job))?.state).toBe('running');
+          // An explicit inspection does not make invalid evidence transient or
+          // re-run business. Repeating completion remains the same identity error.
+          await expect(
+            storage().completeBusiness(job, summary(run)),
+          ).rejects.toMatchObject({ code: 'identity' });
+          expect(await fingerprint()).toEqual(original);
+        } finally {
+          observed.repository.close();
+        }
+      },
+      15_000,
+    );
+    it('requires matching transactional receipts, original member results and aggregate counts before business completion', async () => {
+      const job = await nowJob();
+      await insertRows(groupTable, [scheduledGroup(domain)]);
+      await insertRows(memberTable, [scheduledMember(domain)]);
+      const run = await storage().accept(job);
+      await storage().start(job);
+      await expect(
+        storage().completeBusiness(job, summary(run)),
+      ).rejects.toMatchObject({ code: 'state' });
+      await insertReceipt(run, { request_hash: 'a'.repeat(64) });
+      await expect(
+        storage().completeBusiness(job, summary(run)),
+      ).rejects.toMatchObject({ code: 'identity' });
+      await connection().query(
+        `DELETE FROM ${qualified}."${receiptTable}" WHERE task_id=$1`,
+        [job.taskId],
+      );
+      await insertReceipt(run, {
+        completed_at: new Date(
+          Date.parse(job.expiresAt) + 60_000,
+        ).toISOString(),
+      });
+      await expect(
+        storage().completeBusiness(job, summary(run)),
+      ).rejects.toMatchObject({ code: 'identity' });
+      await connection().query(
+        `DELETE FROM ${qualified}."${receiptTable}" WHERE task_id=$1`,
+        [job.taskId],
+      );
+      await insertReceipt(run);
+      await expect(
+        storage().completeBusiness(job, { ...summary(run), brokenMembers: 1 }),
+      ).rejects.toMatchObject({ code: 'identity' });
+      const business = await storage().completeBusiness(
+        job,
+        summary(run),
+        domain === 'primary',
+      );
+      expect(business.state).toBe('business-completed');
+      expect(business.result).toEqual(summary(run));
+      expect(business.followUpJob?.domain ?? null).toBe(
+        domain === 'primary' ? 'competitor' : null,
+      );
+      if (business.followUpJob) {
+        expect(business.followUpJob.requestedAt).toBe(
+          business.businessCompletedAt,
+        );
+        expect(business.followUpDigest).toBe(
+          scheduledMonitorJobDigest(business.followUpJob),
+        );
+      }
+      expect(
+        await storage().completeBusiness(
+          job,
+          summary(run),
+          domain === 'primary',
+        ),
+      ).toEqual(business);
+      // Once committed, a late cancellation cannot revoke business or rewrite its
+      // child identity. Consumer replay only delivers that original child.
+      expect(await storage().requestCancellation(job)).toEqual(business);
+      await connection().query(`DELETE FROM ${qualified}."${groupTable}"`);
+      const completed = await storage().complete(job);
+      expect(completed.state).toBe('completed');
+      expect(completed.followUpJob).toEqual(business.followUpJob);
+      expect(await storage().complete(job)).toEqual(completed);
+      await expect(
+        Promise.resolve().then(() =>
+          storage().completeBusiness(job, summary(run), domain !== 'primary'),
+        ),
+      ).rejects.toMatchObject({
+        code: domain === 'primary' ? 'identity' : 'input',
+      });
+      expect(await storage().read(job)).toEqual(completed);
+    });
+    it.each(['commit', 'rollback'] as const)(
+      'refreshes a receipt COUNT established before the final group writer %s releases the run lock',
+      async (decision) => {
+        const job = await nowJob();
+        await insertRows(groupTable, [
+          scheduledGroup(domain, 'first committed group'),
+          scheduledGroup(domain, 'last transactional group'),
+        ]);
+        await insertRows(memberTable, [
+          scheduledMember(domain, 'first committed group', 'first member'),
+          {
+            ...scheduledMember(
+              domain,
+              'last transactional group',
+              'last member',
+            ),
+            asin: 'B000000002',
+          },
+        ]);
+        const run = await storage().accept(job);
+        expect(run.groups).toHaveLength(2);
+        await storage().start(job);
+        await insertReceipt(run, {}, 0);
+        const fingerprint = () =>
+          connection().query(
+            `SELECT ordinal,operation_key,request_hash,completed_at,md5(result::text) AS result_hash FROM ${qualified}."${receiptTable}" WHERE task_id=$1 ORDER BY ordinal`,
+            [job.taskId],
+          );
+        const firstReceipt = (await fingerprint()).rows;
+        const historyTable =
+          domain === 'primary'
+            ? 'monitor_history'
+            : 'competitor_monitor_history';
+        const historyId = Number.parseInt(randomUUID().slice(0, 7), 16);
+        const observed = observeReceiptTransport();
+        const writer = await connection().connect();
+        let released = false;
+        let completion:
+          | ReturnType<typeof settled<ScheduledMonitorRun>>
+          | undefined;
+        try {
+          const pid = (
+            await writer.query<{ pid: number }>(
+              'SELECT pg_backend_pid() AS pid',
+            )
+          ).rows[0].pid;
+          await writer.query('BEGIN');
+          await writer.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('neo:scheduled-monitor:' || $1,0))",
+            [job.taskId],
+          );
+          // Lock without changing the run tuple. A synthetic run UPDATE could
+          // produce 40001 and exercise the already-existing serialization path,
+          // hiding the missing receipt COUNT path this regression must prove.
+          await writer.query(
+            `SELECT task_id FROM ${qualified}."${runTable}" WHERE task_id=$1 FOR UPDATE`,
+            [job.taskId],
+          );
+          await writer.query(
+            `INSERT INTO ${qualified}."${historyTable}" (id) VALUES ($1)`,
+            [historyId],
+          );
+          await insertReceipt(run, {}, 1, undefined, writer);
+          completion = settled(
+            observed.repository.completeBusiness(job, summary(run)),
+          );
+          await waitFor(async () => {
+            const waiting = await connection().query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_locks waiter JOIN pg_catalog.pg_locks holder
+                  ON waiter.classid=holder.classid AND waiter.objid=holder.objid
+                  AND waiter.objsubid=holder.objsubid AND waiter.database=holder.database
+                JOIN pg_catalog.pg_stat_activity activity ON activity.pid=waiter.pid
+                WHERE holder.pid=$1 AND holder.locktype='advisory' AND holder.granted
+                  AND waiter.locktype='advisory' AND NOT waiter.granted
+                  AND activity.backend_xmin IS NOT NULL
+              ) AS waiting`,
+              [pid],
+            );
+            return waiting.rows[0]?.waiting === true;
+          });
+          await writer.query(decision === 'commit' ? 'COMMIT' : 'ROLLBACK');
+          writer.release();
+          released = true;
+          const outcome = await completion;
+          const receipts = (await fingerprint()).rows;
+          expect(receipts.slice(0, 1)).toEqual(firstReceipt);
+          expect(receipts).toHaveLength(decision === 'commit' ? 2 : 1);
+          const history = await connection().query(
+            `SELECT id FROM ${qualified}."${historyTable}" WHERE id=$1`,
+            [historyId],
+          );
+          expect(history.rows).toEqual(
+            decision === 'commit' ? [{ id: historyId }] : [],
+          );
+          expect(
+            observed.statements.some(
+              (text) =>
+                text.includes(`."${groupTable}"`) ||
+                text.includes(`."${memberTable}"`),
+            ),
+          ).toBe(false);
+          expect(
+            observed.statements.some((text) =>
+              /SUM\(|result::text/i.test(text),
+            ),
+          ).toBe(false);
+          if (decision === 'commit') {
+            if (!outcome.ok) throw outcome.error;
+            expect(outcome.value.state).toBe('business-completed');
+            expect(outcome.value.result).toEqual(summary(run));
+            expect(outcome.value.groups).toEqual(run.groups);
+            expect(outcome.value.snapshotDigest).toBe(run.snapshotDigest);
+            expect(observed.counts).toEqual(['1', '2']);
+            expect(observed.pages).toEqual([
+              { after: -1, rows: 1, ordinal: 0 },
+              { after: 0, rows: 1, ordinal: 1 },
+            ]);
+            expect(observed.completions).toBe(1);
+            expect(
+              observed.statements.filter(
+                (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+              ),
+            ).toHaveLength(2);
+            expect(
+              await observed.repository.completeBusiness(job, summary(run)),
+            ).toEqual(outcome.value);
+            expect(observed.counts).toEqual(['1', '2']);
+            expect(observed.pages).toHaveLength(2);
+            expect(observed.completions).toBe(1);
+            expect((await fingerprint()).rows).toEqual(receipts);
+          } else {
+            expect(outcome).toMatchObject({
+              ok: false,
+              error: { code: 'state' },
+            });
+            expect(observed.counts).toEqual(['1', '1', '1']);
+            expect(observed.pages).toEqual([]);
+            expect(observed.completions).toBe(0);
+            expect(
+              observed.statements.filter(
+                (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+              ),
+            ).toHaveLength(3);
+            const inspected = await storage().read(job);
+            expect(inspected?.state).toBe('running');
+            expect(inspected?.groups).toEqual(run.groups);
+            expect(inspected?.result).toBeNull();
+            expect(inspected?.businessCompletedAt).toBeNull();
+          }
+        } finally {
+          if (!released) {
+            try {
+              await writer.query('ROLLBACK');
+            } finally {
+              writer.release();
+            }
+          }
+          observed.repository.close();
+          await completion;
+          await connection().query(
+            `DELETE FROM ${qualified}."${historyTable}" WHERE id=$1`,
+            [historyId],
+          );
+        }
+      },
+      15_000,
+    );
+    it('returns one full receipt per real SQL page, retaining the frozen run and single atomic completion', async () => {
+      const job = await nowJob();
+      await insertRows(
+        groupTable,
+        Array.from({ length: 8 }, (_, ordinal) =>
+          scheduledGroup(domain, `page-${ordinal}`),
+        ),
+      );
+      const run = await storage().accept(job);
+      await storage().start(job);
+      for (let ordinal = 0; ordinal < run.groups.length; ordinal++)
+        await insertReceipt(run, {}, ordinal, 'x'.repeat(1024 * 1024));
+      // Successful completion must use these original receipts, even if the
+      // current catalog no longer contains any group. No business is replayed.
+      await connection().query(`DELETE FROM ${qualified}."${groupTable}"`);
+      const observed = observeReceiptTransport();
+      try {
+        const complete = await observed.repository.completeBusiness(
+          job,
+          summary(run),
+          domain === 'primary',
+        );
+        expect(complete.state).toBe('business-completed');
+        expect(complete.result).toEqual(summary(run));
+        expect(complete.groups).toEqual(run.groups);
+        expect(observed.counts).toEqual(['8']);
+        expect(
+          observed.statements.filter(
+            (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+          ),
+        ).toHaveLength(1);
+        const lockIndex = observed.statements.findIndex((text) =>
+          text.includes('pg_advisory_xact_lock'),
+        );
+        expect(lockIndex).toBeGreaterThanOrEqual(0);
+        expect(lockIndex).toBeLessThan(
+          observed.statements.findIndex((text) =>
+            text.includes('AS receipt_count'),
+          ),
+        );
+        expect(
+          observed.statements.filter((text) => text === 'COMMIT'),
+        ).toHaveLength(1);
+        expect(observed.pages).toEqual(
+          Array.from({ length: 8 }, (_, ordinal) => ({
+            after: ordinal - 1,
+            rows: 1,
+            ordinal,
+          })),
+        );
+        expect(observed.completions).toBe(1);
+        const receiptQueries = observed.statements.filter(
+          (text) =>
+            text.startsWith('SELECT *') && text.includes(`."${receiptTable}"`),
+        );
+        expect(receiptQueries).toHaveLength(8);
+        expect(
+          receiptQueries.every((text) =>
+            /ordinal > \$2 ORDER BY ordinal LIMIT 1$/.test(text),
+          ),
+        ).toBe(true);
+        expect(
+          observed.statements.some((text) => /SUM\(|result::text/i.test(text)),
+        ).toBe(false);
+        expect(
+          await observed.repository.completeBusiness(
+            job,
+            summary(run),
+            domain === 'primary',
+          ),
+        ).toEqual(complete);
+        expect(observed.pages).toHaveLength(8);
+        expect(observed.completions).toBe(1);
+      } finally {
+        observed.repository.close();
+      }
+    }, 20_000);
+    it('rejects a forged final page and a real oversized receipt without changing the running state', async () => {
+      const job = await nowJob();
+      await insertRows(
+        groupTable,
+        Array.from({ length: 3 }, (_, ordinal) =>
+          scheduledGroup(domain, `last-page-${ordinal}`),
+        ),
+      );
+      const run = await storage().accept(job);
+      await storage().start(job);
+      for (let ordinal = 0; ordinal < run.groups.length; ordinal++)
+        await insertReceipt(run, {}, ordinal);
+      await expect(
+        connection().query(
+          `UPDATE ${qualified}."${receiptTable}" SET result=result || jsonb_build_object('raw',repeat('x',33554433)) WHERE task_id=$1 AND ordinal=2`,
+          [job.taskId],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+      await connection().query(
+        `UPDATE ${qualified}."${receiptTable}" SET request_hash=$2 WHERE task_id=$1 AND ordinal=2`,
+        [job.taskId, 'a'.repeat(64)],
+      );
+      const observed = observeReceiptTransport();
+      try {
+        await expect(
+          observed.repository.completeBusiness(job, summary(run)),
+        ).rejects.toMatchObject({ code: 'identity' });
+        expect(observed.pages.map((page) => page.ordinal)).toEqual([0, 1, 2]);
+        expect(observed.completions).toBe(0);
+        const inspected = await storage().read(job);
+        expect(inspected?.state).toBe('running');
+        expect(inspected?.result).toBeNull();
+        expect(inspected?.businessCompletedAt).toBeNull();
+      } finally {
+        observed.repository.close();
+      }
+    }, 20_000);
+    it('keeps all original receipts after a real second-page SQL timeout and retries only the completion boundary', async () => {
+      const job = await nowJob();
+      await insertRows(
+        groupTable,
+        Array.from({ length: 3 }, (_, ordinal) =>
+          scheduledGroup(domain, `timeout-page-${ordinal}`),
+        ),
+      );
+      const run = await storage().accept(job);
+      await storage().start(job);
+      for (let ordinal = 0; ordinal < run.groups.length; ordinal++)
+        await insertReceipt(run, {}, ordinal);
+      const fingerprints = () =>
+        connection().query(
+          `SELECT ordinal,operation_key,request_hash,completed_at,md5(result::text) AS result_hash FROM ${qualified}."${receiptTable}" WHERE task_id=$1 ORDER BY ordinal`,
+          [job.taskId],
+        );
+      const original = (await fingerprints()).rows;
+      await connection().query(`DELETE FROM ${qualified}."${groupTable}"`);
+      const observed = observeReceiptTransport(true);
+      try {
+        await expect(
+          observed.repository.completeBusiness(job, summary(run)),
+        ).rejects.toMatchObject({ code: 'timeout' });
+        expect(observed.pages).toEqual([{ after: -1, rows: 1, ordinal: 0 }]);
+        expect(observed.completions).toBe(0);
+        expect(observed.repository.getDiagnostics().active).toBe(0);
+        const inspected = await storage().read(job);
+        expect(inspected?.state).toBe('running');
+        expect(inspected?.businessCompletedAt).toBeNull();
+        expect(inspected?.result).toBeNull();
+        expect((await fingerprints()).rows).toEqual(original);
+        const complete = await storage().completeBusiness(job, summary(run));
+        expect(complete.state).toBe('business-completed');
+        expect(complete.groups).toEqual(run.groups);
+        expect((await fingerprints()).rows).toEqual(original);
+        expect(await storage().completeBusiness(job, summary(run))).toEqual(
+          complete,
+        );
+        expect(
+          (
+            await connection().query(
+              `SELECT count(*)::integer AS n FROM ${qualified}."${groupTable}"`,
+            )
+          ).rows[0].n,
+        ).toBe(0);
+      } finally {
+        observed.repository.close();
+      }
+    }, 10_000);
+    if (domain === 'primary')
+      it('rejects replaced US child clocks in SQL and a forged digest on read without losing the original child', async () => {
+        const job = await nowJob();
+        await insertRows(groupTable, [scheduledGroup(domain)]);
+        await insertRows(memberTable, [scheduledMember(domain)]);
+        const run = await storage().accept(job);
+        await storage().start(job);
+        await insertReceipt(run);
+        const business = await storage().completeBusiness(
+          job,
+          summary(run),
+          true,
+        );
+        const original = business.followUpJob;
+        if (!original) throw new Error('Fixture child was not persisted');
+        const later = new Date(
+          Date.parse(original.requestedAt) + 1,
+        ).toISOString();
+        for (const changes of [
+          { requestedAt: later, createdAt: later },
+          { createdAt: later },
+          {
+            expiresAt: new Date(
+              Date.parse(original.expiresAt) + 1,
+            ).toISOString(),
+          },
+        ]) {
+          const child = { ...original, ...changes };
+          await expect(
+            connection().query(
+              `UPDATE ${qualified}."${runTable}" SET follow_up_job=$2::jsonb,follow_up_digest=$3,follow_up_requested_at=$4::timestamptz WHERE task_id=$1`,
+              [
+                job.taskId,
+                JSON.stringify(child),
+                scheduledMonitorJobDigest(child),
+                child.requestedAt,
+              ],
+            ),
+          ).rejects.toMatchObject({ code: '23514' });
+          expect(await storage().read(job)).toEqual(business);
+        }
+        await connection().query(
+          `UPDATE ${qualified}."${runTable}" SET follow_up_digest=$2 WHERE task_id=$1`,
+          [job.taskId, 'a'.repeat(64)],
+        );
+        await expect(storage().read(job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        await expect(storage().complete(job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        await connection().query(
+          `UPDATE ${qualified}."${runTable}" SET follow_up_digest=$2 WHERE task_id=$1`,
+          [job.taskId, business.followUpDigest],
+        );
+        expect(await storage().read(job)).toEqual(business);
+        expect((await storage().complete(job)).followUpJob).toEqual(original);
+      });
+  },
+);

@@ -144,7 +144,7 @@ describe('TimescaleDB 环境配置', () => {
     );
     expect(workflow).toContain("RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'");
     expect(workflow).toContain(
-      'vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism',
+      'vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts test/scheduled-monitor-run.integration.test.ts --no-file-parallelism',
     );
   });
 });
