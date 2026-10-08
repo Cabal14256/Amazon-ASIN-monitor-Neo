@@ -18,6 +18,8 @@ import {
 import {
   monitorAggregateSourceSelect,
   monitorPeriodSql,
+  monitorRawSummaryIdentityCoverageSelect,
+  monitorSupportedRegionCountryCondition,
 } from './monitor-analytics-sql';
 
 const operations = new Set([
@@ -62,16 +64,41 @@ export function monitorAggregateDurationSelect(
     ? monitorAggregateCoverageSelect(query, family, granularity)
     : sql`SELECT false AS covered`;
   if (rawSummary && query.startTime && query.endTime) {
+    const regional = query.operation === 'region-summary';
+    const identityCoverage = monitorRawSummaryIdentityCoverageSelect(
+      query,
+      granularity,
+      regional
+        ? monitorSupportedRegionCountryCondition(sql`mh.country`)
+        : undefined,
+      regional
+        ? monitorSupportedRegionCountryCondition(sql`agg.country`)
+        : undefined,
+    );
     // Raw SQL filters checks before grouping. A clipped boundary bucket can be
     // reused only if it contains no check excluded by the exact HTTP bounds.
-    // Its min/max are sufficient; this stays in the coverage/read snapshot.
-    coverage = sql`SELECT covered AND NOT EXISTS (
+    // Its min/max are sufficient; identity and edges share the coverage/read
+    // snapshot, and unrelated countries cannot reject a regional summary.
+    coverage = sql`SELECT CASE WHEN covered THEN
+      (SELECT covered FROM (${identityCoverage}) identity_coverage)
+      AND NOT EXISTS (
       SELECT 1 FROM public.monitor_history_agg_dim_v2 edge
       WHERE edge.granularity=${granularity}
-        AND edge.time_slot IN (date_trunc(${granularity}, ${query.startTime}::timestamp),
+        ${
+          regional
+            ? sql`AND ${monitorSupportedRegionCountryCondition(
+                sql`edge.country`,
+              )}`
+            : sql``
+        }
+        AND edge.time_slot IN (date_trunc(${granularity}, ${
+      query.startTime
+    }::timestamp),
           date_trunc(${granularity}, ${query.endTime}::timestamp))
-        AND (edge.first_check_time<${query.startTime}::timestamp OR edge.last_check_time>${query.endTime}::timestamp)
-    ) AS covered FROM (${coverage}) projection_coverage`;
+        AND (edge.first_check_time<${
+          query.startTime
+        }::timestamp OR edge.last_check_time>${query.endTime}::timestamp)
+    ) ELSE false END AS covered FROM (${coverage}) projection_coverage`;
   }
   const hours = (
     rawSummary
@@ -97,7 +124,9 @@ export function monitorAggregateDurationSelect(
     // hours before multiplication; raw summaries retain binary64 hours.
     const country = rawSummary ? sql`upper(agg.country)` : sql`agg.country`;
     const base = sql`SELECT ${country} AS group_key, ${country} AS group_label, ${values}
-      FROM source_base agg WHERE agg.country IN ('US','UK','DE','FR','ES','IT')
+      FROM source_base agg WHERE ${monitorSupportedRegionCountryCondition(
+        sql`agg.country`,
+      )}
       UNION ALL SELECT 'EU_TOTAL' AS group_key, 'EU_TOTAL' AS group_label, ${values}
       FROM source_base agg WHERE agg.country IN ('UK','DE','FR','ES','IT')`;
     metrics = sql`WITH source_base AS MATERIALIZED (${source})

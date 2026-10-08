@@ -11,6 +11,10 @@ import {
   type DurationMetricsAccumulator,
 } from '../src/domain/monitor-duration';
 import { monitorAggregateDurationSelect } from '../src/repositories/monitor-analytics-aggregate-query';
+import {
+  monitorRawDurationSourceSelect,
+  monitorRawSummaryIdentityCoverageSelect,
+} from '../src/repositories/monitor-analytics-sql';
 import { readMonitorDurationQuery } from '../src/repositories/monitor-duration-query';
 
 // Run the actual frozen Legacy raw arithmetic. SQL sufficient statistics must
@@ -231,6 +235,87 @@ describe('CAGG summary finalization / actual Legacy raw oracle', () => {
     expect(
       statements.find((statement) => statement.startsWith('DECLARE')),
     ).toContain('public.monitor_history_agg_dim_v2');
+  });
+
+  it('scopes both regional reuse proofs to the consumed countries in the same bounded SELECT', () => {
+    const query = parseMonitorAnalyticsQuery('region-summary', {
+      startTime: '1997-10-01 00:20:00',
+      endTime: '1997-10-01 01:40:00',
+    });
+    const regional = new PgDialect().sqlToQuery(
+      monitorAggregateDurationSelect(query, 'hour', 'legacy-raw-summary'),
+    );
+    expect(regional.sql).toContain(
+      `rtrim(mh.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('US','UK','DE','FR','ES','IT')`,
+    );
+    expect(regional.sql).toContain(
+      `rtrim(edge.country) COLLATE public.legacy_utf8mb4_unicode_ci IN ('US','UK','DE','FR','ES','IT')`,
+    );
+    expect(regional.sql).toContain('first_spelling <> last_spelling');
+    expect(regional.sql).toContain('FULL JOIN raw_groups history_group');
+    expect(regional.sql).toContain(
+      'agg.total_checks IS DISTINCT FROM history_group.check_count',
+    );
+    expect(regional.sql).toContain('WITH coverage AS MATERIALIZED');
+    expect(regional.sql).toContain('LIMIT 5001');
+    const global = new PgDialect().sqlToQuery(
+      monitorAggregateDurationSelect(
+        parseMonitorAnalyticsQuery('all-countries-summary', query),
+        'hour',
+        'legacy-raw-summary',
+      ),
+    );
+    expect(global.sql).not.toContain(`IN ('US','UK','DE','FR','ES','IT')`);
+  });
+
+  it.each([{ startTime: '1997-10-01' }, { endTime: '1997-10-31' }, {}])(
+    'does not perform an unbounded identity proof when summary bounds are incomplete: %j',
+    (bounds) => {
+      const compiled = new PgDialect().sqlToQuery(
+        monitorAggregateDurationSelect(
+          parseMonitorAnalyticsQuery('all-countries-summary', bounds),
+          'hour',
+          'legacy-raw-summary',
+        ),
+      );
+      expect(compiled.sql).toContain('SELECT false AS covered');
+      expect(compiled.sql).not.toContain('identity_coverage');
+      expect(compiled.sql).not.toContain('FROM public.monitor_history mh');
+    },
+  );
+
+  it('keeps the reusable dim identity proof within the raw source site and brand filters', () => {
+    const input = {
+      startTime: '1997-10-01',
+      endTime: '1997-10-31',
+      country: 'EU',
+      site: 'Scoped site',
+      brand: 'Scoped brand',
+    };
+    const query = parseMonitorAnalyticsQuery('period-summary', input);
+    const dialect = new PgDialect();
+    const source = dialect.sqlToQuery(
+      monitorRawDurationSourceSelect(query, 'dim', 'hour'),
+    );
+    const proof = dialect.sqlToQuery(
+      monitorRawSummaryIdentityCoverageSelect(query, 'hour'),
+    );
+    // The raw source additionally binds its period display format first.
+    // Compare its filters with the proof's raw-group filters, before the latter
+    // binds the aggregate source used to check that raw evidence is complete.
+    expect(source.params[0]).toBe('YYYY-MM-DD HH24:00:00');
+    expect(proof.params.slice(0, source.params.length - 1)).toEqual(
+      source.params.slice(1),
+    );
+    for (const column of ['site_snapshot', 'brand_snapshot'])
+      expect(proof.sql).toContain(
+        `rtrim(mh.${column}) COLLATE public.legacy_utf8mb4_unicode_ci = rtrim(`,
+      );
+    expect(proof.sql).toContain(`IN ('UK','DE','FR','IT','ES')`);
+    const summary = parseMonitorAnalyticsQuery('all-countries-summary', input);
+    expect(summary).not.toHaveProperty('country');
+    expect(summary).not.toHaveProperty('site');
+    expect(summary).not.toHaveProperty('brand');
   });
 
   it.each([

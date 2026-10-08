@@ -33,9 +33,8 @@ const ci = (expression: SQL) =>
   sql`rtrim(${expression}) COLLATE public.legacy_utf8mb4_unicode_ci`;
 const equals = (expression: SQL, value: string) =>
   sql`${ci(expression)} = rtrim(${value}::text)`;
-const asinKey = ci(
-  sql`coalesce(nullif(rtrim(mh.asin_code), ''), 'ID#' || rtrim(mh.asin_id))`,
-);
+const rawAsinKey = sql`coalesce(nullif(rtrim(mh.asin_code), ''), 'ID#' || rtrim(mh.asin_id))`;
+const asinKey = ci(rawAsinKey);
 const asinFilter = sql`${ci(sql`mh.check_type`)} = 'ASIN'
   AND (mh.asin_id IS NOT NULL OR nullif(rtrim(mh.asin_code), '') IS NOT NULL)`;
 const groupJoin = sql`LEFT JOIN public.variant_groups vg
@@ -79,6 +78,10 @@ function rawWhere(query: MonitorAnalyticsQuery): SQL[] {
 }
 const conjunction = (parts: SQL[]) =>
   parts.length ? sql.join(parts, sql` AND `) : sql`true`;
+
+export function monitorSupportedRegionCountryCondition(country: SQL): SQL {
+  return sql`${ci(country)} IN ('US','UK','DE','FR','ES','IT')`;
+}
 
 // The extra eight hours are observable Legacy behavior, also pinned in 0001.
 // This is distinct from the chart's peak-mark wall-clock display.
@@ -138,6 +141,55 @@ export function monitorRawDurationSourceSelect(
     }
     WHERE ${conjunction(where)}
     GROUP BY ${sql.join(groups, sql`, `)} ORDER BY ${slot} ASC, ${country} ASC`;
+}
+
+/** The frozen dim CAGG groups ASIN keys with Legacy's CI collation. If that
+ * grouping discarded a binary spelling, its representative cannot safely
+ * reconstruct the raw JS Map identity. Prove spelling uniqueness in the same
+ * read snapshot, or let the caller use the existing raw source. Matching each
+ * group's check count also proves the raw evidence was not lost to retention.
+ * This proof returns one boolean; no raw buckets cross the application boundary. */
+export function monitorRawSummaryIdentityCoverageSelect(
+  query: MonitorAnalyticsQuery,
+  granularity: MonitorSourceGranularity,
+  scope?: SQL,
+  aggregateScope?: SQL,
+): SQL {
+  validateMonitorAnalyticsQuery(query);
+  validateSource('dim', granularity);
+  const where = [...rawWhere(query), asinFilter];
+  if (scope) where.push(scope);
+  if (query.site) where.push(equals(sql`mh.site_snapshot`, query.site));
+  if (query.brand) where.push(equals(sql`mh.brand_snapshot`, query.brand));
+  const slot = rawSlots[granularity],
+    country = ci(sql`mh.country`),
+    site = ci(sql`coalesce(mh.site_snapshot, '')`),
+    brand = ci(sql`coalesce(mh.brand_snapshot, '')`);
+  const groups = [slot, country, site, brand, asinKey];
+  return sql`WITH raw_groups AS MATERIALIZED (
+    SELECT ${slot} AS time_slot, ${country} AS country,
+      ${site} AS site, ${brand} AS brand, ${asinKey} AS asin_key,
+      count(*) AS check_count,
+      min(${rawAsinKey} COLLATE "C") AS first_spelling,
+      max(${rawAsinKey} COLLATE "C") AS last_spelling
+    FROM public.monitor_history mh
+    WHERE ${conjunction(where)}
+    GROUP BY ${sql.join(groups, sql`, `)}
+  ), aggregate_groups AS (${monitorAggregateSourceSelect(
+    query,
+    'dim',
+    granularity,
+    aggregateScope,
+  )})
+  SELECT NOT EXISTS (
+    SELECT 1 FROM raw_groups WHERE first_spelling <> last_spelling
+  ) AND NOT EXISTS (
+    SELECT 1 FROM aggregate_groups agg FULL JOIN raw_groups history_group
+      ON agg.time_slot=history_group.time_slot
+      AND agg.country=history_group.country AND agg.site=history_group.site
+      AND agg.brand=history_group.brand AND agg.asin_key=history_group.asin_key
+    WHERE agg.total_checks IS DISTINCT FROM history_group.check_count
+  ) AS covered`;
 }
 
 /** Internal projection only. A runtime caller MUST combine its consumption with

@@ -28,6 +28,7 @@ import {
   monitorPeriodGroupsSelect,
   monitorPeriodPageSelect,
   monitorRawDurationSourceSelect,
+  monitorRawSummaryIdentityCoverageSelect,
 } from '../src/repositories/monitor-analytics-sql';
 import {
   readMonitorCountQuery,
@@ -1238,6 +1239,150 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           expect(reasons).toEqual(['coverage']);
           expect(actual.data).toEqual(await legacy.model[method](query));
         }
+
+        // CA contributes neither regional rows nor EU_TOTAL. Its clipped edge
+        // and mixed-case identity must not reject an otherwise reusable region.
+        const regionalBounds = {
+          startTime: '1997-10-28 00:20:00',
+          endTime: '1997-10-28 01:40:00',
+          timeSlotGranularity: 'hour',
+        };
+        const regionalSeed = {
+          ...rows[0],
+          asin_code: 'B226REGION',
+          site_snapshot: 'regional-scope-site',
+        };
+        await seed([
+          { ...regionalSeed, check_time: '1997-10-28 00:30:00' },
+          { ...regionalSeed, check_time: '1997-10-28 01:30:00' },
+          ...['00:05:00', '00:25:00', '01:55:00'].map((time) => ({
+            ...regionalSeed,
+            country: 'CA',
+            asin_code: 'B226CASECA',
+            check_time: `1997-10-28 ${time}`,
+          })),
+          {
+            ...regionalSeed,
+            country: 'CA',
+            asin_code: 'b226caseca',
+            check_time: '1997-10-28 00:35:00',
+          },
+        ]);
+        await refreshAll();
+        const regionalQuery = parseMonitorAnalyticsQuery(
+          'region-summary',
+          regionalBounds,
+        );
+        const regional = await read(regionalQuery);
+        expect(regional.source).toBe('agg');
+        expect(regional.data).toEqual(
+          await legacy.model.getRegionSummary(regionalQuery),
+        );
+        const globalQuery = parseMonitorAnalyticsQuery(
+          'all-countries-summary',
+          regionalBounds,
+        );
+        const globalReasons: string[] = [];
+        const global = await read(globalQuery, (reason) => {
+          globalReasons.push(reason);
+        });
+        expect(global.source).toBe('raw');
+        expect(globalReasons).toEqual(['coverage']);
+        expect(global.data).toEqual(
+          await legacy.model.getAllCountriesSummary(globalQuery),
+        );
+
+        // Same CI bucket, two raw spellings: CAGG stores only one of them.
+        // Read the actual MySQL representative, then put its opposite spelling
+        // in another dimension. Do not assume either engine chooses upper case.
+        const identitySeed = {
+          ...rows[0],
+          asin_code: 'B226IDENTITY',
+          site_snapshot: 'identity-first-site',
+        };
+        await seed([
+          { ...identitySeed, check_time: '1997-10-27 00:05:00' },
+          {
+            ...identitySeed,
+            asin_code: 'b226identity',
+            is_broken: false,
+            check_time: '1997-10-27 00:10:00',
+          },
+        ]);
+        const identityBounds = {
+          startTime: '1997-10-27 00:00:00',
+          endTime: '1997-10-27 01:00:00',
+        };
+        const mysqlBuckets = await legacy.model.getDurationSourceRowsFromRaw({
+          ...identityBounds,
+          sourceGranularity: 'hour',
+        });
+        const representative = mysqlBuckets.find(
+          (row) => row.site === identitySeed.site_snapshot,
+        );
+        expect(representative?.total_checks).toBe(2);
+        expect(['B226IDENTITY', 'b226identity']).toContain(
+          representative?.asin_key,
+        );
+        await seed([
+          {
+            ...identitySeed,
+            asin_code:
+              representative?.asin_key === 'B226IDENTITY'
+                ? 'b226identity'
+                : 'B226IDENTITY',
+            site_snapshot: 'identity-second-site',
+            check_time: '1997-10-27 00:30:00',
+          },
+        ]);
+        await refreshAll();
+        const mysqlFinalBuckets =
+          await legacy.model.getDurationSourceRowsFromRaw({
+            ...identityBounds,
+            sourceGranularity: 'hour',
+          });
+        expect(mysqlFinalBuckets).toHaveLength(2);
+        expect(new Set(mysqlFinalBuckets.map((row) => row.asin_key)).size).toBe(
+          2,
+        );
+        for (const [timeSlotGranularity, bounds] of [
+          ['hour', identityBounds],
+          ['day', { startTime: '1997-09-01 00:00:00', endTime }],
+          ['month', range],
+        ] as const) {
+          for (const [operation, method] of [
+            ['all-countries-summary', 'getAllCountriesSummary'],
+            ['region-summary', 'getRegionSummary'],
+          ] as const) {
+            const query = parseMonitorAnalyticsQuery(operation, {
+              ...bounds,
+              timeSlotGranularity,
+            });
+            const coverage = await createDb(pool).execute(
+              monitorAggregateCoverageSelect(query, 'dim', timeSlotGranularity),
+            );
+            expect(coverage.rows).toEqual([{ covered: true }]);
+            const reasons: string[] = [];
+            const actual = await read(query, (reason) => {
+              reasons.push(reason);
+            });
+            expect(
+              actual.source,
+              `${operation}/${timeSlotGranularity}/identity`,
+            ).toBe('raw');
+            expect(reasons).toEqual(['coverage']);
+            expect(actual.data).toEqual(await legacy.model[method](query));
+            if (timeSlotGranularity === 'hour') {
+              const metrics = Array.isArray(actual.data)
+                ? actual.data.find((row) => row.regionCode === 'US')
+                : actual.data;
+              expect(metrics).toMatchObject({
+                totalAsinsDedup: 2,
+                ratioAllAsin: 75,
+              });
+            }
+          }
+        }
       } finally {
         await legacy.query('SET SESSION sql_mode=?', [mode]);
         const codes = [
@@ -1246,6 +1391,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           `\t${rows[0].asin_code}\u00a0`,
           `\ufeff${rows[0].asin_code.toLowerCase()}\u3000`,
           'B226MILLI',
+          'B226REGION',
+          'B226CASECA',
+          'b226caseca',
+          'B226IDENTITY',
+          'b226identity',
         ];
         await legacy.query(
           "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code IN (?)",
@@ -1258,6 +1408,75 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await refreshAll();
       }
     }, 30_000);
+
+    it('rejects incomplete raw identity evidence without fabricating Timescale coverage metadata', async () => {
+      const codes = ['B226PROOFA', 'B226PROOFB'];
+      const query = parseMonitorAnalyticsQuery('all-countries-summary', {
+        startTime: '1997-10-30 00:00:00',
+        endTime: '1997-10-30 02:00:00',
+        timeSlotGranularity: 'hour',
+      });
+      try {
+        await pool.query(
+          `INSERT INTO public.monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id)
+          SELECT asin_code,'US',false,'ASIN',check_time,'count-proof-site','count-proof-brand','analytics-109-a'
+          FROM jsonb_to_recordset($1::jsonb) AS seed(asin_code text,check_time timestamp)`,
+          [
+            JSON.stringify([
+              { asin_code: codes[0], check_time: '1997-10-30 00:05:00' },
+              { asin_code: codes[0], check_time: '1997-10-30 00:10:00' },
+              { asin_code: codes[1], check_time: '1997-10-30 01:05:00' },
+              { asin_code: codes[1], check_time: '1997-10-30 01:10:00' },
+            ]),
+          ],
+        );
+        await refreshAll();
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const proof = async () =>
+            (
+              await createDb(client).execute(
+                monitorRawSummaryIdentityCoverageSelect(query, 'hour'),
+              )
+            ).rows;
+          expect(await proof()).toEqual([{ covered: true }]);
+          // Leave the real materialized source unchanged. Inspect only this
+          // scalar count proof, not the separate invalidation/watermark guard.
+          await client.query(
+            "DELETE FROM public.monitor_history WHERE asin_code=$1 AND check_time='1997-10-30 00:05:00'",
+            [codes[0]],
+          );
+          expect(
+            await proof(),
+            'one check missing from an existing bucket',
+          ).toEqual([{ covered: false }]);
+          await client.query(
+            'DELETE FROM public.monitor_history WHERE asin_code=$1',
+            [codes[0]],
+          );
+          expect(await proof(), 'one whole raw bucket missing').toEqual([
+            { covered: false },
+          ]);
+          await client.query(
+            'DELETE FROM public.monitor_history WHERE asin_code=$1',
+            [codes[1]],
+          );
+          expect(await proof(), 'raw evidence entirely absent').toEqual([
+            { covered: false },
+          ]);
+        } finally {
+          await client.query('ROLLBACK');
+          client.release();
+        }
+      } finally {
+        await pool.query(
+          "DELETE FROM public.monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code=ANY($1::text[])",
+          [codes],
+        );
+        await refreshAll();
+      }
+    }, 10_000);
 
     it('sums ASIN rates in chronological Map insertion order rather than alphabetical order', async () => {
       const cases = [
