@@ -198,15 +198,18 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     });
     it('rejects a stale group or ASIN manual state after the row lock is acquired', async () => {
       await seed();
+      const firstHeaders = { ...headers };
+      await login();
       const groupExpected = {
         manualBroken: true,
         manualBrokenReason: 'Parent reason',
       };
       const groupResponses = await Promise.all([
-        write('/variant-groups/g', {
-          markedBroken: false,
-          expectedManualState: groupExpected,
-        }),
+        write(
+          '/variant-groups/g',
+          { markedBroken: false, expectedManualState: groupExpected },
+          firstHeaders,
+        ),
         write('/variant-groups/g', {
           markedBroken: false,
           expectedManualState: groupExpected,
@@ -228,11 +231,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         parentManualBroken: false,
       };
       const asinResponses = await Promise.all([
-        write('/asins/a1', {
-          action: 'MARK_BROKEN',
-          reason: 'Concurrent own reason',
-          expectedManualState: asinExpected,
-        }),
+        write(
+          '/asins/a1',
+          {
+            action: 'MARK_BROKEN',
+            reason: 'Concurrent own reason',
+            expectedManualState: asinExpected,
+          },
+          firstHeaders,
+        ),
         write('/asins/a1', {
           action: 'MARK_BROKEN',
           reason: 'Concurrent own reason',

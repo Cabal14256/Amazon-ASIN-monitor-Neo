@@ -97,8 +97,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await f.pools.competitorPool.query(`DELETE FROM ${table}`);
         await legacy.query(`DELETE FROM ${table}`);
       }
-      userId = randomUUID();
-      sessionId = randomUUID();
+      ({ userId, sessionId, headers } = await writer());
+    });
+    async function writer() {
+      const userId = randomUUID(),
+        sessionId = randomUUID();
       f.userIds.add(userId);
       await f.pools.primaryPool.query(
         'INSERT INTO users(id,username,password,force_password_change) VALUES($1,$1,$2,false)',
@@ -112,23 +115,28 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
         [sessionId, userId],
       );
-      headers = {
-        authorization: `Bearer ${jwt.sign(
-          { userId, sessionId },
-          f.env.JWT_SECRET,
-          { expiresIn: '1h' },
-        )}`,
+      return {
+        userId,
+        sessionId,
+        headers: {
+          authorization: `Bearer ${jwt.sign(
+            { userId, sessionId },
+            f.env.JWT_SECRET,
+            { expiresIn: '1h' },
+          )}`,
+        },
       };
-    });
+    }
     const request = (
       method: 'POST' | 'PUT' | 'DELETE',
       path: string,
       payload: unknown = undefined,
+      auth = headers,
     ) =>
       f.http.inject({
         method,
         url: `/api/v1/competitor/${path}`,
-        headers,
+        headers: auth,
         payload: payload as Record<string, unknown>,
       });
     const read = () =>
@@ -1340,11 +1348,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).rejects.toMatchObject({ code: '23503' });
     });
     it('serializes competing equivalent ASIN creation across different parents with one success', async () => {
+      const other = await writer();
       await group('g1');
       await group('g2');
       const results = await Promise.all([
         request('POST', 'asins', { ...asinBody, asin: 'CAFÉ', parentId: 'g1' }),
-        request('POST', 'asins', { ...asinBody, asin: 'CAFE', parentId: 'g2' }),
+        request(
+          'POST',
+          'asins',
+          { ...asinBody, asin: 'CAFE', parentId: 'g2' },
+          other.headers,
+        ),
       ]);
       expect(
         results.filter((result) => result.statusCode === 200),
@@ -1352,6 +1366,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect([400, 409]).toContain(
         results.find((result) => result.statusCode !== 200)!.statusCode,
       );
+      const conflict = results.find((result) => result.statusCode !== 200)!;
+      if (conflict.statusCode === 409)
+        expect(conflict.json().errorMessage).toBe(
+          '该 ASIN 在此国家中已存在，请刷新后重试',
+        );
+      else
+        expect(conflict.json().errorMessage).toMatch(
+          /^ASIN (CAFÉ|CAFE) 在国家 US 中已存在$/,
+        );
       const current = await snapshot();
       expect(current.asins).toHaveLength(1);
       const winner = current.asins[0].variant_group_id;
