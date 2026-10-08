@@ -151,8 +151,9 @@ function completedResult(job: Job, state: TaskState) {
       case 'batch-check': {
         const data = parseVariantCheckJob(job.data);
         if (
+          state.status === 'completed' &&
           JSON.stringify(variantCheckJobOperation(data)) !==
-          JSON.stringify(variantCheckResultOperation(state, state.result))
+            JSON.stringify(variantCheckResultOperation(state, state.result))
         )
           throw new Error();
         break;
@@ -161,10 +162,13 @@ function completedResult(job: Job, state: TaskState) {
         primaryMonitorJobSchema.parse(job.data);
         break;
       case 'competitor-monitor':
-        return parseCompetitorMonitorCompletion(
-          competitorMonitorJobSchema.parse(job.data),
-          state.result,
-        );
+        if (state.status === 'completed')
+          return parseCompetitorMonitorCompletion(
+            competitorMonitorJobSchema.parse(job.data),
+            state.result,
+          );
+        competitorMonitorJobSchema.parse(job.data);
+        break;
       default:
         throw new Error();
     }
@@ -197,6 +201,79 @@ export function createCatalogFencedProcessor(
   processor: Processor<unknown, unknown, string>,
   log: Pick<typeof logger, 'warn'> = logger,
 ): Processor<unknown, unknown, string> {
+  // Retry only storage acknowledgement work. These attempts never allocate a
+  // business pin, invoke a consumer, or change its BullMQ attempt policy.
+  const reconcileTerminal = async (
+    job: Job,
+    state: TaskState,
+    task: CatalogTaskBinding,
+  ) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        let identity: CatalogOperationIdentity;
+        try {
+          identity = await repository.findByTask(task);
+        } catch (error) {
+          if (
+            error instanceof CatalogOperationError &&
+            error.code === 'CATALOG_OPERATION_MISSING'
+          )
+            return;
+          throw error;
+        }
+        const snapshot = requireSnapshot(
+          await repository.read(identity.ownerId, identity.domain),
+          identity,
+          task,
+        );
+        if (
+          snapshot.state !== 'closed' ||
+          snapshot.pendingPins ||
+          snapshot.uncertainPins
+        )
+          return;
+        if (snapshot.terminal) {
+          if (
+            snapshot.terminal.status !== state.status ||
+            !['worker', 'cancel'].includes(snapshot.terminal.source) ||
+            !sameTask(snapshot.terminal.task ?? null, task)
+          )
+            return;
+          await repository.close(identity);
+        } else {
+          // Only an original worker's drained, durable admission marker permits
+          // recovery. Redis terminal metadata cannot close an open generation.
+          completedResult(job, state);
+          const current = await store.read(task.taskId);
+          if (
+            !current ||
+            !sameTask(current, task) ||
+            current.status !== state.status
+          )
+            return;
+          completedResult(job, current);
+          await repository.close(identity, {
+            status: current.status as 'completed' | 'failed' | 'cancelled',
+            source: 'worker',
+            task,
+          });
+        }
+        await repository.release(identity);
+        return;
+      } catch (error) {
+        if (
+          error instanceof CatalogOperationError &&
+          [
+            'CATALOG_OPERATION_IDENTITY',
+            'CATALOG_OPERATION_MISSING',
+            'CATALOG_OPERATION_INVALID',
+          ].includes(error.code)
+        )
+          return;
+        if (attempt === 2) throw error;
+      }
+    }
+  };
   return async (job, token) => {
     let task: CatalogTaskBinding, identity: CatalogOperationIdentity;
     try {
@@ -204,45 +281,24 @@ export function createCatalogFencedProcessor(
       const state = await store.read(task.taskId);
       if (!sameTask(state, task) || !state)
         throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
-      // The original worker has already closed/released its PostgreSQL slot.
-      // A lost BullMQ completion ACK must replay metadata, not prepare new work.
-      if (state.status === 'completed') return completedResult(job, state);
-      if (state.status === 'failed')
-        throw new UnrecoverableError('目录任务已失败，请核实已提交结果');
-      try {
-        identity = await repository.findByTask(task);
-      } catch (error) {
-        if (
-          state.status === 'cancelled' &&
-          error instanceof CatalogOperationError &&
-          error.code === 'CATALOG_OPERATION_MISSING'
-        )
-          return cancelledResult(taskType);
-        throw error;
+      if (['completed', 'failed', 'cancelled'].includes(state.status)) {
+        const result =
+          state.status === 'completed'
+            ? completedResult(job, state)
+            : undefined;
+        await reconcileTerminal(job, state, task);
+        if (state.status === 'failed')
+          throw new UnrecoverableError('目录任务已失败，请核实已提交结果');
+        return state.status === 'cancelled'
+          ? cancelledResult(taskType)
+          : result;
       }
+      identity = await repository.findByTask(task);
       const initial = requireSnapshot(
         await repository.read(identity.ownerId, identity.domain),
         identity,
         task,
       );
-      if (state.status === 'cancelled') {
-        // The cancelling API may have removed the exact queue job and closed
-        // its generation. Preserve that first proof; never restart its work.
-        if (
-          initial.state === 'closed' &&
-          initial.terminal?.status === 'cancelled' &&
-          ['cancel', 'worker'].includes(initial.terminal.source) &&
-          sameTask(initial.terminal.task ?? null, task)
-        ) {
-          if (!initial.pendingPins && !initial.uncertainPins) {
-            await repository.close(identity);
-            await repository.release(identity);
-          }
-        }
-        // Terminal Redis metadata cannot start another processor, settle an
-        // open/uncertain generation, or clear a still-pending physical pin.
-        return cancelledResult(taskType);
-      }
       if (initial.state !== 'open') {
         throw new CatalogOperationError(
           initial.state === 'uncertain'
@@ -269,51 +325,84 @@ export function createCatalogFencedProcessor(
     let settlement: Promise<void> = Promise.resolve();
     const settle = () => {
       settlement = settlement
+        .catch(() => undefined)
         .then(async () => {
           if (!actionDone || released || unconfirmed || allocating || pins.size)
             return;
-          const current = await store.read(task.taskId);
-          if (
-            !sameTask(current, task) ||
-            !current ||
-            !['completed', 'failed', 'cancelled'].includes(current.status)
-          )
-            return;
-          const snapshot = requireSnapshot(
-            await repository.read(identity.ownerId, identity.domain),
-            identity,
-            task,
-          );
-          if (
-            snapshot.state === 'uncertain' ||
-            snapshot.pendingPins ||
-            snapshot.uncertainPins
-          )
-            return;
-          if (snapshot.terminal) {
-            if (
-              snapshot.terminal.status !== current.status ||
-              !['worker', 'cancel'].includes(snapshot.terminal.source) ||
-              !sameTask(snapshot.terminal.task ?? null, task)
-            )
-              throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
-            await repository.close(identity);
-          } else {
-            await repository.close(identity, {
-              status: current.status as 'completed' | 'failed' | 'cancelled',
-              source: 'worker',
-              task,
-            });
+          let releaseAttempted = false;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const current = await store.read(task.taskId);
+              if (
+                !sameTask(current, task) ||
+                !current ||
+                !['completed', 'failed', 'cancelled'].includes(current.status)
+              )
+                return;
+              const value = await repository.read(
+                identity.ownerId,
+                identity.domain,
+              );
+              // A lost release ACK may already have made the original slot idle.
+              // A replacement is never closed/released by this attempt.
+              if (
+                releaseAttempted &&
+                (!value || !sameIdentity(value, identity))
+              ) {
+                released = true;
+                return;
+              }
+              const snapshot = requireSnapshot(value, identity, task);
+              if (
+                snapshot.state === 'uncertain' ||
+                snapshot.pendingPins ||
+                snapshot.uncertainPins
+              )
+                return;
+              if (snapshot.terminal) {
+                if (
+                  snapshot.terminal.status !== current.status ||
+                  !['worker', 'cancel'].includes(snapshot.terminal.source) ||
+                  !sameTask(snapshot.terminal.task ?? null, task)
+                )
+                  throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
+                await repository.close(identity);
+              } else {
+                if (snapshot.state === 'open') {
+                  // Persist that this exact attempt cannot allocate more work only
+                  // after terminal metadata and every physical pin are confirmed.
+                  await repository.close(identity);
+                }
+                await repository.close(identity, {
+                  status: current.status as
+                    | 'completed'
+                    | 'failed'
+                    | 'cancelled',
+                  source: 'worker',
+                  task,
+                });
+              }
+              releaseAttempted = true;
+              released = await repository.release(identity);
+              return;
+            } catch (error) {
+              if (
+                error instanceof CatalogOperationError &&
+                [
+                  'CATALOG_OPERATION_IDENTITY',
+                  'CATALOG_OPERATION_MISSING',
+                  'CATALOG_OPERATION_INVALID',
+                ].includes(error.code)
+              )
+                return;
+              log.warn('目录任务释放未确认', {
+                reason: 'catalog_task_settlement_unconfirmed',
+                taskType,
+              });
+              if (attempt === 2)
+                throw new Error('目录任务释放暂不可用，请核实任务和目录后恢复');
+            }
           }
-          released = await repository.release(identity);
-        })
-        .catch(() => {
-          // Preserve the original processor's result/error. The durable slot and
-          // pin ledger remain the authority even if this acknowledgement is lost.
-          log.warn('目录任务释放未确认', {
-            reason: 'catalog_task_settlement_unconfirmed',
-            taskType,
-          });
         });
       return settlement;
     };

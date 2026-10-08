@@ -33,6 +33,11 @@ export function catalogOperationUnitFixture() {
           reject: vi.fn(async () => true),
         }),
     ),
-    settleRemovedTask: vi.fn(async () => undefined),
+    acquireCancellation: vi.fn(() => ({
+      markRemoved: vi.fn(),
+      confirmRemoved: vi.fn(async () => undefined),
+      release: vi.fn(),
+    })),
+    retryRemovedTask: vi.fn(async () => false),
   };
 }

@@ -154,6 +154,112 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const current = await repository.read('owner', 'asin');
       expect(current).toMatchObject({ generation: '1', pendingPins: 0 });
     });
+    it.each(['asin', 'competitor'] as const)(
+      '%s reports BUSY while the real business assertPin SHARE lock remains held, without changing the slot or pin',
+      async (domain) => {
+        const identity = await reserve('owner', domain);
+        const pin = await repository.beginPin(identity);
+        const holder = await pool.connect();
+        let began = false;
+        let secondActionStarted = false;
+        let contender: Promise<unknown> | undefined;
+        const physicalSnapshot = async () => ({
+          slots: (
+            await pool.query(
+              'SELECT * FROM catalog_operation_slots ORDER BY owner_id,domain',
+            )
+          ).rows,
+          pins: (
+            await pool.query(
+              'SELECT * FROM catalog_operation_pins ORDER BY pin_id',
+            )
+          ).rows,
+          groups: (await pool.query('SELECT * FROM variant_groups ORDER BY id'))
+            .rows,
+          asins: (await pool.query('SELECT * FROM asins ORDER BY id')).rows,
+          history: (
+            await pool.query('SELECT * FROM monitor_history ORDER BY id')
+          ).rows,
+        });
+        try {
+          await holder.query('BEGIN');
+          began = true;
+          // Production's real guard locks this exact generation and pending pin
+          // FOR SHARE. No fake SQLSTATE, timer or lock-error adapter is involved.
+          await repository.assertPin(createDb(holder), pin);
+          const pid = Number(
+            (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+          );
+          expect(
+            (
+              await pool.query(
+                "SELECT count(*)::int AS n FROM pg_locks WHERE pid=$1 AND granted AND mode='RowShareLock' AND relation='catalog_operation_slots'::regclass",
+                [pid],
+              )
+            ).rows[0].n,
+          ).toBe(1);
+          const before = await physicalSnapshot();
+          const snapshot = await repository.read('owner', domain);
+          expect(snapshot).toMatchObject({
+            ...identity,
+            state: 'open',
+            pendingPins: 1,
+            uncertainPins: 0,
+          });
+          contender = repository
+            .reserve(
+              { ownerId: 'owner', domain, kind: 'write' },
+              async (unit) => {
+                expect(await unit.lockOperator('owner')).toMatchObject({
+                  status: 'active',
+                });
+              },
+            )
+            .then(
+              () => {
+                secondActionStarted = true;
+                return { accepted: true };
+              },
+              (error: unknown) => ({ accepted: false, error }),
+            );
+          // Keep the holder transaction open until the contender has returned.
+          // The old FOR UPDATE path really reaches statement_timeout (57014),
+          // so releasing first would conceal the BUSY classification regression.
+          expect(await contender).toMatchObject({
+            accepted: false,
+            error: { code: 'CATALOG_OPERATION_BUSY' },
+          });
+          expect(secondActionStarted).toBe(false);
+          expect(await repository.read('owner', domain)).toEqual(snapshot);
+          expect(await physicalSnapshot()).toEqual(before);
+          expect(
+            (
+              await pool.query(
+                'SELECT state FROM pg_stat_activity WHERE pid=$1',
+                [pid],
+              )
+            ).rows[0].state,
+          ).toBe('idle in transaction');
+        } finally {
+          try {
+            if (began) await holder.query('ROLLBACK');
+          } finally {
+            holder.release();
+          }
+          await Promise.allSettled(contender ? [contender] : []);
+          await repository.finishPin(pin, 'rolled-back');
+        }
+        expect(await repository.read('owner', domain)).toMatchObject({
+          ...identity,
+          pendingPins: 0,
+          uncertainPins: 0,
+        });
+        await complete(identity);
+        const next = await reserve('owner', domain);
+        expect(next.generation).toBe('2');
+        await complete(next);
+      },
+    );
     it('checks current authorization in the same SQL transaction, and never reserves after its rejection', async () => {
       await expect(
         repository.reserve(
@@ -606,7 +712,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const identity = await reserve();
       let proceed!: () => void,
         ready!: () => void,
-        pid = 0;
+        pid = 0,
+        firstAuthorized = false,
+        contenderAuthorized = false,
+        secondActionStarted = false;
       const gate = new Promise<void>((resolve) => {
         proceed = resolve;
       });
@@ -624,6 +733,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           expect(await unit.lockOperator('owner')).toMatchObject({
             status: 'active',
           });
+          firstAuthorized = true;
           return unit.createGroup({
             name: 'auth lock order',
             country: 'US',
@@ -634,33 +744,93 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       let contender: Promise<CatalogOperationIdentity> | undefined;
       try {
-        await started;
-        contender = repository.reserve(
-          { ownerId: 'owner', domain: 'asin', kind: 'write' },
-          async (unit) => {
-            await unit.lockOperator('owner');
-          },
-        );
-        const rejected = expect(contender).rejects.toMatchObject({
+        await Promise.race([
+          started,
+          business.then(() => {
+            throw new Error(
+              'Business transaction ended before lock-order oracle',
+            );
+          }),
+        ]);
+        const before = await repository.read('owner', 'asin');
+        const beforePins = (
+          await pool.query(
+            'SELECT * FROM catalog_operation_pins ORDER BY pin_id',
+          )
+        ).rows;
+        expect(before).toMatchObject({
+          ...identity,
+          state: 'open',
+          pendingPins: 1,
+          uncertainPins: 0,
+        });
+        contender = repository
+          .reserve(
+            { ownerId: 'owner', domain: 'asin', kind: 'write' },
+            async (unit) => {
+              contenderAuthorized = true;
+              expect(await unit.lockOperator('owner')).toMatchObject({
+                status: 'active',
+              });
+            },
+          )
+          .then((next) => {
+            secondActionStarted = true;
+            return next;
+          });
+        // NOWAIT must reject while the first real slot/pin SHARE locks remain
+        // held, before taking the owner lock or admitting another action.
+        await expect(contender).rejects.toMatchObject({
           code: 'CATALOG_OPERATION_BUSY',
         });
-        await vi.waitFor(
-          async () => {
-            expect(
-              (
-                await pool.query(
-                  'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND $1=ANY(pg_blocking_pids(pid))',
-                  [pid],
-                )
-              ).rows[0].n,
-            ).toBeGreaterThan(0);
-          },
-          { timeout: 1000, interval: 10 },
-        );
+        expect(contenderAuthorized).toBe(false);
+        expect(secondActionStarted).toBe(false);
+        expect(firstAuthorized).toBe(false);
+        expect(
+          (
+            await pool.query(
+              "SELECT count(*)::int AS n FROM pg_locks WHERE pid=$1 AND granted AND mode='RowShareLock' AND relation='catalog_operation_slots'::regclass",
+              [pid],
+            )
+          ).rows[0].n,
+        ).toBe(1);
+        expect(await repository.read('owner', 'asin')).toEqual(before);
+        expect(
+          (
+            await pool.query(
+              'SELECT * FROM catalog_operation_pins ORDER BY pin_id',
+            )
+          ).rows,
+        ).toEqual(beforePins);
+        expect(
+          (await pool.query('SELECT count(*)::int AS n FROM variant_groups'))
+            .rows[0].n,
+        ).toBe(0);
         proceed();
         await business;
-        await rejected;
+        expect(firstAuthorized).toBe(true);
+        expect(await repository.read('owner', 'asin')).toMatchObject({
+          ...identity,
+          pendingPins: 0,
+          uncertainPins: 0,
+        });
+        expect(
+          (await pool.query('SELECT name FROM variant_groups')).rows,
+        ).toEqual([{ name: 'auth lock order' }]);
         await complete(identity);
+        let nextAuthorized = false;
+        const next = await repository.reserve(
+          { ownerId: 'owner', domain: 'asin', kind: 'write' },
+          async (unit) => {
+            expect(await unit.lockOperator('owner')).toMatchObject({
+              status: 'active',
+            });
+            nextAuthorized = true;
+          },
+        );
+        expect(nextAuthorized).toBe(true);
+        expect(next.generation).toBe('2');
+        await complete(next);
       } finally {
         proceed();
         await Promise.allSettled([business, ...(contender ? [contender] : [])]);

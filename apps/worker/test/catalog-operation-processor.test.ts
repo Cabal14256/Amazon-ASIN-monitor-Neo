@@ -302,12 +302,20 @@ describe('required Worker catalog operation and physical settlement', () => {
           return { success: true };
         });
         expect(result).toEqual({ success: true });
-        expect(f.repository.close).toHaveBeenCalledExactlyOnceWith(f.identity, {
+        expect(f.repository.close).toHaveBeenCalledTimes(2);
+        expect(f.repository.close).toHaveBeenNthCalledWith(1, f.identity);
+        expect(f.repository.close).toHaveBeenNthCalledWith(2, f.identity, {
           status: 'completed',
           source: 'worker',
           task: f.task,
         });
-        expect(f.events).toEqual(['begin', 'committed', 'close', 'release']);
+        expect(f.events).toEqual([
+          'begin',
+          'committed',
+          'close',
+          'close',
+          'release',
+        ]);
       });
       it(`${domain} ${kind} replays its exact terminal result after release without invoking any business processor`, async () => {
         const f = fixture(domain, kind);
@@ -325,8 +333,9 @@ describe('required Worker catalog operation and physical settlement', () => {
         });
         await expect(f.run(business)).resolves.toEqual(original?.result);
         expect(business).not.toHaveBeenCalled();
-        for (const method of Object.values(f.repository))
-          expect(method).not.toHaveBeenCalled();
+        expect(f.repository.findByTask).toHaveBeenCalledExactlyOnceWith(f.task);
+        for (const [name, method] of Object.entries(f.repository))
+          if (name !== 'findByTask') expect(method).not.toHaveBeenCalled();
         expect(await f.store.read()).toEqual(original);
       });
     }
@@ -351,7 +360,13 @@ describe('required Worker catalog operation and physical settlement', () => {
         expect(f.snapshot()?.pendingPins).toBe(1);
         physical.resolve();
         await finishing;
-        expect(f.events).toEqual(['begin', outcome, 'close', 'release']);
+        expect(f.events).toEqual([
+          'begin',
+          outcome,
+          'close',
+          'close',
+          'release',
+        ]);
         expect(f.repository.close).toHaveBeenCalledWith(f.identity, {
           status: 'cancelled',
           source: 'worker',
@@ -536,7 +551,9 @@ describe('required Worker catalog operation and physical settlement', () => {
         );
       expect(business).not.toHaveBeenCalled();
       expect(f.repository.beginPin).not.toHaveBeenCalled();
-      expect(f.repository.release).not.toHaveBeenCalled();
+      expect(f.repository.close).toHaveBeenCalledExactlyOnceWith(f.identity);
+      expect(f.repository.release).toHaveBeenCalledExactlyOnceWith(f.identity);
+      expect(f.snapshot()).toBeNull();
     },
   );
   it('a new owner/domain generation cannot be released by an old attempt', async () => {
@@ -564,8 +581,19 @@ describe('required Worker catalog operation and physical settlement', () => {
     await expect(f.run(business)).resolves.toEqual(original);
     expect(f.snapshot()).toEqual(replacement);
     expect(business).not.toHaveBeenCalled();
-    for (const method of Object.values(f.repository))
-      expect(method).not.toHaveBeenCalled();
+    expect(f.repository.findByTask).toHaveBeenCalledExactlyOnceWith(f.task);
+    expect(f.repository.read).toHaveBeenCalledExactlyOnceWith(
+      f.identity.ownerId,
+      f.identity.domain,
+    );
+    for (const name of [
+      'beginPin',
+      'assertPin',
+      'finishPin',
+      'close',
+      'release',
+    ] as const)
+      expect(f.repository[name]).not.toHaveBeenCalled();
   });
   it.each(['open', 'uncertain'] as const)(
     'cancelled metadata cannot invoke a processor or settle a %s physical generation',
@@ -641,6 +669,8 @@ describe('required Worker catalog operation and physical settlement', () => {
     f.setSnapshot(null);
     const business = vi.fn(async () => undefined);
     await expect(f.run(business)).resolves.toEqual(result);
+    expect(f.repository.findByTask).toHaveBeenCalledExactlyOnceWith(f.task);
+    f.repository.findByTask.mockClear();
     f.job.data.params.groupIds = ['different'];
     await expect(f.run(business)).rejects.toBeInstanceOf(UnrecoverableError);
     expect(business).not.toHaveBeenCalled();
@@ -748,6 +778,7 @@ describe('required Worker catalog operation and physical settlement', () => {
       'committed',
       'rolled-back',
       'close',
+      'close',
       'release',
     ]);
   });
@@ -764,15 +795,15 @@ describe('required Worker catalog operation and physical settlement', () => {
     await expect(f.run(business)).rejects.toBeInstanceOf(UnrecoverableError);
     expect(business).not.toHaveBeenCalled();
   });
-  it('preserves the gate when final metadata read is unavailable and logs only fixed context', async () => {
+  it('retains the gate and rejects Bull completion when final metadata read stays unavailable after bounded retry', async () => {
     const f = fixture();
     await expect(
       f.run(async () => {
         f.patch({ status: 'completed' });
-        f.store.read.mockRejectedValueOnce(new Error('private endpoint'));
+        f.store.read.mockRejectedValue(new Error('private endpoint'));
         return 'completed';
       }),
-    ).resolves.toBe('completed');
+    ).rejects.toThrow('目录任务释放暂不可用');
     expect(f.repository.close).not.toHaveBeenCalled();
     expect(f.repository.release).not.toHaveBeenCalled();
     expect(f.log.warn).toHaveBeenCalledWith('目录任务释放未确认', {
@@ -802,7 +833,13 @@ describe('required Worker catalog operation and physical settlement', () => {
     late.resolve();
     await finishing;
     expect(f.repository.assertPin).not.toHaveBeenCalled();
-    expect(f.events).toEqual(['begin', 'rolled-back', 'close', 'release']);
+    expect(f.events).toEqual([
+      'begin',
+      'rolled-back',
+      'close',
+      'close',
+      'release',
+    ]);
   });
   it('a caught unknown settlement stops subsequent chunks and already prepared SQL guards', async () => {
     const f = fixture('competitor', 'batch-delete');
@@ -826,4 +863,274 @@ describe('required Worker catalog operation and physical settlement', () => {
     expect(f.repository.assertPin).not.toHaveBeenCalled();
     expect(f.repository.release).not.toHaveBeenCalled();
   });
+
+  for (const status of ['completed', 'failed', 'cancelled'] as const) {
+    for (const dependency of ['read', 'close', 'release'] as const) {
+      it(`retries ${status} physical settlement after a single ${dependency} failure even with one Bull attempt`, async () => {
+        const f = fixture('competitor', 'batch-delete');
+        f.job.opts.attempts = 1;
+        const originalError = new Error('original business failure');
+        const result = { cancelled: status === 'cancelled', original: true };
+        const business = vi.fn(async () => {
+          const execution = catalogTransactionExecution();
+          await execution.begin();
+          await execution.guard({ execute: vi.fn() });
+          await execution.settled(
+            status === 'failed' ? 'rolled-back' : 'committed',
+          );
+          f.patch({ status, result });
+          const method =
+            dependency === 'read' ? f.store.read : f.repository[dependency];
+          method.mockRejectedValueOnce(
+            new Error('private settlement endpoint'),
+          );
+          if (status === 'failed') throw originalError;
+          return result;
+        });
+        if (status === 'failed')
+          await expect(f.run(business)).rejects.toBe(originalError);
+        else await expect(f.run(business)).resolves.toEqual(result);
+        expect(business).toHaveBeenCalledTimes(1);
+        expect(f.repository.beginPin).toHaveBeenCalledTimes(1);
+        expect(f.repository.finishPin).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ identity: f.identity }),
+          status === 'failed' ? 'rolled-back' : 'committed',
+        );
+        expect(f.snapshot()).toBeNull();
+        expect(f.repository.release).toHaveBeenCalledWith(f.identity);
+        expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+          'private settlement endpoint',
+        );
+      });
+    }
+    it(`recovers ${status} from its durable drained marker without invoking business or allocating another pin`, async () => {
+      const f = fixture();
+      const result = completedReplay(f);
+      f.patch({ status });
+      f.setSnapshot({ ...f.snapshot()!, state: 'closed', terminal: null });
+      const original = await f.store.read();
+      const business = vi.fn(async () => {
+        throw new Error('must not repeat business');
+      });
+      if (status === 'failed')
+        await expect(f.run(business)).rejects.toBeInstanceOf(
+          UnrecoverableError,
+        );
+      else
+        await expect(f.run(business)).resolves.toEqual(
+          status === 'cancelled'
+            ? {
+                cancelled: true,
+                message: '检查任务已取消，已提交的检查结果保留',
+              }
+            : result,
+        );
+      expect(business).not.toHaveBeenCalled();
+      expect(f.repository.beginPin).not.toHaveBeenCalled();
+      expect(f.repository.close).toHaveBeenCalledWith(f.identity, {
+        status,
+        source: 'worker',
+        task: f.task,
+      });
+      expect(f.snapshot()).toBeNull();
+      expect(await f.store.read()).toEqual(original);
+    });
+    it(`recovers ${status} after PostgreSQL applied the drained marker but its close ACK was lost`, async () => {
+      const f = fixture();
+      const close = f.repository.close.getMockImplementation()!;
+      const business = vi.fn(async () => {
+        const execution = catalogTransactionExecution();
+        await execution.begin();
+        await execution.settled('committed');
+        f.patch({ status });
+        f.repository.close.mockImplementationOnce(async (identity, proof) => {
+          await close(identity, proof);
+          throw new Error('private close ACK');
+        });
+        return { original: true };
+      });
+      await expect(f.run(business)).resolves.toEqual({ original: true });
+      expect(business).toHaveBeenCalledTimes(1);
+      expect(f.snapshot()).toBeNull();
+      expect(f.repository.beginPin).toHaveBeenCalledTimes(1);
+      expect(f.repository.release).toHaveBeenCalledWith(f.identity);
+    });
+    it(`recovers ${status} after terminal-proof COMMIT succeeded but its ACK was lost`, async () => {
+      const f = fixture();
+      const close = f.repository.close.getMockImplementation()!;
+      let lost = false;
+      f.repository.close.mockImplementation(async (identity, proof) => {
+        await close(identity, proof);
+        if (proof && !lost) {
+          lost = true;
+          throw new Error('private proof ACK');
+        }
+      });
+      await expect(
+        f.run(async () => {
+          f.patch({ status });
+          return 'original';
+        }),
+      ).resolves.toBe('original');
+      expect(lost).toBe(true);
+      expect(f.snapshot()).toBeNull();
+      expect(f.repository.beginPin).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+        'private proof ACK',
+      );
+    });
+    it(`does not repeat business after ${status} release COMMIT succeeded but its ACK was lost`, async () => {
+      const f = fixture();
+      const release = f.repository.release.getMockImplementation()!;
+      f.repository.release.mockImplementationOnce(async () => {
+        await release();
+        throw new Error('private release ACK');
+      });
+      const business = vi.fn(async () => {
+        f.patch({ status });
+        return 'original';
+      });
+      await expect(f.run(business)).resolves.toBe('original');
+      expect(f.snapshot()).toBeNull();
+      expect(business).toHaveBeenCalledTimes(1);
+      expect(f.repository.release).toHaveBeenCalledTimes(1);
+      expect(f.repository.beginPin).not.toHaveBeenCalled();
+    });
+    it(`a new Worker invocation recovers ${status} after proof storage failed three times following a durable marker`, async () => {
+      const f = fixture();
+      f.job.opts.attempts = 1;
+      const result = completedReplay(f);
+      f.patch({ status: 'pending', result: null });
+      const close = f.repository.close.getMockImplementation()!;
+      f.repository.close.mockImplementation(async (identity, proof) => {
+        if (proof) throw new Error('private proof outage');
+        await close(identity);
+      });
+      const business = vi.fn(async () => {
+        const execution = catalogTransactionExecution();
+        await execution.begin();
+        await execution.guard({ execute: vi.fn() });
+        await execution.settled(
+          status === 'failed' ? 'rolled-back' : 'committed',
+        );
+        f.patch({ status, result });
+        return result;
+      });
+      await expect(f.run(business)).rejects.toThrow('目录任务释放暂不可用');
+      expect(f.snapshot()).toMatchObject({
+        state: 'closed',
+        terminal: null,
+        pendingPins: 0,
+        uncertainPins: 0,
+      });
+      expect(f.repository.release).not.toHaveBeenCalled();
+      const original = await f.store.read();
+      f.repository.close.mockImplementation(close);
+      const forbidden = vi.fn(async () => {
+        throw new Error('business cannot repeat');
+      });
+      if (status === 'failed')
+        await expect(f.run(forbidden)).rejects.toBeInstanceOf(
+          UnrecoverableError,
+        );
+      else
+        await expect(f.run(forbidden)).resolves.toEqual(
+          status === 'cancelled'
+            ? {
+                cancelled: true,
+                message: '检查任务已取消，已提交的检查结果保留',
+              }
+            : result,
+        );
+      expect(f.snapshot()).toBeNull();
+      expect(business).toHaveBeenCalledTimes(1);
+      expect(forbidden).not.toHaveBeenCalled();
+      expect(f.repository.beginPin).toHaveBeenCalledTimes(1);
+      expect(await f.store.read()).toEqual(original);
+    });
+  }
+  it('does not seal a still-active retryable failure and permits the next normal business attempt', async () => {
+    const f = fixture();
+    const error = new Error('retryable business error');
+    await expect(
+      f.run(async () => {
+        const execution = catalogTransactionExecution();
+        await execution.begin();
+        await execution.settled('rolled-back');
+        f.patch({ status: 'processing' });
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    expect(f.snapshot()).toMatchObject({
+      state: 'open',
+      terminal: null,
+      pendingPins: 0,
+      uncertainPins: 0,
+    });
+    expect(f.repository.close).not.toHaveBeenCalled();
+    expect(f.repository.release).not.toHaveBeenCalled();
+    await expect(
+      f.run(async () => {
+        const execution = catalogTransactionExecution();
+        await execution.begin();
+        await execution.settled('committed');
+        f.patch({ status: 'completed' });
+        return 'retry completed';
+      }),
+    ).resolves.toBe('retry completed');
+    expect(f.repository.beginPin).toHaveBeenCalledTimes(2);
+    expect(f.snapshot()).toBeNull();
+  });
+  it.each([
+    ['open', 0, 0],
+    ['closed', 1, 0],
+    ['uncertain', 0, 1],
+  ] as const)(
+    'terminal metadata leaves %s marker with pending=%s uncertain=%s untouched',
+    async (state, pendingPins, uncertainPins) => {
+      const f = fixture();
+      const result = completedReplay(f);
+      const original = {
+        ...f.snapshot()!,
+        state,
+        pendingPins,
+        uncertainPins,
+        terminal: null,
+      };
+      f.setSnapshot(original);
+      const business = vi.fn(async () => undefined);
+      await expect(f.run(business)).resolves.toEqual(result);
+      expect(f.snapshot()).toEqual(original);
+      expect(business).not.toHaveBeenCalled();
+      expect(f.repository.close).not.toHaveBeenCalled();
+      expect(f.repository.release).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'taskId',
+    'userId',
+    'taskType',
+    'taskSubType',
+    'createdAt',
+  ] as const)(
+    'a drained marker with different %s binding is never released',
+    async (field) => {
+      const f = fixture();
+      const result = completedReplay(f);
+      const original = {
+        ...f.snapshot()!,
+        state: 'closed' as const,
+        terminal: null,
+        task: { ...f.task, [field]: 'changed' },
+      };
+      f.setSnapshot(original);
+      const business = vi.fn(async () => undefined);
+      await expect(f.run(business)).resolves.toEqual(result);
+      expect(f.snapshot()).toEqual(original);
+      expect(business).not.toHaveBeenCalled();
+      expect(f.repository.beginPin).not.toHaveBeenCalled();
+      expect(f.repository.close).not.toHaveBeenCalled();
+      expect(f.repository.release).not.toHaveBeenCalled();
+    },
+  );
 });

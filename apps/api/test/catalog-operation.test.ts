@@ -239,7 +239,11 @@ describe('durable catalog operation application boundary', () => {
     });
   });
   it('closes only a cancelled task with its exact stored binding after confirmed queue removal', async () => {
-    await service.settleRemovedTask(task(), performance.now() + 500);
+    const lease = service.acquireCancellation({ ...task(), status: 'pending' });
+    expect(lease).toBeDefined();
+    lease!.markRemoved();
+    await lease!.confirmRemoved(task(), performance.now() + 500);
+    lease!.release();
     expect(find).toHaveBeenCalledWith(
       expect.objectContaining({
         taskId: task().taskId,
@@ -252,10 +256,17 @@ describe('durable catalog operation application boundary', () => {
     );
     find.mockClear();
     close.mockClear();
-    await service.settleRemovedTask(
-      { ...task(), status: 'processing' },
-      performance.now() + 500,
-    );
+    const invalid = service.acquireCancellation({
+      ...task(),
+      status: 'pending',
+    });
+    await expect(
+      invalid!.confirmRemoved(
+        { ...task(), status: 'processing' },
+        performance.now() + 500,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    invalid!.release();
     expect(find).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
   });
@@ -267,12 +278,214 @@ describe('durable catalog operation application boundary', () => {
           finish = resolve;
         }),
     );
-    await service.settleRemovedTask(task(), performance.now() + 10);
-    await service.settleRemovedTask(task(), performance.now() + 10);
+    const lease = service.acquireCancellation({
+      ...task(),
+      status: 'pending',
+    })!;
+    lease.markRemoved();
+    await lease.confirmRemoved(task(), performance.now() + 10);
+    lease.release();
+    expect(await service.retryRemovedTask(task(), performance.now() + 10)).toBe(
+      true,
+    );
     expect(find).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
     expect(release).not.toHaveBeenCalled();
     finish();
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+  });
+  it('reserves all eight admission leases before removal and frees an unconfirmed lease', () => {
+    const leases = Array.from(
+      { length: 8 },
+      (_, index) =>
+        service.acquireCancellation({
+          ...task(),
+          status: 'pending',
+          taskId: `22400000-0000-4000-8000-${String(index + 100).padStart(
+            12,
+            '0',
+          )}`,
+        })!,
+    );
+    expect(() =>
+      service.acquireCancellation({ ...task(), status: 'pending' }),
+    ).toThrow(HttpException);
+    expect(find).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    leases[0].release();
+    const admitted = service.acquireCancellation({
+      ...task(),
+      status: 'pending',
+    });
+    expect(admitted).toBeDefined();
+    admitted!.release();
+    leases.forEach((lease) => lease.release());
+  });
+  it.each([
+    'taskId',
+    'userId',
+    'taskType',
+    'taskSubType',
+    'createdAt',
+  ] as const)(
+    'freezes %s before queue removal and refuses a substituted cancelled record',
+    async (field) => {
+      const original = task();
+      const prepared = { ...original, status: 'pending' as const };
+      const lease = service.acquireCancellation(prepared)!;
+      const next = { ...original };
+      if (field === 'taskId')
+        next.taskId = '22400000-0000-4000-8000-000000000019';
+      else if (field === 'userId') next.userId = 'other-owner';
+      else if (field === 'taskType') next.taskType = 'import';
+      else if (field === 'taskSubType')
+        next.taskSubType = 'competitor-variant-group-delete';
+      else next.createdAt = '2099-01-01T00:00:00.000Z';
+      await expect(
+        lease.confirmRemoved(next, performance.now() + 500),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(
+        await service.retryRemovedTask(next, performance.now() + 500),
+      ).toBe(false);
+      expect(find).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      // The admitted identity is an immutable copy, even if the original
+      // metadata object is changed while the queue command is in flight.
+      prepared.createdAt = '2099-01-01T00:00:00.000Z';
+      lease.markRemoved();
+      await lease.confirmRemoved(original, performance.now() + 500);
+      expect(find).toHaveBeenCalledWith({
+        taskId: original.taskId,
+        userId: original.userId,
+        taskType: original.taskType,
+        taskSubType: original.taskSubType,
+        createdAt: original.createdAt,
+      });
+      lease.release();
+    },
+  );
+  it('bounds unconfirmed storage to three attempts and retains capacity until exact explicit retry succeeds', async () => {
+    close.mockRejectedValue(new Error('synthetic close unavailable'));
+    const cancelled = task();
+    const lease = service.acquireCancellation({
+      ...cancelled,
+      status: 'pending',
+    })!;
+    lease.markRemoved();
+    await lease.confirmRemoved(cancelled, performance.now() + 500);
+    lease.release();
+    expect(close).toHaveBeenCalledTimes(3);
+    expect(find).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    const other = Array.from(
+      { length: 7 },
+      (_, index) =>
+        service.acquireCancellation({
+          ...task(),
+          status: 'pending',
+          taskId: `22400000-0000-4000-8000-${String(index + 100).padStart(
+            12,
+            '0',
+          )}`,
+        })!,
+    );
+    expect(() =>
+      service.acquireCancellation({
+        ...task(),
+        status: 'pending',
+        taskId: '22400000-0000-4000-8000-000000000200',
+      }),
+    ).toThrow(HttpException);
+    expect(
+      await service.retryRemovedTask(
+        { ...cancelled, status: 'failed' },
+        performance.now() + 500,
+      ),
+    ).toBe(false);
+    expect(close).toHaveBeenCalledTimes(3);
+    close.mockResolvedValue(undefined);
+    expect(
+      await service.retryRemovedTask(cancelled, performance.now() + 500),
+    ).toBe(true);
+    expect(find).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(4);
+    expect(release).toHaveBeenCalledExactlyOnceWith({
+      ...identity,
+      kind: 'batch-delete',
+    });
+    expect(
+      service.acquireCancellation({
+        ...task(),
+        status: 'pending',
+        taskId: '22400000-0000-4000-8000-000000000200',
+      }),
+    ).toBeDefined();
+    other.forEach((admitted) => admitted.release());
+  });
+  it('does not free a cancelled binding when physical pins still prevent release', async () => {
+    release.mockResolvedValue(false);
+    const lease = service.acquireCancellation({
+      ...task(),
+      status: 'pending',
+    })!;
+    lease.markRemoved();
+    await lease.confirmRemoved(task(), performance.now() + 500);
+    lease.release();
+    expect(close).toHaveBeenCalledTimes(3);
+    expect(release).toHaveBeenCalledTimes(3);
+    expect(() =>
+      service.acquireCancellation({ ...task(), status: 'pending' }),
+    ).toThrow(HttpException);
+    release.mockResolvedValue(true);
+    expect(
+      await service.retryRemovedTask(task(), performance.now() + 500),
+    ).toBe(true);
+    expect(release).toHaveBeenCalledTimes(4);
+  });
+  it('never turns an absent binding or a mismatched physical identity into release proof', async () => {
+    find
+      .mockRejectedValueOnce(
+        new CatalogOperationError('CATALOG_OPERATION_MISSING'),
+      )
+      .mockResolvedValue({
+        ...identity,
+        ownerId: 'foreign',
+        kind: 'batch-delete',
+      });
+    const lease = service.acquireCancellation({
+      ...task(),
+      status: 'pending',
+    })!;
+    lease.markRemoved();
+    await lease.confirmRemoved(task(), performance.now() + 500);
+    lease.release();
+    expect(find).toHaveBeenCalledTimes(3);
+    expect(close).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    expect(() =>
+      service.acquireCancellation({ ...task(), status: 'pending' }),
+    ).toThrow(HttpException);
+  });
+  it('requires prior confirmed removal for a terminal retry and excludes non-catalog jobs', async () => {
+    expect(
+      await service.retryRemovedTask(task(), performance.now() + 500),
+    ).toBe(false);
+    const lease = service.acquireCancellation({
+      ...task(),
+      status: 'pending',
+    })!;
+    expect(
+      await service.retryRemovedTask(task(), performance.now() + 500),
+    ).toBe(false);
+    lease.release();
+    expect(
+      service.acquireCancellation({
+        ...task(),
+        taskType: 'export',
+        taskSubType: 'asin',
+      }),
+    ).toBeUndefined();
+    expect(find).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 });

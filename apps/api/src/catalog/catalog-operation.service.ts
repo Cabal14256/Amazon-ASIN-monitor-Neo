@@ -2,7 +2,9 @@ import type { PermissionCode } from '@asin-monitor/contracts';
 import {
   CatalogOperationError,
   catalogTaskBindingSchema,
+  parseCatalogIdentity,
   PgCatalogOperationRepository,
+  taskMatchesCatalogOperation,
   withCatalogOperationExecution,
   type CatalogOperationIdentity,
   type CatalogTaskBinding,
@@ -22,12 +24,67 @@ export interface CatalogOperationSubmission {
   reject(): Promise<boolean>;
 }
 
+export interface CatalogCancellationLease {
+  /** Preserve the original queue proof immediately after exact remove ACK. */
+  markRemoved(): void;
+  /** Confirm only the exact removed task after its cancelled metadata CAS. */
+  confirmRemoved(task: TaskState, deadline: number): Promise<void>;
+  /** Only unconfirmed queue removal releases admission; a later metadata
+   * failure retains it. Running/absent jobs have no removal proof. */
+  release(): void;
+}
+
+interface RemovedTaskSettlement {
+  readonly key: string;
+  readonly binding: CatalogTaskBinding;
+  confirmedRemoved: boolean;
+  identity?: CatalogOperationIdentity;
+  work?: Promise<void>;
+}
+
+function cancellationBinding(task: TaskState): CatalogTaskBinding | undefined {
+  const parsed = catalogTaskBindingSchema.safeParse({
+    taskId: task.taskId,
+    userId: task.userId,
+    taskType: task.taskType,
+    taskSubType: task.taskSubType,
+    createdAt: task.createdAt,
+  });
+  if (!parsed.success) return undefined;
+  const binding = parsed.data;
+  const catalogTask = (['asin', 'competitor'] as const).some((domain) =>
+    (['batch-delete', 'import', 'check', 'monitor'] as const).some((kind) =>
+      taskMatchesCatalogOperation(
+        {
+          ownerId: binding.userId,
+          domain,
+          kind,
+          generation: '1',
+          operationId: binding.taskId,
+        },
+        binding,
+      ),
+    ),
+  );
+  return catalogTask ? Object.freeze(binding) : undefined;
+}
+
+function settlementKey(binding: CatalogTaskBinding): string {
+  return JSON.stringify([
+    binding.taskId,
+    binding.userId,
+    binding.taskType,
+    binding.taskSubType,
+    binding.createdAt,
+  ]);
+}
+
 /** Every scope is backed by a durable PostgreSQL reservation. No browser
  * receipt, expired metadata or queue absence can release that reservation. */
 @Injectable()
 export class ApplicationCatalogOperations {
   private readonly repository: PgCatalogOperationRepository;
-  private readonly settlements = new Map<string, Promise<void>>();
+  private readonly settlements = new Map<string, RemovedTaskSettlement>();
   constructor(
     @Inject(ApplicationDatabasePools) pools: ApplicationDatabasePools,
     @Inject(AppLogger) private readonly logger: AppLogger,
@@ -103,33 +160,100 @@ export class ApplicationCatalogOperations {
     }
   }
 
-  /** Called only after the queue atomically confirms removal before execution.
-   * An absent job or terminal Redis metadata is never physical completion proof. */
-  async settleRemovedTask(task: TaskState, deadline: number): Promise<void> {
-    const binding = catalogTaskBindingSchema.safeParse({
-      taskId: task.taskId,
-      userId: task.userId,
-      taskType: task.taskType,
-      taskSubType: task.taskSubType,
-      createdAt: task.createdAt,
-    });
-    if (!binding.success || task.status !== 'cancelled') return;
-    const key = `${binding.data.taskId}:${binding.data.createdAt}`;
-    let work = this.settlements.get(key);
+  /** Admit BEFORE the irreversible queue removal. Confirmed entries remain
+   * bounded and owned until PostgreSQL proves release of their exact identity. */
+  acquireCancellation(task: TaskState): CatalogCancellationLease | undefined {
+    const binding = cancellationBinding(task);
+    if (!binding) return undefined;
+    const key = settlementKey(binding);
+    if (this.settlements.has(key))
+      throw new HttpException(
+        {
+          success: false,
+          errorCode: 409,
+          errorMessage: '目录取消仍待核验，请刷新后重试',
+        },
+        409,
+      );
+    if (this.settlements.size >= 8)
+      throw new HttpException(
+        {
+          success: false,
+          errorCode: 429,
+          errorMessage: '任务取消繁忙，请稍后再试',
+        },
+        429,
+      );
+    const entry: RemovedTaskSettlement = {
+      key,
+      binding,
+      confirmedRemoved: false,
+    };
+    this.settlements.set(key, entry);
+    let released = false;
+    return {
+      markRemoved: () => {
+        if (released || this.settlements.get(key) !== entry)
+          throw new HttpException(
+            {
+              success: false,
+              errorCode: 409,
+              errorMessage: '目录取消仍待核验，请刷新后重试',
+            },
+            409,
+          );
+        entry.confirmedRemoved = true;
+      },
+      confirmRemoved: async (next, deadline) => {
+        const actual = cancellationBinding(next);
+        if (
+          released ||
+          !entry.confirmedRemoved ||
+          this.settlements.get(key) !== entry ||
+          next.status !== 'cancelled' ||
+          !actual ||
+          settlementKey(actual) !== key
+        )
+          throw new HttpException(
+            {
+              success: false,
+              errorCode: 409,
+              errorMessage: '任务已变化，请刷新后重试',
+            },
+            409,
+          );
+        await this.waitRemovedSettlement(entry, deadline);
+      },
+      release: () => {
+        released = true;
+        if (!entry.confirmedRemoved && this.settlements.get(key) === entry)
+          this.settlements.delete(key);
+      },
+    };
+  }
+
+  /** Terminal metadata alone cannot authorize cleanup. Only this process's
+   * prior exact queue-removal proof may retry its still-owned settlement. */
+  async retryRemovedTask(task: TaskState, deadline: number): Promise<boolean> {
+    if (task.status !== 'cancelled') return false;
+    const binding = cancellationBinding(task);
+    if (!binding) return false;
+    const entry = this.settlements.get(settlementKey(binding));
+    if (!entry?.confirmedRemoved) return false;
+    await this.waitRemovedSettlement(entry, deadline);
+    return true;
+  }
+
+  private async waitRemovedSettlement(
+    entry: RemovedTaskSettlement,
+    deadline: number,
+  ): Promise<void> {
+    let work = entry.work;
     if (!work) {
-      if (this.settlements.size >= 8) {
-        this.logger.warn(
-          '目录取消结算繁忙，保留待核验',
-          'ApplicationCatalogOperations',
-          { reason: 'catalog_cancel_settlement_capacity' },
-        );
-        return;
-      }
-      const prepared = binding.data;
-      work = this.settleRemovedBinding(prepared).finally(() => {
-        if (this.settlements.get(key) === work) this.settlements.delete(key);
+      work = this.settleRemovedBinding(entry).finally(() => {
+        if (entry.work === work) entry.work = undefined;
       });
-      this.settlements.set(key, work);
+      entry.work = work;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -148,30 +272,40 @@ export class ApplicationCatalogOperations {
   }
 
   private async settleRemovedBinding(
-    binding: CatalogTaskBinding,
+    entry: RemovedTaskSettlement,
   ): Promise<void> {
-    try {
-      const identity = await this.repository.findByTask(binding);
-      await this.repository.close(identity, {
-        status: 'cancelled',
-        source: 'cancel',
-        task: binding,
-      });
-      if (!(await this.repository.release(identity)))
+    // Each initial confirmation or explicit retry owns at most three attempts.
+    // An HTTP deadline stops waiting; it never frees in-flight storage work.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (!entry.identity) {
+          const identity = parseCatalogIdentity(
+            await this.repository.findByTask(entry.binding),
+          );
+          if (!taskMatchesCatalogOperation(identity, entry.binding))
+            throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
+          entry.identity = Object.freeze(identity);
+        }
+        await this.repository.close(entry.identity, {
+          status: 'cancelled',
+          source: 'cancel',
+          task: entry.binding,
+        });
+        if (await this.repository.release(entry.identity)) {
+          if (this.settlements.get(entry.key) === entry)
+            this.settlements.delete(entry.key);
+          return;
+        }
         this.logger.warn(
           '已移除目录任务保留待核验',
           'ApplicationCatalogOperations',
           { reason: 'catalog_cancel_not_physically_settled' },
         );
-    } catch (error) {
-      if (
-        error instanceof CatalogOperationError &&
-        error.code === 'CATALOG_OPERATION_MISSING'
-      )
-        return;
-      this.logger.warn('目录取消结算未确认', 'ApplicationCatalogOperations', {
-        reason: 'catalog_cancel_settlement_unconfirmed',
-      });
+      } catch {
+        this.logger.warn('目录取消结算未确认', 'ApplicationCatalogOperations', {
+          reason: 'catalog_cancel_settlement_unconfirmed',
+        });
+      }
     }
   }
 

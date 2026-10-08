@@ -67,7 +67,7 @@ async function readRow(
   db: SqlDb,
   ownerId: string,
   domain: CatalogOperationDomain,
-  lock?: 'UPDATE' | 'SHARE',
+  lock?: 'UPDATE' | 'SHARE' | 'UPDATE NOWAIT',
 ): Promise<Row | undefined> {
   const result = await db.execute(sql`
     SELECT *, generation::text AS generation FROM catalog_operation_slots
@@ -77,6 +77,23 @@ async function readRow(
   if (result.rows.length > 1)
     throw new CatalogOperationError('CATALOG_OPERATION_INVALID');
   return result.rows[0];
+}
+function slotContention(error: unknown): boolean {
+  // Drizzle wraps PostgreSQL errors in cause. This mapping is used only for
+  // reservation slot INSERT/lock statements, never authorization or IO.
+  const visited = new Set<object>();
+  for (
+    let depth = 0;
+    depth < 8 && error && typeof error === 'object';
+    depth++
+  ) {
+    if (visited.has(error)) return false;
+    visited.add(error);
+    const value = error as { code?: unknown; cause?: unknown };
+    if (value.code === '55P03' || value.code === '57014') return true;
+    error = value.cause;
+  }
+  return false;
 }
 async function requireRow(
   db: SqlDb,
@@ -170,16 +187,23 @@ export class PgCatalogOperationRepository {
       // Slot before owner/session matches actual execution's held slot lock.
       // Authorizing first could deadlock against a running transaction waiting
       // for the same owner lock. Failed authorization rolls this INSERT back.
-      await db.execute(sql`
-        INSERT INTO catalog_operation_slots(owner_id,domain)
-        VALUES(${identity.ownerId},${identity.domain}) ON CONFLICT DO NOTHING
-      `);
-      const row = await readRow(
-        db,
-        identity.ownerId,
-        identity.domain,
-        'UPDATE',
-      );
+      let row: Row | undefined;
+      try {
+        await db.execute(sql`
+          INSERT INTO catalog_operation_slots(owner_id,domain)
+          VALUES(${identity.ownerId},${identity.domain}) ON CONFLICT DO NOTHING
+        `);
+        row = await readRow(
+          db,
+          identity.ownerId,
+          identity.domain,
+          'UPDATE NOWAIT',
+        );
+      } catch (error) {
+        if (slotContention(error))
+          throw new CatalogOperationError('CATALOG_OPERATION_BUSY');
+        throw error;
+      }
       if (!row) throw new CatalogOperationError('CATALOG_OPERATION_DEPENDENCY');
       await authorize(new DrizzleAsinQueryUnit(db, ensureOpen));
       ensureOpen();

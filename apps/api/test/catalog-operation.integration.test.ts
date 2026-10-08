@@ -1,9 +1,15 @@
-import { PgCatalogOperationRepository } from '@asin-monitor/db';
+import {
+  PgCatalogOperationRepository,
+  PgCompetitorWriteRepository,
+  withCatalogOperationExecution,
+  type CompetitorWriteRepositoryPort,
+} from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { authorizeAdministration } from '../src/auth/administration-authorization';
 import type { AuthPrincipal } from '../src/auth/auth.types';
+import { COMPETITOR_WRITE_REPOSITORY } from '../src/competitor/competitor-write.service';
 import { competitorWriteApp } from './helpers/competitor-write-app';
 import { taskAuthFixture } from './helpers/task-query-fixtures';
 
@@ -14,6 +20,217 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     afterEach(async () => {
       await fixture?.close();
       fixture = undefined;
+    });
+    it('returns HTTP 409 while a real 4-second competitor business transaction holds assertPin SHARE, without starting a second action', async () => {
+      const f = await competitorWriteApp({ primaryBusiness: true });
+      fixture = f;
+      const userId = randomUUID(),
+        sessionId = randomUUID();
+      f.userIds.add(userId);
+      await f.pools.primaryPool.query(
+        'INSERT INTO users(id,username,password,force_password_change) VALUES($1,$1,$2,false)',
+        [userId, 'fixture-unused-hash'],
+      );
+      await f.pools.primaryPool.query(
+        "INSERT INTO user_roles(user_id,role_id) VALUES($1,'writer-71')",
+        [userId],
+      );
+      await f.pools.primaryPool.query(
+        "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
+        [sessionId, userId],
+      );
+      const headers = {
+        authorization: `Bearer ${jwt.sign(
+          { userId, sessionId },
+          f.env.JWT_SECRET,
+          { expiresIn: '1h' },
+        )}`,
+        origin: f.env.CORS_ORIGIN,
+      };
+      const payload = {
+        name: 'Held competitor group',
+        country: 'US',
+        brand: 'Fixture',
+      };
+      const created = await f.http.inject({
+        method: 'POST',
+        url: '/api/v1/competitor/variant-groups',
+        headers,
+        payload,
+      });
+      expect(created.statusCode).toBe(200);
+      const groupId = created.json().data.id as string;
+      const principal: AuthPrincipal = {
+        userId,
+        sessionId,
+        user: {
+          ...taskAuthFixture().user,
+          id: userId,
+          status: 'ACTIVE',
+          forcePasswordChange: false,
+        },
+      };
+      const repository = new PgCatalogOperationRepository(f.pools.primaryPool);
+      const identity = await repository.reserve(
+        { ownerId: userId, domain: 'competitor', kind: 'write' },
+        (unit) => authorizeAdministration(unit, principal, 'asin:write'),
+      );
+      // Keep the production wrapper's default 4000/1500 ms limits. Its actual
+      // primary guard and competitor write remain uncommitted behind this gate.
+      const heldRepository = new PgCompetitorWriteRepository(
+        f.pools.primaryPool,
+        f.pools.competitorPool,
+      );
+      const httpRepository = f.app.get<CompetitorWriteRepositoryPort>(
+        COMPETITOR_WRITE_REPOSITORY,
+      );
+      const secondAction = vi.spyOn(httpRepository, 'transaction');
+      let proceed!: () => void,
+        ready!: () => void,
+        holding = false;
+      const gate = new Promise<void>((resolve) => {
+        proceed = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+      const business = withCatalogOperationExecution(repository, identity, () =>
+        heldRepository.transaction(async (unit) => {
+          await authorizeAdministration(unit, principal, 'asin:write');
+          const result = await unit.updateGroup(groupId, {
+            ...payload,
+            name: 'First committed edit',
+          });
+          holding = true;
+          ready();
+          await gate;
+          holding = false;
+          return result;
+        }),
+      );
+      const physicalSnapshot = async () => ({
+        slots: (
+          await f.pools.primaryPool.query(
+            'SELECT * FROM catalog_operation_slots WHERE owner_id=$1 ORDER BY domain',
+            [userId],
+          )
+        ).rows,
+        pins: (
+          await f.pools.primaryPool.query(
+            'SELECT * FROM catalog_operation_pins WHERE owner_id=$1 ORDER BY pin_id',
+            [userId],
+          )
+        ).rows,
+        groups: (
+          await f.pools.competitorPool.query(
+            'SELECT * FROM competitor_variant_groups ORDER BY id',
+          )
+        ).rows,
+        asins: (
+          await f.pools.competitorPool.query(
+            'SELECT * FROM competitor_asins ORDER BY id',
+          )
+        ).rows,
+        history: (
+          await f.pools.competitorPool.query(
+            'SELECT * FROM competitor_monitor_history ORDER BY id',
+          )
+        ).rows,
+      });
+      try {
+        await Promise.race([
+          started,
+          business.then(() => {
+            throw new Error(
+              'Business transaction ended before the held-lock oracle',
+            );
+          }),
+        ]);
+        const before = await physicalSnapshot();
+        const snapshot = await repository.read(userId, 'competitor');
+        expect(snapshot).toMatchObject({
+          ...identity,
+          state: 'open',
+          pendingPins: 1,
+          uncertainPins: 0,
+        });
+        expect(before.groups.find((row) => row.id === groupId)?.name).toBe(
+          payload.name,
+        );
+        const changed = await f.http.inject({
+          method: 'PUT',
+          url: `/api/v1/competitor/variant-groups/${encodeURIComponent(
+            groupId,
+          )}`,
+          headers,
+          payload: { ...payload, name: 'Unexpected second edit' },
+        });
+        expect(changed.statusCode).toBe(409);
+        expect(changed.json()).toMatchObject({
+          success: false,
+          errorCode: 409,
+        });
+        for (const secret of [
+          identity.operationId,
+          'catalog_operation_slots',
+          '57014',
+          '55P03',
+        ])
+          expect(changed.body).not.toContain(secret);
+        expect(holding).toBe(true);
+        expect(secondAction).not.toHaveBeenCalled();
+        expect(await repository.read(userId, 'competitor')).toEqual(snapshot);
+        expect(await physicalSnapshot()).toEqual(before);
+        proceed();
+        await business;
+        expect(await repository.read(userId, 'competitor')).toMatchObject({
+          ...identity,
+          pendingPins: 0,
+          uncertainPins: 0,
+        });
+        expect(
+          (
+            await f.pools.competitorPool.query(
+              'SELECT name FROM competitor_variant_groups WHERE id=$1',
+              [groupId],
+            )
+          ).rows[0].name,
+        ).toBe('First committed edit');
+        await repository.close(identity, {
+          status: 'completed',
+          source: 'sync',
+        });
+        expect(await repository.release(identity)).toBe(true);
+        const next = await f.http.inject({
+          method: 'PUT',
+          url: `/api/v1/competitor/variant-groups/${encodeURIComponent(
+            groupId,
+          )}`,
+          headers,
+          payload: { ...payload, name: 'Verified next edit' },
+        });
+        expect(next.statusCode).toBe(200);
+        expect(next.json().data.name).toBe('Verified next edit');
+        expect(await repository.read(userId, 'competitor')).toBeNull();
+      } finally {
+        proceed();
+        try {
+          await Promise.allSettled([business]);
+          // An outer timeout is not physical settlement. Await the actual wrapper
+          // and persisted pin before the fixture is allowed to drop its schemas.
+          await vi.waitFor(
+            async () => {
+              expect(heldRepository.getDiagnostics().pendingOperations).toBe(0);
+              const current = await repository.read(userId, 'competitor');
+              expect(current?.pendingPins ?? 0).toBe(0);
+            },
+            { timeout: 1000, interval: 10 },
+          );
+        } finally {
+          heldRepository.close();
+          secondAction.mockRestore();
+        }
+      }
     });
     it.each(['asin', 'competitor'] as const)(
       '%s retains the durable gate across CRUD, deletion and upload; GET remains available',
