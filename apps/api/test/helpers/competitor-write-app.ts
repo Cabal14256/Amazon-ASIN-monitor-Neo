@@ -10,6 +10,8 @@ export async function competitorWriteApp(
   options: {
     configure?: NonNullable<Parameters<typeof spApiConfigApp>[0]>['configure'];
     primaryBusiness?: boolean;
+    imports?: NonNullable<Parameters<typeof spApiConfigApp>[0]>['imports'];
+    env?: NonNullable<Parameters<typeof spApiConfigApp>[0]>['env'];
   } = {},
 ) {
   if (
@@ -66,8 +68,8 @@ export async function competitorWriteApp(
     const url = new URL(process.env.COMPETITOR_DATABASE_URL);
     url.searchParams.set('options', `-c search_path=${schema}`);
     const appOptions = {
-      imports: [CompetitorModule],
-      env: { COMPETITOR_DATABASE_URL: url.toString() },
+      imports: [CompetitorModule, ...(options.imports ?? [])],
+      env: { ...options.env, COMPETITOR_DATABASE_URL: url.toString() },
     };
     const f = options.primaryBusiness
       ? await asinWriteApp(options.configure, appOptions)

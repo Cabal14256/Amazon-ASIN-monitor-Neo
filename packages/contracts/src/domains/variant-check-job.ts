@@ -1,11 +1,8 @@
 import { z } from 'zod';
+import { neoCatalogIdSchema } from './neo-catalog-id';
 import { parentAsinCodeSchema } from './variantCheck';
 
-const identifier = z
-  .string()
-  .min(1)
-  .max(100)
-  .regex(/^[^\x00-\x1f\x7f]+$/u);
+const identifier = neoCatalogIdSchema;
 const identity = {
   taskId: z.string().uuid(),
   userId: z
