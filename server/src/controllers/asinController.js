@@ -10,7 +10,10 @@ const {
   executeBatchDelete,
   createBatchDeleteTaskId,
 } = require('../services/batchDeleteService');
-const { batchCreateASINs } = require('../services/asinBatchCreateService');
+const {
+  MAX_ASIN_BATCH_CREATE_ITEMS,
+  batchCreateASINs,
+} = require('../services/asinBatchCreateService');
 const {
   sendSuccessResponse,
   sendErrorResponse,
@@ -251,6 +254,13 @@ exports.createASIN = async (req, res) => {
 exports.batchCreateASINs = async (req, res) => {
   try {
     const { items = [] } = req.body || {};
+    if (Array.isArray(items) && items.length > MAX_ASIN_BATCH_CREATE_ITEMS) {
+      return sendErrorResponse(
+        res,
+        400,
+        `单次最多批量添加 ${MAX_ASIN_BATCH_CREATE_ITEMS} 个 ASIN`,
+      );
+    }
     const result = await batchCreateASINs({
       domain: 'asin',
       items,
