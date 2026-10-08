@@ -66,6 +66,12 @@ services:
       - ./packages/db/docker/apply-competitor-monitor.sh:/opt/asin-monitor/apply-competitor-monitor.sh:ro
       - ./packages/db/migrations/0015_competitor_monitor.sql:/opt/asin-monitor/0015_competitor_monitor.sql:ro
       - ./packages/db/migrations/0015_competitor_monitor.rollback.sql:/opt/asin-monitor/0015_competitor_monitor.rollback.sql:ro
+      # Scheduled ledgers are explicit, domain-specific post-import upgrades.
+      - ./packages/db/docker/apply-scheduled-monitor.sh:/opt/asin-monitor/apply-scheduled-monitor.sh:ro
+      - ./packages/db/migrations/0016_scheduled_monitor_primary.sql:/opt/asin-monitor/0016_scheduled_monitor_primary.sql:ro
+      - ./packages/db/migrations/0016_scheduled_monitor_primary.rollback.sql:/opt/asin-monitor/0016_scheduled_monitor_primary.rollback.sql:ro
+      - ./packages/db/migrations/0016_scheduled_monitor_competitor.sql:/opt/asin-monitor/0016_scheduled_monitor_competitor.sql:ro
+      - ./packages/db/migrations/0016_scheduled_monitor_competitor.rollback.sql:/opt/asin-monitor/0016_scheduled_monitor_competitor.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

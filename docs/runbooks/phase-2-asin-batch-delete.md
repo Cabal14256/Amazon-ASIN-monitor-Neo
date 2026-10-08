@@ -4,23 +4,23 @@
 
 `POST /api/v1/variant-groups/batch-delete` 已迁移同步删除和异步任务。需要 `asin:delete`，带 Origin 时必须匹配 `CORS_ORIGIN`；当前账号、密码有效期、会话与权限在 PostgreSQL 事务中再次复核。要求 `AUTH_DATA_AUTHORITY=postgresql`，按最终 Legacy 导入 →0003→0004 顺序完成存储升级。Legacy 入口保留，当前没有切换生产流量。
 
-API 和 Worker 必须使用同一 PostgreSQL 主库、Redis、`BULL_PREFIX`；Neo 命名空间固定为 `${BULL_PREFIX}:neo`。启动已构建的 `apps/worker/dist/main.js`，将 `WORKER_ENABLED_QUEUES` 包含 `batch-delete`，即可注册主营实际消费者。可同时选择 `maintenance`；日志以 `mode=business-worker` 和准确的 `registeredProcessors`/`queueCount` 表示已注册资源。主营导入消费者见[文件导入运行说明](./phase-2-asin-import.md)；剩余六类业务消费者与竞品批量删除仍待迁移，队列健康不代表这些业务可执行。
+API 和 Worker 必须使用同一 PostgreSQL 主库、Redis、`BULL_PREFIX`；Neo 命名空间固定为 `${BULL_PREFIX}:neo`。启动已构建的 `apps/worker/dist/main.js`，将 `WORKER_ENABLED_QUEUES` 包含 `batch-delete`，即可注册主营实际消费者。可同时选择 `maintenance`；日志以 `mode=business-worker` 和准确的 `registeredProcessors`/`queueCount` 表示已注册资源。主营导入消费者见[文件导入运行说明](./phase-2-asin-import.md)；共享消费者也支持[竞品批量删除](../refactor/competitor-batch-delete-api.md)，其它业务队列健康不代表其实际业务已迁移。
 
 ## 输入与兼容行为
 
-请求字段为 `groupIds`、`asinIds`、`useAsync`。两个列表保留 Legacy 的标量转字符串、去两端空白、去空值、按首次出现去重；非数组列表视为空。显式 `useAsync` 接受布尔值及大小写不敏感、去空白后的 true/1/yes/on、false/0/no/off 字符串；其他值按阈值判断。
+请求字段为 `groupIds`、`asinIds`、`useAsync`。Issue #212 后两个列表仅接受原始字符串 ID，不 trim、不按大小写或重音折叠、不进行标量转换；精确相同的字符串按首次出现去重。非空的全空格 ID 也是合法迁移键。显式 `useAsync` 继续接受布尔值及大小写不敏感、去空白后的 true/1/yes/on、false/0/no/off 字符串；其他值按阈值判断，该控制字段规则不会用于 ID。
 
-新增资源边界：原始两个数组合计最多 1000 项，重复项也计入此上限，超出返回 413。ID 最多 50 个 Unicode 码点且不得含 ASCII 控制字符，额外顶层字段、无法转换的值、空目标返回 400。旧服务未限制这些输入；这是 PostgreSQL 存储与任务大小的明确边界，不截断目标。
+资源边界：原始两个数组合计最多 1000 项，重复项也计入此上限，超出返回 413。ID 为 1–50 个 Unicode 码点，拒绝 C0/C1 控制字符和孤立 surrogate；额外顶层字段、非字符串、非数组列表、真正空串和空目标返回 400，不截断目标。冻结 v1 schema 和旧 trim parser 仅保留为 Legacy 兼容证据，Neo API、repository 与 job 校验使用独立 literal 边界。危险 Legacy trim 可能删除邻居的情形属于明确的安全修复差异，见 [原始 ID 说明与隔离对拍](./neo-literal-batch-delete.md)。
 
 | 变量 | 默认 | 规则 |
 | --- | --: | --- |
-| `BATCH_DELETE_SYNC_MAX_ITEMS` | 50 | 规范化目标数大于此值时使用异步 |
+| `BATCH_DELETE_SYNC_MAX_ITEMS` | 50 | 原值精确去重后的目标数大于此值时使用异步 |
 | `BATCH_DELETE_SYNC_MAX_ASINS` | 500 | 预计直接与组内 ASIN 总数大于此值时使用异步 |
 | `BATCH_DELETE_CHUNK_SIZE` | 50 | 异步每块 1–500 个组或直接 ASIN |
 
 无效或非正阈值回退默认；正数向下取整并至少为 1，修复旧小于 1 的分块配置产生 0 的问题。超过安全整数或分块大于 500 拒绝启动。显式模式覆盖阈值。同步仍受原有 2 秒事务截止、1.5 秒 SQL 截止，强制同步的大组超时需缩小请求或改异步；异步单个大组也受同样事务截止。
 
-分析保持请求顺序，先删除存在的选中组；同时选中的组内 ASIN 不再作为直接删除项。原本缺失的组与 ASIN 放入 `skipped`。成功返回 200/现有信封：同步结果含三种删除计数、原始规范化目标数和跳过列表；异步返回 `mode=async`、UUID `taskId`、`status=pending`、`totalRequested`、`estimatedAsinCount`。
+分析保持请求顺序，先删除存在的选中组；同时选中的组内 ASIN 不再作为直接删除项。原本缺失的组与 ASIN 保留原值放入 `skipped`，不会替换成 trimmed 邻居。成功返回 200/现有信封：同步结果含三种删除计数、原值精确去重后的目标数和跳过列表；异步返回 `mode=async`、UUID `taskId`、`status=pending`、`totalRequested`、`estimatedAsinCount`。
 
 ## 事务和并发
 
@@ -34,7 +34,7 @@ API 接受授权的时点是上述当前权限事务提交。随后创建任务�
 
 ## 取消、故障与关闭
 
-Worker 校验完整规范化 payload、job ID/名称、元数据所有者/type/subtype/createdAt。开始分析、每个分块和进度写入前核对当前元数据及 BullMQ 锁 token。元数据缺失、身份变化、锁丢失或 Redis 不可用会停止后续数据库工作；绝不重建已过期任务。进度和终态写入均等待有界 Redis 命令完成，终态先持久化再返回 BullMQ；已完成、已失败或已取消的记录再次投递时不重复删除。
+Worker 校验完整原值 payload、job ID/名称、元数据所有者/type/subtype/createdAt，不重新 trim 或转换 ID；队列列表仍要求精确去重。开始分析、每个分块和进度写入前核对当前元数据及 BullMQ 锁 token。元数据缺失、身份变化、锁丢失或 Redis 不可用会停止后续数据库工作；绝不重建已过期任务。进度和终态写入均等待有界 Redis 命令完成，终态先持久化再返回 BullMQ；已完成、已失败或已取消的记录再次投递时不重复删除。
 
 排队任务可由现有取消接口原子移除；运行中的任务在当前块结束后确认取消，之后不再开始新块。已经提交的删除保留，取消结果不承诺撤销。进程正常关闭也停止新块，并记录固定的“Worker 正在停止”失败原因，不冒充用户取消；连接资源归还，主入口保留整体 10 秒强退上限。
 

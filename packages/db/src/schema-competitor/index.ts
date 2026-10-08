@@ -154,4 +154,5 @@ export {
   competitorMonitorNotifications,
   competitorMonitorRuns,
 } from './monitor';
+export * from './scheduled-monitor';
 export { competitorVariantCheckReceipts } from './variant-check-receipts';
