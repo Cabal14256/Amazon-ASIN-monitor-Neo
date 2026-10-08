@@ -1,12 +1,10 @@
-import type { ImportDomain } from '../../services/asin-import';
-import { notifyCatalogGateChanged } from '../catalog/catalog-gate-events';
+// Frozen main 197925d producer/reader; only the erased type import path is relocated.
+import type { ImportDomain } from '../../../services/asin-import';
 
 export interface AsinImportGate {
   phase: 'sending' | 'accepted' | 'uncertain' | 'settled';
   taskId: string | null;
   savedAt: number;
-  operationId?: string;
-  catalogOperation?: 'batch-delete';
 }
 
 const KEY_PREFIX: Record<ImportDomain, string> = {
@@ -33,7 +31,7 @@ export function readImportGate(
   if (!owner) return null;
   try {
     const raw = storage.getItem(importGateKey(domain, owner));
-    if (raw === null) return null;
+    if (!raw) return null;
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('invalid');
@@ -47,12 +45,7 @@ export function readImportGate(
       (['accepted', 'settled'].includes(String(gate.phase)) &&
         gate.taskId === null) ||
       typeof gate.savedAt !== 'number' ||
-      !Number.isFinite(gate.savedAt) ||
-      (gate.operationId !== undefined &&
-        (typeof gate.operationId !== 'string' ||
-          !/^[a-z0-9-]{1,80}$/i.test(gate.operationId))) ||
-      (gate.catalogOperation !== undefined &&
-        (gate.catalogOperation !== 'batch-delete' || !gate.operationId))
+      !Number.isFinite(gate.savedAt)
     )
       throw new Error('invalid');
     return {
@@ -62,17 +55,14 @@ export function readImportGate(
           : (gate.phase as AsinImportGate['phase']),
       taskId: gate.taskId as string | null,
       savedAt: gate.savedAt,
-      ...(typeof gate.operationId === 'string'
-        ? { operationId: gate.operationId }
-        : {}),
-      ...(gate.catalogOperation === 'batch-delete'
-        ? { catalogOperation: 'batch-delete' as const }
-        : {}),
     };
   } catch {
-    // A damaged or unreadable record cannot prove an import did not start.
-    // Keep the original key for explicit task reconciliation; never retry POST.
-    return { phase: 'uncertain', taskId: null, savedAt: 0 };
+    try {
+      storage.removeItem(importGateKey(domain, owner));
+    } catch {
+      // Storage can be unavailable; the current component still keeps its lock.
+    }
+    return null;
   }
 }
 
@@ -95,7 +85,6 @@ export function claimImportGate(
     phase: 'sending',
     taskId: null,
     savedAt: now,
-    operationId: crypto.randomUUID(),
   };
   return writeImportGate(storage, domain, owner, gate)
     ? { kind: 'claimed', gate }
@@ -113,7 +102,6 @@ export function writeImportGate(
     if (gate)
       storage.setItem(importGateKey(domain, owner), JSON.stringify(gate));
     else storage.removeItem(importGateKey(domain, owner));
-    notifyCatalogGateChanged(importGateKey(domain, owner));
     return true;
   } catch {
     return false;

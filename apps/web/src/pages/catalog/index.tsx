@@ -39,8 +39,14 @@ import {
 } from '../../components/ui/surfaces';
 import { useTaskQuery } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
+import { isBulkDeleteId } from '../../services/catalog-batch-delete';
 import { isTerminalTask } from '../../services/tasks';
+import { importGateKey } from '../asin/asin-import-gate';
 import { CatalogActionPanel } from './catalog-actions';
+import {
+  useCatalogBatchDelete,
+  type CatalogSelection,
+} from './catalog-batch-delete';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
   browserCheckRecovery,
@@ -61,7 +67,12 @@ import {
   statusOf,
   statusSource,
 } from './catalog-data';
+import { CATALOG_GATE_CHANGED } from './catalog-gate-events';
+import { runWithCatalogOperationLock } from './catalog-operation-lock';
+import { CatalogRefreshContext } from './catalog-refresh-context';
 import {
+  canRecoverKnownBatchDeleteReceipt,
+  catalogImportBlocksWrite,
   catalogSafetyKey,
   catalogSafetyStorage,
   readCatalogSafetyGate,
@@ -94,6 +105,30 @@ type CheckState = {
   message?: string;
 };
 const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
+function CatalogSelectionInput({
+  group,
+  selection,
+}: {
+  group: CatalogGroup;
+  selection?: CatalogSelection;
+}) {
+  if (!selection) return null;
+  const eligible = isBulkDeleteId(group.id);
+  return (
+    <label className="mb-2 flex items-center gap-2 text-xs">
+      <input
+        type="checkbox"
+        aria-label={`选择变体组 ${group.name || '未命名'}，ID ${JSON.stringify(
+          group.id,
+        )}`}
+        checked={selection.ids.includes(group.id)}
+        disabled={selection.disabled || !eligible}
+        onChange={() => selection.toggle(group.id)}
+      />
+      {eligible ? '选择' : '原始 ID 格式不兼容，无法选择'}
+    </label>
+  );
+}
 function Notice({
   title,
   error,
@@ -123,17 +158,20 @@ function GroupCard({
   selected,
   onSelect,
   disabled,
+  selection,
 }: {
   group: CatalogGroup;
   config: CatalogConfig;
   selected: boolean;
   onSelect: () => void;
   disabled?: boolean;
+  selection?: CatalogSelection;
 }) {
   return (
     <li className="rounded-control border border-border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
+          <CatalogSelectionInput group={group} selection={selection} />
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="break-words font-semibold">
               {group.name || '未命名变体组'}
@@ -686,6 +724,7 @@ export function GroupRows({
   onAction,
   onCheck,
   onDenied,
+  selection,
 }: {
   groups: CatalogGroup[];
   config: CatalogConfig;
@@ -699,6 +738,7 @@ export function GroupRows({
   onAction?: (action: CatalogAction) => void;
   onCheck?: (target: CheckTarget) => void;
   onDenied?: () => void;
+  selection?: CatalogSelection;
 }) {
   // Both CSS layouts stay mounted; one parent page keeps rotation/resize stable.
   const [childPage, setChildPage] = useState(1);
@@ -716,6 +756,7 @@ export function GroupRows({
         header: '变体组',
         cell: ({ row }) => (
           <div className="min-w-0">
+            <CatalogSelectionInput group={row.original} selection={selection} />
             <p className="break-words font-semibold">
               {row.original.name || '未命名变体组'}
             </p>
@@ -786,7 +827,7 @@ export function GroupRows({
         ),
       },
     ],
-    [actionsDisabled, config, selectedId, toggleGroup],
+    [actionsDisabled, config, selectedId, toggleGroup, selection],
   );
   const table = useTable({
     features: TABLE_FEATURES,
@@ -806,6 +847,7 @@ export function GroupRows({
               selected={selectedId === row.id}
               onSelect={() => toggleGroup(row.id)}
               disabled={actionsDisabled}
+              selection={selection}
             />
             {selectedId === row.id && (
               <li>
@@ -908,6 +950,8 @@ export function CatalogPage({
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
   const ownerId = auth.status === 'authenticated' ? auth.identity.user.id : '';
+  const peerSessionId =
+    auth.status === 'authenticated' ? auth.identity.sessionId : undefined;
   const safetyKey = useMemo(
     () => ['catalog-write-safety', ownerId, config.id] as const,
     [config.id, ownerId],
@@ -916,6 +960,21 @@ export function CatalogPage({
     typeof safetyKey | null
   >(null);
   const safetyHydrated = !config.writes || hydratedSafetyKey === safetyKey;
+  const importSafetyKey = useMemo(
+    () => ['catalog-import-safety', ownerId, config.id] as const,
+    [ownerId, config.id],
+  );
+  const importBlocked = useQuery({
+    queryKey: importSafetyKey,
+    queryFn: () => false,
+    enabled: false,
+    initialData: () => {
+      if (!ownerId || !config.writes) return false;
+      const stored = catalogSafetyStorage();
+      return !stored || catalogImportBlocksWrite(stored, ownerId, config.id);
+    },
+    gcTime: Infinity,
+  }).data;
   const [storageUnavailable, setStorageUnavailable] = useState(() =>
     Boolean(ownerId && config.writes && !catalogSafetyStorage()),
   );
@@ -923,6 +982,7 @@ export function CatalogPage({
     string | null
   >(null);
   const [recoveringStorage, setRecoveringStorage] = useState(false);
+  const [peerRefreshRetry, setPeerRefreshRetry] = useState(0);
   const safety = useQuery<CatalogSafetyGate | null>({
     queryKey: safetyKey,
     queryFn: () => null,
@@ -972,7 +1032,12 @@ export function CatalogPage({
         'INVALID_INPUT',
         '浏览器不支持安全的跨标签写入锁，请使用支持 Web Locks 的浏览器。',
       );
-    await navigator.locks.request(catalogSafetyKey(ownerId, config.id), work);
+    await runWithCatalogOperationLock(
+      navigator.locks,
+      ownerId,
+      config.id,
+      work,
+    );
   };
   const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {
     const stored = catalogSafetyStorage();
@@ -984,6 +1049,13 @@ export function CatalogPage({
       );
     }
     const existing = readCatalogSafetyGate(stored, ownerId, config.id);
+    if (catalogImportBlocksWrite(stored, ownerId, config.id)) {
+      runtime.queryClient.setQueryData(importSafetyKey, true);
+      throw new ApiError(
+        'INVALID_INPUT',
+        '已有导入请求待核实，导入保护解除前不能写入目录。',
+      );
+    }
     if (existing) {
       runtime.queryClient.setQueryData(safetyKey, existing);
       throw new ApiError('INVALID_INPUT', '已有写入结果待核实，请先重读目录。');
@@ -1016,6 +1088,7 @@ export function CatalogPage({
       safetyHydrated &&
       access.canWriteASIN &&
       !safety &&
+      !importBlocked &&
       !storageUnavailable,
   );
   const canDelete = Boolean(
@@ -1025,6 +1098,7 @@ export function CatalogPage({
         ? access.canWriteASIN
         : access.canDeleteASIN) &&
       !safety &&
+      !importBlocked &&
       !storageUnavailable,
   );
   const canCheck = Boolean(config.checks && access.canReadASIN);
@@ -1043,6 +1117,60 @@ export function CatalogPage({
   const [country, setCountry] = useState('');
   const [status, setStatus] = useState<StatusFilter>('ALL');
   const [query, setQuery] = useState<CatalogQuery>(INITIAL_QUERY);
+  const importReadEpoch = useRef(0);
+  const importSessionRevision = runtime.session.revision;
+  useLayoutEffect(() => {
+    importReadEpoch.current++;
+  }, [query, ownerId, peerSessionId, importSessionRevision]);
+  const refreshImportedCatalog = useMemo(
+    () => async () => {
+      const epoch = importReadEpoch.current;
+      const check = () => {
+        const state = identity.getSnapshot();
+        const policy = createAccess(
+          state.status === 'authenticated' ? state.identity : undefined,
+        );
+        if (
+          importReadEpoch.current !== epoch ||
+          runtime.session.revision !== importSessionRevision ||
+          state.status !== 'authenticated' ||
+          state.identity.user.id !== ownerId ||
+          state.identity.sessionId !== peerSessionId ||
+          !policy.canReadASIN ||
+          policy.mustChangePassword
+        )
+          throw new ApiError(
+            'CANCELLED',
+            '目录查询或会话已改变，请重读当前目录后再解除导入保护',
+          );
+      };
+      check();
+      await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+      check();
+      const first = await config.list(runtime.http, query);
+      check();
+      const last = Math.max(1, Math.ceil(first.total / first.pageSize));
+      const corrected =
+        first.current > last ? { ...query, current: last } : query;
+      const fresh =
+        corrected === query
+          ? first
+          : await config.list(runtime.http, corrected);
+      check();
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+      runtime.queryClient.setQueryData([config.id, 'groups', corrected], fresh);
+      if (corrected !== query) setQuery(corrected);
+    },
+    [
+      config,
+      identity,
+      importSessionRevision,
+      ownerId,
+      peerSessionId,
+      query,
+      runtime,
+    ],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const crossTabSafetyRevision = useRef(0);
   const clearCatalogCache = useCallback(async () => {
@@ -1137,7 +1265,13 @@ export function CatalogPage({
     const syncSafety = (event?: StorageEvent) => {
       // The writable-storage probe broadcasts its own set/remove events to
       // other tabs. Ignore unrelated keys before any probe can broadcast again.
-      if (event && event.key !== catalogSafetyKey(ownerId, config.id)) return;
+      if (
+        event &&
+        event.key !== null &&
+        event.key !== catalogSafetyKey(ownerId, config.id) &&
+        event.key !== importGateKey(config.id, ownerId)
+      )
+        return;
       const stored = catalogSafetyStorage();
       if (!stored) {
         setStorageUnavailable(true);
@@ -1145,9 +1279,26 @@ export function CatalogPage({
       }
       if (event && event.storageArea !== stored) return;
       const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
+      const importing = catalogImportBlocksWrite(stored, ownerId, config.id);
+      const currentImportBlocked =
+        runtime.queryClient.getQueryData<boolean>(importSafetyKey);
+      if (importing) runtime.queryClient.setQueryData(importSafetyKey, true);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {
-        runtime.queryClient.setQueryData(safetyKey, incoming);
+        const known =
+          runtime.queryClient.getQueryData<CatalogSafetyGate>(safetyKey);
+        const receiptScope = JSON.stringify([
+          config.id,
+          ownerId,
+          peerSessionId ?? null,
+        ]);
+        runtime.queryClient.setQueryData(
+          safetyKey,
+          canRecoverKnownBatchDeleteReceipt(incoming, known) &&
+            known.ownerScope === receiptScope
+            ? known
+            : incoming,
+        );
         if (incoming.phase === 'refresh') {
           setAction(null);
           setSelectedId(null);
@@ -1158,13 +1309,11 @@ export function CatalogPage({
       }
       const currentSafety =
         runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
-      if (
-        currentSafety?.phase !== 'refresh' &&
-        currentSafety?.phase !== 'inspection'
-      ) {
+      if (!currentSafety && !currentImportBlocked) {
         runtime.queryClient.setQueryData(safetyKey, null);
         return;
       }
+      if (importing) return;
       void (async () => {
         try {
           await clearCatalogCache();
@@ -1184,7 +1333,17 @@ export function CatalogPage({
           if (
             !active ||
             revision !== crossTabSafetyRevision.current ||
-            readCatalogSafetyGate(stored, ownerId, config.id)
+            readCatalogSafetyGate(stored, ownerId, config.id) ||
+            catalogImportBlocksWrite(stored, ownerId, config.id)
+          )
+            return;
+          const currentIdentity = identity.getSnapshot();
+          if (
+            currentIdentity.status !== 'authenticated' ||
+            currentIdentity.identity.user.id !== ownerId ||
+            currentIdentity.identity.sessionId !== peerSessionId ||
+            !createAccess(currentIdentity.identity).canReadASIN ||
+            createAccess(currentIdentity.identity).mustChangePassword
           )
             return;
           runtime.queryClient.setQueryData(
@@ -1193,20 +1352,45 @@ export function CatalogPage({
           );
           if (correctedQuery !== query) setQuery(correctedQuery);
           runtime.queryClient.setQueryData(safetyKey, null);
+          runtime.queryClient.setQueryData(importSafetyKey, false);
         } catch {
           // Keep the safety gate until this tab can reread the catalog.
+          if (active && revision === crossTabSafetyRevision.current)
+            setNotice(
+              '目录重读失败，操作保护仍保留；可再次重读，不能重新提交旧操作。',
+            );
         }
       })();
     };
     // The disabled query may cache null while the page misses storage events.
     syncSafety();
     setHydratedSafetyKey(safetyKey);
+    const changed = (event: Event) => {
+      if (
+        (event as CustomEvent<string>).detail ===
+        importGateKey(config.id, ownerId)
+      )
+        syncSafety();
+    };
     window.addEventListener('storage', syncSafety);
+    window.addEventListener(CATALOG_GATE_CHANGED, changed);
     return () => {
       active = false;
       window.removeEventListener('storage', syncSafety);
+      window.removeEventListener(CATALOG_GATE_CHANGED, changed);
     };
-  }, [clearCatalogCache, config, ownerId, query, runtime, safetyKey]);
+  }, [
+    clearCatalogCache,
+    config,
+    ownerId,
+    query,
+    runtime,
+    safetyKey,
+    importSafetyKey,
+    peerRefreshRetry,
+    peerSessionId,
+    identity,
+  ]);
   useEffect(() => {
     if (!action) return;
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -1216,6 +1400,21 @@ export function CatalogPage({
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+  const batchDelete = useCatalogBatchDelete({
+    config,
+    query,
+    groups: data?.list ?? [],
+    safety,
+    safetyHydrated,
+    enabled:
+      safetyHydrated &&
+      !storageUnavailable &&
+      !importBlocked &&
+      !writing &&
+      !accessDenied,
+    onQuery: setQuery,
+    onDenied: () => reportAccessDenied(),
+  });
 
   const recheckAccess = useCallback(async () => {
     if (recheckActive.current) return;
@@ -1773,6 +1972,10 @@ export function CatalogPage({
             readCatalogSafetyGate(stored, ownerId, config.id),
           );
         }
+        runtime.queryClient.setQueryData(
+          importSafetyKey,
+          catalogImportBlocksWrite(stored, ownerId, config.id),
+        );
         setStorageUnavailable(false);
       });
     } catch (cause) {
@@ -1890,7 +2093,23 @@ export function CatalogPage({
             </Button>
           </div>
         )}
-        {extra}
+        <CatalogRefreshContext.Provider value={refreshImportedCatalog}>
+          {extra}
+        </CatalogRefreshContext.Provider>
+        {importBlocked && (
+          <div className="space-y-2">
+            <p role="status">
+              导入请求待核实，目录写入与批量删除已暂停；请先核实导入任务。
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => setPeerRefreshRetry((value) => value + 1)}
+            >
+              重读目录并核实导入保护（不提交）
+            </Button>
+          </div>
+        )}
 
         {notice && (
           <p
@@ -2189,6 +2408,7 @@ export function CatalogPage({
             }
           />
           <CardContent className="space-y-5">
+            {batchDelete.panel}
             {groups.isPending && (
               <div
                 aria-label={`正在加载${config.label}目录`}
@@ -2227,6 +2447,7 @@ export function CatalogPage({
                   <GroupRows
                     groups={data.list}
                     config={config}
+                    selection={batchDelete.selection}
                     selectedId={selectedId}
                     onSelect={(id) => {
                       if (writingRef.current) return;

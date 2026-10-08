@@ -12,6 +12,7 @@ import type {
   VariantGroupUpsertRequest,
 } from '@asin-monitor/contracts';
 import type { HttpClient } from '../../lib/http';
+import type { CatalogBatchDeleteOutcome } from '../../services/catalog-batch-delete';
 
 type Flag = 0 | 1 | boolean | null;
 
@@ -119,6 +120,11 @@ interface CatalogConfigBase {
     id: string,
     signal?: AbortSignal,
   ) => Promise<CatalogGroup>;
+  batchDelete?: (
+    http: Pick<HttpClient, 'request'>,
+    input: { groupIds: string[]; useAsync: boolean },
+    signal?: AbortSignal,
+  ) => Promise<CatalogBatchDeleteOutcome>;
   checks?: {
     group: (
       http: Pick<HttpClient, 'request'>,

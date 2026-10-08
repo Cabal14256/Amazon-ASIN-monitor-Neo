@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  catalogImportBlocksWrite,
   catalogSafetyKey,
   readCatalogSafetyGate,
   writeCatalogSafetyGate,
@@ -19,6 +20,44 @@ class MemoryStorage {
 }
 
 describe('catalog write safety across page loads', () => {
+  it.each(['asin', 'competitor'] as const)(
+    'keeps %s imports mutually exclusive by literal owner and domain even when damaged',
+    (domain) => {
+      const storage = new MemoryStorage();
+      const key =
+        domain === 'asin'
+          ? 'neo:asin-import:owner'
+          : 'neo:competitor-import:owner';
+      for (const raw of [
+        'invalid',
+        '',
+        JSON.stringify({ phase: 'accepted', taskId: 'fixture' }),
+      ]) {
+        storage.setItem(key, raw);
+        expect(catalogImportBlocksWrite(storage, 'owner', domain)).toBe(true);
+        expect(catalogImportBlocksWrite(storage, 'other', domain)).toBe(false);
+        expect(
+          catalogImportBlocksWrite(
+            storage,
+            'owner',
+            domain === 'asin' ? 'competitor' : 'asin',
+          ),
+        ).toBe(false);
+        expect(storage.getItem(key)).toBe(raw);
+      }
+      expect(
+        catalogImportBlocksWrite(
+          {
+            getItem: () => {
+              throw new Error('denied');
+            },
+          },
+          'owner',
+          domain,
+        ),
+      ).toBe(true);
+    },
+  );
   it.each(['asin', 'competitor'])(
     'preserves fifty-codepoint detail IDs while rejecting fifty-one in the %s catalog',
     (source) => {
