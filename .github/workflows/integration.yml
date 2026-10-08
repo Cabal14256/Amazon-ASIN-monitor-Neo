@@ -321,6 +321,9 @@ jobs:
       - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
+      - name: Verify history preflight stops at the first overflowing prefix in one PostgreSQL snapshot
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-history-preflight.integration.test.ts --maxWorkers=1
+
       - name: Compare competitor monitor history with Legacy MySQL and verify dual-database authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-history.integration.test.ts
 
