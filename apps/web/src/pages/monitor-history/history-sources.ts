@@ -12,6 +12,10 @@ import {
   getMonitorHistoryDetail,
   getMonitorStatusIntervals,
 } from '../../services/monitor-history';
+import {
+  getMonitorStatistics,
+  getPeakHoursStatistics,
+} from '../../services/monitor-statistics';
 
 const PRIMARY_TEXT_FILTERS = [
   { key: 'variantGroupId', label: '变体组 ID', max: 50 },
@@ -41,6 +45,8 @@ export type HistorySource = {
   textFilters: readonly { key: TextKey; label: string; max: number }[];
   competitor: boolean;
   getList: typeof getMonitorHistory;
+  getStatistics?: typeof getMonitorStatistics;
+  getPeakHours?: typeof getPeakHoursStatistics;
   getDetail: (
     http: Parameters<typeof getMonitorHistoryDetail>[0],
     id: number,
@@ -70,6 +76,8 @@ export const HISTORY_SOURCES: Record<'primary' | 'competitor', HistorySource> =
       getList: getMonitorHistory,
       getDetail: getMonitorHistoryDetail,
       getIntervals: getMonitorStatusIntervals,
+      getStatistics: getMonitorStatistics,
+      getPeakHours: getPeakHoursStatistics,
     },
     competitor: {
       key: 'competitor-monitor-history',
