@@ -41,6 +41,13 @@ class ScheduledMonitorMissingSnapshot extends ScheduledMonitorRunError {
     super('identity');
   }
 }
+/** A canonical missing receipt count can share the lock-wait snapshot race.
+ * Extra or malformed rows and receipt identities remain permanent failures. */
+class ScheduledMonitorMissingReceiptSnapshot extends ScheduledMonitorRunError {
+  constructor() {
+    super('state');
+  }
+}
 const MAX_CATALOG_GROUPS = 100_000;
 const PAGE_SIZE = 1000;
 const terminal = new Set([
@@ -179,16 +186,19 @@ export class PgScheduledMonitorRunRepository {
     admission = false,
   ): Promise<T> {
     // Refresh an RR snapshot that may predate an advisory-lock wait. Only a
-    // missing required row or explicit PG conflict retries, never a mismatched
-    // identity, connection loss or COMMIT uncertainty. Genuine absence remains
-    // an identity failure after at most three whole transactions.
+    // missing required row/receipt count or explicit PG conflict retries, never
+    // a mismatched identity, connection loss or COMMIT uncertainty. All attempts
+    // share the original duration; genuine absence retains its failure code.
+    const deadline = this.transactions.createDeadline();
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await this.transactions.run(action, signal, admission);
+        return await this.transactions.run(action, signal, admission, deadline);
       } catch (error) {
-        if (error instanceof ScheduledMonitorMissingSnapshot) {
-          // Preserve the private missing-row marker so optional read can report
-          // genuine absence only after exhausting fresh RR transactions.
+        if (
+          error instanceof ScheduledMonitorMissingSnapshot ||
+          error instanceof ScheduledMonitorMissingReceiptSnapshot
+        ) {
+          // Preserve private markers after exhausting fresh RR transactions.
           if (attempt === 2) throw error;
         } else if (!(error instanceof ScheduledMonitorSerializationRetry)) {
           throw error;
@@ -610,11 +620,17 @@ export class PgScheduledMonitorRunRepository {
         `SELECT count(*)::text AS receipt_count FROM ${this.receipts} WHERE task_id=$1`,
         [job.taskId],
       );
+      const count = receiptCount[0]?.receipt_count;
       if (
         receiptCount.length !== 1 ||
-        receiptCount[0].receipt_count !== String(run.groups.length)
+        typeof count !== 'string' ||
+        !/^(0|[1-9]\d*)$/.test(count)
       )
         throw new ScheduledMonitorRunError('state');
+      const expected = BigInt(run.groups.length),
+        actual = BigInt(count);
+      if (actual < expected) throw new ScheduledMonitorMissingReceiptSnapshot();
+      if (actual > expected) throw new ScheduledMonitorRunError('state');
       const now = await this.now(tx);
       if (Date.parse(job.expiresAt) <= Date.parse(now))
         throw new ScheduledMonitorRunError('expired');

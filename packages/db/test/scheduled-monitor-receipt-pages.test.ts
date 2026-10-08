@@ -24,6 +24,13 @@ function fixture(
     oversized?: boolean;
     malformed?: boolean;
     pauseSecondPage?: boolean;
+    staleFirstCount?: boolean;
+    countValue?: unknown;
+    countRows?: number;
+    missingPage?: number;
+    firstConnectDelayMs?: number;
+    lostCommit?: boolean;
+    onFirstRelease?: () => void;
   } = {},
 ) {
   const job = scheduledJob(domain);
@@ -70,13 +77,29 @@ function fixture(
   const wait = new Promise<void>((resolve) => {
     resume = resolve;
   });
+  let attempts = 0;
   const connect = vi.fn(async () => {
+    const attempt = ++attempts;
+    // A transaction's COUNT view is frozen. Rereading on this same client must
+    // not manufacture the final receipt; only a fresh transaction can see it.
+    const metadataCount =
+      options.staleFirstCount && attempt === 1
+        ? String(count - 1)
+        : Object.hasOwn(options, 'countValue')
+        ? options.countValue
+        : String(options.receiptCount ?? count);
+    if (attempt === 1 && options.firstConnectDelayMs)
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, options.firstConnectDelayMs),
+      );
     const query = vi.fn(async (text: string, values: unknown[] = []) => {
       statements.push({ text, values });
       if (/FROM .*_group_receipts/.test(text)) {
         if (text.includes('count(*)'))
           return {
-            rows: [{ receipt_count: String(options.receiptCount ?? count) }],
+            rows: Array.from({ length: options.countRows ?? 1 }, () => ({
+              receipt_count: metadataCount,
+            })),
           };
         // Refuse the unsafe request BEFORE manufacturing any payload. A legal
         // run can contain 1,000 independent 32 MiB values; a driver must never
@@ -85,6 +108,7 @@ function fixture(
           throw new Error('unsafe receipt transport can buffer 32 GiB');
         const ordinal = Number(values[1]) + 1;
         pages.push(ordinal);
+        if (ordinal === options.missingPage) return { rows: [] };
         if (options.pauseSecondPage && ordinal === 1 && !paused) {
           paused = true;
           await wait;
@@ -143,11 +167,15 @@ function fixture(
           values[5] === null ? null : new Date(values[5] as string);
         return { rows: [{ task_id: job.taskId }] };
       }
+      if (text === 'COMMIT' && options.lostCommit)
+        throw new Error('Completion COMMIT acknowledgment lost');
       return { rows: [] };
     });
     return Object.assign(new EventEmitter(), {
       query,
-      release: vi.fn(),
+      release: vi.fn(() => {
+        if (attempt === 1) options.onFirstRelease?.();
+      }),
     }) as unknown as PoolClient;
   });
   const repository = new PgScheduledMonitorRunRepository(
@@ -178,6 +206,7 @@ function fixture(
     updates,
     resume,
     connect,
+    now,
   };
 }
 
@@ -217,6 +246,7 @@ describe.each(['primary', 'competitor'] as const)(
           expect(f.pages).toEqual([]);
           expect(f.updates()).toEqual([]);
           expect(f.row.state).toBe('running');
+          expect(f.connect).toHaveBeenCalledTimes(receiptCount < 3 ? 3 : 1);
         } finally {
           f.repository.close();
         }
@@ -233,6 +263,7 @@ describe.each(['primary', 'competitor'] as const)(
           expect(f.pages.length).toBeGreaterThan(0);
           expect(f.updates()).toEqual([]);
           expect(f.row.state).toBe('running');
+          expect(f.connect).toHaveBeenCalledTimes(1);
         } finally {
           f.repository.close();
         }
@@ -280,6 +311,167 @@ describe.each(['primary', 'competitor'] as const)(
       } finally {
         f.resume();
         f.repository.close();
+        vi.useRealTimers();
+      }
+    });
+    it('reopens the entire transaction before verifying a last receipt hidden by its original COUNT view', async () => {
+      const f = fixture(domain, 3, { staleFirstCount: true });
+      try {
+        const complete = await f.repository.completeBusiness(f.job, f.summary);
+        expect(complete.state).toBe('business-completed');
+        expect(complete.result).toEqual(f.summary);
+        expect(f.connect).toHaveBeenCalledTimes(2);
+        expect(f.pages).toEqual([0, 1, 2]);
+        expect(f.updates()).toHaveLength(1);
+        expect(
+          f.statements.filter(({ text }) => text.includes('AS receipt_count')),
+        ).toHaveLength(2);
+        expect(
+          f.statements.filter(({ text }) => text === 'COMMIT'),
+        ).toHaveLength(1);
+      } finally {
+        f.repository.close();
+      }
+    });
+    it.each(['01', '-1', null, 1, '9007199254740993'])(
+      'rejects malformed or extra COUNT metadata %j without retrying or fetching receipts',
+      async (countValue) => {
+        const f = fixture(domain, 3, { countValue });
+        try {
+          await expect(
+            f.repository.completeBusiness(f.job, f.summary),
+          ).rejects.toMatchObject({ code: 'state' });
+          expect(f.connect).toHaveBeenCalledTimes(1);
+          expect(f.pages).toEqual([]);
+          expect(f.updates()).toEqual([]);
+        } finally {
+          f.repository.close();
+        }
+      },
+    );
+    it.each([0, 2])(
+      'rejects %s COUNT rows without treating a malformed query result as a stale receipt view',
+      async (countRows) => {
+        const f = fixture(domain, 3, { countRows });
+        try {
+          await expect(
+            f.repository.completeBusiness(f.job, f.summary),
+          ).rejects.toMatchObject({ code: 'state' });
+          expect(f.connect).toHaveBeenCalledTimes(1);
+          expect(f.pages).toEqual([]);
+          expect(f.updates()).toEqual([]);
+        } finally {
+          f.repository.close();
+        }
+      },
+    );
+    it('keeps a missing page with a correct COUNT non-retryable', async () => {
+      const f = fixture(domain, 3, { missingPage: 1 });
+      try {
+        await expect(
+          f.repository.completeBusiness(f.job, f.summary),
+        ).rejects.toMatchObject({ code: 'state' });
+        expect(f.connect).toHaveBeenCalledTimes(1);
+        expect(f.pages).toEqual([0, 1]);
+        expect(f.updates()).toEqual([]);
+      } finally {
+        f.repository.close();
+      }
+    });
+    it('never retries a COMMIT uncertainty after refreshing the receipt view', async () => {
+      const f = fixture(domain, 3, {
+        staleFirstCount: true,
+        lostCommit: true,
+      });
+      try {
+        await expect(
+          f.repository.completeBusiness(f.job, f.summary),
+        ).rejects.toMatchObject({ code: 'commit-uncertain' });
+        expect(f.connect).toHaveBeenCalledTimes(2);
+        expect(f.updates()).toHaveLength(1);
+        expect(f.pages).toEqual([0, 1, 2]);
+      } finally {
+        f.repository.close();
+      }
+    });
+    it.each(['cancel', 'close', 'expire'] as const)(
+      'revalidates %s after the old receipt transaction releases its lease',
+      async (boundary) => {
+        const controller = new AbortController();
+        const f = fixture(domain, 3, {
+          staleFirstCount: true,
+          onFirstRelease: () => {
+            if (boundary === 'cancel') controller.abort();
+            if (boundary === 'close') f.repository.close();
+            if (boundary === 'expire')
+              f.now.setTime(Date.parse(f.job.expiresAt));
+          },
+        });
+        try {
+          await expect(
+            f.repository.completeBusiness(
+              f.job,
+              f.summary,
+              false,
+              controller.signal,
+            ),
+          ).rejects.toMatchObject({
+            code:
+              boundary === 'cancel'
+                ? 'cancelled'
+                : boundary === 'close'
+                ? 'closed'
+                : 'expired',
+          });
+          expect(f.connect).toHaveBeenCalledTimes(
+            boundary === 'expire' ? 2 : 1,
+          );
+          expect(f.pages).toEqual([]);
+          expect(f.updates()).toEqual([]);
+          expect(f.row.state).toBe('running');
+        } finally {
+          f.repository.close();
+        }
+      },
+    );
+    it('shares one original total deadline across stale COUNT retry, connection acquisition and receipt pages', async () => {
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'performance'],
+      });
+      const f = fixture(domain, 3, {
+        staleFirstCount: true,
+        firstConnectDelayMs: 900,
+        pauseSecondPage: true,
+      });
+      let settled: unknown;
+      const work = f.repository.completeBusiness(f.job, f.summary).then(
+        (value) => {
+          settled = value;
+        },
+        (error: unknown) => {
+          settled = error;
+        },
+      );
+      try {
+        await vi.advanceTimersByTimeAsync(900);
+        expect(f.connect).toHaveBeenCalledTimes(2);
+        expect(f.pages).toEqual([0, 1]);
+        await vi.advanceTimersByTimeAsync(99);
+        expect(settled).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toMatchObject({ code: 'timeout' });
+        expect(f.row.state).toBe('running');
+        expect(f.updates()).toEqual([]);
+        expect(f.repository.getDiagnostics().active).toBe(1);
+        f.resume();
+        await vi.advanceTimersByTimeAsync(0);
+        await work;
+        expect(f.repository.getDiagnostics().active).toBe(0);
+      } finally {
+        f.repository.close();
+        f.resume();
+        await vi.advanceTimersByTimeAsync(0);
+        await work;
         vi.useRealTimers();
       }
     });

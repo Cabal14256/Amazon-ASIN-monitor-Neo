@@ -2,7 +2,7 @@ import type { ScheduledMonitorJob } from '@asin-monitor/contracts';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPgPool } from '../src/client';
 import {
@@ -115,6 +115,7 @@ suite.each(['primary', 'competitor'] as const)(
       changes: Record<string, unknown> = {},
       ordinal = 0,
       raw?: string,
+      writer?: PoolClient,
     ) => {
       const group = run.groups[ordinal];
       const operation = scheduledMonitorGroupOperation(run.job, group);
@@ -153,7 +154,9 @@ suite.each(['primary', 'competitor'] as const)(
       const columns = Object.keys(row);
       if (columns.some((column) => !/^[a-z_]+$/.test(column)))
         throw new Error('Invalid receipt fixture field');
-      await connection().query(
+      // A writer holding the run's FOR UPDATE lock must insert its FK receipt
+      // on this same connection, rather than waiting on itself through the pool.
+      await (writer ?? connection()).query(
         `INSERT INTO ${qualified}."${receiptTable}" (${columns.join(
           ',',
         )}) VALUES (${columns.map((_, index) => `$${index + 1}`).join(',')})`,
@@ -735,6 +738,174 @@ suite.each(['primary', 'competitor'] as const)(
       });
       expect(await storage().read(job)).toEqual(completed);
     });
+    it.each(['commit', 'rollback'] as const)(
+      'refreshes a receipt COUNT established before the final group writer %s releases the run lock',
+      async (decision) => {
+        const job = await nowJob();
+        await insertRows(groupTable, [
+          scheduledGroup(domain, 'first committed group'),
+          scheduledGroup(domain, 'last transactional group'),
+        ]);
+        await insertRows(memberTable, [
+          scheduledMember(domain, 'first committed group', 'first member'),
+          {
+            ...scheduledMember(
+              domain,
+              'last transactional group',
+              'last member',
+            ),
+            asin: 'B000000002',
+          },
+        ]);
+        const run = await storage().accept(job);
+        expect(run.groups).toHaveLength(2);
+        await storage().start(job);
+        await insertReceipt(run, {}, 0);
+        const fingerprint = () =>
+          connection().query(
+            `SELECT ordinal,operation_key,request_hash,completed_at,md5(result::text) AS result_hash FROM ${qualified}."${receiptTable}" WHERE task_id=$1 ORDER BY ordinal`,
+            [job.taskId],
+          );
+        const firstReceipt = (await fingerprint()).rows;
+        const historyTable =
+          domain === 'primary'
+            ? 'monitor_history'
+            : 'competitor_monitor_history';
+        const historyId = Number.parseInt(randomUUID().slice(0, 7), 16);
+        const observed = observeReceiptTransport();
+        const writer = await connection().connect();
+        let released = false;
+        let completion:
+          | ReturnType<typeof settled<ScheduledMonitorRun>>
+          | undefined;
+        try {
+          const pid = (
+            await writer.query<{ pid: number }>(
+              'SELECT pg_backend_pid() AS pid',
+            )
+          ).rows[0].pid;
+          await writer.query('BEGIN');
+          await writer.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('neo:scheduled-monitor:' || $1,0))",
+            [job.taskId],
+          );
+          // Lock without changing the run tuple. A synthetic run UPDATE could
+          // produce 40001 and exercise the already-existing serialization path,
+          // hiding the missing receipt COUNT path this regression must prove.
+          await writer.query(
+            `SELECT task_id FROM ${qualified}."${runTable}" WHERE task_id=$1 FOR UPDATE`,
+            [job.taskId],
+          );
+          await writer.query(
+            `INSERT INTO ${qualified}."${historyTable}" (id) VALUES ($1)`,
+            [historyId],
+          );
+          await insertReceipt(run, {}, 1, undefined, writer);
+          completion = settled(
+            observed.repository.completeBusiness(job, summary(run)),
+          );
+          await waitFor(async () => {
+            const waiting = await connection().query<{ waiting: boolean }>(
+              `SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_locks waiter JOIN pg_catalog.pg_locks holder
+                  ON waiter.classid=holder.classid AND waiter.objid=holder.objid
+                  AND waiter.objsubid=holder.objsubid AND waiter.database=holder.database
+                JOIN pg_catalog.pg_stat_activity activity ON activity.pid=waiter.pid
+                WHERE holder.pid=$1 AND holder.locktype='advisory' AND holder.granted
+                  AND waiter.locktype='advisory' AND NOT waiter.granted
+                  AND activity.backend_xmin IS NOT NULL
+              ) AS waiting`,
+              [pid],
+            );
+            return waiting.rows[0]?.waiting === true;
+          });
+          await writer.query(decision === 'commit' ? 'COMMIT' : 'ROLLBACK');
+          writer.release();
+          released = true;
+          const outcome = await completion;
+          const receipts = (await fingerprint()).rows;
+          expect(receipts.slice(0, 1)).toEqual(firstReceipt);
+          expect(receipts).toHaveLength(decision === 'commit' ? 2 : 1);
+          const history = await connection().query(
+            `SELECT id FROM ${qualified}."${historyTable}" WHERE id=$1`,
+            [historyId],
+          );
+          expect(history.rows).toEqual(
+            decision === 'commit' ? [{ id: historyId }] : [],
+          );
+          expect(
+            observed.statements.some(
+              (text) =>
+                text.includes(`."${groupTable}"`) ||
+                text.includes(`."${memberTable}"`),
+            ),
+          ).toBe(false);
+          expect(
+            observed.statements.some((text) =>
+              /SUM\(|result::text/i.test(text),
+            ),
+          ).toBe(false);
+          if (decision === 'commit') {
+            if (!outcome.ok) throw outcome.error;
+            expect(outcome.value.state).toBe('business-completed');
+            expect(outcome.value.result).toEqual(summary(run));
+            expect(outcome.value.groups).toEqual(run.groups);
+            expect(outcome.value.snapshotDigest).toBe(run.snapshotDigest);
+            expect(observed.counts).toEqual(['1', '2']);
+            expect(observed.pages).toEqual([
+              { after: -1, rows: 1, ordinal: 0 },
+              { after: 0, rows: 1, ordinal: 1 },
+            ]);
+            expect(observed.completions).toBe(1);
+            expect(
+              observed.statements.filter(
+                (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+              ),
+            ).toHaveLength(2);
+            expect(
+              await observed.repository.completeBusiness(job, summary(run)),
+            ).toEqual(outcome.value);
+            expect(observed.counts).toEqual(['1', '2']);
+            expect(observed.pages).toHaveLength(2);
+            expect(observed.completions).toBe(1);
+            expect((await fingerprint()).rows).toEqual(receipts);
+          } else {
+            expect(outcome).toMatchObject({
+              ok: false,
+              error: { code: 'state' },
+            });
+            expect(observed.counts).toEqual(['1', '1', '1']);
+            expect(observed.pages).toEqual([]);
+            expect(observed.completions).toBe(0);
+            expect(
+              observed.statements.filter(
+                (text) => text === 'BEGIN ISOLATION LEVEL REPEATABLE READ',
+              ),
+            ).toHaveLength(3);
+            const inspected = await storage().read(job);
+            expect(inspected?.state).toBe('running');
+            expect(inspected?.groups).toEqual(run.groups);
+            expect(inspected?.result).toBeNull();
+            expect(inspected?.businessCompletedAt).toBeNull();
+          }
+        } finally {
+          if (!released) {
+            try {
+              await writer.query('ROLLBACK');
+            } finally {
+              writer.release();
+            }
+          }
+          observed.repository.close();
+          await completion;
+          await connection().query(
+            `DELETE FROM ${qualified}."${historyTable}" WHERE id=$1`,
+            [historyId],
+          );
+        }
+      },
+      15_000,
+    );
     it('returns one full receipt per real SQL page, retaining the frozen run and single atomic completion', async () => {
       const job = await nowJob();
       await insertRows(

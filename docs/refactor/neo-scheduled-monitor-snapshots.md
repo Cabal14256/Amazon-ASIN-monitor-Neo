@@ -39,9 +39,11 @@
 
 ## 事务失败与隔离验证
 
-每仓库最多 4 个操作，每次事务默认总时限 15 秒、单语句/锁等待 5 秒。每次事务使用局部限制，不改变共享池配置。连接取得、SQL、取消和关闭均纳入时限；迟到连接被销毁，容量槽直到该操作真正释放才归还。COMMIT 发出后的断连/取消/超时统一报告 `commit-uncertain`，不能证明回滚。
+每仓库最多 4 个操作，每次逻辑操作默认总时限 15 秒、单语句/锁等待 5 秒。最多三次完整事务共用首次操作建立的 `performance` 截止时间，不会每次重试重置总预算；每次事务仍使用原有 SQL 局部限制，不改变共享池配置。连接取得、锁等待、SQL 分页、取消和关闭均纳入剩余时限；迟到连接被销毁，容量槽直到该操作真正释放才归还。COMMIT 发出后的断连/取消/超时统一报告 `commit-uncertain`，不能证明回滚。
 
 repeatable-read 的视图可能在 advisory lock 等待前建立。需要已有 run 的状态转换及 `read()` 对账在锁后仍看不到记录时，最多重新开启三次完整事务，读取先前受理并提交的原身份和原快照。确实无记录时，状态转换最终仍返回 `identity`，普通 `read()` 才返回 undefined；不创建或补写 run。已有记录的错摘要/错域/损坏快照立即拒绝，不按缺行重试；取消、连接错误或 COMMIT 未知也不重试。
+
+`completeBusiness()` 的末组收据也可能被等待前的视图隐藏。只有 `COUNT` 恰好返回一行、值为规范非负整数字符串且小于原快照组数时，才通过私有 `state` 标记重新开启事务；第三次仍不足时保留 `state`，不写完成边界。计数超过预期、畸形计数、正确计数下缺页、身份污染或永久解码失败立即拒绝。计数比较使用 SQL 整数字符串与 `BigInt`，不经浮点转换；重试不改原收据、固定集合或业务时钟。
 
 只对 PostgreSQL 明确拒绝的 serialization conflict，以及受理阶段的唯一键冲突，最多重新尝试 3 次 DB-only 事务。repeatable-read 的快照可能早于 advisory lock 等待，冲突后必须开启新事务；不能在旧快照下假定刚提交的 run 不存在。这里不包含外部请求，因此冲突重试不会重抓商品。
 
@@ -53,6 +55,20 @@ corepack pnpm --filter db exec vitest run test/scheduled-monitor-run.integration
 ```
 
 本层的仓库/收据读回不能替代 #188 的真实 BullMQ/Redis/双 PG 编译入口、业务事务故障注入和发送 ACK 丢失回归；生产数据对拍、旧 Bull drain 与 Legacy 退役门槛仍保持独立。
+
+## PR #222 完成边界快照修复与验证范围
+
+本轮新增测试针对完成操作的 repeatable-read 快照早于末组提交的问题：末组写入持有原 run advisory/行锁，在同一连接里写业务标记和原 ordinal 收据；完成操作必须先被 `pg_locks` 证明确实等待该锁，且 `pg_stat_activity.backend_xmin` 非空，随后才允许末组 COMMIT 或 ROLLBACK。夹具不改 run tuple，避免已有 serialization conflict 重试掩盖收据计数缺失；完成操作的 SQL 不插入额外快照探针。
+
+提交对照要求重新开启完整事务后看到全部收据、逐行核验并只写一次完成边界，原收据、组快照与成员保持不变；回滚对照要求三次完整事务后仍返回 `state`，保留已提交收据和 `running`，不写部分完成。两个逻辑库各增加提交、回滚两个场景，原 33 个 native 用例及原期限保留，共 37 个。本机未启用真实 PostgreSQL，37 个用例仅完成收集并全部 skip；真实锁竞争证明仍需隔离 Integration workflow，不能记为本机 RED 或 GREEN。
+
+本机先保存两份原生产文件的完整字节和 SHA，再用原源码实际执行三文件定向回归：19 failed、74 passed、0 skipped。失败覆盖规范缺收据视图、后续取消/关闭/过期/COMMIT 未知的错误分类、跨重试与借连接/分页的共享总期限，以及非有限/已耗尽 deadline 的借连接前拒绝；原控制场景全部通过。执行的 `finally` 从保存副本恢复生产文件并核对两份 SHA，之后才实施最小两源修复。修复后相同 93 个用例全部通过，没有删除或放宽断言，也没有增加原期限。
+
+DB 源码与上述四份测试文件的扩展严格类型检查已通过。首次检查因主线新增 contracts 导出的旧构建产物失败，重建依赖后再检查成功；首次失败没有记录为通过。完整命令、失败与成功日志、每次检查前后生产源码 SHA 由本轮验证 manifest 单独保留。
+
+后续完整包回归实际执行：DB 1009 passed / 268 skipped，API 1710 passed / 549 skipped，Worker 250 passed / 41 skipped，Web 851 passed / 0 skipped；跳过项均仍受原真实服务启用条件约束。根契约、Legacy 55 个单元用例、contracts 213 个、config 41 个，以及 Legacy/Web/API/Worker/DB 构建和 Web lint 已通过。没有启用未知数据库连接，没有把 opt-in 收集结果记为真实服务验收。
+
+根 TypeScript 首次因缺少 Legacy `src/.umi` 开发声明而实际失败；`npm run setup` 只补充忽略的生成物后，相同检查通过，没有更改 tracked 源码或 lockfile。首次失败日志保留，不记录为首轮通过；已通过的完整包回归没有重复运行。
 
 ## Producer、source 与消费者接续边界
 

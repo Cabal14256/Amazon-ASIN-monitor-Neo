@@ -5,6 +5,7 @@ import { ScheduledMonitorRunError } from '../src/domain/scheduled-monitor-run';
 import {
   PgScheduledMonitorTransactions,
   ScheduledMonitorSerializationRetry,
+  type ScheduledMonitorTransaction,
 } from '../src/repositories/scheduled-monitor-transaction';
 
 function deferred<T>() {
@@ -202,5 +203,106 @@ describe('scheduled monitor transaction ownership and uncertainty', () => {
     expect(
       () => new PgScheduledMonitorTransactions({} as Pool, 1, 1000, 1000),
     ).toThrow();
+  });
+  it.each([NaN, Infinity, -Infinity])(
+    'rejects non-finite logical deadline %s before taking physical capacity',
+    async (deadline) => {
+      const { transactions, connect } = fixture();
+      // An optional fourth argument is compatible with the original three-arg
+      // interface. The original implementation must fail on behavior, rather
+      // than failing because the proposed deadline method does not exist yet.
+      const run: <T>(
+        action: (tx: ScheduledMonitorTransaction) => Promise<T>,
+        signal?: AbortSignal,
+        admission?: boolean,
+        deadline?: number,
+      ) => Promise<T> = transactions.run.bind(transactions);
+      try {
+        await expect(
+          run(async () => 'must not execute', undefined, false, deadline),
+        ).rejects.toMatchObject({ code: 'input' });
+        expect(connect).not.toHaveBeenCalled();
+        expect(transactions.getDiagnostics().active).toBe(0);
+      } finally {
+        transactions.close();
+      }
+    },
+  );
+  it('rejects an exhausted logical deadline without borrowing a client', async () => {
+    const { transactions, connect } = fixture();
+    const run: <T>(
+      action: (tx: ScheduledMonitorTransaction) => Promise<T>,
+      signal?: AbortSignal,
+      admission?: boolean,
+      deadline?: number,
+    ) => Promise<T> = transactions.run.bind(transactions);
+    try {
+      await expect(
+        run(
+          async () => 'must not execute',
+          undefined,
+          false,
+          performance.now() - 1,
+        ),
+      ).rejects.toMatchObject({ code: 'timeout' });
+      expect(connect).not.toHaveBeenCalled();
+      expect(transactions.getDiagnostics().active).toBe(0);
+    } finally {
+      transactions.close();
+    }
+  });
+  it('uses only the remaining logical budget while a retry acquires a late connection', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const { transactions, connect, client, release } = fixture();
+    const connection = deferred<PoolClient>();
+    const run: <T>(
+      action: (tx: ScheduledMonitorTransaction) => Promise<T>,
+      signal?: AbortSignal,
+      admission?: boolean,
+      deadline?: number,
+    ) => Promise<T> = transactions.run.bind(transactions);
+    const deadline = performance.now() + 1200;
+    let settled: unknown;
+    let work: Promise<void> | undefined;
+    try {
+      expect(await run(async () => 'first', undefined, false, deadline)).toBe(
+        'first',
+      );
+      expect(release).toHaveBeenCalledExactlyOnceWith(false);
+      await vi.advanceTimersByTimeAsync(800);
+      connect.mockReturnValueOnce(connection.promise);
+      work = run(
+        async () => 'must not execute',
+        undefined,
+        false,
+        deadline,
+      ).then(
+        (value) => {
+          settled = value;
+        },
+        (error: unknown) => {
+          settled = error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(399);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toMatchObject({ code: 'timeout' });
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(transactions.getDiagnostics().active).toBe(1);
+      await expect(transactions.run(async () => 'new')).rejects.toMatchObject({
+        code: 'capacity',
+      });
+      connection.resolve(client);
+      await vi.advanceTimersByTimeAsync(0);
+      await work;
+      expect(release.mock.calls).toEqual([[false], [true]]);
+      expect(transactions.getDiagnostics().active).toBe(0);
+    } finally {
+      transactions.close();
+      connection.resolve(client);
+      await vi.advanceTimersByTimeAsync(0);
+      await work;
+    }
   });
 });

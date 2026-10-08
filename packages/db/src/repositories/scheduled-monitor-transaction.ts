@@ -38,11 +38,18 @@ export class PgScheduledMonitorTransactions {
   getDiagnostics() {
     return { active: this.active, closed: this.closed };
   }
+  createDeadline(): number {
+    return performance.now() + this.durationMs;
+  }
   async run<T>(
     action: (transaction: ScheduledMonitorTransaction) => Promise<T>,
     signal?: AbortSignal,
     retryAdmissionConflict = false,
+    deadline = this.createDeadline(),
   ): Promise<T> {
+    if (!Number.isFinite(deadline)) throw new ScheduledMonitorRunError('input');
+    const remaining = Math.min(this.durationMs, deadline - performance.now());
+    if (remaining <= 0) throw new ScheduledMonitorRunError('timeout');
     if (this.closed) throw new ScheduledMonitorRunError('closed');
     if (signal?.aborted) throw new ScheduledMonitorRunError('cancelled');
     if (this.active >= this.maximum)
@@ -90,7 +97,7 @@ export class PgScheduledMonitorTransactions {
     };
     signal?.addEventListener('abort', abort, { once: true });
     this.stops.add(close);
-    const timer = setTimeout(() => stop('timeout'), this.durationMs);
+    const timer = setTimeout(() => stop('timeout'), remaining);
     if (signal?.aborted) abort();
     const work = (async () => {
       let confirmed = false;
