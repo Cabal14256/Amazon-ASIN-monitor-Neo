@@ -406,6 +406,12 @@ jobs:
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
 
+      - name: Run ASIN export from HTTP through PostgreSQL, Redis and the compiled BullMQ Worker
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-export.integration.test.ts
+
+      - name: Verify ASIN export group status and keyset queries against PostgreSQL
+        run: pnpm --filter @asin-monitor/db exec vitest run test/asin-export-query.integration.test.ts
+
       - name: Compare competitor imports with Legacy MySQL and verify shared compiled import Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-import.integration.test.ts
 

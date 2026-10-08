@@ -28,6 +28,9 @@ const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
 const cancellationSensitiveTask = (task: { taskType: string }) =>
   checkTask(task) || ['monitor', 'competitor-monitor'].includes(task.taskType);
+const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
+  cancellationSensitiveTask(task) ||
+  (task.taskType === 'export' && task.taskSubType === 'asin');
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed');
@@ -60,7 +63,7 @@ export class TaskQueryService {
         throw new Error('TASK_QUERY_DEADLINE');
     };
     try {
-      return await action(this.runtime.open(ensureOpen), ensureOpen);
+      return await action(this.runtime.open(ensureOpen, deadline), ensureOpen);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       if (error instanceof TaskQueryInputError) fail(400, '任务查询参数无效');
@@ -84,6 +87,16 @@ export class TaskQueryService {
     const userId = principal.userId;
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
+    // Queue absence alone is never proof. Only the producer's immutable,
+    // shared-volume receipt can terminalize a definitive pre-add rejection.
+    if (port.reconcileRejectedExport) {
+      const rejected = await port.reconcileRejectedExport(task);
+      if (rejected) {
+        this.owner(rejected, userId);
+        if (isTerminalTaskStatus(rejected.status)) return rejected;
+      }
+    }
+    ensureOpen();
     const queued = await port.findJob(task.taskId, task.taskType);
     // Cleanup, retention limits, or a lost completion acknowledgement can erase
     // the job after a business commit. Without its immutable request digest,
@@ -92,7 +105,7 @@ export class TaskQueryService {
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (cancellationSensitiveTask(task)) {
+    if (boundTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -104,9 +117,7 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(cancellationSensitiveTask(task)
-        ? { taskSubType: task.taskSubType }
-        : {}),
+      ...(boundTask(task) ? { taskSubType: task.taskSubType } : {}),
     };
     if (
       cancellationSensitiveTask(task) &&

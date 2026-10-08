@@ -4,6 +4,11 @@ import { CompetitorCheckStorageModule } from '../competitor/competitor-check-sto
 import { ImportStorageModule } from '../import/import-storage.module';
 import { VariantCheckStorageModule } from '../variant-check/variant-check-storage.module';
 import { WebSocketModule } from '../websocket/websocket.module';
+import {
+  AsinExportTaskController,
+  AsinExportTaskService,
+} from './asin-export-task';
+import { ExportStorageModule } from './export-storage.module';
 import { TaskCancellationController } from './task-cancellation.controller';
 import { TaskCancellationService } from './task-cancellation.service';
 import { TaskDownloadController, TaskDownloadService } from './task-download';
@@ -18,12 +23,14 @@ import { VariantCheckTaskResults } from './variant-check-task-results';
     WebSocketModule,
     ImportStorageModule,
     VariantCheckStorageModule,
+    ExportStorageModule,
     CompetitorCheckStorageModule,
   ],
   controllers: [
     TaskQueryController,
     TaskCancellationController,
     TaskDownloadController,
+    AsinExportTaskController,
   ],
   providers: [
     TaskQueryRuntime,
@@ -31,6 +38,7 @@ import { VariantCheckTaskResults } from './variant-check-task-results';
     VariantCheckTaskResults,
     TaskCancellationService,
     TaskDownloadService,
+    AsinExportTaskService,
   ],
   exports: [TaskQueryRuntime],
 })
