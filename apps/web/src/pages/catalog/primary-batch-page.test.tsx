@@ -20,10 +20,11 @@ import {
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthContext } from '../../auth/context';
-import type { IdentityStore } from '../../auth/identity';
+import { IdentityStore } from '../../auth/identity';
 import { RouteGate } from '../../auth/route-gate';
 import {
   deferred,
+  FakeSocket,
   jsonResponse,
   sessionFixture,
 } from '../../lib/transport-fixtures';
@@ -66,6 +67,7 @@ function fixture(
   competitor = false,
   groupId = 'group-1',
   gated = false,
+  verifiedIdentity = false,
 ) {
   const group = {
     id: groupId,
@@ -95,7 +97,7 @@ function fixture(
   const refresh = vi.fn(async () => state);
   let anonymous = false;
   const anonymousState = { status: 'anonymous' as const };
-  const identity = {
+  const stubIdentity = {
     getSnapshot: () => (anonymous ? anonymousState : state),
     subscribe: (listener: () => void) => {
       listeners.add(listener);
@@ -112,9 +114,15 @@ function fixture(
   let readGate: ReturnType<typeof deferred<void>> | undefined;
   let receiptSerial = 0;
   let posted = false;
+  let identityResponse: ReturnType<typeof deferred<Response>> | undefined;
   const prefix = baseURL.includes('/gateway/') ? '/gateway/api/v1' : '/api/v1';
   const fetcher = vi.fn<typeof fetch>(async (input, options) => {
     const path = new URL(String(input)).pathname;
+    if (path.endsWith('/auth/current-user'))
+      return (
+        identityResponse?.promise ??
+        jsonResponse({ success: true, data: state.identity })
+      );
     const readOwner = state.identity.user.id;
     const snapshot = {
       ...group,
@@ -220,11 +228,14 @@ function fixture(
     pageOrigin: 'https://app.test',
     fetch: fetcher,
     session: sessionFixture().store,
+    socket: () => new FakeSocket(),
   });
   runtime.queryClient.setDefaultOptions({
     queries: { retry: false, gcTime: 0 },
   });
   runtimes.push(runtime);
+  const identity = verifiedIdentity ? new IdentityStore(runtime) : stubIdentity;
+  if (verifiedIdentity) identity.start();
   const config = competitor ? COMPETITOR_CATALOG : ASIN_CATALOG;
   const root = createRootRoute({ component: Outlet });
   const router = gated
@@ -266,6 +277,16 @@ function fixture(
     refresh,
     group,
     prefix,
+    identityStore: identity,
+    holdIdentityResponse: () => {
+      identityResponse = deferred<Response>();
+      return identityResponse;
+    },
+    verifiedIdentity: (id = 'operator', session = 'session-1') => ({
+      ...state.identity,
+      user: { ...state.identity.user, id },
+      sessionId: session,
+    }),
     outcomes: (values: boolean[]) => {
       outcomes = values;
     },
@@ -355,6 +376,175 @@ const guardKey = catalogSafetyKey('operator', 'asin');
 const fiftyPointGroupId = ` ${'😀'.repeat(48)} `;
 
 describe('actual primary batch-create catalog integration', () => {
+  it.each(['pending', 'error'] as const)(
+    'keeps known rows through a real IdentityStore %s check and the same verified session',
+    async (pause) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+        true,
+      );
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+      const original = readAsinBatchReceipt('operator', owner);
+      expect(original).toBeTruthy();
+      let response = f.holdIdentityResponse();
+      let verified!: ReturnType<IdentityStore['refresh']>;
+      await act(async () => {
+        verified = f.identityStore.refresh();
+      });
+      await screen.findByText('正在验证登录状态…');
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+      if (pause === 'error') {
+        await act(async () => {
+          response.reject(new TypeError('Fixture identity unavailable'));
+          await verified;
+        });
+        await screen.findByRole('heading', { name: '暂时无法验证登录状态' });
+        expect(f.identityStore.getSnapshot()).toEqual({ status: 'error' });
+        expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+        response = f.holdIdentityResponse();
+        await act(async () => {
+          verified = f.identityStore.refresh();
+        });
+        await screen.findByText('正在验证登录状态…');
+      }
+      await act(async () => {
+        response.resolve(
+          jsonResponse({ success: true, data: f.verifiedIdentity() }),
+        );
+        await verified;
+      });
+      await screen.findByRole('region', { name: '批量添加结果' });
+      expect(screen.getByText('Fixture duplicate')).toBeTruthy();
+      expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+  it.each([
+    { pause: 'pending', target: 'anonymous' },
+    { pause: 'pending', target: 'owner' },
+    { pause: 'pending', target: 'session' },
+    { pause: 'error', target: 'anonymous' },
+    { pause: 'error', target: 'owner' },
+    { pause: 'error', target: 'session' },
+  ] as const)(
+    'retires unprotected known rows only after real $pause verification confirms $target',
+    async ({ pause, target }) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+        true,
+      );
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('region', { name: '批量添加结果' });
+      await waitFor(() =>
+        expect(window.localStorage.getItem(guardKey)).toBeNull(),
+      );
+      const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+      const original = readAsinBatchReceipt('operator', owner);
+      expect(original).toBeTruthy();
+      let response = f.holdIdentityResponse();
+      let verified!: ReturnType<IdentityStore['refresh']>;
+      await act(async () => {
+        verified = f.identityStore.refresh();
+      });
+      await screen.findByText('正在验证登录状态…');
+      expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+      if (pause === 'error') {
+        await act(async () => {
+          response.reject(new TypeError('Fixture identity unavailable'));
+          await verified;
+        });
+        await screen.findByRole('heading', { name: '暂时无法验证登录状态' });
+        expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+        response = f.holdIdentityResponse();
+        await act(async () => {
+          verified = f.identityStore.refresh();
+        });
+      }
+      await act(async () => {
+        response.resolve(
+          target === 'anonymous'
+            ? jsonResponse({ success: false, errorCode: 401 }, 401)
+            : jsonResponse({
+                success: true,
+                data: f.verifiedIdentity(
+                  target === 'owner' ? 'other' : 'operator',
+                  target === 'session' ? 'session-2' : 'session-1',
+                ),
+              }),
+        );
+        await verified;
+      });
+      await waitFor(() =>
+        expect(readAsinBatchReceipt('operator', owner)).toBeNull(),
+      );
+      if (target === 'anonymous') await screen.findByText('Fixture 登录页');
+      expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
+      expect(window.localStorage.getItem(guardKey)).toBeNull();
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
+  it.each(['anonymous', 'owner', 'session'] as const)(
+    'preserves exact protected rows and gate after real pending identity confirms %s',
+    async (target) => {
+      const f = fixture(
+        '/api/',
+        ['asin:read', 'asin:write'],
+        false,
+        'group-1',
+        true,
+        true,
+      );
+      f.failReads(true);
+      await openBatch();
+      fireEvent.submit(fillBatch());
+      await screen.findByRole('button', { name: '重新读取目录' });
+      const owner = JSON.stringify(['asin', 'operator', 'session-1']);
+      const original = readAsinBatchReceipt('operator', owner);
+      const originalGate = window.localStorage.getItem(guardKey);
+      expect(original).toBeTruthy();
+      expect(originalGate).not.toBeNull();
+      const response = f.holdIdentityResponse();
+      let verified!: ReturnType<IdentityStore['refresh']>;
+      await act(async () => {
+        verified = f.identityStore.refresh();
+      });
+      await screen.findByText('正在验证登录状态…');
+      expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+      await act(async () => {
+        response.resolve(
+          target === 'anonymous'
+            ? jsonResponse({ success: false, errorCode: 401 }, 401)
+            : jsonResponse({
+                success: true,
+                data: f.verifiedIdentity(
+                  target === 'owner' ? 'other' : 'operator',
+                  target === 'session' ? 'session-2' : 'session-1',
+                ),
+              }),
+        );
+        await verified;
+      });
+      expect(readAsinBatchReceipt('operator', owner)).toEqual(original);
+      expect(window.localStorage.getItem(guardKey)).toBe(originalGate);
+      expect(f.posts()).toHaveLength(1);
+    },
+  );
   it.each(['logout', 'permission-then-logout'] as const)(
     'retires an unprotected receipt when the actual RouteGate unmounts on %s',
     async (change) => {

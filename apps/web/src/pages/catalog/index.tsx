@@ -46,11 +46,11 @@ import { AsinBatchCreateResult } from '../asin/asin-batch-create-result';
 import {
   readAsinBatchReceipt,
   removeAsinBatchReceipt,
-  removeUnprotectedAsinBatchReceipt,
   saveAsinBatchReceipt,
   type AsinBatchReceipt,
 } from '../asin/asin-batch-receipt';
 import { CatalogActionPanel } from './catalog-actions';
+import { retireBatchReceiptAfterIdentityChange } from './catalog-batch-receipt-retirement';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
   browserCheckRecovery,
@@ -1092,38 +1092,28 @@ export function CatalogPage({
   const knownBatchReceipts = useRef(
     new Map<string, { receipt: AsinBatchReceipt; persisted: boolean }>(),
   );
-  const retireBatchReceipt = useCallback((receipt: AsinBatchReceipt) => {
-    if (!navigator.locks) return;
-    const originalUser = JSON.parse(receipt.owner)[1] as string;
-    // Cleanup always uses the receipt's original scope and rechecks the actual
-    // shared gate under its lock. A redirect must not choose a new owner key.
-    void navigator.locks
-      .request(catalogSafetyKey(originalUser, 'asin'), async () => {
-        if (removeUnprotectedAsinBatchReceipt(originalUser, receipt)) {
+  const retireBatchReceipt = useCallback(
+    (receipt: AsinBatchReceipt, displayedOwner: string) => {
+      retireBatchReceiptAfterIdentityChange(
+        identity,
+        runtime,
+        receipt,
+        displayedOwner,
+        () => {
           const memory = knownBatchReceipts.current.get(receipt.operationId);
           if (memory?.receipt.owner === receipt.owner)
             knownBatchReceipts.current.delete(receipt.operationId);
-        }
-      })
-      .catch(() => undefined);
-  }, []);
+        },
+      );
+    },
+    [identity, runtime],
+  );
   useEffect(
     () => () => {
-      // RouteGate can replace this page with Navigate before it renders an
-      // anonymous identity. Retire on that identity transition, while ordinary
-      // navigation/remount within the same live session keeps completed rows.
+      // RouteGate may unmount for pending/error before identity is definitive.
+      // The retirement subscription survives that screen without losing rows.
       const previous = batchResultRef.current;
-      const latest = identity.getSnapshot();
-      const latestOwner =
-        latest.status === 'authenticated'
-          ? JSON.stringify([
-              config.id,
-              latest.identity.user.id,
-              latest.identity.sessionId ?? null,
-            ])
-          : '';
-      if (previous && previous.owner !== latestOwner)
-        retireBatchReceipt(previous.receipt);
+      if (previous) retireBatchReceipt(previous.receipt, previous.owner);
     },
     [config.id, identity, retireBatchReceipt],
   );
@@ -1320,9 +1310,14 @@ export function CatalogPage({
   useEffect(() => {
     batchReceiptRecoveryEpoch.current++;
     const previous = batchResultRef.current;
-    if (previous && previous.owner !== batchOwner && navigator.locks) {
+    if (
+      previous &&
+      previous.owner !== batchOwner &&
+      navigator.locks &&
+      (auth.status === 'authenticated' || auth.status === 'anonymous')
+    ) {
       batchResultRef.current = null;
-      retireBatchReceipt(previous.receipt);
+      retireBatchReceipt(previous.receipt, previous.owner);
     }
     setBatchReceiptWarning(null);
     setBatchRecoveryNotice(null);
@@ -1356,6 +1351,7 @@ export function CatalogPage({
     batchOwner,
     access.canWriteASIN,
     access.mustChangePassword,
+    auth.status,
     retireBatchReceipt,
   ]);
   useLayoutEffect(() => {

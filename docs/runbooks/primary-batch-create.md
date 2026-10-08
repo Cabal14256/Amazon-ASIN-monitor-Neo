@@ -28,6 +28,14 @@
 
 共享 normalizer 的 literal 行为已收窄为主营 HTTP batch-create，竞品和文件导入继续冻结 trim 口径；实际调用者 oracle 专项 DB23、API48、Legacy55、expanded source strict 通过。随后 Integration `37528062785` 的竞品 comparator 28 项通过，主营实际 PG/MySQL 21 项中 20 通过，PG 4500+500+500 的等待观察失败：同一观察事务中的 `pg_stat_activity` 可能缓存第二 HTTP 连接出现前的统计快照。夹具改为实时 `pg_locks` 未授予 transaction-ID 锁并精确证明第一批 PID 是 blocker，保持暂停第一批真实 insert、第二批真实等待、500/0 成功计数、500 行失败、最终 5000 和详情 GET 成功全部断言。该修复后本地 source strict/收集通过，21 项仍因未启 opt-in 跳过；实际锁证明须最新 Integration CI 21/21 验收，不能将本地 skip 称作恢复成功。
 
+## 生产 JSON 解析层验收（评论 4201134469）
+
+Legacy `server/src/index.js` 调用 `installBodyParsers`，Neo `apps/api/src/main.ts` 调用 `createHttpAdapter`；两端 JSON body 均限制为有界 **4 MiB**。普通 1,000 行请求超过原 Legacy 100 KiB，合法最大宽度 Unicode 1,000 行请求超过原 Neo 1 MiB；调整解析上限使其能进入后续鉴权、合同和业务校验，超过 4 MiB 的请求仍在 dispatch 前以 413 拒绝。
+
+root 已执行两个生产解析器的独立原生回归，Legacy `server/test/json-body-parser.test.js` **1 passed**，Neo `apps/api/test/http-body-limit.test.ts` **1 passed**：实际 Express loopback 与生产 Fastify adapter inject 分别验证普通 1,000 行及最大 Unicode 宽度 1,000 行（parentId/site/brand/name 分别 50/100/100/500 码点）为 200 且 count=1000；大于 4 MiB 为 413，已 dispatch 数仍为 2。Neo 回归同时断言两端字节上限相同。测试路由只回报解析后的条数，**此证据仅证明生产解析层，不证明完整鉴权、写事务、逐行业务回执或浏览器验收通过**。
+
+两项回归也完成实际 RED→GREEN：临时将 Legacy 恢复为默认 `express.json()`、Neo 移除 `bodyLimit` 时，各自的合法请求均得到 413，两个测试分别因 expected 200 而失败；`finally` 精确恢复修复源码后，各自 **1 passed**。本机 Temp `neo-206-bootstrap-verification/*default-parser-red.log` 与 `*parser-green.log` 保存解析层红绿日志。
+
 ## 自动验证（修复前历史记录）
 
 所有命令从该 managed worktree 根执行，仅使用根 `pnpm-lock.yaml`；未改变服务等待门槛或测试超时。2026-10-07 接续时重新检查现有 diff 与新增文件，并重跑下表注明的完整前端与根级检查；历史专项和 RED 探针单独标注，不冒充本轮重跑。
@@ -57,6 +65,16 @@
 - mounted CatalogPage 使用真实 HttpClient/Query/IdentityStore 边界：两个 API base、原生空格与 50 码点 ID、完整/部分/失败回执、刷新失败只 GET、未知结果重挂、真实 120 秒传输定时器（fake clock 不增加门槛）、重复 submit、排队换 owner/session、撤权恢复、旧 GET/403、跨标签替换及卸页取消。
 
 ## 浏览器验收
+
+### 生产 RouteGate 临时身份校验（评论 4201134464）
+
+`IdentityStore.refresh()` 会先发布 `loading`；网络校验失败发布 `error`，两者都会使实际 `RouteGate` 暂时卸载目录。此时身份尚未确认改变，已知逐行回执必须保留。目录卸载后的退休订阅继续等待确定身份：同一已验证 owner/session 保留原行；确定匿名、另一个 owner 或 session 后，才进入原回执 owner 的 Web Lock。锁内再读当前身份与实际持久 gate；排队期间再次进入校验则继续等待，同一会话回来则停止退休，原操作仍受保护或 gate 不可读时保留恢复证明。runtime dispose 撤销订阅，不能据此推断注销或释放门禁。
+
+显式恢复旧会话回执时，存储与锁使用回执的原 owner，身份比较使用当前展示该回执的 owner/session，避免把旧归属当作本次登录已改变的证据。权限变化仍隐藏写入结果并保留回执，确认后续退出才检查是否可退休。
+
+2026-10-09 新增实际 `IdentityStore`、真实 `HttpClient` 配合 synthetic current-user fetch 响应、原 `RouteGate`/memory router 的 pending/error→ 同会话恢复、pending/error→ 匿名/另用户/另 session，以及仍受保护的回执/gate 对照。临时恢复原 CatalogPage 源执行这 11 项时，**8 failed / 3 protected 对照 passed**，66 项仅因名称筛选跳过；失败均复现临时校验期间原逐行回执已被删除。`finally` 按字节恢复修复源后，完整受影响命令 `corepack pnpm --filter web exec vitest run src/pages/catalog/primary-batch-page.test.tsx src/pages/asin/asin-batch-receipt.test.ts src/pages/catalog/catalog-batch-receipt-retirement.test.ts --maxWorkers=1` **130 passed / 3 files / 0 skipped**（页面 77、存储 46、订阅生命周期 7）。生命周期回归覆盖 dispose、排队锁内再次 loading/error、同会话确认、确认注销重新排队、显式恢复旧会话的展示身份、排队期间新增原保护以及 Web Locks 不可用。
+
+本轮 contracts build、Web strict `tsc -p tsconfig.json --noEmit --pretty false`（含 src 下测试）、完整 Web lint 零警告、URL 去重 3 项、changed-format 脚本 5 项、五个 P2 文件 Prettier 与 `git diff --check` 均通过。未重复 full Web/build，其重型基线由 root 后续串行执行；没有改测试等待门槛或超时。RED/GREEN 日志位于本机 Temp `neo-206-p2-verification/identity-receipt-{red,green}.log`，恢复后的 index SHA256 为 `1C32534BAE3B6D66BF59BBBB111A185562D47B2B5906EC91928D4345A065D360`。上述场景是 mounted 证据，实际浏览器验收仍沿用下文“尚未执行”。
 
 ### 生产 RouteGate 注销卸载回收（评论 4200823271）
 
