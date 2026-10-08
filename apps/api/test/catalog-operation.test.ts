@@ -134,15 +134,18 @@ describe('durable catalog operation application boundary', () => {
       expect(release).toHaveBeenCalledWith(identity);
     },
   );
-  it('keeps retained acknowledgement uncertainty and never fabricates sync proof', async () => {
+  it('attempts synchronous failure settlement when retention has no acknowledged binding', async () => {
     await expect(
       write(async (submission) => {
         submission.retain();
         throw new Error('ACK lost');
       }),
     ).rejects.toThrow('ACK lost');
-    expect(close).not.toHaveBeenCalled();
-    expect(release).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledExactlyOnceWith(identity, {
+      status: 'failed',
+      source: 'sync',
+    });
+    expect(release).toHaveBeenCalledExactlyOnceWith(identity);
   });
   it('leaves a physically pending sync operation reserved without changing its result', async () => {
     release.mockResolvedValueOnce(false);
@@ -189,11 +192,13 @@ describe('durable catalog operation application boundary', () => {
       task: expected,
     });
   });
-  it('never releases an unbound retained operation or a foreign prepared task', async () => {
+  it('retains a successful unbound action but settles a rejected foreign preparation synchronously', async () => {
     await write(async (submission) => {
       submission.retain();
       expect(await submission.reject()).toBe(false);
     });
+    expect(close).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
     await expect(
       write(async (submission) => {
         submission.retain();
@@ -201,8 +206,11 @@ describe('durable catalog operation application boundary', () => {
       }),
     ).rejects.toThrow('CATALOG_TASK_BINDING_INVALID');
     expect(bind).not.toHaveBeenCalled();
-    expect(close).not.toHaveBeenCalled();
-    expect(release).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledExactlyOnceWith(identity, {
+      status: 'failed',
+      source: 'sync',
+    });
+    expect(release).toHaveBeenCalledExactlyOnceWith(identity);
   });
   it('authorizes only the actual guarded transaction DB and removes it after settlement', async () => {
     const db = { execute: vi.fn() } as unknown as Pick<Db, 'execute'>;

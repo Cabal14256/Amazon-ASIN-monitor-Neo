@@ -146,7 +146,8 @@ export class ApplicationCatalogOperations {
       if (!retained) await this.finish(reserved, 'completed');
       return result;
     } catch (error) {
-      if (identity && !retained) await this.finish(identity, 'failed');
+      if (identity && (!retained || !boundTask))
+        await this.finish(identity, 'failed');
       if (error instanceof CatalogOperationError)
         throw new HttpException(
           {

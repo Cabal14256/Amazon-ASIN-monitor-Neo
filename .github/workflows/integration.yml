@@ -403,6 +403,8 @@ jobs:
 
       - name: Verify catalog server fencing survives discarded browser receipts
         run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
+      - name: Verify catalog preparation binding failures with PostgreSQL and a Redis driver seam
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-submission-binding.integration.test.ts --maxWorkers=1 --no-file-parallelism
 
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
