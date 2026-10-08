@@ -307,7 +307,11 @@ describe('backup command boundary', () => {
     const environment = commandEnvironment(
       'postgresql://restore_user:private_password@localhost/backup_ci',
     );
-    const args = restoreCommandArgs(environment.PGDATABASE!, '/tmp/test.dump');
+    const args = restoreCommandArgs(
+      environment.PGDATABASE!,
+      '/tmp/test.dump',
+      'restore_user',
+    );
     expect(args).toContain('--dbname=backup_ci');
     expect(args).toContain('--single-transaction');
     expect(args.join(' ')).not.toContain('private_password');
@@ -542,7 +546,7 @@ describe('backup command boundary', () => {
       expect(client.connectionParameters.database).toBe(expected);
       expect(environment.PGDATABASE).toBe(client.connectionParameters.database);
       expect(
-        restoreCommandArgs(environment.PGDATABASE!, '/tmp/test.dump'),
+        restoreCommandArgs(environment.PGDATABASE!, '/tmp/test.dump', 'backup'),
       ).toContain(`--dbname=${expected}`);
     },
   );

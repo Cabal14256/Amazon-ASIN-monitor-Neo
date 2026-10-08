@@ -37,9 +37,42 @@ describe('committed restore recovery when the registry connection fails', () => 
     { scope: 'full', cancel: false, expires: false },
     { scope: 'full', cancel: true, expires: false },
     { scope: 'selective', cancel: false, expires: true },
+    {
+      scope: 'full',
+      cancel: false,
+      expires: false,
+      sessionUser: 'Session "Odd"\\Role',
+    },
+    {
+      scope: 'full',
+      cancel: false,
+      expires: false,
+      sessionUser: 'Session "Odd"\\Role',
+      sourceEngine: 'timescaledb',
+    },
+    {
+      scope: 'full',
+      cancel: false,
+      expires: false,
+      unconfirmedStage: 'session',
+    },
+    { scope: 'full', cancel: false, expires: false, unconfirmedStage: 'role' },
+    {
+      scope: 'full',
+      cancel: false,
+      expires: false,
+      unconfirmedStage: 'authorization-error',
+    },
   ] as const)(
-    'returns a bounded BullMQ receipt after both commit writes fail (%j)',
-    async ({ scope, cancel, expires }) => {
+    'preserves a committed receipt or fails closed on unconfirmed staging identity (%j)',
+    async (input) => {
+      const { scope, cancel, expires } = input;
+      const sessionUser =
+        'sessionUser' in input ? input.sessionUser ?? 'fixture' : 'fixture';
+      const unconfirmedStage =
+        'unconfirmedStage' in input ? input.unconfirmedStage : undefined;
+      const timescale =
+        'sourceEngine' in input && input.sourceEngine === 'timescaledb';
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-commit-'));
       const taskId = '10000000-0000-4000-8000-000000000161';
       const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -55,25 +88,64 @@ describe('committed restore recovery when the registry connection fails', () => 
       await writeFile(
         join(directory, `${filename}.meta.json`),
         JSON.stringify({
-          version: 3,
+          version: timescale ? 4 : 3,
           filename,
           target: 'primary',
-          sourceEngine: 'postgresql',
-          scope,
-          ...(scope === 'selective' ? { tables: ['public.asins'] } : {}),
+          ...(timescale
+            ? {
+                sourceEngine: 'timescaledb',
+                timescale: {
+                  extensionVersion: '2.22.0',
+                  hypertables: ['public.metrics'],
+                  continuousAggregates: [],
+                },
+              }
+            : {
+                sourceEngine: 'postgresql',
+                scope,
+                ...(scope === 'selective' ? { tables: ['public.asins'] } : {}),
+              }),
           archiveSha256: createHash('sha256').update(archive).digest('hex'),
           databaseSettings: settings,
         }),
       );
+      let stagingBound = false;
+      let restoring = false;
       const query = vi.fn(async (input: string | { text: string }) => {
         const sql = typeof input === 'string' ? input : input.text;
+        if (sql.startsWith('SET SESSION AUTHORIZATION')) {
+          stagingBound = true;
+          if (unconfirmedStage === 'authorization-error')
+            throw new Error('unconfirmed authorization');
+        }
+        if (sql === 'SELECT timescaledb_pre_restore()') restoring = true;
+        if (sql === 'SELECT timescaledb_post_restore()') restoring = false;
         return {
           rows: sql.includes('backup_selective_restore_dependencies')
             ? [{ blocked: false }]
             : sql.includes('pg_try_advisory_lock')
             ? [{ acquired: true }]
+            : sql.includes('current_user AS role')
+            ? [
+                {
+                  role:
+                    stagingBound && unconfirmedStage === 'role'
+                      ? 'unexpected-login'
+                      : 'restricted Backup"Role',
+                  sessionUser:
+                    stagingBound && unconfirmedStage === 'session'
+                      ? 'unexpected-login'
+                      : sessionUser,
+                },
+              ]
             : sql.includes('SELECT EXISTS')
-            ? [{ enabled: false }]
+            ? [{ enabled: timescale }]
+            : sql.includes('SELECT extversion')
+            ? [{ extversion: '2.22.0' }]
+            : sql.includes('timescaledb_information.hypertables')
+            ? [{ relation: 'public.metrics' }]
+            : sql.includes("current_setting('timescaledb.restoring'")
+            ? [{ enabled: restoring ? 'on' : 'off' }]
             : sql.includes('pg_encoding_to_char')
             ? [{ ...settings, localeProvider: 'c' }]
             : sql.includes('AS timezone')
@@ -85,10 +157,20 @@ describe('committed restore recovery when the registry connection fails', () => 
             : [],
         };
       });
+      const release = vi.fn();
+      const end = vi.fn();
+      const clientQueries: (typeof query)[] = [];
+      const pooledQuery = vi.fn(async () => {
+        throw new Error('Backup must keep the explicitly leased session');
+      });
       dependencies.pool.mockImplementation(() => ({
-        query,
-        connect: async () => ({ query, release: vi.fn() }),
-        end: vi.fn(),
+        query: pooledQuery,
+        connect: async () => {
+          const clientQuery = vi.fn(query);
+          clientQueries.push(clientQuery);
+          return { query: clientQuery, release };
+        },
+        end,
       }));
       dependencies.spawn.mockImplementation(() => {
         const child = Object.assign(new EventEmitter(), {
@@ -176,15 +258,42 @@ describe('committed restore recovery when the registry connection fails', () => 
         },
         log,
       );
-      const result = backupRestoreReceiptSchema.parse(
-        await processor({ id: taskId, name: 'restore', data } as Job, 'lock'),
+      const execution = processor(
+        { id: taskId, name: 'restore', data } as Job,
+        'lock',
       );
+      if (unconfirmedStage) {
+        await expect(execution).rejects.toThrow(
+          '备份任务失败，请核实数据库状态和备份文件',
+        );
+        expect(state.status).toBe('failed');
+        expect(state.result).toBeNull();
+        expect(dependencies.spawn).toHaveBeenCalledOnce();
+        expect(
+          query.mock.calls.some(
+            ([sql]) =>
+              typeof sql === 'string' && sql.startsWith('DROP DATABASE'),
+          ),
+        ).toBe(true);
+        expect(release).toHaveBeenCalledTimes(2);
+        expect(end).toHaveBeenCalledTimes(2);
+        return;
+      }
+      const result = backupRestoreReceiptSchema.parse(await execution);
       expect(result).toMatchObject({
         filename,
         targetDatabaseChanged: scope === 'selective',
         verification: 'unconfirmed',
       });
       if (scope === 'full') {
+        expect(query).toHaveBeenCalledWith(
+          'SET SESSION AUTHORIZATION "' +
+            sessionUser.replaceAll('"', '""') +
+            '"',
+        );
+        expect(query).toHaveBeenCalledWith(
+          'SET ROLE "restricted Backup""Role"',
+        );
         expect(result).toMatchObject({
           restoreMode: 'isolated',
           restoredDatabase: stagingDatabaseName(taskId, 'primary'),
@@ -196,11 +305,57 @@ describe('committed restore recovery when the registry connection fails', () => 
           ),
         ).toBe(false);
       }
+      expect(pooledQuery).not.toHaveBeenCalled();
+      if (timescale) {
+        expect(clientQueries).toHaveLength(4);
+        expect(release).toHaveBeenCalledTimes(4);
+        expect(end).toHaveBeenCalledTimes(4);
+        for (const clientQuery of clientQueries.slice(1)) {
+          expect(clientQuery.mock.calls.slice(0, 3)).toEqual([
+            ['SET SESSION AUTHORIZATION "Session ""Odd""\\Role"'],
+            ['SET ROLE "restricted Backup""Role"'],
+            ['SELECT current_user AS role, session_user AS "sessionUser"'],
+          ]);
+        }
+        expect(clientQueries[2]?.mock.calls.map(([sql]) => sql)).toEqual(
+          expect.arrayContaining([
+            'BEGIN',
+            'SELECT timescaledb_post_restore()',
+            'SELECT public.alter_job(id::integer, scheduled => false) FROM _timescaledb_config.bgw_job WHERE id >= 1000',
+            'COMMIT',
+          ]),
+        );
+        expect(clientQueries[1]?.mock.calls).not.toContainEqual(['BEGIN']);
+        expect(clientQueries[3]?.mock.calls).not.toContainEqual(['BEGIN']);
+      }
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024);
       expect(dependencies.spawn).toHaveBeenCalledOnce();
       expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
-        '--single-transaction',
+        '--role=restricted Backup"Role',
       );
+      if (sessionUser === 'fixture') {
+        expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
+          '-c session_authorization=fixture',
+        );
+      } else {
+        expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
+          '-c session_authorization=Session\\ "Odd"\\\\Role',
+        );
+      }
+      if (timescale) {
+        // Timescale uses its existing pre/CLI/post phases; the final local
+        // transaction above does not turn the CLI into PostgreSQL's mode.
+        expect(dependencies.spawn.mock.calls[0]?.[1]).not.toContain(
+          '--single-transaction',
+        );
+        expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
+          '--exit-on-error',
+        );
+      } else {
+        expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
+          '--single-transaction',
+        );
+      }
       expect(
         store.mutate.mock.calls.filter(
           ([, change]) => change.kind === 'restore-committed',

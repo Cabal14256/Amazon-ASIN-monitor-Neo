@@ -470,6 +470,343 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       },
       30000,
     );
+    it.each([
+      'url',
+      'inherited',
+      'url-overrides-env',
+      'empty-url-options',
+      'database-default',
+      'session-authorization',
+      'database-session-overridden',
+    ] as const)(
+      'keeps the real effective role for backup and restore commands (%s)',
+      async (mode) => {
+        const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+        const role =
+          mode === 'session-authorization'
+            ? `backup auth_${suffix}"\\restricted`
+            : `backup_restricted_${suffix}`;
+        const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
+        const sessionGuard = `backup_session_guard_${suffix}`;
+        const allowed = `backup_role_allowed_${suffix}`;
+        const privateTable = `backup_role_private_${suffix}`;
+        const previousOptions = process.env.PGOPTIONS;
+        let applicationPool: ReturnType<typeof createPgPool> | undefined;
+        let roleCreated = false;
+        let databaseRoleSet = false;
+        let databaseSessionSet = false;
+        let stagedDatabase: string | undefined;
+        try {
+          await scratchPool.query(
+            `CREATE ROLE ${quote(role)} NOLOGIN${
+              mode === 'database-default' ? ' CREATEDB' : ''
+            }`,
+          );
+          roleCreated = true;
+          await scratchPool.query(
+            `GRANT USAGE, CREATE ON SCHEMA public TO ${quote(role)}`,
+          );
+          await scratchPool.query(
+            `CREATE TABLE public.${allowed} (id integer PRIMARY KEY, note text NOT NULL)`,
+          );
+          await scratchPool.query(
+            `INSERT INTO public.${allowed} VALUES (1, 'allowed-original')`,
+          );
+          await scratchPool.query(
+            `ALTER TABLE public.${allowed} OWNER TO ${quote(role)}`,
+          );
+          await scratchPool.query(
+            `CREATE TABLE public.${privateTable} (id integer PRIMARY KEY, note text NOT NULL)`,
+          );
+          await scratchPool.query(
+            `INSERT INTO public.${privateTable} VALUES (1, 'private-original')`,
+          );
+
+          // A real login-authorized archive is later offered to a restricted
+          // restore. Its preflight can resolve names without owning the table.
+          const unrestricted = new URL(scratchUrl);
+          unrestricted.searchParams.set(
+            'options',
+            '-c application_name=backup_role_admin',
+          );
+          const privateArchive = backupTaskResultDataSchema.parse(
+            (
+              await runJob(unrestricted.toString(), 'create', {
+                tables: [`public.${privateTable}`],
+              })
+            ).result,
+          );
+          if (!privateArchive.filename)
+            throw new Error('Missing role fixture archive');
+          const fullArchive =
+            mode === 'database-default'
+              ? backupTaskResultDataSchema.parse(
+                  (await runJob(unrestricted.toString(), 'create', {})).result,
+                )
+              : null;
+          await scratchPool.query(
+            `UPDATE public.${privateTable} SET note='private-live' WHERE id=1`,
+          );
+
+          const loginIdentity = (
+            await scratchPool.query(
+              'SELECT current_user AS role, session_user AS "sessionUser"',
+            )
+          ).rows[0];
+          if (typeof loginIdentity?.sessionUser !== 'string')
+            throw new Error('Missing login session identity');
+
+          const source = new URL(scratchUrl);
+          let guardedSession: string | undefined;
+          if (mode === 'session-authorization') {
+            source.searchParams.set(
+              'options',
+              '-c session_authorization=' +
+                role.replaceAll('\\', '\\\\').replaceAll(' ', '\\ ') +
+                ' -c search_path=public',
+            );
+            process.env.PGOPTIONS =
+              '-c application_name=unconfirmed_session_default';
+            guardedSession = role;
+          } else if (mode === 'database-session-overridden') {
+            await adminPool.query(
+              `ALTER DATABASE ${quote(
+                scratchName,
+              )} SET session_authorization TO ${quote(role)}`,
+            );
+            databaseSessionSet = true;
+            process.env.PGOPTIONS =
+              '-c application_name=ignored_database_session_default';
+            const defaultPool = createPgPool(unrestricted.toString(), {
+              max: 1,
+            });
+            try {
+              expect(
+                (
+                  await defaultPool.query(
+                    'SELECT current_user AS role, session_user AS "sessionUser"',
+                  )
+                ).rows[0],
+              ).toEqual({ role, sessionUser: role });
+            } finally {
+              await defaultPool.end();
+            }
+            // Explicitly override the database's different session default
+            // back to login. The frozen value equals PGUSER, but still must
+            // be sent to every CLI instead of inheriting that database default.
+            source.searchParams.set(
+              'options',
+              '-c session_authorization=' +
+                loginIdentity.sessionUser.replace(/([\\ \t\n\r\v\f])/g, '\\$1'),
+            );
+            guardedSession = loginIdentity.sessionUser;
+          } else if (mode === 'database-default') {
+            await adminPool.query(
+              `ALTER DATABASE ${scratchName} SET role TO ${role}`,
+            );
+            databaseRoleSet = true;
+            source.searchParams.set(
+              'options',
+              '-c application_name=backup_database_role',
+            );
+            process.env.PGOPTIONS =
+              '-c application_name=ignored_database_role_default';
+          } else if (mode === 'url') {
+            source.searchParams.set('options', `-c role=${role}`);
+            process.env.PGOPTIONS = '-c application_name=ignored_role_default';
+          } else {
+            process.env.PGOPTIONS = `-c role=${role}`;
+            if (mode === 'inherited') source.searchParams.delete('options');
+            else
+              source.searchParams.set(
+                'options',
+                mode === 'empty-url-options'
+                  ? ''
+                  : '-c application_name=backup_role_override',
+              );
+          }
+          if (guardedSession !== undefined) {
+            // Real DDL must use the frozen session_user, independently of
+            // current_user restored by --role (including a login override).
+            await scratchPool.query(
+              `CREATE FUNCTION public.${sessionGuard}() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN IF session_user <> '${guardedSession.replaceAll(
+                "'",
+                "''",
+              )}' THEN RAISE EXCEPTION 'Unconfirmed backup session user'; END IF; END; $$`,
+            );
+            await scratchPool.query(
+              `CREATE EVENT TRIGGER ${sessionGuard} ON ddl_command_start WHEN TAG IN ('CREATE TABLE', 'DROP TABLE') EXECUTE FUNCTION public.${sessionGuard}()`,
+            );
+          }
+          applicationPool = createPgPool(source.toString(), { max: 1 });
+          const effectiveIdentity = (
+            await applicationPool.query(
+              'SELECT current_user AS role, session_user AS "sessionUser"',
+            )
+          ).rows[0];
+          const restricted =
+            mode !== 'url-overrides-env' &&
+            mode !== 'database-session-overridden';
+          expect(effectiveIdentity.role).toBe(
+            mode === 'database-session-overridden'
+              ? loginIdentity.sessionUser
+              : restricted
+              ? role
+              : loginIdentity.role,
+          );
+          expect(effectiveIdentity.sessionUser).toBe(
+            mode === 'session-authorization' ? role : loginIdentity.sessionUser,
+          );
+
+          // A restricted whole-database dump must fail on login-only tables;
+          // silently reverting to the broader login role would publish it.
+          const fullTaskId = randomUUID();
+          if (restricted) {
+            await expect(
+              runJob(source.toString(), 'create', {}, { taskId: fullTaskId }),
+            ).rejects.toThrow('备份任务失败，请核实数据库状态和备份文件');
+            expect(states.get(fullTaskId)?.status).toBe('failed');
+            expect(
+              (await readdir(directory)).filter((file) =>
+                file.includes(fullTaskId.replaceAll('-', '')),
+              ),
+            ).toEqual([]);
+            await expect(
+              runJob(source.toString(), 'restore', {
+                filename: privateArchive.filename,
+              }),
+            ).rejects.toThrow('备份任务失败，请核实数据库状态和备份文件');
+            expect(
+              (
+                await scratchPool.query(
+                  `SELECT note FROM public.${privateTable} WHERE id=1`,
+                )
+              ).rows,
+            ).toEqual([{ note: 'private-live' }]);
+          } else {
+            expect(
+              (
+                await runJob(
+                  source.toString(),
+                  'create',
+                  {},
+                  { taskId: fullTaskId },
+                )
+              ).state.status,
+            ).toBe('completed');
+            expect(
+              (
+                await runJob(source.toString(), 'restore', {
+                  filename: privateArchive.filename,
+                })
+              ).state.status,
+            ).toBe('completed');
+            expect(
+              (
+                await scratchPool.query(
+                  `SELECT note FROM public.${privateTable} WHERE id=1`,
+                )
+              ).rows,
+            ).toEqual([{ note: 'private-original' }]);
+          }
+
+          const permitted = backupTaskResultDataSchema.parse(
+            (
+              await runJob(source.toString(), 'create', {
+                tables: [`public.${allowed}`],
+              })
+            ).result,
+          );
+          if (!permitted.filename)
+            throw new Error('Missing permitted role archive');
+          await scratchPool.query(
+            `UPDATE public.${allowed} SET note='allowed-live' WHERE id=1`,
+          );
+          expect(
+            (
+              await runJob(source.toString(), 'restore', {
+                filename: permitted.filename,
+              })
+            ).state.status,
+          ).toBe('completed');
+          expect(
+            (
+              await scratchPool.query(
+                `SELECT note FROM public.${allowed} WHERE id=1`,
+              )
+            ).rows,
+          ).toEqual([{ note: 'allowed-original' }]);
+          if (mode === 'database-default') {
+            if (!fullArchive?.filename)
+              throw new Error('Missing full role archive');
+            const taskId = randomUUID();
+            stagedDatabase = stagingDatabaseName(taskId, 'primary');
+            const restored = await runJob(
+              source.toString(),
+              'restore',
+              { filename: fullArchive.filename },
+              { taskId },
+            );
+            expect(restored.state.status).toBe('completed');
+            expect(restored.result).toMatchObject({
+              restoreMode: 'isolated',
+              targetDatabaseChanged: false,
+              restoredDatabase: stagedDatabase,
+            });
+            expect(
+              (
+                await scratchPool.query(
+                  `SELECT note FROM public.${privateTable} WHERE id=1`,
+                )
+              ).rows,
+            ).toEqual([{ note: 'private-live' }]);
+          }
+        } finally {
+          if (previousOptions === undefined) delete process.env.PGOPTIONS;
+          else process.env.PGOPTIONS = previousOptions;
+          await applicationPool?.end();
+          if (
+            mode === 'session-authorization' ||
+            mode === 'database-session-overridden'
+          ) {
+            await scratchPool.query(
+              `DROP EVENT TRIGGER IF EXISTS ${sessionGuard}`,
+            );
+            await scratchPool.query(
+              `DROP FUNCTION IF EXISTS public.${sessionGuard}()`,
+            );
+          }
+          if (databaseRoleSet)
+            await adminPool.query(`ALTER DATABASE ${scratchName} RESET role`);
+          if (databaseSessionSet)
+            await adminPool.query(
+              `ALTER DATABASE ${quote(
+                scratchName,
+              )} RESET session_authorization`,
+            );
+          if (stagedDatabase) {
+            const owned = await adminPool.query(
+              'SELECT pg_get_userbyid(datdba) = $2 AS owned FROM pg_database WHERE datname = $1',
+              [stagedDatabase, role],
+            );
+            if (owned.rows[0]?.owned === true)
+              await adminPool.query(
+                `DROP DATABASE ${stagedDatabase} WITH (FORCE)`,
+              );
+          }
+          await scratchPool.query(
+            `DROP TABLE IF EXISTS public.${privateTable}, public.${allowed}`,
+          );
+          if (roleCreated) {
+            await scratchPool.query(
+              `REVOKE USAGE, CREATE ON SCHEMA public FROM ${quote(role)}`,
+            );
+            await scratchPool.query(`DROP ROLE ${quote(role)}`);
+          }
+        }
+      },
+      30000,
+    );
     it('refuses a valid plus missing literal table instead of publishing a partial-selection archive', async () => {
       const taskId = randomUUID();
       await expect(
@@ -932,7 +1269,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await expect(
         processCommand(
           'pg_restore',
-          restoreCommandArgs(scratchName, join(directory, artifact.filename)),
+          restoreCommandArgs(
+            scratchName,
+            join(directory, artifact.filename),
+            (
+              await scratchPool.query('SELECT current_user AS role')
+            ).rows[0].role,
+          ),
           commandEnvironment(scratchUrl),
           {
             timeoutMs: 30000,

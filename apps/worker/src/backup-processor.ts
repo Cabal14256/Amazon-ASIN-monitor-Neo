@@ -135,6 +135,7 @@ function applicationSslFromEnvironment(
 export function commandEnvironment(
   connectionString: string,
   defaults: NodeJS.ProcessEnv = process.env,
+  sessionUser?: string,
 ): NodeJS.ProcessEnv {
   const url = new URL(connectionString);
   if (!['postgres:', 'postgresql:'].includes(url.protocol))
@@ -223,6 +224,17 @@ export function commandEnvironment(
     PGSSLCRL: noAutomaticFile,
     PGSSLCRLDIR: noAutomaticFile,
   };
+  if (sessionUser !== undefined) {
+    const confirmed = backupDatabaseRole(sessionUser);
+    // PostgreSQL pg_split_opts uses backslashes, not shell/SQL quoting.
+    // Always pin the confirmed session, including the login user: database
+    // defaults may otherwise replace an explicit source-session override.
+    // Never copy the source URL options or inherited PGOPTIONS into the child.
+    environment.PGOPTIONS = `-c session_authorization=${confirmed.replace(
+      /([\\ \t\n\r\v\f])/g,
+      '\\$1',
+    )}`;
+  }
   if (sslMode === 'verify-full' && !sslOptions?.ca)
     commandDefaultTrust.add(environment);
   return environment;
@@ -310,7 +322,7 @@ const databaseTimeZoneSql =
   "SELECT split_part(setting, '=', 2) AS timezone FROM pg_db_role_setting CROSS JOIN LATERAL unnest(setconfig) AS setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()) AND setrole = 0 AND lower(split_part(setting, '=', 1)) = 'timezone'";
 
 async function verifyStagingTimeZone(
-  pool: ReturnType<typeof createPgPool>,
+  pool: { query(sql: string): Promise<{ rows: Record<string, unknown>[] }> },
   settings: BackupDatabaseSettings,
 ): Promise<void> {
   const result = await pool.query(databaseTimeZoneSql);
@@ -385,7 +397,22 @@ function sameTimescaleManifest(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-export function restoreCommandArgs(database: string, input: string): string[] {
+function backupDatabaseRole(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !value ||
+    value.includes('\0') ||
+    Buffer.byteLength(value) > 1024
+  )
+    throw new BackupCommandError('BACKUP_DATABASE_ROLE_UNCONFIRMED');
+  return value;
+}
+
+export function restoreCommandArgs(
+  database: string,
+  input: string,
+  role: string,
+): string[] {
   if (!database || database.includes('\0'))
     throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
   return [
@@ -395,6 +422,7 @@ export function restoreCommandArgs(database: string, input: string): string[] {
     '--if-exists',
     '--no-owner',
     '--no-acl',
+    `--role=${backupDatabaseRole(role)}`,
     `--dbname=${database}`,
     input,
   ];
@@ -633,12 +661,21 @@ export async function acquireBackupTargetLock(
       );
       if (acquired.rows[0]?.acquired !== true)
         throw new BackupCommandError('BACKUP_TARGET_BUSY');
+      // Freeze privileges from the actual application session, including URL
+      // options, PGOPTIONS and role defaults, without forwarding arbitrary GUCs.
+      const role = await client.query(
+        'SELECT current_user AS role, session_user AS "sessionUser"',
+      );
+      const effectiveRole = backupDatabaseRole(role.rows[0]?.role);
+      const sessionUser = backupDatabaseRole(role.rows[0]?.sessionUser);
       const extension = await client.query(
         "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') AS enabled",
       );
       const lockedClient = client;
       let released = false;
       return {
+        effectiveRole,
+        sessionUser,
         hasTimescale: extension.rows[0]?.enabled === true,
         async ensureHeld() {
           if (released) throw new BackupCommandError('BACKUP_TARGET_LOCK_LOST');
@@ -788,6 +825,59 @@ async function assertCustomDump(path: string, maxBytes: number) {
   return details;
 }
 
+/** Keep one leased session so reconnects cannot silently restore login privileges. */
+async function openBackupStagingPool(
+  databaseUrl: string,
+  env: Env,
+  identity: { readonly effectiveRole: string; readonly sessionUser: string },
+  statementTimeout: number,
+) {
+  const pool = createPgPool(databaseUrl, {
+    max: 1,
+    connectionTimeoutMillis: Math.min(
+      env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+      5000,
+    ),
+    statement_timeout: statementTimeout,
+  });
+  try {
+    const client = await pool.connect();
+    try {
+      const expectedRole = backupDatabaseRole(identity.effectiveRole);
+      const expectedSession = backupDatabaseRole(identity.sessionUser);
+      await client.query(
+        `SET SESSION AUTHORIZATION "${expectedSession.replaceAll('"', '""')}"`,
+      );
+      await client.query(`SET ROLE "${expectedRole.replaceAll('"', '""')}"`);
+      const actual = await client.query(
+        'SELECT current_user AS role, session_user AS "sessionUser"',
+      );
+      if (
+        actual.rows[0]?.role !== expectedRole ||
+        actual.rows[0]?.sessionUser !== expectedSession
+      )
+        throw new BackupCommandError('BACKUP_DATABASE_ROLE_UNCONFIRMED');
+      let closing: Promise<void> | undefined;
+      return {
+        query: client.query.bind(client),
+        end(): Promise<void> {
+          closing ??= (async () => {
+            client.release();
+            await pool.end();
+          })();
+          return closing;
+        },
+      };
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
+}
+
 async function restorePostgresqlIsolated(input: {
   databaseUrl: string;
   directoryFile: string;
@@ -802,7 +892,11 @@ async function restorePostgresqlIsolated(input: {
 }): Promise<string> {
   const database = stagingDatabaseName(input.taskId, input.target);
   const databaseUrl = connectionForDatabase(input.databaseUrl, database);
-  const commandEnv = commandEnvironment(databaseUrl);
+  const commandEnv = commandEnvironment(
+    databaseUrl,
+    process.env,
+    input.lock.sessionUser,
+  );
   let created = false;
   let keep = false;
   let error: unknown;
@@ -833,6 +927,7 @@ async function restorePostgresqlIsolated(input: {
         '--single-transaction',
         '--no-owner',
         '--no-acl',
+        `--role=${input.lock.effectiveRole}`,
         `--dbname=${database}`,
         input.directoryFile,
       ],
@@ -845,14 +940,12 @@ async function restorePostgresqlIsolated(input: {
         onProgress: async () => undefined,
       },
     );
-    const pool = createPgPool(databaseUrl, {
-      max: 1,
-      connectionTimeoutMillis: Math.min(
-        input.env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
-        5000,
-      ),
-      statement_timeout: 5000,
-    });
+    const pool = await openBackupStagingPool(
+      databaseUrl,
+      input.env,
+      input.lock,
+      5000,
+    );
     try {
       const current = await pool.query('SELECT current_database() AS database');
       if (current.rows[0]?.database !== database)
@@ -899,17 +992,14 @@ async function restoreTimescaleIsolated(input: {
 }): Promise<string> {
   const database = stagingDatabaseName(input.taskId, input.target);
   const databaseUrl = connectionForDatabase(input.databaseUrl, database);
-  const commandEnv = commandEnvironment(databaseUrl);
+  const commandEnv = commandEnvironment(
+    databaseUrl,
+    process.env,
+    input.lock.sessionUser,
+  );
   const openPool = () =>
-    createPgPool(databaseUrl, {
-      max: 1,
-      connectionTimeoutMillis: Math.min(
-        input.env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
-        5000,
-      ),
-      statement_timeout: 60000,
-    });
-  let pool: ReturnType<typeof createPgPool> | undefined;
+    openBackupStagingPool(databaseUrl, input.env, input.lock, 60000);
+  let pool: Awaited<ReturnType<typeof openPool>> | undefined;
   let created = false;
   let preRestore = false;
   let keep = false;
@@ -931,7 +1021,7 @@ async function restoreTimescaleIsolated(input: {
       throw new BackupCommandError('BACKUP_RESTORE_DATABASE_OWNER_MISMATCH');
     await input.lock.restrictStagingDatabase(database);
     await input.lock.setStagingTimeZone(database, input.databaseSettings);
-    pool = openPool();
+    pool = await openPool();
     await pool.query(
       timescaleExtensionCreateSql(input.manifest.extensionVersion),
     );
@@ -944,7 +1034,8 @@ async function restoreTimescaleIsolated(input: {
     // The restore subprocess uses a new connection. Verify that the database
     // setting is visible beyond the session that ran pre_restore().
     await pool.end();
-    pool = openPool();
+    pool = undefined;
+    pool = await openPool();
     const restoring = await pool.query(
       "SELECT current_setting('timescaledb.restoring', true) AS enabled",
     );
@@ -959,6 +1050,7 @@ async function restoreTimescaleIsolated(input: {
         '--exit-on-error',
         '--no-owner',
         '--no-acl',
+        `--role=${input.lock.effectiveRole}`,
         `--dbname=${database}`,
         input.directoryFile,
       ],
@@ -975,7 +1067,7 @@ async function restoreTimescaleIsolated(input: {
     // Keep the restored database quiescent for operator review. Commit the
     // transition out of restore mode and job suspension atomically, so no
     // retention/columnstore/refresh policy can run between the two steps.
-    const finishClient = await pool.connect();
+    const finishClient = pool;
     try {
       await finishClient.query('BEGIN');
       await finishClient.query('SELECT timescaledb_post_restore()');
@@ -990,12 +1082,11 @@ async function restoreTimescaleIsolated(input: {
         // The staging database is deleted on every failure path below.
       }
       throw finishError;
-    } finally {
-      finishClient.release();
     }
     preRestore = false;
     await pool.end();
-    pool = openPool();
+    pool = undefined;
+    pool = await openPool();
     const normal = await pool.query(
       "SELECT current_setting('timescaledb.restoring', true) AS enabled",
     );
@@ -1021,7 +1112,7 @@ async function restoreTimescaleIsolated(input: {
   } finally {
     if (preRestore) {
       try {
-        pool ??= openPool();
+        pool ??= await openPool();
         await pool.query('SELECT timescaledb_post_restore()');
       } catch {
         // The database will be dropped after closing this pool. Keep the
@@ -1321,7 +1412,11 @@ export function createBackupProcessor(
         throw new BackupCommandError('BACKUP_TIMESCALE_TABLE_DUMP_UNSUPPORTED');
       await mkdir(directory, { recursive: true });
       const databaseUrl = targetUrl(options.env, data.target);
-      const environment = commandEnvironment(databaseUrl);
+      const environment = commandEnvironment(
+        databaseUrl,
+        process.env,
+        lock.sessionUser,
+      );
       const timeoutMs = options.env.BACKUP_COMMAND_TIMEOUT_MS;
       const maxBytes = options.env.BACKUP_MAX_BYTES;
       if (data.operation === 'create') {
@@ -1365,6 +1460,7 @@ export function createBackupProcessor(
             '--format=custom',
             '--no-owner',
             '--no-acl',
+            `--role=${lock.effectiveRole}`,
             `--file=${partial}`,
             ...(tables.length ? ['--strict-names'] : []),
             ...tables.map(
@@ -1584,7 +1680,7 @@ export function createBackupProcessor(
       await lock.assertSelectiveRestoreSupported(metadata.tables);
       await processCommand(
         commandPath(options.env.PG_RESTORE_PATH, 'pg_restore'),
-        restoreCommandArgs(environment.PGDATABASE!, input),
+        restoreCommandArgs(environment.PGDATABASE!, input, lock.effectiveRole),
         environment,
         {
           timeoutMs,

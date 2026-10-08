@@ -8,13 +8,15 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 创建和恢复始终提交到 `backup-task-queue` 异步执行。任务元数据先写入 Redis task registry， Worker 再执行 `pg_dump`/`pg_restore`，每次检查 BullMQ lease、任务身份和取消状态。
 
-备份创建与恢复的总执行窗口为受理时不可变 `createdAt` 起六天，包含排队、退避、全部尝试、归档哈希和外部命令；重新投递不重置窗口。`TASK_META_TTL_SECONDS` 对备份至少为 604800（七天，默认不变），API 在创建元数据和入队前拒绝更短配置并返回 503，Worker 在建立消费者或自动计划连接前同样拒绝。其他队列仍可使用原有较短保留期。排队接近截止时仅获得剩余窗口，过期的未发布任务明确失败；静默恢复命令和流式哈希也受同一 AbortSignal 控制，原 `BACKUP_COMMAND_TIMEOUT_MS` 的单命令上限不会延长。停止与清理留出一天保留余量，不新增无界 Redis touch。若 Worker 离线超过保留期，历史元数据按既有 TTL 过期，不复建或猜测任务身份；查询原任务的可用队列证据并人工核对，禁止自动补偿未知恢复。
+备份创建与恢复的总执行窗口为受理时不可变 `createdAt` 起六天，包含排队、退避、全部尝试、归档哈希和外部命令；重新投递不重置窗口。`TASK_META_TTL_SECONDS` 对备份至少为 604800（七天，默认不变），API 在创建元数据和入队前拒绝更短配置并返回 503，Worker 在建立消费者或自动计划连接前移除备份队列并记录固定 warn 原因，继续启动其他已选队列；只选择备份时进入空闲模式，不建立 Redis/看门狗连接。API 与备份 Processor 的保留期检查继续拒绝短配置，不自动扩大配置值。其他队列仍可使用原有较短保留期。排队接近截止时仅获得剩余窗口，过期的未发布任务明确失败；静默恢复命令和流式哈希也受同一 AbortSignal 控制，原 `BACKUP_COMMAND_TIMEOUT_MS` 的单命令上限不会延长。停止与清理留出一天保留余量，不新增无界 Redis touch。若 Worker 离线超过保留期，历史元数据按既有 TTL 过期，不复建或猜测任务身份；查询原任务的可用队列证据并人工核对，禁止自动补偿未知恢复。
 
 已发布创建文件与已提交恢复结果优先保留：到期、退出、取消或旧租约丢失不能撤销真实完成点。未发布且清理已确认的最终失败通过绑定原任务身份的专用 CAS 重新读取共享状态，保留已接受的取消；隔离库创建或清理结果不确定、已观察到正式产物或临时文件清理失败时仍保留失败与人工核对提示，不能把不确定状态包装为安全取消。回滚本次生命周期限制前应先停止 Neo 备份生产者和消费者，核对所有长时间排队任务及未知恢复，不降低元数据保留配置作为回滚手段。
 
 公开按表参数继续仅接受一个 ASCII 表标识符或 `schema.table`。API 在自己的实际 NodePG 会话中以参数化 catalog 查询解析，每段逐字引用，1500 毫秒查询预算内得到确切 schema/table 后才创建任务；入队参数冻结完整限定名。Worker 持有目标锁后再次核验名称及命名空间，再把每段单独转为双引号 literal pattern 交给 `pg_dump --table-and-children`；缺失、截断或临时表不能生成产物。混合大小写不折叠到另一个表，schema 中的点和双引号作为标识符内容处理。依据 [PostgreSQL 16 pg_dump](https://www.postgresql.org/docs/16/app-pgdump.html) 和 [psql pattern 规则](https://www.postgresql.org/docs/16/app-psql.html#APP-PSQL-PATTERNS)，双引号内的点和模式字符均逐字匹配，嵌入的双引号写成两个双引号。
 
-NodePG 正常应用 URL `options`、继承 `PGOPTIONS` 或数据库/角色配置中的 `search_path`；CLI 环境继续隔离任意 `PGOPTIONS`/startup options，使用已核验的完整限定名选择实际对象，不依赖 CLI 默认路径。新 v3 sidecar 的 `tables` 保存实际归档的限定范围，恢复预检按同一字面命名空间核查外部依赖。同名但位于其他 schema 的表及其依赖不算本次归档。内部 job/sidecar 可以用 SQL 双引号表示特殊 schema，公开请求语法及 sidecar 版本不变。
+NodePG 正常应用 URL `options`、继承 `PGOPTIONS` 或数据库/角色配置中的 `search_path`；CLI 环境继续隔离任意 `PGOPTIONS`/startup options，使用已核验的完整限定名选择实际对象，不依赖 CLI 默认路径。新 v3 sidecar 的 `tables` 保存实际归档的限定范围，恢复预检按同一字面命名空间核查外部依赖。同名但位于其他 schema 的表及其依赖不算本次归档。内部 job/sidecar 可以用 SQL 双引号表示特殊 schema，公开请求语法及 sidecar 版本不变。目标 advisory lock 的实际 NodePG 会话同时读取 `current_user` 与 `session_user`，冻结有效角色和会话用户；任何一项为空、含 NUL、过长或无法确认时，在启动命令前失败。`pg_dump`、原位按表 `pg_restore`、隔离 PostgreSQL 与 TimescaleDB `pg_restore` 均以独立 `--role=<有效角色>` 参数执行。CLI 不转发 URL options 或继承的任意 `PGOPTIONS`；只要提供已确认的会话用户，就无条件重建唯一的 `-c session_authorization=<冻结会话用户>`，即使它等于 PGUSER；不提供冻结身份的独立环境 helper 仍剥离全部原 PGOPTIONS。数据库/角色默认也可以设置 session_authorization，不能让子进程重新继承被来源连接显式覆盖的默认身份，参见 [PostgreSQL 13.3 发布说明](https://www.postgresql.org/docs/release/13.3/)。该值按 PostgreSQL `pg_split_opts` 规则转义每个 ASCII 空白和反斜杠，避免角色名成为额外启动参数；这里不使用 shell 引号语义。参数通过独立 argv、`shell: false` 传递，身份不写入 sidecar 或日志。`SET ROLE` 只改变有效角色，因此会话用户须单独保留，不能以更宽的登录会话绕过限制。实际身份缺少备份、恢复或 CREATEDB 权限时明确失败。参见 [pg_dump 角色选项](https://www.postgresql.org/docs/16/app-pgdump.html)、[pg_restore 角色选项](https://www.postgresql.org/docs/16/app-pgrestore.html)、[SET SESSION AUTHORIZATION](https://www.postgresql.org/docs/16/sql-set-session-authorization.html) 和 [pg_split_opts 实现](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/utils/init/postinit.c)。
+
+隔离库使用 template0，不依赖来源数据库默认 role 的继承。NodePG 隔离连接池只租用一个 client，在该会话先执行逐字引用的 `SET SESSION AUTHORIZATION`，再执行 `SET ROLE`，重新查询并确认两项身份后才执行后续查询。所有查询和 TimescaleDB 最终事务都绑定同一个 client；连接失效时失败，不自动重连到登录角色。每次 TimescaleDB 重开连接均重新绑定和验证，结束时先释放 client 再关闭 pool。真实隔离用例保留原有 22 项集成场景，新增七种身份模式：URL role、继承 PGOPTIONS、非空 URL options 覆盖环境角色、空 URL options 回落、数据库默认 role、session authorization，以及数据库默认 session authorization 被来源 URL 显式覆盖回登录身份。第六种模式使用含空格、引号和反斜杠的真实角色及仅接受该 session_user 的恢复 DDL 控制；受限全库备份和未授权表恢复须失败，授权表备份/恢复须成功。第七种模式先用真实连接证明受限数据库默认双身份，再核查来源 URL 覆盖后的登录双身份；恢复 DDL 只允许被冻结的登录会话，完整备份和两种授权表恢复须成功，finally 先删除 guard 再由外部管理员重置数据库默认身份。本机未启用真实服务时明确 skip，不计作已通过的原生证明。
 
 此前已入队的非限定表任务在 Worker 的实际持锁会话中解析并写入新产物的限定范围，其 `creationIdentity` 仍以原不可变 job params 计算；不把解析后的范围重写进旧任务或旧 proof。已经发布的合法旧 sidecar 在重放时保持原值；旧非限定范围在目标库存在同名歧义时仍拒绝自动恢复。完整备份、默认数据库、连接凭据及已验证 TLS 策略沿用原实现。真实回归在独立 scratch PostgreSQL 内，用两个 schema 中完全同名的表分别验证 URL options/继承 PGOPTIONS、受理路径与 Worker 路径不同、含点/引号 schema、归档后原位恢复及未选中同名表外部 view 的保留；本机不启用真实服务时这些用例明确 skip。
 
@@ -100,3 +102,13 @@ API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变�
 当原位恢复已经提交，或隔离恢复完成验证并保留数据库，而两次 Redis task registry 完成写入均失败时，Worker 把小于 1 KiB 的已恢复、待核实回执返回给 BullMQ，队列保持 completed。隔离恢复回执保留 `restoredDatabase`、`restoreMode: isolated`、`targetDatabaseChanged: false` 和 `verification: unconfirmed`；不得因此自动重试或删除已经保留的恢复库。备份队列的完成/失败结果至少保留 max(7 天, TASK_META_TTL_SECONDS)，不设置可提前淘汰回执的 count 上限；任务查询按所有者、创建时间和 restore 子类型绑定回执后恢复 registry。即使 registry 保留 cancelling、cancelled 或 failed，已完成的恢复也不能被展示为未执行。若 BullMQ 自身也失联或进程被强制终止，仍须人工核对数据库，不能依赖该回执证明未提交。
 
 备份下载以 EXPORT/backup 记录持久审计：保留认证操作人、经过文件名校验的归档标识、路由模板及最终状态，不记录文件内容、查询参数或凭据。
+
+备份创建审计沿用实际契约默认：省略 target 的成功请求记录 primary，显式 competitor 记录 competitor；无效/null target 以及整个 JSON 为数组/null 的拒绝记录不冒充默认目标。描述、表名和未经校验的文件名不进入审计摘要。
+
+## 启动、权限与审计回归证据
+
+本次本机回归导入真实 `main.bootstrap`，保留实际 `loadEnv` 和 `resolveWorkerSelection`，仅替换外部运行时资源。旧启动与 Processor 源码运行首轮新增回归得到 24 项失败、45 项通过；后补的 TimescaleDB 同连接回归在旧 Processor 下也单独失败；冻结 session_user 等于登录用户的新实际 Processor 回归，在先前条件式重建环境的实现下精确得到一项失败，特殊身份健康对照一项通过，该次生产字节前后不变。修复后 Worker 五个受影响文件得到 113 项通过。启动四种配置包含默认队列选择下显式配置一天/七天 TTL、仅 backup 与 backup/monitor 混选，schema 的真实默认值仍为七天。用例验证其他队列继续运行、备份空闲时不创建 Redis/看门狗，不仅测试保留期 helper。Processor 回归核查实际四条 CLI 调用和隔离连接，包括异常/特殊身份、身份确认失败后释放连接及保留已提交恢复回执；TimescaleDB 分阶段恢复保留原有 CLI 参数，并核查重开连接的三次身份绑定和同一连接中的最终事务。
+
+API 使用真实 BackupController、Fastify、全局校验和审计生命周期，七项 HTTP 场景在旧审计映射下精确得到两项默认目标失败、五项对照通过；恢复修复后，备份服务和审计两个文件共 123 项通过。测试身份包含生产 AuthPrincipal 必需的 user 字段。首次缺少该字段导致审计无法记录的夹具失败已纠正，该次运行不作为产品 RED 证据。每次临时运行旧产品源码均在 finally 按原字节恢复，并保留哈希核验；Worker/API 扩展严格类型检查包含受影响测试及其源码依赖，均通过。
+
+真实 PostgreSQL/TimescaleDB 集成文件新增至 29 项，本机以 `RUN_INTEGRATION_TESTS=false` 明确跳过全部 29 项；原有 22 项场景及新增七项真实权限模式保留原期限和成功/拒绝断言。首次新增 TimescaleDB 本机夹具误用普通 PostgreSQL 的单事务参数断言已按两种既有引擎流程纠正，该次失败不作为产品 RED。上述本机通过数只证明 mock 外部资源下的实际入口行为及类型闭包，不能替代隔离 CI 中实际数据库、pg_dump/pg_restore 与 TimescaleDB 的执行结果。

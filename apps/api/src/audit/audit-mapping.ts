@@ -14,6 +14,8 @@ const backupFilename = (value: unknown): string | null =>
     : null;
 const backupTarget = (value: unknown): string | null =>
   value === 'primary' || value === 'competitor' ? value : null;
+const backupCreateTarget = (value: unknown): string | null =>
+  value === undefined ? 'primary' : backupTarget(value);
 
 /** Backup audit records identify the operation and artifact, never free-text
  * descriptions, table names, or unvalidated filenames. */
@@ -22,7 +24,8 @@ export function auditBackupBody(
   body: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   if (!body) return null;
-  if (route === '/api/v1/backup') return { target: backupTarget(body.target) };
+  if (route === '/api/v1/backup')
+    return { target: backupCreateTarget(body.target) };
   if (route === '/api/v1/backup/restore')
     return {
       filename: backupFilename(body.filename),

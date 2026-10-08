@@ -1,6 +1,7 @@
 import { BACKUP_SCHEDULER_USER_ID } from '@asin-monitor/contracts';
 import { transitionTask, type TaskState } from '@asin-monitor/db';
 import { HttpException, type ExecutionContext } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import {
   FastifyAdapter,
   type NestFastifyApplication,
@@ -11,6 +12,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AuditInterceptor } from '../src/audit/audit.interceptor';
+import { AuditService } from '../src/audit/audit.service';
 import { AuthenticationGuard } from '../src/auth/authentication.guard';
 import { PermissionsGuard } from '../src/auth/permissions.guard';
 import { readBackupMetadata } from '../src/backup/backup-files';
@@ -69,7 +72,11 @@ vi.mock('node:fs/promises', async (original) => {
   };
 });
 
-const principal = { userId: 'backup-admin', sessionId: 'session-1' } as never;
+const principal = {
+  userId: 'backup-admin',
+  sessionId: 'session-1',
+  user: { username: 'backup-admin-fixture' },
+} as never;
 const createdAt = '2026-09-27T00:00:00.000Z';
 const filename = 'backup_20260927-020000-abcdef01-primary.dump';
 const directories: string[] = [];
@@ -308,10 +315,15 @@ describe('backup submission HTTP / global exception boundary', () => {
       await app.close();
     }
   });
-  async function http(service: BackupService) {
+  async function http(service: BackupService, audit?: AuditService) {
     const module = await Test.createTestingModule({
       controllers: [BackupController],
-      providers: [{ provide: BackupService, useValue: service }],
+      providers: [
+        { provide: BackupService, useValue: service },
+        ...(audit
+          ? [{ provide: APP_INTERCEPTOR, useClass: AuditInterceptor }]
+          : []),
+      ],
     })
       .overrideGuard(AuthenticationGuard)
       .useValue({
@@ -328,11 +340,69 @@ describe('backup submission HTTP / global exception boundary', () => {
     );
     configureHttpApp(app, {
       logger: { error: vi.fn(), warn: vi.fn() } as never,
+      ...(audit ? { audit } : {}),
     });
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
     return app;
   }
+  it.each([
+    { payload: {}, target: 'primary', status: 200 },
+    {
+      payload: { description: 'private-person' },
+      target: 'primary',
+      status: 200,
+    },
+    { payload: { target: 'competitor' }, target: 'competitor', status: 200 },
+    { payload: { target: null }, target: null, status: 400 },
+    { payload: { target: 'invalid' }, target: null, status: 400 },
+    { payload: [], target: null, status: 400 },
+    { payload: null, target: null, status: 400 },
+  ])(
+    'audits the effective create target through the actual controller ($payload)',
+    async ({ payload, target, status }) => {
+      const f = await fixture();
+      const repository = { append: vi.fn(async () => undefined) };
+      const audit = new AuditService(repository, f.logger as never);
+      const app = await http(f.service, audit);
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/backup',
+          headers: { 'content-type': 'application/json' },
+          payload: JSON.stringify(payload),
+        });
+        expect(response.statusCode).toBe(status);
+        await audit.flush();
+        expect(repository.append).toHaveBeenCalledOnce();
+        expect(repository.append).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: 'CREATE',
+            resource: 'backup',
+            resourceName: target,
+            requestData:
+              payload === null || Array.isArray(payload) ? null : { target },
+            responseStatus: status,
+          }),
+        );
+        if (status === 200) {
+          expect(f.port.enqueue).toHaveBeenCalledOnce();
+          expect(f.port.enqueue).toHaveBeenCalledWith(
+            expect.objectContaining({ operation: 'create', target }),
+          );
+        } else {
+          expect(f.port.enqueue).not.toHaveBeenCalled();
+          expect(f.port.store.create).not.toHaveBeenCalled();
+        }
+        expect(JSON.stringify(repository.append.mock.calls)).not.toContain(
+          'private-person',
+        );
+      } finally {
+        await audit.flush();
+        await app.close();
+      }
+    },
+  );
   it('returns the original execution window in list/download HTTP and accepts the timed archive for restore', async () => {
     const f = await fixture();
     await writeFile(join(f.directory, filename), 'PGDMPfixture');
