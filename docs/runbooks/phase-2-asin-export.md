@@ -31,6 +31,8 @@ ExcelJS 4.4.0 默认的 worksheet StreamBuf 不提供可靠的写入背压。本
 
 - 容量超限在 Redis 终态 message 中持久化“ASIN 导出超过上限，请缩小筛选范围”，任务中心不依赖已失败队列回执来恢复这条提示。真实 64 字节文件预算及发布容量错误回归验证相同终态提示；取消竞态继续以取消为准。
 - 新增真实 Redis 创建提交后注入丢失响应／3.1 秒迟到响应的 HTTP → 新 API runtime／编译 Worker 恢复场景；本机 opt-in 未执行，须以最新 Integration 运行结果验收。Worker 文件夹具验证首次元数据缺失保留拒绝证据、迟到元数据在下一轮失败并释放名额。
+- 2026-10-08 复查 [Integration 37540406987](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/actions/runs/37540406987)：`late-create-ack` 首个失败源于 HTTP 503 返回后立即读取尚未完成 fsync/link 的 journal。迟到创建回执已经耗尽原 3 秒请求期限；请求结束等待，底层写入继续占用原生操作预算。集成夹具改为在原有 15 秒恢复窗口内等待完整 task/owner/createdAt/type/subtype 回执，再分别验证授权 HTTP 和重新启动的编译 Worker 得到 `failed` 与“ASIN 导出未入队，请重试”，删除 proof 后新任务完成；没有延长运行时期限或降低恢复 oracle。失败路径也在 `finally` 恢复 Worker，避免后续工作簿测试级联失败。
+- 过期回执单元回归使用可控延迟门后调用真实文件写入：先证明 caller 到期时 proof 尚未发布、同一身份只启动一次写入、共享八个底层槽仍被占用，再验证实际落盘释放一个槽、完整不可变回执可读，重建 API runtime 后 CAS 恢复为失败并清理回执。API 导出 focused 36 项、共享 export 文件存储 15 项、Worker 导出 runtime/processor/Legacy 文件对拍 39 项及两个修改测试的 strict TypeScript 检查通过；本机未配置 PostgreSQL/Redis 集成服务，5 项 opt-in 集成明确跳过，仍须最新 CI 验收。
 
 - 明确在 `queue.add` 调用前拒绝时，API 将不可变 task/owner/createdAt/type 身份写入私有共享卷 `export-rejected-<taskId>.json`。即使 Redis 终态写入失败，响应仍为 503，并附任务 ID 与 `status=rejected`；不会改报为提交结果未知。任务中心的已授权详情/列表和 Worker 启动及每分钟巡检按这份回执恢复失败状态、释放名额；同一 ID 的身份发生变化时不能修改替代任务。Redis 恢复前保留回执，明确取消仍优先。仅队列无作业、任务年龄或通用入队 ACK 丢失均不能产生这种回执。共享卷写入也失败时会记录固定错误原因，需运维核对该任务；不能靠猜测队列缺席将其它任务标为失败。
 - 文件清理与拒绝回执恢复共用单轮执行门：文件系统阻塞期间不会每分钟叠加新的目录读取/删除；只有原轮实际结束后才允许下一轮。拒绝回执使用单个原生目录游标，每轮最多推进 100 个目录项；暂留回执、损坏项或对账失败仍推进游标，后续任务不会永久排在最初 100 项之后。目录读完后下一轮重新开始。Worker 关闭先停止新增巡检，在原轮实际结束后关闭游标。

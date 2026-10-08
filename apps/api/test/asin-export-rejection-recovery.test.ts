@@ -178,30 +178,84 @@ describe('definitive export rejection is recoverable independently of API proces
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  it('starts one bounded durable journal write after an already-expired Redis deadline without extending the wait', async () => {
+  it('publishes one real journal after an expired caller deadline, then releases its native slot and survives API recreation', async () => {
     const f = await fixture();
     const runtime = f.recreate();
-    let finish!: () => void;
+    const record = ExportArtifactStore.prototype.recordRejectedSubmission;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let published: Promise<void> | undefined;
     const writes = vi
       .spyOn(ExportArtifactStore.prototype, 'recordRejectedSubmission')
-      .mockImplementation(
-        () =>
-          new Promise<void>((resolve) => {
-            finish = resolve;
-          }),
-      );
-    vi.useFakeTimers();
-    const pending = runtime.openExport(() => {}).recordRejected!(
-      f.proof,
-      performance.now() - 1,
-    ).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(await pending).toMatchObject({
-      message: 'TASK_QUERY_FILE_DEADLINE',
-    });
-    expect(writes).toHaveBeenCalledTimes(1);
-    finish();
-    await vi.advanceTimersByTimeAsync(0);
+      .mockImplementation(function (this: ExportArtifactStore, identity) {
+        published = blocked.then(() => record.call(this, identity));
+        return published;
+      });
+    const releaseHeld: Array<() => void> = [];
+    const held: Promise<unknown>[] = [];
+    try {
+      vi.useFakeTimers();
+      const port = runtime.openExport(() => {});
+      const pending = port.recordRejected!(
+        f.proof,
+        performance.now() - 1,
+      ).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await pending).toMatchObject({
+        message: 'TASK_QUERY_FILE_DEADLINE',
+      });
+      expect(await f.artifacts.readRejectedSubmission(taskId)).toBeNull();
+      expect(f.current()?.status).toBe('pending');
+      const repeated = port.recordRejected!(
+        f.proof,
+        performance.now() - 1,
+      ).catch((error: unknown) => error);
+      for (let index = 0; index < 7; index++)
+        held.push(
+          runtime
+            .discardExport(
+              `held-${index}`,
+              performance.now() + 10,
+              () => new Promise<void>((resolve) => releaseHeld.push(resolve)),
+            )
+            .catch((error: unknown) => error),
+        );
+      await vi.advanceTimersByTimeAsync(10);
+      for (const error of await Promise.all([repeated, ...held]))
+        expect(error).toMatchObject({ message: 'TASK_QUERY_FILE_DEADLINE' });
+      expect(writes).toHaveBeenCalledTimes(1);
+      const reusable = vi.fn(async () => {});
+      await expect(
+        runtime.discardExport('ninth', performance.now() + 10, reusable),
+      ).rejects.toThrow('TASK_QUERY_FILE_CAPACITY');
+      expect(reusable).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+      release();
+      await published;
+      expect(await f.artifacts.readRejectedSubmission(taskId)).toEqual(f.proof);
+      await runtime.discardExport('ninth', performance.now() + 3000, reusable);
+      expect(reusable).toHaveBeenCalledExactlyOnceWith();
+      await runtime.onModuleDestroy();
+      expect(
+        await f.recreate().open(() => {}).reconcileRejectedExport!(f.initial),
+      ).toMatchObject({
+        taskId,
+        status: 'failed',
+        error: 'ASIN 导出未入队，请重试',
+      });
+      expect(f.current()?.status).toBe('failed');
+      expect(f.evalRedis).toHaveBeenCalledTimes(1);
+      expect(await f.artifacts.readRejectedSubmission(taskId)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      release();
+      for (const finish of releaseHeld) finish();
+      await published;
+      await Promise.all(held);
+    }
   });
 
   it('does not merge final-artifact deletion with rejection-proof deletion for the same task', async () => {
