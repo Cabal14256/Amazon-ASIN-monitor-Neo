@@ -28,6 +28,7 @@ import {
   subscribeDashboardChanges,
   type DashboardCountry,
 } from './dashboard-data';
+import { HomeWorkbench } from './home-workbench';
 
 const errorText = (error: unknown) =>
   error instanceof ApiError ? error.message : '暂时无法读取仪表盘，请稍后重试';
@@ -86,6 +87,120 @@ export default function HomePage() {
   const activities = data ? activitiesForCountry(data, country) : [];
   const countryStatus =
     data && countryStatusData(data.distribution.byCountry, country);
+  const countryControls = (
+    <section
+      aria-label="站点筛选"
+      className="rounded-card border border-border bg-card p-4"
+    >
+      <div className="mb-4 px-2">
+        <ModuleLabel module="monitor">站点筛选</ModuleLabel>
+      </div>
+      <div className="space-y-1">
+        {COUNTRIES.map(([code, label]) => {
+          const count = !data
+            ? null
+            : code === 'ALL'
+            ? data.overview.totalGroups
+            : data.overview.overviewByCountry[code]?.totalGroups ?? 0;
+          return (
+            <button
+              type="button"
+              key={code}
+              aria-pressed={country === code}
+              onClick={() => setCountry(code)}
+              className={
+                'flex min-h-11 w-full items-center justify-between rounded-control px-3 text-left text-sm transition-colors ' +
+                (country === code
+                  ? 'bg-signal font-semibold text-ink'
+                  : 'hover:bg-muted')
+              }
+            >
+              <span>{label}</span>
+              <span className="neo-mono text-xs opacity-65">
+                {count ?? '—'}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+  const statusPanel = (
+    <section
+      aria-labelledby="country-status-title"
+      className="min-w-0 rounded-card border border-border bg-card p-5 sm:p-6"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <ModuleLabel module="monitor">站点态势</ModuleLabel>
+          <h2 id="country-status-title" className="mt-3 text-xl font-bold">
+            变体组状态
+          </h2>
+        </div>
+        <span className="rounded-pill bg-muted px-3 py-1.5 text-xs text-muted-foreground">
+          {countryLabel(country)}
+        </span>
+      </div>
+      {countryStatus && <CountryStatusChart data={countryStatus} />}
+    </section>
+  );
+  const alertsPanel = (
+    <section
+      aria-labelledby="alerts-title"
+      className="min-w-0 rounded-card border border-border bg-card p-5 sm:p-6"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <ModuleLabel module="monitor">实时告警</ModuleLabel>
+          <h2 id="alerts-title" className="mt-3 text-xl font-bold">
+            异常关注
+          </h2>
+        </div>
+        <span className="neo-mono rounded-pill bg-status-danger-soft px-3 py-1.5 text-xs font-semibold text-status-danger">
+          {data ? alerts.length : '—'}
+        </span>
+      </div>
+      {!data ? (
+        <p role="status" className="mt-5 text-sm text-muted-foreground">
+          {dashboard.isError ? '告警读取失败，请重试仪表盘。' : '正在读取告警…'}
+        </p>
+      ) : alerts.length === 0 ? (
+        <div className="mt-5">
+          <EmptyState
+            title="暂无异常项"
+            description="当前站点范围没有出现在最近异常列表中的项目。"
+          />
+        </div>
+      ) : (
+        <ul className="mt-5 max-h-[520px] divide-y divide-border overflow-y-auto">
+          {alerts.map(({ kind, row }, index) => (
+            <li
+              key={kind + ':' + alertText(row, 'id') + ':' + index}
+              className="py-4 first:pt-0"
+            >
+              <div className="flex items-center gap-2 text-xs text-status-danger">
+                <CircleAlert aria-hidden="true" className="size-3.5" />
+                {kind}异常 · {countryLabel(alertText(row, 'country'))}
+              </div>
+              <p
+                className="mt-2 truncate text-sm font-semibold"
+                title={alertText(row, 'name')}
+              >
+                {alertText(row, 'name') ||
+                  alertText(row, 'asin') ||
+                  '未命名项目'}
+              </p>
+              {alertText(row, 'asin') && (
+                <p className="neo-mono mt-1 text-xs text-muted-foreground">
+                  {alertText(row, 'asin')}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
   return (
     <AppShell title="监控总览">
       <div className="space-y-6 lg:space-y-7">
@@ -220,122 +335,16 @@ export default function HomePage() {
                 </div>
               ))}
             </section>
-
-            <div className="grid items-start gap-5 xl:grid-cols-[208px_minmax(0,1fr)_320px]">
-              <section
-                aria-label="站点筛选"
-                className="rounded-card border border-border bg-card p-4"
-              >
-                <div className="mb-4 px-2">
-                  <ModuleLabel module="monitor">站点筛选</ModuleLabel>
-                </div>
-                <div className="space-y-1">
-                  {COUNTRIES.map(([code, label]) => {
-                    const count =
-                      code === 'ALL'
-                        ? data.overview.totalGroups
-                        : data.overview.overviewByCountry[code]?.totalGroups ??
-                          0;
-                    return (
-                      <button
-                        type="button"
-                        key={code}
-                        aria-pressed={country === code}
-                        onClick={() => setCountry(code)}
-                        className={
-                          'flex min-h-11 w-full items-center justify-between rounded-control px-3 text-left text-sm transition-colors ' +
-                          (country === code
-                            ? 'bg-signal font-semibold text-ink'
-                            : 'hover:bg-muted')
-                        }
-                      >
-                        <span>{label}</span>
-                        <span className="neo-mono text-xs opacity-65">
-                          {count}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              <section
-                aria-labelledby="country-status-title"
-                className="min-w-0 rounded-card border border-border bg-card p-5 sm:p-6"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <ModuleLabel module="monitor">站点态势</ModuleLabel>
-                    <h2
-                      id="country-status-title"
-                      className="mt-3 text-xl font-bold"
-                    >
-                      变体组状态
-                    </h2>
-                  </div>
-                  <span className="rounded-pill bg-muted px-3 py-1.5 text-xs text-muted-foreground">
-                    {countryLabel(country)}
-                  </span>
-                </div>
-                {countryStatus && <CountryStatusChart data={countryStatus} />}
-              </section>
-
-              <section
-                aria-labelledby="alerts-title"
-                className="min-w-0 rounded-card border border-border bg-card p-5 sm:p-6"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <ModuleLabel module="monitor">实时告警</ModuleLabel>
-                    <h2 id="alerts-title" className="mt-3 text-xl font-bold">
-                      异常关注
-                    </h2>
-                  </div>
-                  <span className="neo-mono rounded-pill bg-status-danger-soft px-3 py-1.5 text-xs font-semibold text-status-danger">
-                    {alerts.length}
-                  </span>
-                </div>
-                {alerts.length === 0 ? (
-                  <div className="mt-5">
-                    <EmptyState
-                      title="暂无异常项"
-                      description="当前站点范围没有出现在最近异常列表中的项目。"
-                    />
-                  </div>
-                ) : (
-                  <ul className="mt-5 max-h-[520px] divide-y divide-border overflow-y-auto">
-                    {alerts.map(({ kind, row }, index) => (
-                      <li
-                        key={kind + ':' + alertText(row, 'id') + ':' + index}
-                        className="py-4 first:pt-0"
-                      >
-                        <div className="flex items-center gap-2 text-xs text-status-danger">
-                          <CircleAlert
-                            aria-hidden="true"
-                            className="size-3.5"
-                          />
-                          {kind}异常 · {countryLabel(alertText(row, 'country'))}
-                        </div>
-                        <p
-                          className="mt-2 truncate text-sm font-semibold"
-                          title={alertText(row, 'name')}
-                        >
-                          {alertText(row, 'name') ||
-                            alertText(row, 'asin') ||
-                            '未命名项目'}
-                        </p>
-                        {alertText(row, 'asin') && (
-                          <p className="neo-mono mt-1 text-xs text-muted-foreground">
-                            {alertText(row, 'asin')}
-                          </p>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-            </div>
-
+          </>
+        )}
+        <HomeWorkbench
+          country={country}
+          countryControls={countryControls}
+          statusPanel={statusPanel}
+          alertsPanel={alertsPanel}
+        />
+        {data && overview && (
+          <>
             <section
               aria-labelledby="activities-title"
               className="rounded-card border border-border bg-card p-5 sm:p-6"
