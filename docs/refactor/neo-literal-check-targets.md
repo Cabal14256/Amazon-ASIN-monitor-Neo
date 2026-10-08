@@ -17,13 +17,13 @@
 
 MySQL 的冻结 `utf8mb4_unicode_ci` 比较可能把不存在的 `Tail `、`case`、`cafe` 分别匹配为已存 `Tail`、`Case`、`café`。原竞品服务因此会检查并更新该邻组或邻 ASIN。Neo 改为拒绝缺失的原始目标，不产生商品请求、目录更新、历史或成功收据。这是修复危险选择行为的明确安全差异，不能声称此场景与 Legacy 产物等价。
 
-`apps/api/test/helpers/literal-check-legacy.ts` 在随机私有 MySQL 数据库执行原 `competitor-init.sql` 三张表的 DDL，以及真实冻结检查 service、model 和 history 源码。只替换外部观测、缓存、配置和日志边界，查询及更新结果均由真实 MySQL 返回。使用 BINARY 查询先证明不存在请求的字面 ID，再检查实际邻居发生了更新。
+`apps/api/test/helpers/literal-check-legacy.ts` 在随机私有 MySQL 数据库使用原 `competitor-init.sql` 三张表结构，并沿已有 Legacy comparator 固定 `utf8mb4_unicode_ci` 源比较合同，执行真实冻结检查 service、model 和 history 源码。只替换外部观测、缓存、配置和日志边界，查询及更新结果均由真实 MySQL 返回。实际 metadata 验证两张目标表的 ID 列 collation；BINARY 查询证明请求的字面 ID 不存在，普通 `WHERE id=?` 查询证明源比较命中邻居，再检查实际服务更新。该夹具不能证明未检查的生产库采用同一 collation。
 
 ## 隔离验收
 
 `apps/api/test/literal-check-targets.integration.test.ts` 显式接入现有 Integration workflow 的编译 Worker 检查步骤，共 46 项：
 
-- 32 项覆盖双域 group/ASIN、同步/异步检查、前空格/尾空格/全空格/50 emoji，经过实际 Nest HTTP、Redis/BullMQ、编译 Worker 和双 PostgreSQL，验证原始队列 payload、目录、历史及收据身份。
+- 32 项覆盖双域 group/ASIN、同步/异步检查、前空格/尾空格/全空格/50 emoji，经过实际 Nest HTTP、Redis/BullMQ、编译 Worker 和双 PostgreSQL，验证原始队列 payload、目录及收据身份。主营手动组检查严格不写任何监控历史；主营单项和竞品检查的历史保持原始 group/ASIN ID。
 - 12 项使用真实 MySQL Legacy 与 PostgreSQL Neo 验证上述危险邻居差异。Neo 同步及异步请求在受理前返回 404；异步场景额外显式放入一张私有旧任务，证明实际编译消费者仍拒绝缺失原始目标。该旧任务由测试 producer 构造，不宣称其由被拒绝的 HTTP 请求产生。
 - 1 项使用原生 PostgreSQL 验证主营监控原始快照首次保存和重试一致。
 - 1 项经真实主营批量 HTTP → BullMQ → 编译 Worker 检查前空格、全空格、50 emoji 与重复组，核对原队列数组、完整结果顺序、每个 ordinal 的不可变任务/请求摘要及实际商品请求次数；保留批量检查不写监控历史的既有行为。
@@ -56,6 +56,22 @@ MySQL 的冻结 `utf8mb4_unicode_ci` 比较可能把不存在的 `Tail `、`case
 原失败记录也保留：首次仓库定向测试因该工作树尚未构建 `@asin-monitor/sp-api` 的 `dist` 而在收集阶段退出、没有运行测试；标准依赖构建后，同一测试 63 项通过。根 TypeScript 首次缺少 Umi 开发期 `src/.umi` 类型入口；执行仓库标准 `npm run setup` 后原命令通过，只生成被忽略的文件，没有修改 Legacy 源码或 tsconfig。
 
 首次完整 API 的一个未修改 Legacy 权限用例触发默认 5 秒超时；同一原期限单独运行 4 项全部通过（首项 507 ms），随后完整 API 1710 项通过。没有提高超时或放宽断言。验证台账、初始失败日志及最终成功日志保留在本机 `%TEMP%/neo-227-verification`；这份本地证据不代替发布后的 CI、Integration 和 Review。
+
+## 首次发布 Integration 诊断与修复
+
+PR #240 的 `ed51be1` 在 Integration `37813156214` 的真实 HTTP 检查步骤中，本文件 **34 passed / 12 failed / 46 tests**；同一步原 `variant-check.integration.test.ts` **7 passed**，总计 41 passed / 12 failed。12 个失败具体为：
+
+| 场景 | 实际结果 | 根因与修复 |
+| --- | --- | --- |
+| 主营 group：四种原值 × 同步/异步 | 8 failed；子项已更新，但 ASIN history 查询为空 | 原 oracle 误把手动组检查当作监控任务。冻结 Legacy `checkVariantGroup` 不写历史，Neo pipeline 仅 `operation.taskType==='monitor'` 调用 `recordMonitorHistory`。保留原响应、队列、子项及收据断言，新增真实组 ID/状态/时间断言，并严格要求整个 `monitor_history` 为空；主营 single 及竞品原历史断言保留。 |
+| Legacy group/ASIN：`Tail`→`Tail ` × 同步/异步 | 4 failed；真实服务抛目标不存在 | 两个方法及调用接口都存在。新 helper 的表 DDL 显式 charset、未指定 collation；数据库的 unicode_ci 设置不足以固定表列比较规则。沿主线已有 comparator 固定源 unicode_ci，新增实际列 metadata 和普通/BINARY 查询差异证明，不 trim 请求或改写服务。 |
+| 其余原值 24 项、case/accent 差异 8 项、主营 batch 1 项、监控 snapshot 1 项 | 34 passed | 保留全部场景和原断言。 |
+
+旧失败夹具的实际列 collation 未记录；MySQL 8 默认 `0900_ai_ci` 是依据原 DDL、CI 服务版本及已有 comparator 注释的推断，不能写作已实测结果。新夹具会在连接真实私有 MySQL 后核实 ID 列为 `utf8mb4_unicode_ci`，再执行未改写的冻结业务服务。没有更改生产源码、响应要求、任务期限、测试等待上限、业务写入逻辑或未合并 #229 的持久互斥实现。
+
+MySQL 官方说明，表指定字符集但省略 `COLLATE` 时选择该字符集的默认排序规则；`utf8mb4_unicode_ci` 使用 PAD SPACE，`utf8mb4_0900_ai_ci` 使用 NO PAD，后者将尾空格作为普通字符比较。这支持夹具诊断，但不替代当次实际列 metadata。[表字符集与排序规则](https://dev.mysql.com/doc/refman/8.0/en/charset-table.html)，[Unicode 排序的 pad 属性](https://dev.mysql.com/doc/refman/8.0/en/charset-unicode-sets.html#charset-unicode-sets-pad-attributes)。
+
+本轮 expanded API strict（全部 API src、46 项原值集成文件及两个 helper）通过。显式 `RUN_INTEGRATION_TESTS=false`、单 worker/禁用文件并行的 `corepack pnpm --filter api exec vitest run test/literal-check-targets.integration.test.ts --maxWorkers=1 --no-file-parallelism` 完整收集 **46 项 opt-in skipped / 0 executed**，退出 0；没有连接本机 PostgreSQL/MySQL/Redis。三个修复文件的 Prettier write/check 与 `git diff --check` 通过。真实 46 项仍需更新后的 Integration 执行，先前 34 项通过不移作修复后完整验收。日志位于本机 Temp `neo-240-verification/api-expanded-strict.log` 与 `literal-integration-collection.log`；本轮只改隔离夹具及文档，不重复发布前 18 项全量基线，共享窗口用于其它迁移门禁。
 
 ## 风险与回滚
 

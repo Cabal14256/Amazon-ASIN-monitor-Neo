@@ -185,6 +185,17 @@ suite(
         true,
       );
       legacy = await legacyLiteralCheckFixture();
+      expect(
+        await legacy.query(
+          "SELECT TABLE_NAME AS table_name,COLLATION_NAME AS collation FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND COLUMN_NAME='id' AND TABLE_NAME IN ('competitor_asins','competitor_variant_groups') ORDER BY TABLE_NAME",
+        ),
+      ).toEqual([
+        { table_name: 'competitor_asins', collation: 'utf8mb4_unicode_ci' },
+        {
+          table_name: 'competitor_variant_groups',
+          collation: 'utf8mb4_unicode_ci',
+        },
+      ]);
       store = new RedisTaskRepository(f.redis.client, f.env);
       userId = randomUUID();
       const sessionId = randomUUID();
@@ -393,17 +404,36 @@ suite(
           expect(row.id).toBe(asinId);
           expect(row.is_broken).toBe(false);
           expect(row.last_check_time).not.toBeNull();
+          if (target.kind === 'group') {
+            const group = (
+              await seeded.pool.query(
+                `SELECT id,is_broken,last_check_time FROM ${seeded.g} WHERE id=$1`,
+                [groupId],
+              )
+            ).rows[0];
+            expect(group.id).toBe(groupId);
+            expect(group.is_broken).toBe(false);
+            expect(group.last_check_time).not.toBeNull();
+          }
           const history =
             target.domain === 'primary'
               ? 'monitor_history'
               : 'competitor_monitor_history';
-          expect(
-            (
-              await seeded.pool.query(
-                `SELECT DISTINCT variant_group_id,asin_id FROM ${history} WHERE check_type='ASIN'`,
-              )
-            ).rows,
-          ).toEqual([{ variant_group_id: groupId, asin_id: asinId }]);
+          // Frozen manual primary group checks update the directory without
+          // monitor history; only monitor operations record that group history.
+          // Single primary and competitor checks retain their history oracle.
+          if (target.domain === 'primary' && target.kind === 'group')
+            expect(
+              (await seeded.pool.query(`SELECT * FROM ${history}`)).rows,
+            ).toEqual([]);
+          else
+            expect(
+              (
+                await seeded.pool.query(
+                  `SELECT DISTINCT variant_group_id,asin_id FROM ${history} WHERE check_type='ASIN'`,
+                )
+              ).rows,
+            ).toEqual([{ variant_group_id: groupId, asin_id: asinId }]);
         },
         25_000,
       );
@@ -543,6 +573,11 @@ suite(
                 [requested],
               ),
             ).toEqual([]);
+            expect(
+              await legacy.query(`SELECT id FROM ${table} WHERE id=?`, [
+                requested,
+              ]),
+            ).toEqual([{ id: stored }]);
             await legacy.check(kind, requested);
             const changed = (
               await legacy.query(

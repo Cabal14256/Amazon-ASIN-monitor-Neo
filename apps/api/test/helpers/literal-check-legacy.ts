@@ -60,7 +60,16 @@ export async function legacyLiteralCheckFixture() {
         ),
       )?.[0];
       if (!sql) throw new Error('Original Legacy competitor DDL missing');
-      await connection.query(sql);
+      // Pin the source comparison contract, as the existing Legacy comparators
+      // do. An explicit table charset otherwise uses MySQL's charset default
+      // collation, even though this private database selected unicode_ci.
+      // This fixture does not establish an uninspected production collation.
+      await connection.query(
+        sql.replace(
+          'DEFAULT CHARSET=utf8mb4',
+          'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
+        ),
+      );
     }
     const query = async (statement: string, values: unknown[] = []) =>
       (await connection.query<RowDataPacket[]>(statement, values))[0];
