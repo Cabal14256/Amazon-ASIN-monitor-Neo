@@ -34,6 +34,41 @@ export type CatalogSafetyGate =
     }
   | { phase: 'inspection'; operationId?: string };
 
+/** A validated ACK may complete only the exact, otherwise unchanged sent claim. */
+export function canRecoverKnownBatchDeleteReceipt(
+  claim: CatalogSafetyGate | null | undefined,
+  receipt: CatalogSafetyGate | null | undefined,
+): receipt is CatalogBatchDeleteGate {
+  const claimKeys = [
+    'phase',
+    'operationId',
+    'groupIds',
+    'submittedAt',
+    'state',
+    'ownerScope',
+  ];
+  return Boolean(
+    claim?.phase === 'batch-delete' &&
+      claim.state === 'unknown' &&
+      claim.taskId === undefined &&
+      receipt?.phase === 'batch-delete' &&
+      receipt.state === 'task' &&
+      receipt.taskId &&
+      isValidTaskId(receipt.taskId) &&
+      typeof claim.ownerScope === 'string' &&
+      receipt.ownerScope === claim.ownerScope &&
+      claim.operationId !== 'invalid-record' &&
+      receipt.operationId === claim.operationId &&
+      receipt.submittedAt === claim.submittedAt &&
+      claim.groupIds.length > 0 &&
+      JSON.stringify(receipt.groupIds) === JSON.stringify(claim.groupIds) &&
+      Object.keys(claim).every((key) => claimKeys.includes(key)) &&
+      Object.keys(receipt).every((key) =>
+        [...claimKeys, 'taskId', 'message'].includes(key),
+      ),
+  );
+}
+
 export function catalogSafetyKey(owner: string, source: string): string {
   return `neo:catalog-write-safety:${encodeURIComponent(
     owner,

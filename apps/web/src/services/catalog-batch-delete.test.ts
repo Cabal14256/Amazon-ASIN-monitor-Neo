@@ -49,11 +49,11 @@ describe('typed catalog batch-delete receipts and target safeguards', () => {
     },
   );
   it.each(services)(
-    'rejects unsafe padded IDs and oversized batches before transport',
+    'rejects invalid literal IDs and oversized batches before transport',
     async (service) => {
       const f = httpFixture(jsonResponse({ success: true, data: counts }));
       for (const groupIds of [
-        [' Source '],
+        ['bad\u0000id'],
         ['😀'.repeat(51)],
         Array.from({ length: 1001 }, (_, index) => String(index)),
       ])

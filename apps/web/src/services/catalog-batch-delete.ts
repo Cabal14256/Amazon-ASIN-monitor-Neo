@@ -1,9 +1,10 @@
 import {
   batchDeleteSyncDataSchema,
-  batchDeleteVariantGroupsRequestSchema,
   batchDeleteVariantGroupsResultSchema,
   competitorBatchDeleteResultSchema,
-  type BatchDeleteVariantGroupsRequest,
+  isNeoBatchDeleteId,
+  neoBatchDeleteVariantGroupsRequestSchema,
+  type NeoBatchDeleteVariantGroupsRequest,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
 import { isValidTaskId } from './tasks';
@@ -15,17 +16,9 @@ export type CatalogBatchDeleteOutcome =
   | BatchDeleteCounts
   | { mode: 'async'; taskId: string; status: 'pending' | 'unknown' };
 
-/** The current bulk backend trims IDs. Never select a different raw ID. */
+/** Neo catalog keys are literal, including whitespace. Share its wire policy. */
 export function isBulkDeleteId(id: string): boolean {
-  return (
-    !!id &&
-    id === id.trim() &&
-    [...id].length <= 50 &&
-    ![...id].some(
-      (character) =>
-        character.charCodeAt(0) <= 31 || character.charCodeAt(0) === 127,
-    )
-  );
+  return isNeoBatchDeleteId(id);
 }
 
 export function batchDeleteCounts(value: unknown): BatchDeleteCounts | null {
@@ -90,20 +83,14 @@ function uncertainTask(error: unknown): string | null {
 export async function submitCatalogBatchDelete(
   http: Pick<HttpClient, 'request'>,
   domain: 'asin' | 'competitor',
-  input: BatchDeleteVariantGroupsRequest,
+  input: NeoBatchDeleteVariantGroupsRequest,
   signal?: AbortSignal,
 ): Promise<CatalogBatchDeleteOutcome> {
-  const parsed = batchDeleteVariantGroupsRequestSchema.safeParse(input);
-  const ids = [...(input.groupIds ?? []), ...(input.asinIds ?? [])];
-  if (
-    !parsed.success ||
-    !ids.length ||
-    ids.length > 1000 ||
-    ids.some((id) => !isBulkDeleteId(id))
-  )
+  const parsed = neoBatchDeleteVariantGroupsRequestSchema.safeParse(input);
+  if (!parsed.success)
     throw new ApiError(
       'INVALID_INPUT',
-      '请选择最多 1000 项；含前后空格的原始 ID 请使用单项删除。',
+      '请选择最多 1000 项有效原始 ID；ID 不能为空、超过 50 个字符或包含控制字符。',
     );
   try {
     const response = await http.request(

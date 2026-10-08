@@ -847,22 +847,23 @@ describe('mounted primary and competitor bulk-delete real HTTP transport', () =>
     },
   );
   it.each(['asin', 'competitor'] as const)(
-    'cannot select padded %s IDs or send them in a bulk POST',
+    'selects distinct padded %s IDs and their trimmed neighbours without rewriting either target',
     async (domain) => {
       const f = fixture(domain, { ids: [' Source Ś ', 'Source Ś'] });
       const controls = await screen.findAllByRole('checkbox', {
         name: /ID " Source Ś "/,
       });
       expect(
-        controls.every((input) => (input as HTMLInputElement).disabled),
+        controls.every((input) => !(input as HTMLInputElement).disabled),
       ).toBe(true);
       fireEvent.click(controls[0]);
       expect(
         screen.getByRole('button', { name: '批量删除所选组' }),
-      ).toHaveProperty('disabled', true);
+      ).toHaveProperty('disabled', false);
       await confirm();
       await waitFor(() => expect(mutations(f)).toHaveLength(1));
       expect(JSON.parse(String(mutations(f)[0][1]?.body)).groupIds).toEqual([
+        ' Source Ś ',
         'Source Ś',
       ]);
     },

@@ -9,6 +9,7 @@ import { isTerminalTask } from '../../services/tasks';
 import { browserBatchDeleteRecovery } from './catalog-batch-delete-recovery';
 import { catalogAccessDenied, catalogError } from './catalog-data';
 import {
+  canRecoverKnownBatchDeleteReceipt,
   type CatalogBatchDeleteGate,
   type CatalogSafetyGate,
 } from './catalog-safety-gate';
@@ -29,6 +30,7 @@ export function useCatalogBatchDelete(options: {
   query: CatalogQuery;
   groups: CatalogGroup[];
   safety: CatalogSafetyGate | null | undefined;
+  safetyHydrated: boolean;
   enabled: boolean;
   onQuery: (query: CatalogQuery) => void;
   onDenied: () => void;
@@ -107,7 +109,7 @@ export function useCatalogBatchDelete(options: {
   const task = useTaskQuery(
     runtime,
     gate?.state === 'task' && receiptVisible ? gate.taskId : undefined,
-    access.canReadASIN && !access.mustChangePassword,
+    options.safetyHydrated && access.canReadASIN && !access.mustChangePassword,
   );
   const enabled = Boolean(
     options.config.batchDelete &&
@@ -134,9 +136,14 @@ export function useCatalogBatchDelete(options: {
   };
   const publish = (value: CatalogSafetyGate | null) => {
     if (!current(false)) return;
+    const key = ['catalog-write-safety', owner, options.config.id];
+    const known = runtime.queryClient.getQueryData<CatalogSafetyGate>(key);
     runtime.queryClient.setQueryData(
-      ['catalog-write-safety', owner, options.config.id],
-      value,
+      key,
+      canRecoverKnownBatchDeleteReceipt(value, known) &&
+        known.ownerScope === receiptOwner
+        ? known
+        : value,
     );
   };
   useEffect(() => {
@@ -181,11 +188,18 @@ export function useCatalogBatchDelete(options: {
     const restore = () => {
       try {
         const stored = recovery.read();
-        if (stored?.phase === 'batch-delete')
+        if (stored?.phase === 'batch-delete') {
+          const key = ['catalog-write-safety', owner, recovery.domain];
+          const known =
+            runtime.queryClient.getQueryData<CatalogSafetyGate>(key);
           runtime.queryClient.setQueryData(
-            ['catalog-write-safety', owner, recovery.domain],
-            stored,
+            key,
+            canRecoverKnownBatchDeleteReceipt(stored, known) &&
+              known.ownerScope === receiptOwner
+              ? known
+              : stored,
           );
+        }
       } catch {
         setMessage('无法读取删除恢复记录，请恢复本地存储后重试。');
       }
@@ -196,7 +210,7 @@ export function useCatalogBatchDelete(options: {
     };
     window.addEventListener('storage', sync);
     return () => window.removeEventListener('storage', sync);
-  }, [owner, recovery, runtime.queryClient, revision, sessionId]);
+  }, [owner, recovery, runtime.queryClient, revision, sessionId, receiptOwner]);
 
   async function refresh() {
     const epoch = queryEpoch.current;
@@ -390,6 +404,39 @@ export function useCatalogBatchDelete(options: {
             options.config.id,
           ]),
       );
+      if (result.kind === 'accepted' && result.gate.state === 'task') {
+        // Identity revalidation unmounts this page. Keep a validated ACK in the
+        // original runtime scope, never in a replacement identity or generation.
+        const state = identity.getSnapshot();
+        const eligible =
+          runtime.session.revision === revision &&
+          result.gate.ownerScope === receiptOwner &&
+          (state.status === 'loading' ||
+            state.status === 'error' ||
+            (state.status === 'authenticated' &&
+              state.identity.user.id === owner &&
+              state.identity.sessionId === sessionId &&
+              createAccess(state.identity).canReadASIN &&
+              !createAccess(state.identity).mustChangePassword));
+        if (eligible) {
+          try {
+            const stored = recovery.read();
+            const key = ['catalog-write-safety', owner, options.config.id];
+            const cached =
+              runtime.queryClient.getQueryData<CatalogSafetyGate>(key);
+            if (
+              cached &&
+              (JSON.stringify(cached) === JSON.stringify(stored) ||
+                JSON.stringify(cached) === JSON.stringify(result.gate)) &&
+              (JSON.stringify(stored) === JSON.stringify(result.gate) ||
+                canRecoverKnownBatchDeleteReceipt(stored, result.gate))
+            )
+              runtime.queryClient.setQueryData(key, result.gate);
+          } catch {
+            // An unreadable or changed guard cannot prove ACK ownership.
+          }
+        }
+      }
       if (!active(false)) return;
       if (result.kind === 'accepted') {
         accepted = result.gate;
@@ -519,7 +566,9 @@ export function useCatalogBatchDelete(options: {
           </p>
           <ul className="max-h-40 overflow-auto break-all text-xs">
             {confirmation.ids.map((id) => (
-              <li key={id}>{id}</li>
+              <li key={id} className="whitespace-pre-wrap">
+                {JSON.stringify(id)}
+              </li>
             ))}
           </ul>
           <div className="mt-3 flex gap-2">

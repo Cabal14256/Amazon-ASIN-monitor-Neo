@@ -71,6 +71,7 @@ import { CATALOG_GATE_CHANGED } from './catalog-gate-events';
 import { runWithCatalogOperationLock } from './catalog-operation-lock';
 import { CatalogRefreshContext } from './catalog-refresh-context';
 import {
+  canRecoverKnownBatchDeleteReceipt,
   catalogImportBlocksWrite,
   catalogSafetyKey,
   catalogSafetyStorage,
@@ -124,7 +125,7 @@ function CatalogSelectionInput({
         disabled={selection.disabled || !eligible}
         onChange={() => selection.toggle(group.id)}
       />
-      {eligible ? '选择' : '原始 ID 含空格或不兼容，请使用单项删除'}
+      {eligible ? '选择' : '原始 ID 格式不兼容，无法选择'}
     </label>
   );
 }
@@ -1284,7 +1285,20 @@ export function CatalogPage({
       if (importing) runtime.queryClient.setQueryData(importSafetyKey, true);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {
-        runtime.queryClient.setQueryData(safetyKey, incoming);
+        const known =
+          runtime.queryClient.getQueryData<CatalogSafetyGate>(safetyKey);
+        const receiptScope = JSON.stringify([
+          config.id,
+          ownerId,
+          peerSessionId ?? null,
+        ]);
+        runtime.queryClient.setQueryData(
+          safetyKey,
+          canRecoverKnownBatchDeleteReceipt(incoming, known) &&
+            known.ownerScope === receiptScope
+            ? known
+            : incoming,
+        );
         if (incoming.phase === 'refresh') {
           setAction(null);
           setSelectedId(null);
@@ -1391,6 +1405,7 @@ export function CatalogPage({
     query,
     groups: data?.list ?? [],
     safety,
+    safetyHydrated,
     enabled:
       safetyHydrated &&
       !storageUnavailable &&

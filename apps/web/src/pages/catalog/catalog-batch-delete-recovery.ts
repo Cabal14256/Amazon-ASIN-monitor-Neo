@@ -9,6 +9,7 @@ import { importGateKey, writeImportGate } from '../asin/asin-import-gate';
 import { notifyCatalogGateChanged } from './catalog-gate-events';
 import { runWithCatalogOperationLock } from './catalog-operation-lock';
 import {
+  canRecoverKnownBatchDeleteReceipt,
   catalogImportBlocksWrite,
   catalogSafetyKey,
   readCatalogSafetyGate,
@@ -265,8 +266,8 @@ export class CatalogBatchDeleteRecovery {
           try {
             const stored = this.read();
             matching =
-              stored?.phase === 'batch-delete' &&
-              stored.operationId === claim.operationId;
+              JSON.stringify(stored) === JSON.stringify(gate) ||
+              canRecoverKnownBatchDeleteReceipt(stored, gate);
           } catch {
             // The mounted accepted receipt remains visible while the durable guard is unreadable.
           }
@@ -308,8 +309,18 @@ export class CatalogBatchDeleteRecovery {
       async () => {
         if (!current()) return { kind: 'stale' as const };
         const stored = this.read();
-        if (JSON.stringify(stored) !== JSON.stringify(expected))
-          return { kind: 'changed' as const };
+        if (JSON.stringify(stored) !== JSON.stringify(expected)) {
+          if (
+            stored?.phase !== 'batch-delete' ||
+            !canRecoverKnownBatchDeleteReceipt(stored, expected) ||
+            expected.ownerScope !== this.ownerScope
+          )
+            return { kind: 'changed' as const };
+          // Both operation locks are held. Persist the ACK before any GET-only
+          // reconciliation; saving a receipt never releases the unknown guard.
+          if (!this.remember(expected, stored))
+            return { kind: 'unsaved' as const };
+        }
         let gate = expected;
         if (expected.state === 'task' && expected.taskId) {
           const task = await readTask(expected.taskId);
