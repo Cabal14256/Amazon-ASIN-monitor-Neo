@@ -20,10 +20,12 @@
 
 新目录写入对原 slot 使用 `FOR UPDATE NOWAIT`。槽竞争及首次 slot INSERT 仲裁的 PostgreSQL 55P03/57014 归为 CATALOG_OPERATION_BUSY，API 返回固定 409，未进入业务动作；当前鉴权、管理锁、连接/IO 等其他错误不泛化为目录繁忙。原业务 COMMIT/ROLLBACK、真实连接释放与 pin finally 仍须独立完成，HTTP 409 不撤销原业务。
 
+HTTP 鉴权先更新当前会话活跃时间。若原业务仍持有同一 session 的共享锁，这笔 heartbeat 可能在进入目录 reserve 前按原鉴权期限超时，返回固定 503；它不能被归为槽竞争。原目录保护仍保留，未开始第二笔业务。原生验收使用同 owner 的另一合法 session 单独触达真实槽 NOWAIT，并以同 session 的独立 503 控制保留这一边界，不跳过实际鉴权或提高期限。
+
 ## 验收门与回滚
 
 - 定向 unit/HTTP：Worker catalog-operation-processor；API catalog-operation、task-cancellation、task-cancellation-settlement；DB catalog-operation-reservation。driver seam 故障测试不是原生数据库证明。
-- 隔离 PostgreSQL：DB catalog-operation.integration 的两个 domain 持真实 assertPin SHARE 锁时新 reserve 返回 BUSY，原槽/pin/业务原值不变；API catalog-operation.integration 的真实竞品事务期间返回 HTTP 409。
+- 隔离 PostgreSQL：DB catalog-operation.integration 的两个 domain 持真实 assertPin SHARE 锁时新 reserve 返回 BUSY，原槽/pin/业务原值不变；API catalog-operation.integration 在原 4000ms 竞品业务事务期间，同 owner 第二合法 session 返回 HTTP 409、确实到达目录仲裁，同 session heartbeat 受锁返回鉴权 503 且未进入仲裁；两者均不调用第二业务事务，原槽/pin/业务值不变，原业务完成后下一写入成功。
 - 隔离 PostgreSQL、Redis、Legacy fixture 与已构建正式 Worker：API asin-batch-delete.integration 保留真实删除、closed/null 标记、零 pin、Worker 关闭/重新启动及原失败 delivery 显式 retry，确认原 Redis receipt 不变、未申请第二次业务 pin。
 - 本机未启用 RUN_INTEGRATION_TESTS 的 native skip 只表示未运行，不计为通过。CI 必须在隔离服务中实际执行上述用例并覆盖最终源码；浏览器与发布 gate 独立保留。
 

@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { authorizeAdministration } from '../src/auth/administration-authorization';
 import type { AuthPrincipal } from '../src/auth/auth.types';
+import { ApplicationCatalogOperations } from '../src/catalog/catalog-operation.service';
 import { COMPETITOR_WRITE_REPOSITORY } from '../src/competitor/competitor-write.service';
 import { competitorWriteApp } from './helpers/competitor-write-app';
 import { taskAuthFixture } from './helpers/task-query-fixtures';
@@ -21,7 +22,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await fixture?.close();
       fixture = undefined;
     });
-    it('returns HTTP 409 while a real 4-second competitor business transaction holds assertPin SHARE, without starting a second action', async () => {
+    it.each([
+      {
+        description:
+          'returns HTTP 409 to a second authorized session while a real 4-second competitor business transaction holds assertPin SHARE, without starting a second action',
+        separateSession: true,
+        expectedStatus: 409,
+      },
+      {
+        description:
+          'preserves authentication HTTP 503 when the same-session heartbeat is blocked before catalog admission, without starting a second action',
+        separateSession: false,
+        expectedStatus: 503,
+      },
+    ])('$description', async ({ separateSession, expectedStatus }) => {
       const f = await competitorWriteApp({ primaryBusiness: true });
       fixture = f;
       const userId = randomUUID(),
@@ -46,6 +60,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           { expiresIn: '1h' },
         )}`,
         origin: f.env.CORS_ORIGIN,
+      };
+      // A same-session HTTP heartbeat updates the row held FOR SHARE by the
+      // original business authorization. Use another real session of the same
+      // owner to reach slot arbitration; separately retain that auth-503 path.
+      const requestSessionId = separateSession ? randomUUID() : sessionId;
+      if (separateSession)
+        await f.pools.primaryPool.query(
+          "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
+          [requestSessionId, userId],
+        );
+      const requestHeaders = {
+        ...headers,
+        authorization: `Bearer ${jwt.sign(
+          { userId, sessionId: requestSessionId },
+          f.env.JWT_SECRET,
+          { expiresIn: '1h' },
+        )}`,
       };
       const payload = {
         name: 'Held competitor group',
@@ -85,6 +116,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         COMPETITOR_WRITE_REPOSITORY,
       );
       const secondAction = vi.spyOn(httpRepository, 'transaction');
+      const catalogAdmission = vi.spyOn(
+        f.app.get(ApplicationCatalogOperations),
+        'execute',
+      );
       let proceed!: () => void,
         ready!: () => void,
         holding = false;
@@ -162,14 +197,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           url: `/api/v1/competitor/variant-groups/${encodeURIComponent(
             groupId,
           )}`,
-          headers,
+          headers: requestHeaders,
           payload: { ...payload, name: 'Unexpected second edit' },
         });
-        expect(changed.statusCode).toBe(409);
+        expect(changed.statusCode).toBe(expectedStatus);
         expect(changed.json()).toMatchObject({
           success: false,
-          errorCode: 409,
+          errorCode: expectedStatus,
         });
+        expect(catalogAdmission).toHaveBeenCalledTimes(separateSession ? 1 : 0);
+        if (!separateSession)
+          expect(changed.json().errorMessage).toBe('鉴权服务暂时不可用');
         for (const secret of [
           identity.operationId,
           'catalog_operation_slots',
@@ -206,7 +244,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           url: `/api/v1/competitor/variant-groups/${encodeURIComponent(
             groupId,
           )}`,
-          headers,
+          headers: requestHeaders,
           payload: { ...payload, name: 'Verified next edit' },
         });
         expect(next.statusCode).toBe(200);
@@ -229,6 +267,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         } finally {
           heldRepository.close();
           secondAction.mockRestore();
+          catalogAdmission.mockRestore();
         }
       }
     });
