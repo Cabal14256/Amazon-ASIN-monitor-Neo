@@ -6,7 +6,10 @@ import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, createPgPool } from '../src/client';
 import { parseMonitorAnalyticsQuery } from '../src/domain/monitor-analytics-query';
-import type { MonitorSourceGranularity } from '../src/domain/monitor-calendar';
+import {
+  getMonitorDurationSourceGranularity,
+  type MonitorSourceGranularity,
+} from '../src/domain/monitor-calendar';
 import { normalizeSqlDurationMetricRow } from '../src/domain/monitor-duration';
 import {
   monitorAggregateCoverageSelect,
@@ -81,8 +84,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     async function refreshAll(from = startTime) {
       for (const item of timescaleAggregateEvidenceManifest)
         await pool.query(
-          'CALL public.refresh_continuous_aggregate($1::regclass,$2::timestamp,$3::timestamp,force=>true)',
-          [`public.${item.caggRelation}`, from, '1997-11-01 00:00:00'],
+          'CALL public.refresh_continuous_aggregate($1::regclass,$2::timestamp,$3::timestamp,force=>true,options=>$4::jsonb)',
+          [
+            `public.${item.caggRelation}`,
+            from,
+            '1997-11-01 00:00:00',
+            // A batched refresh may skip empty September chunks and retain
+            // their initial invalidation. Refresh the whole fixture window.
+            JSON.stringify({ buckets_per_batch: 0 }),
+          ],
         );
     }
     async function clean() {
@@ -1041,8 +1051,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           query: Parameters<typeof readMonitorDurationQuery>[1],
           onAggregateFallback: Parameters<
             typeof readMonitorDurationQuery
-          >[3]['onAggregateFallback'] = () => {
-            throw new Error('Unexpected precision fixture fallback');
+          >[3]['onAggregateFallback'] = (reason) => {
+            const source = getMonitorDurationSourceGranularity(
+              query.timeSlotGranularity || 'day',
+              query.startTime,
+              query.endTime,
+            );
+            throw new Error(
+              `Unexpected precision fixture fallback: ${reason}; ${query.operation}/${query.timeSlotGranularity}; source=${source}; ${query.startTime}..${query.endTime}`,
+            );
           },
         ) => {
           const client = await pool.connect();
@@ -1189,6 +1206,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         // More than 31 days selects the actual native daily source, while
         // hour/month targets still retain their separate source semantics.
         await refreshAll('1997-09-01 00:00:00');
+        for (const granularity of granularities) {
+          const query = parseMonitorAnalyticsQuery('all-countries-summary', {
+            startTime: '1997-09-01 00:00:00',
+            endTime,
+            timeSlotGranularity: granularity,
+          });
+          const coverage = await createDb(pool).execute(
+            monitorAggregateCoverageSelect(query, 'dim', granularity),
+          );
+          expect(
+            coverage.rows,
+            `refreshed empty September/${granularity}`,
+          ).toEqual([{ covered: true }]);
+        }
         await compareSummaries({ startTime: '1997-09-01 00:00:00', endTime });
         for (const [operation, method] of [
           ['all-countries-summary', 'getAllCountriesSummary'],
@@ -1216,6 +1247,98 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           `\ufeff${rows[0].asin_code.toLowerCase()}\u3000`,
           'B226MILLI',
         ];
+        await legacy.query(
+          "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code IN (?)",
+          [codes],
+        );
+        await pool.query(
+          "DELETE FROM public.monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code=ANY($1::text[])",
+          [codes],
+        );
+        await refreshAll();
+      }
+    }, 30_000);
+
+    it('sums ASIN rates in chronological Map insertion order rather than alphabetical order', async () => {
+      const cases = [
+        ['B226ORDERA', '00', 128, 1],
+        ['B226ORDERC', '01', 128, 2],
+        ['B226ORDERB', '02', 15625, 6],
+      ] as const;
+      const rows = cases.flatMap(([asin_code, hour, count, broken]) =>
+        Array.from({ length: count }, (_, index) => ({
+          asin_code,
+          check_time: `1997-10-29 ${hour}:00:00`,
+          is_broken: index < broken,
+        })),
+      );
+      const codes = cases.map(([code]) => code);
+      try {
+        await legacy.query(
+          'INSERT INTO monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id) VALUES ?',
+          [
+            rows.map((row) => [
+              row.asin_code,
+              'US',
+              Number(row.is_broken),
+              'ASIN',
+              row.check_time,
+              'map-order-site',
+              'map-order-brand',
+              'analytics-109-a',
+            ]),
+          ],
+        );
+        await pool.query(
+          `INSERT INTO public.monitor_history(asin_code,country,is_broken,check_type,check_time,site_snapshot,brand_snapshot,variant_group_id)
+          SELECT asin_code,'US',is_broken,'ASIN',check_time,'map-order-site','map-order-brand','analytics-109-a'
+          FROM jsonb_to_recordset($1::jsonb) AS seed(asin_code text,check_time timestamp,is_broken boolean)`,
+          [JSON.stringify(rows)],
+        );
+        await refreshAll();
+        for (const [operation, method] of [
+          ['all-countries-summary', 'getAllCountriesSummary'],
+          ['region-summary', 'getRegionSummary'],
+        ] as const) {
+          const query = parseMonitorAnalyticsQuery(operation, {
+            startTime: '1997-10-29 00:00:00',
+            endTime: '1997-10-29 03:00:00',
+            timeSlotGranularity: 'hour',
+          });
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            const actual = await readMonitorDurationQuery(
+              createDb(client),
+              query,
+              () => {},
+              {
+                aggregateEnabled: true,
+                onAggregateFallback() {
+                  throw new Error('Unexpected Map order fixture fallback');
+                },
+              },
+            );
+            expect(actual.source).toBe('agg');
+            expect(actual.data).toEqual(await legacy.model[method](query));
+            const metrics = Array.isArray(actual.data)
+              ? actual.data.find((row) => row.regionCode === 'US')
+              : actual.data;
+            // A,C,B = .7940, A,B,C = .7941. Each first time is distinct,
+            // so this regression does not depend on engine tie ordering.
+            expect(metrics).toMatchObject({
+              ratioAllAsin: 0.794,
+              ratio_all_asin: 0.794,
+              totalChecks: 15881,
+              totalAsinsDedup: 3,
+            });
+            await client.query('COMMIT');
+          } finally {
+            await client.query('ROLLBACK');
+            client.release();
+          }
+        }
+      } finally {
         await legacy.query(
           "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code IN (?)",
           [codes],

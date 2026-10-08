@@ -59,7 +59,7 @@ export function monitorRawSummaryBucketHoursSql(
  * Only bounded group rows cross the wire; coverage and source stay one SELECT. */
 export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
   const order = sql`time_slot, country, asin_key, site, brand`;
-  const sum = (value: SQL) => sql`sum(${value} ORDER BY ${order})`;
+  const sum = (value: SQL) => sql`sum(${value} ORDER BY contribution_order)`;
   // JS Map keys use String.trim() and exact string equality AFTER source SQL
   // grouping. Do not let the legacy case-insensitive column collation merge
   // differently cased keys coming from separate countries/dimensions.
@@ -73,7 +73,9 @@ export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
   const abnormal = sql`least(base.bucket_hours, greatest(0::double precision,
     base.bucket_hours * (${fraction})))`;
   return sql`WITH base AS (${base}), contributions AS MATERIALIZED (
-    SELECT base.*, ${asinKey} AS normalized_asin_key, ${abnormal} AS abnormal_hours,
+    SELECT base.*, ${asinKey} AS normalized_asin_key,
+      row_number() OVER (PARTITION BY group_key, group_label ORDER BY ${order}) AS contribution_order,
+      ${abnormal} AS abnormal_hours,
       greatest(0::double precision, base.bucket_hours - (${abnormal})) AS normal_hours
     FROM base WHERE base.bucket_hours>0
   ), global_metrics AS (
@@ -97,13 +99,14 @@ export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
     FROM contributions GROUP BY group_key, group_label
   ), asin_metrics AS (
     SELECT group_key, group_label, normalized_asin_key AS asin_key,
+      min(contribution_order) AS first_contribution_order,
       ${sum(sql`bucket_hours`)} AS total_hours,
       ${sum(sql`abnormal_hours`)} AS abnormal_hours
     FROM contributions WHERE nullif(normalized_asin_key,'') IS NOT NULL
     GROUP BY group_key, group_label, normalized_asin_key
   ), asin_groups AS (
     SELECT group_key, group_label,
-      sum(least(1::double precision,greatest(0::double precision,abnormal_hours/total_hours)) ORDER BY asin_key) AS "sumAsinDurationRate",
+      sum(least(1::double precision,greatest(0::double precision,abnormal_hours/total_hours)) ORDER BY first_contribution_order) AS "sumAsinDurationRate",
       count(*) AS "totalAsinsDedup",
       count(*) FILTER (WHERE abnormal_hours>0) AS "brokenAsinsDedup"
     FROM asin_metrics WHERE total_hours>0 GROUP BY group_key,group_label
