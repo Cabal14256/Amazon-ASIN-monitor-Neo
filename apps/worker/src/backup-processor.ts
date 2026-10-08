@@ -226,14 +226,11 @@ export function commandEnvironment(
   };
   if (sessionUser !== undefined) {
     const confirmed = backupDatabaseRole(sessionUser);
-    // PostgreSQL pg_split_opts uses backslashes, not shell/SQL quoting.
-    // Always pin the confirmed session, including the login user: database
-    // defaults may otherwise replace an explicit source-session override.
-    // Never copy the source URL options or inherited PGOPTIONS into the child.
-    environment.PGOPTIONS = `-c session_authorization=${confirmed.replace(
-      /([\\ \t\n\r\v\f])/g,
-      '\\$1',
-    )}`;
+    // PostgreSQL overrides startup session_authorization with the login user.
+    // CLI options cannot preserve a session changed after authentication.
+    // Refuse that identity instead of silently restoring the broader login.
+    if (confirmed !== environment.PGUSER)
+      throw new BackupCommandError('BACKUP_DATABASE_ROLE_UNCONFIRMED');
   }
   if (sslMode === 'verify-full' && !sslOptions?.ca)
     commandDefaultTrust.add(environment);

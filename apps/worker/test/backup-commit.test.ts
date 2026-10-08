@@ -242,9 +242,12 @@ describe('committed restore recovery when the registry connection fails', () => 
         store,
         {
           env: {
-            DATABASE_URL: 'postgresql://fixture@localhost/source',
-            COMPETITOR_DATABASE_URL:
-              'postgresql://fixture@localhost/competitor',
+            DATABASE_URL: `postgresql://${encodeURIComponent(
+              sessionUser,
+            )}@localhost/source`,
+            COMPETITOR_DATABASE_URL: `postgresql://${encodeURIComponent(
+              sessionUser,
+            )}@localhost/competitor`,
             BACKUP_STORAGE_DIRECTORY: directory,
             DATABASE_POOL_CONNECTION_TIMEOUT_MS: 2000,
             BACKUP_COMMAND_TIMEOUT_MS: 2000,
@@ -333,15 +336,12 @@ describe('committed restore recovery when the registry connection fails', () => 
       expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
         '--role=restricted Backup"Role',
       );
-      if (sessionUser === 'fixture') {
-        expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
-          '-c session_authorization=fixture',
-        );
-      } else {
-        expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
-          '-c session_authorization=Session\\ "Odd"\\\\Role',
-        );
-      }
+      expect(dependencies.spawn.mock.calls[0]?.[2].env.PGUSER).toBe(
+        sessionUser,
+      );
+      expect(
+        dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS,
+      ).toBeUndefined();
       if (timescale) {
         // Timescale uses its existing pre/CLI/post phases; the final local
         // transaction above does not turn the CLI into PostgreSQL's mode.

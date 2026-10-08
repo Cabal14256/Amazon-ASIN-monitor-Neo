@@ -97,7 +97,11 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
+async function fixture(
+  createdAt = new Date().toISOString(),
+  ttl = 604800,
+  databaseUser = 'fixture',
+) {
   const directory = await mkdtemp(join(tmpdir(), 'neo-backup-replay-'));
   directories.push(directory);
   const data: BackupJobData = {
@@ -148,7 +152,7 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
           : text.includes('pg_try_advisory_lock')
           ? [{ acquired: true }]
           : text.includes('current_user AS role')
-          ? [{ role: 'restricted Backup"Role', sessionUser: 'fixture' }]
+          ? [{ role: 'restricted Backup"Role', sessionUser: databaseUser }]
           : text.includes('SELECT EXISTS')
           ? [{ enabled: false }]
           : text.includes('pg_encoding_to_char')
@@ -217,8 +221,12 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
     store,
     {
       env: {
-        DATABASE_URL: 'postgresql://fixture@localhost/source',
-        COMPETITOR_DATABASE_URL: 'postgresql://fixture@localhost/competitor',
+        DATABASE_URL: `postgresql://${encodeURIComponent(
+          databaseUser,
+        )}@localhost/source`,
+        COMPETITOR_DATABASE_URL: `postgresql://${encodeURIComponent(
+          databaseUser,
+        )}@localhost/competitor`,
         BACKUP_STORAGE_DIRECTORY: directory,
         DATABASE_POOL_CONNECTION_TIMEOUT_MS: 2000,
         BACKUP_COMMAND_TIMEOUT_MS: 2000,
@@ -261,7 +269,30 @@ async function fixture(createdAt = new Date().toISOString(), ttl = 604800) {
 }
 
 describe('creation attempts and durable publication', () => {
-  it('rebuilds the confirmed session authorization even when it equals the login user', async () => {
+  it('rejects a changed session user before starting a CLI that authenticates as another login', async () => {
+    const f = await fixture();
+    const original = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (input) => {
+      const text = typeof input === 'string' ? input : input.text;
+      return text.includes('current_user AS role')
+        ? {
+            rows: [
+              {
+                role: 'restricted Backup"Role',
+                sessionUser: 'different-session',
+              },
+            ],
+          }
+        : original(input);
+    });
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+      '备份任务失败，请核实数据库状态和备份文件',
+    );
+    expect(dependencies.spawn).not.toHaveBeenCalled();
+    expect(f.state().result).toBeNull();
+    expect(await readdir(f.directory)).toEqual([]);
+  });
+  it('keeps the confirmed login session while stripping ignored startup authorization options', async () => {
     const f = await fixture();
     vi.stubEnv(
       'PGOPTIONS',
@@ -269,9 +300,7 @@ describe('creation attempts and durable publication', () => {
     );
     await f.processor(f.job, 'lock');
     expect(dependencies.spawn).toHaveBeenCalledOnce();
-    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
-      '-c session_authorization=fixture',
-    );
+    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBeUndefined();
     expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
       '--role=restricted Backup"Role',
     );
@@ -291,9 +320,7 @@ describe('creation attempts and durable publication', () => {
     expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
       '--role=restricted Backup"Role',
     );
-    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
-      '-c session_authorization=fixture',
-    );
+    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBeUndefined();
     expect(f.query).toHaveBeenCalledWith(
       'SELECT current_user AS role, session_user AS "sessionUser"',
     );
@@ -339,10 +366,10 @@ describe('creation attempts and durable publication', () => {
       expect(await readdir(f.directory)).toEqual([]);
     },
   );
-  it('rebuilds only the confirmed session authorization with PostgreSQL option escaping', async () => {
-    const f = await fixture();
+  it('preserves literal login and role identifiers without forwarding startup options', async () => {
     const role = 'Current "Odd"\\Role';
     const sessionUser = 'Session "Odd"\\Role -c role=broader\tline\nend\r\v\f';
+    const f = await fixture(undefined, undefined, sessionUser);
     const original = f.query.getMockImplementation()!;
     f.query.mockImplementation(async (input) => {
       const text = typeof input === 'string' ? input : input.text;
@@ -358,11 +385,8 @@ describe('creation attempts and durable publication', () => {
     expect(dependencies.spawn).toHaveBeenCalledOnce();
     const [, args, options] = dependencies.spawn.mock.calls[0]!;
     expect(args).toContain('--role=Current "Odd"\\Role');
-    expect(options.env.PGOPTIONS).toBe(
-      '-c session_authorization=Session\\ "Odd"\\\\Role\\ -c\\ role=broader\\\tline\\\nend\\\r\\\v\\\f',
-    );
-    expect(options.env.PGOPTIONS).not.toContain('unconfirmed');
-    expect(options.env.PGOPTIONS).not.toContain('search_path');
+    expect(options.env.PGUSER).toBe(sessionUser);
+    expect(options.env.PGOPTIONS).toBeUndefined();
     expect(options.shell).toBe(false);
     expect(f.state().status).toBe('completed');
   });
@@ -377,9 +401,7 @@ describe('creation attempts and durable publication', () => {
     expect(dependencies.spawn.mock.calls[0]?.[1]).toContain(
       '--table-and-children="application"."Orders"',
     );
-    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBe(
-      '-c session_authorization=fixture',
-    );
+    expect(dependencies.spawn.mock.calls[0]?.[2].env.PGOPTIONS).toBeUndefined();
     const filename = (f.state().result as { filename: string }).filename;
     const metadata = JSON.parse(
       await readFile(join(f.directory, `${filename}.meta.json`), 'utf8'),

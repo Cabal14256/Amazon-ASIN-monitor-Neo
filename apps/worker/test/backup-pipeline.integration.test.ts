@@ -477,7 +477,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       'empty-url-options',
       'database-default',
       'session-authorization',
-      'database-session-overridden',
+      'database-session-default-ignored',
     ] as const)(
       'keeps the real effective role for backup and restore commands (%s)',
       async (mode) => {
@@ -559,22 +559,37 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           const source = new URL(scratchUrl);
           let guardedSession: string | undefined;
           if (mode === 'session-authorization') {
+            const escapedRole = role
+              .replaceAll('\\', '\\\\')
+              .replaceAll(' ', '\\ ');
             source.searchParams.set(
               'options',
               '-c session_authorization=' +
-                role.replaceAll('\\', '\\\\').replaceAll(' ', '\\ ') +
+                escapedRole +
+                ' -c role=' +
+                escapedRole +
                 ' -c search_path=public',
             );
             process.env.PGOPTIONS =
               '-c application_name=unconfirmed_session_default';
-            guardedSession = role;
-          } else if (mode === 'database-session-overridden') {
+            // PostgreSQL ignores startup session_authorization, while role
+            // still restricts current_user. Guard the actual login session.
+            guardedSession = loginIdentity.sessionUser;
+          } else if (mode === 'database-session-default-ignored') {
             await adminPool.query(
               `ALTER DATABASE ${quote(
                 scratchName,
               )} SET session_authorization TO ${quote(role)}`,
             );
             databaseSessionSet = true;
+            expect(
+              (
+                await adminPool.query(
+                  'SELECT setconfig FROM pg_db_role_setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname=$1) AND setrole=0',
+                  [scratchName],
+                )
+              ).rows[0].setconfig,
+            ).toContain(`session_authorization=${role}`);
             process.env.PGOPTIONS =
               '-c application_name=ignored_database_session_default';
             const defaultPool = createPgPool(unrestricted.toString(), {
@@ -587,13 +602,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                     'SELECT current_user AS role, session_user AS "sessionUser"',
                   )
                 ).rows[0],
-              ).toEqual({ role, sessionUser: role });
+              ).toEqual({
+                role: loginIdentity.role,
+                sessionUser: loginIdentity.sessionUser,
+              });
             } finally {
               await defaultPool.end();
             }
-            // Explicitly override the database's different session default
-            // back to login. The frozen value equals PGUSER, but still must
-            // be sent to every CLI instead of inheriting that database default.
+            // The stored database setting is dormant in PostgreSQL16.
+            // Neither it nor a startup option changes the authenticated user.
             source.searchParams.set(
               'options',
               '-c session_authorization=' +
@@ -646,17 +663,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ).rows[0];
           const restricted =
             mode !== 'url-overrides-env' &&
-            mode !== 'database-session-overridden';
+            mode !== 'database-session-default-ignored';
           expect(effectiveIdentity.role).toBe(
-            mode === 'database-session-overridden'
+            mode === 'database-session-default-ignored'
               ? loginIdentity.sessionUser
               : restricted
               ? role
               : loginIdentity.role,
           );
-          expect(effectiveIdentity.sessionUser).toBe(
-            mode === 'session-authorization' ? role : loginIdentity.sessionUser,
-          );
+          expect(effectiveIdentity.sessionUser).toBe(loginIdentity.sessionUser);
 
           // A restricted whole-database dump must fail on login-only tables;
           // silently reverting to the broader login role would publish it.
@@ -767,7 +782,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           await applicationPool?.end();
           if (
             mode === 'session-authorization' ||
-            mode === 'database-session-overridden'
+            mode === 'database-session-default-ignored'
           ) {
             await scratchPool.query(
               `DROP EVENT TRIGGER IF EXISTS ${sessionGuard}`,
