@@ -4,7 +4,7 @@ import type { Db } from '../client';
 import {
   batchDeleteSyncResult,
   buildBatchDeleteAnalysis,
-  parseBatchDeleteRequest,
+  parseNeoBatchDeleteRequest,
   type BatchDeleteExecutionUnit,
   type BatchDeleteIds,
 } from '../domain/asin-batch-delete';
@@ -49,17 +49,11 @@ class DrizzleCompetitorBatchDeleteUnit implements BatchDeleteExecutionUnit {
     const query = this.db
       .select({ id: a.id, variantGroupId: a.variantGroupId })
       .from(a)
-      .where(
-        sql`rtrim(${
-          a.id
-        }) COLLATE public.neo_competitor_query_ci = ANY(${sql.param(
-          ids,
-        )}::text[])`,
-      )
+      .where(inArray(a.id, ids))
       .orderBy(sql`${a.id} COLLATE "C"`);
     const rows = await this.query(() => (lock ? query.for('update') : query));
     const exact = new Set(ids);
-    // The actual Legacy service filters its CI SQL result through an exact Map.
+    // Destructive Neo matching uses literal SQL keys and an exact result guard.
     return rows.filter((row) => exact.has(row.id));
   }
   private async groups(ids: string[], lock = false) {
@@ -67,13 +61,7 @@ class DrizzleCompetitorBatchDeleteUnit implements BatchDeleteExecutionUnit {
     const query = this.db
       .select({ id: g.id })
       .from(g)
-      .where(
-        sql`rtrim(${
-          g.id
-        }) COLLATE public.neo_competitor_query_ci = ANY(${sql.param([
-          ...new Set(ids),
-        ])}::text[])`,
-      )
+      .where(inArray(g.id, [...new Set(ids)]))
       .orderBy(sql`${g.id} COLLATE "C"`);
     const rows = await this.query(() => (lock ? query.for('update') : query));
     const exact = new Set(ids);
@@ -93,7 +81,7 @@ class DrizzleCompetitorBatchDeleteUnit implements BatchDeleteExecutionUnit {
     return count;
   }
   async analyze(raw: BatchDeleteIds) {
-    const ids = parseBatchDeleteRequest(raw);
+    const ids = parseNeoBatchDeleteRequest(raw);
     const groups = await this.groups(ids.groupIds),
       rows = await this.asins(ids.asinIds);
     return buildBatchDeleteAnalysis(
@@ -105,7 +93,7 @@ class DrizzleCompetitorBatchDeleteUnit implements BatchDeleteExecutionUnit {
     );
   }
   async execute(raw: BatchDeleteIds) {
-    const ids = parseBatchDeleteRequest(raw);
+    const ids = parseNeoBatchDeleteRequest(raw);
     const candidates = await this.asins(ids.asinIds);
     const locked = new Set(
       await this.groups(
