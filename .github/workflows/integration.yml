@@ -144,6 +144,13 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
+      - name: Apply durable catalog fence upgrade twice after final snapshot migration
+        run: |
+          docker cp packages/db/migrations/0017_catalog_operation_fence.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0017_catalog_operation_fence.sql"
+          docker cp packages/db/docker/apply-catalog-operation-fence.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-catalog-operation-fence.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.sql
+
       - name: Apply authentication maintenance storage upgrade twice after final snapshot migration
         run: |
           docker cp packages/db/migrations/0003_auth_maintenance.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0003_auth_maintenance.sql"
@@ -194,6 +201,9 @@ jobs:
 
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
+
+      - name: Verify durable catalog identity and physical commit fencing
+        run: pnpm --filter @asin-monitor/db exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
 
       - name: Verify scheduled ledgers on both PostgreSQL databases and batch policy against real MySQL
         env:
@@ -391,6 +401,11 @@ jobs:
       - name: Verify literal competitor deletion, real Legacy safety difference and compiled Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-delete.integration.test.ts
 
+      - name: Verify catalog server fencing survives discarded browser receipts
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
+      - name: Verify catalog preparation binding failures with PostgreSQL and a Redis driver seam
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-submission-binding.integration.test.ts --maxWorkers=1 --no-file-parallelism
+
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
 
@@ -448,6 +463,12 @@ jobs:
           docker cp packages/db/migrations/0012_primary_monitor.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0012_primary_monitor.rollback.sql"
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
+
+      - name: Smoke test durable catalog fence rollback twice after consumers stop
+        run: |
+          docker cp packages/db/migrations/0017_catalog_operation_fence.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0017_catalog_operation_fence.rollback.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.rollback.sql
 
       - name: Smoke test competitor monitor storage rollback twice and reapply
         run: |

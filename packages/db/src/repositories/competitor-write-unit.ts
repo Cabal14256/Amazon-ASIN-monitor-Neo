@@ -18,6 +18,7 @@ import {
   competitorVariantGroups as g,
   type CompetitorAsin,
 } from '../schema-competitor';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import { CompetitorBatchCreateUnit } from './competitor-batch-create-unit';
 import { DrizzleCompetitorReadUnit } from './competitor-read-unit';
 
@@ -118,6 +119,7 @@ export class DrizzleCompetitorWriteUnit {
     return result;
   }
   batchCreateAsins(items: unknown[]) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     return new CompetitorBatchCreateUnit(this.db, this.ensureOpen).create(
       items,
     );
@@ -197,6 +199,7 @@ export class DrizzleCompetitorWriteUnit {
     expectedChildIds?: string[],
     expectedSource?: CompetitorGroupSource,
   ) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (expectedChildIds !== undefined) {
       if (!Array.isArray(expectedChildIds) || expectedChildIds.length > 5000)
         throw new CompetitorWriteError('input');
@@ -230,12 +233,14 @@ export class DrizzleCompetitorWriteUnit {
     await this.query(() => this.db.delete(g).where(eq(g.id, group.id)));
   }
   async deleteAsin(id: string, expectedSource?: CompetitorAsinSource) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     const { asin, parent } = await this.lockAsin(id);
     assertAsinSource(asin, expectedSource);
     await this.query(() => this.db.delete(a).where(eq(a.id, asin.id)));
     await this.touchGroups([parent.id]);
   }
   async updateGroupNotify(id: string, enabled: boolean) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (typeof enabled !== 'boolean') throw new CompetitorWriteError('input');
     const group = await this.group(id);
     if (!group) throw new CompetitorWriteError('group-not-found');
@@ -250,6 +255,7 @@ export class DrizzleCompetitorWriteUnit {
     return this.reader.detail(group.id);
   }
   async updateAsinNotify(id: string, enabled: boolean) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (typeof enabled !== 'boolean') throw new CompetitorWriteError('input');
     const { asin } = await this.lockAsin(id);
     await this.query(() =>
@@ -262,6 +268,7 @@ export class DrizzleCompetitorWriteUnit {
     return this.asin(asin.id);
   }
   async createGroup(fields: CompetitorGroupWriteFields) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     groupFields(fields);
     const id = randomUUID();
     await this.query(() =>
@@ -282,6 +289,7 @@ export class DrizzleCompetitorWriteUnit {
     fields: CompetitorGroupWriteFields,
     expectedSource?: CompetitorGroupSource,
   ) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     groupFields(fields);
     const group = await this.group(id);
     if (!group) throw new CompetitorWriteError('group-not-found');
@@ -340,6 +348,7 @@ export class DrizzleCompetitorWriteUnit {
     fields: CompetitorAsinWriteFields & { parentId: string },
     expectedParent?: CompetitorGroupSource,
   ) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     asinFields(fields);
     const parent = await this.group(fields.parentId);
     if (!parent) invalid('所属竞品变体组不存在');
@@ -369,6 +378,7 @@ export class DrizzleCompetitorWriteUnit {
     fields: CompetitorAsinWriteFields,
     expectedSource?: CompetitorAsinSource,
   ) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     asinFields(fields);
     const { asin, parent } = await this.lockAsin(id);
     assertAsinSource(asin, expectedSource);
@@ -390,6 +400,7 @@ export class DrizzleCompetitorWriteUnit {
     expectedSourceGroup?: string,
     expectedTargetSnapshot?: CompetitorMoveTargetSnapshot,
   ): Promise<CompetitorAsin> {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (expectedSourceGroup !== undefined) text(expectedSourceGroup, 50);
     const { asin, target } = await this.lockAsin(id, targetGroupId);
     if (

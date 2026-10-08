@@ -2,6 +2,10 @@ import type { Env } from '@asin-monitor/config';
 import { isTerminalTaskStatus, TaskRegistryError } from '@asin-monitor/db';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { AuthPrincipal } from '../auth/auth.types';
+import {
+  ApplicationCatalogOperations,
+  type CatalogCancellationLease,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { CANCELLABLE_TASK_TYPES } from './task-cancellation-script';
@@ -25,6 +29,8 @@ export class TaskCancellationService {
     @Inject(ENV) private readonly env: Env,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async cancel(principal: AuthPrincipal, raw: unknown) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -33,6 +39,7 @@ export class TaskCancellationService {
     this.active++;
     const deadline = performance.now() + 3000;
     let closed = false;
+    let settlementLease: CatalogCancellationLease | undefined;
     const ensureOpen = () => {
       if (closed || performance.now() >= deadline)
         throw new Error('TASK_CANCEL_DEADLINE');
@@ -40,15 +47,25 @@ export class TaskCancellationService {
     try {
       const id = parseTaskId(raw);
       const port = this.runtime.openCancellation(ensureOpen);
-      const task = await port.store.read(id);
-      if (!task) fail(404, '任务不存在');
+      const stored = await port.store.read(id);
+      if (!stored) fail(404, '任务不存在');
+      const task = { ...stored };
       if (!task.userId || task.userId !== principal.userId)
         fail(403, '无权取消此任务');
-      if (isTerminalTaskStatus(task.status)) fail(400, '任务已结束，无法取消');
+      if (isTerminalTaskStatus(task.status)) {
+        ensureOpen();
+        if (await this.catalog.retryRemovedTask(task, deadline))
+          return serializeTask(task);
+        fail(400, '任务已结束，无法取消');
+      }
       if (!CANCELLABLE_TASK_TYPES.some((type) => type === task.taskType))
         fail(400, '该任务类型不支持取消');
       ensureOpen();
+      settlementLease = this.catalog.acquireCancellation(task);
       const outcome = await port.cancelJob(task);
+      // The queue removal has physically happened even if the logical deadline
+      // or the following metadata CAS loses its ACK. Preserve that proof first.
+      if (outcome === 'removed') settlementLease?.markRemoved();
       if (outcome === 'expired') fail(404, '任务不存在');
       if (outcome === 'foreign') fail(403, '无权取消此任务');
       if (outcome === 'identity-changed') fail(409, '任务已变化，请刷新后重试');
@@ -76,6 +93,8 @@ export class TaskCancellationService {
       if (next.userId !== principal.userId) fail(403, '无权取消此任务');
       if (next.status === 'completed' || next.status === 'failed')
         fail(400, '任务已结束，无法取消');
+      if (outcome === 'removed' && next.status === 'cancelled')
+        await settlementLease?.confirmRemoved(next, deadline);
       this.logger.info('任务取消请求已处理', 'TaskCancellationService', {
         status: next.status,
       });
@@ -93,6 +112,7 @@ export class TaskCancellationService {
       });
       return fail(500, '取消任务失败，请刷新任务状态后重试');
     } finally {
+      settlementLease?.release();
       closed = true;
       this.active--;
     }

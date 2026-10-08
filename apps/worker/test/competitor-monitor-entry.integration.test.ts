@@ -1,6 +1,10 @@
 import { getNeoQueuePrefix, getPhysicalQueueName } from '@asin-monitor/config';
 import type { CompetitorMonitorJob } from '@asin-monitor/contracts';
-import { createPgPool, RedisTaskRepository } from '@asin-monitor/db';
+import {
+  createPgPool,
+  PgCatalogOperationRepository,
+  RedisTaskRepository,
+} from '@asin-monitor/db';
 import {
   parseCatalogVariantResult,
   RedisCatalogCheckStore,
@@ -28,6 +32,7 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import { createCatalogFixtureTask } from './helpers/catalog-operation-fixture';
 
 /** Real compiled entry, private primary/competitor schemas and BullMQ/Redis.
  * Fixed Catalog responses are prewarmed; US/DE deferred tests inject only the
@@ -502,7 +507,7 @@ ${extra}
   async function job(
     country: 'US' | 'DE' = 'US',
   ): Promise<CompetitorMonitorJob> {
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'competitor-monitor',
@@ -569,6 +574,12 @@ ${extra}
       },
     });
     expect((await store.read(data.taskId))?.status).toBe('completed');
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(
+        data.userId,
+        'competitor',
+      ),
+    ).toBeNull();
     expect(await counts(data.taskId)).toEqual({
       runs: 1,
       receipts: 1,

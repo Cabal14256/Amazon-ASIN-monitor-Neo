@@ -18,6 +18,7 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import { shanghaiTimestamp as timestampColumn } from '../timestamps';
+export * from './catalog-operation';
 export {
   monitorIntervalDirty,
   monitorIntervalProjection,

@@ -55,35 +55,43 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await f.pools.primaryPool.query(
         "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code='asin:write' ON CONFLICT DO NOTHING",
       );
-      operatorId = randomUUID();
-      const sessionId = randomUUID();
-      f.userIds.add(operatorId);
+      ({ userId: operatorId, headers } = await writer());
+    });
+    async function writer() {
+      const userId = randomUUID(),
+        sessionId = randomUUID();
+      f.userIds.add(userId);
       await f.pools.primaryPool.query(
         'INSERT INTO users(id,username,password,force_password_change) VALUES($1,$2,$3,false)',
-        [operatorId, `u85-${operatorId}`, 'fixture-unused-hash'],
+        [userId, `u85-${userId}`, 'fixture-unused-hash'],
       );
       await f.pools.primaryPool.query(
         "INSERT INTO user_roles(user_id,role_id) VALUES($1,'writer-71')",
-        [operatorId],
+        [userId],
       );
       await f.pools.primaryPool.query(
         "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
-        [sessionId, operatorId],
+        [sessionId, userId],
       );
-      headers = {
-        authorization: `Bearer ${jwt.sign(
-          { userId: operatorId, sessionId },
-          f.env.JWT_SECRET,
-          { expiresIn: '1h' },
-        )}`,
-        origin: f.env.CORS_ORIGIN,
+      return {
+        userId,
+        headers: {
+          authorization: `Bearer ${jwt.sign(
+            { userId, sessionId },
+            f.env.JWT_SECRET,
+            { expiresIn: '1h' },
+          )}`,
+          origin: f.env.CORS_ORIGIN,
+        },
       };
-    });
+    }
     const write = (
       method: 'POST' | 'PUT',
       path: string,
       payload: Record<string, unknown>,
-    ) => f.http.inject({ method, url: `/api/v1${path}`, headers, payload });
+      auth = headers,
+    ) =>
+      f.http.inject({ method, url: `/api/v1${path}`, headers: auth, payload });
     async function group(id: string, manual = false) {
       await f.pools.primaryPool.query(
         "INSERT INTO variant_groups(id,name,country,site,brand,manual_broken,manual_broken_reason,create_time,update_time) VALUES($1,$1,'US','amazon.com','Fixture',$2,$3,'2020-01-01 08:00:00','2020-01-01 08:00:00')",
@@ -262,18 +270,27 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       });
     });
     it('resolves concurrent case-insensitive duplicates across different parents with one commit and one 409', async () => {
+      const other = await writer();
       await group('g1');
       await group('g2');
       const results = await Promise.all([
         write('POST', '/asins', { ...asinBody, parentId: 'g1' }),
-        write('POST', '/asins', {
-          ...asinBody,
-          asin: asinBody.asin.toLowerCase(),
-          country: 'us',
-          parentId: 'g2',
-        }),
+        write(
+          'POST',
+          '/asins',
+          {
+            ...asinBody,
+            asin: asinBody.asin.toLowerCase(),
+            country: 'us',
+            parentId: 'g2',
+          },
+          other.headers,
+        ),
       ]);
       expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
+      expect(
+        results.find((r) => r.statusCode === 409)!.json().errorMessage,
+      ).toBe('该 ASIN 在此国家中已存在');
       const items = await rows('asins');
       expect(items).toHaveLength(1);
       const touched = (await rows('variant_groups')).filter(
@@ -355,13 +372,14 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       },
     );
     it('completes opposite moves with the same parent lock ordering', async () => {
+      const other = await writer();
       await group('g1');
       await group('g2');
       await asin('a', 'g1');
       await asin('b', 'g2');
       const responses = await Promise.all([
         write('POST', '/asins/a/move', { targetGroupId: 'g2' }),
-        write('POST', '/asins/b/move', { targetGroupId: 'g1' }),
+        write('POST', '/asins/b/move', { targetGroupId: 'g1' }, other.headers),
       ]);
       expect(responses.map((r) => r.statusCode)).toEqual([200, 200]);
       expect(
@@ -372,6 +390,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ]);
     });
     it('returns a parent-changed conflict for a competing move after both observed the old parent', async () => {
+      const other = await writer();
       await group('a-source');
       await group('b-target');
       await group('c-target');
@@ -385,7 +404,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
         const responses = Promise.all([
           write('POST', '/asins/a/move', { targetGroupId: 'b-target' }),
-          write('POST', '/asins/a/move', { targetGroupId: 'c-target' }),
+          write(
+            'POST',
+            '/asins/a/move',
+            { targetGroupId: 'c-target' },
+            other.headers,
+          ),
         ]);
         pending = responses.catch(() => {});
         // One waiter may be queued on the first waiter's tuple lock; count all

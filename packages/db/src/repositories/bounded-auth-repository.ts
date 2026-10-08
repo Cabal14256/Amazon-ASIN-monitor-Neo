@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { createDb, type Db } from '../client';
+import type { CatalogPhysicalOutcome } from '../domain/catalog-operation';
 import {
   AuthRepository,
   type AuthDataRepository,
@@ -18,20 +19,36 @@ export class AuthQueryTimeoutError extends Error {
 export async function withAuthDatabaseDeadline<T>(
   pool: Pool,
   operation: (db: Db, ensureOpen: () => void) => Promise<T>,
+  onPhysicalSettled?: (outcome: CatalogPhysicalOutcome) => Promise<void>,
 ): Promise<T> {
   // 获取连接由应用池的 connectionTimeoutMillis 约束。
-  const client: PoolClient = await pool.connect();
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    // No business callback or SQL was started on this failed acquisition.
+    await onPhysicalSettled?.('rolled-back');
+    throw error;
+  }
   let destroyed = false;
+  let released = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let connectionError!: (error: Error) => void;
   const connectionFailure = new Promise<never>((_resolve, reject) => {
     connectionError = reject;
   });
   client.on('error', connectionError);
+  const release = (discard: boolean) => {
+    if (released) return;
+    released = true;
+    client.removeListener('error', connectionError);
+    if (discard) client.release(true);
+    else client.release();
+  };
   const destroy = () => {
     if (!destroyed) {
       destroyed = true;
-      client.release(true);
+      release(true);
     }
   };
   const ensureOpen = () => {
@@ -41,14 +58,39 @@ export async function withAuthDatabaseDeadline<T>(
     return await Promise.race([
       connectionFailure,
       (async () => {
-        await client.query('BEGIN');
-        ensureOpen();
-        await client.query('SET LOCAL statement_timeout = 1500');
-        ensureOpen();
-        const result = await operation(createDb(client), ensureOpen);
-        ensureOpen();
-        await client.query('COMMIT');
-        return result;
+        let commitStarted = false;
+        let outcome: CatalogPhysicalOutcome = 'uncertain';
+        try {
+          await client.query('BEGIN');
+          ensureOpen();
+          await client.query('SET LOCAL statement_timeout = 1500');
+          ensureOpen();
+          const result = await operation(createDb(client), ensureOpen);
+          ensureOpen();
+          commitStarted = true;
+          await client.query('COMMIT');
+          ensureOpen();
+          outcome = 'committed';
+          return result;
+        } catch (error) {
+          // Destruction / an unacknowledged COMMIT is never a rollback proof.
+          if (onPhysicalSettled && !destroyed && !commitStarted) {
+            try {
+              await client.query('ROLLBACK');
+              ensureOpen();
+              outcome = 'rolled-back';
+            } catch {
+              // Durable execution pin remains uncertain.
+            }
+          }
+          throw error;
+        } finally {
+          // Return the actual SQL connection before pin settlement borrows the
+          // same pool; otherwise a fully occupied pool could deadlock here.
+          release(outcome === 'uncertain');
+          // This belongs to the ACTUAL work promise, never Promise.race/finally.
+          await onPhysicalSettled?.(outcome);
+        }
       })(),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
@@ -64,7 +106,7 @@ export async function withAuthDatabaseDeadline<T>(
   } finally {
     if (timer) clearTimeout(timer);
     client.removeListener('error', connectionError);
-    if (!destroyed) client.release();
+    if (!destroyed) release(false);
   }
 }
 

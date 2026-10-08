@@ -1,6 +1,7 @@
 import { getNeoQueuePrefix, getPhysicalQueueName } from '@asin-monitor/config';
 import type { PrimaryMonitorJob } from '@asin-monitor/contracts';
 import {
+  PgCatalogOperationRepository,
   PgVariantCheckRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
@@ -33,6 +34,7 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import { createCatalogFixtureTask } from './helpers/catalog-operation-fixture';
 
 describe.skipIf(
   process.env.RUN_INTEGRATION_TESTS !== 'true' || process.platform === 'win32',
@@ -246,7 +248,7 @@ describe.skipIf(
       );
     }, 15_000);
     const store = new RedisTaskRepository(f.redis, f.env);
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
@@ -269,6 +271,9 @@ describe.skipIf(
     const result = await queued.waitUntilFinished(events, 20_000);
     expect(result).toMatchObject({ success: true, totalChecked: 2 });
     expect((await store.read(task.taskId))?.status).toBe('completed');
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(task.userId, 'asin'),
+    ).toBeNull();
     const history = await f.pool.query(
       'SELECT country,check_type,monitor_task_id FROM monitor_history ORDER BY id',
     );
@@ -371,7 +376,7 @@ describe.skipIf(
       );
     }, 15_000);
     const store = new RedisTaskRepository(f.redis, f.env);
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',

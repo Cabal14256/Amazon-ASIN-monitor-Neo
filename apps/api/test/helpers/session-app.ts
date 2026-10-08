@@ -12,10 +12,12 @@ import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import { vi } from 'vitest';
 import { AUTH_DATA_REPOSITORY } from '../../src/auth/auth.constants';
 import { AuthModule } from '../../src/auth/auth.module';
+import { ApplicationCatalogOperations } from '../../src/catalog/catalog-operation.service';
 import { ENV } from '../../src/config/config.module';
 import { configureHttpApp } from '../../src/http-app';
 import { AppLogger } from '../../src/logger/app-logger.service';
 import { ApplicationRedisClient } from '../../src/redis/redis.service';
+import { catalogOperationUnitFixture } from './catalog-operation-fixture';
 
 export async function sessionApp(
   repository?: AuthDataRepository & SessionManagementRepositoryPort,
@@ -43,6 +45,8 @@ export async function sessionApp(
     .useValue(env)
     .overrideProvider(AppLogger)
     .useValue(logger)
+    .overrideProvider(ApplicationCatalogOperations)
+    .useValue(catalogOperationUnitFixture())
     .overrideProvider(ApplicationRedisClient)
     .useValue({
       get: vi.fn().mockResolvedValue(null),

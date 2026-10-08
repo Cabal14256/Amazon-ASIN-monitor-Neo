@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import { ApplicationCatalogOperations } from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { mapCompetitorQueryGroups } from './competitor-query-mapper';
@@ -68,6 +69,8 @@ export class CompetitorWriteService implements OnModuleDestroy {
     @Inject(COMPETITOR_WRITE_REPOSITORY)
     private readonly repository: CompetitorWriteRepositoryPort,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   private async write<T>(
     principal: AuthPrincipal,
@@ -87,10 +90,17 @@ export class CompetitorWriteService implements OnModuleDestroy {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有竞品入口');
     try {
-      const result = await this.repository.transaction(async (unit) => {
-        await authorizeAdministration(unit, principal, 'asin:write');
-        return action(unit);
-      });
+      const result = await this.catalog.execute(
+        principal,
+        'competitor',
+        'write',
+        'asin:write',
+        () =>
+          this.repository.transaction(async (unit) => {
+            await authorizeAdministration(unit, principal, 'asin:write');
+            return action(unit);
+          }),
+      );
       this.logger.info('竞品写入完成', 'CompetitorWriteService', { operation });
       return result;
     } catch (error) {

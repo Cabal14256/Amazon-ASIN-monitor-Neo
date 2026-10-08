@@ -4,6 +4,7 @@ import type { Db } from '../src/client';
 import { PgCompetitorTransactions } from '../src/repositories/competitor-transactions';
 import { PgCompetitorWriteRepository } from '../src/repositories/competitor-write-repository';
 import { DrizzleCompetitorWriteUnit } from '../src/repositories/competitor-write-unit';
+import { withFixtureCatalogOperation } from './catalog-operation-fixture';
 
 function database(reads: Record<string, unknown>[][], allowWrites = false) {
   const locks: string[] = [];
@@ -45,7 +46,17 @@ function database(reads: Record<string, unknown>[][], allowWrites = false) {
   } as unknown as Db;
   return {
     db,
-    unit: new DrizzleCompetitorWriteUnit(db, () => undefined),
+    unit: new Proxy(new DrizzleCompetitorWriteUnit(db, () => undefined), {
+      get(target, property) {
+        const method = Reflect.get(target, property);
+        return typeof method === 'function'
+          ? (...args: unknown[]) =>
+              withFixtureCatalogOperation(db, 'competitor', () =>
+                method.apply(target, args),
+              )
+          : method;
+      },
+    }),
     select,
     update,
     remove,
@@ -62,15 +73,18 @@ afterEach(() => vi.restoreAllMocks());
 function repository(f: ReturnType<typeof database>) {
   vi.spyOn(PgCompetitorTransactions.prototype, 'run').mockImplementation(
     async (_readOnly, operation) =>
-      operation({
-        authorization: {
-          lockOperator: async () => undefined,
-          lockSession: async () => undefined,
-          operatorPermissionCodes: async () => [],
-        },
-        database: async () => f.db,
-        ensureOpen: () => undefined,
-      }),
+      withFixtureCatalogOperation(f.db, 'competitor', () =>
+        operation({
+          authorization: {
+            lockOperator: async () => undefined,
+            lockSession: async () => undefined,
+            operatorPermissionCodes: async () => [],
+            competitorMonitorConfiguration: async () => null,
+          },
+          database: async () => f.db,
+          ensureOpen: () => undefined,
+        }),
+      ),
   );
   return new PgCompetitorWriteRepository({} as Pool, {} as Pool);
 }

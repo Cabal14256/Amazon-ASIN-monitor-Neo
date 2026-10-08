@@ -1,6 +1,8 @@
 import {
   createVariantCheckOperation,
+  PgCatalogOperationRepository,
   PgCompetitorCheckRepository,
+  withCatalogOperationExecution,
   type CompetitorCheckUnit,
 } from '@asin-monitor/db';
 import { parseCatalogVariantResult } from '@asin-monitor/sp-api';
@@ -73,7 +75,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         client.release();
       }
     };
-    const authorize = async (unit: CompetitorCheckUnit) => {
+    const authorize = async (
+      unit: Pick<
+        CompetitorCheckUnit,
+        'lockOperator' | 'lockSession' | 'operatorPermissionCodes'
+      >,
+    ) => {
       const user = await unit.lockOperator(userId);
       const session = await unit.lockSession(userId, sessionId);
       const permissions = await unit.operatorPermissionCodes(userId);
@@ -84,6 +91,30 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         !permissions.includes('asin:read')
       )
         throw new Error('Current primary authorization denied');
+    };
+    // These are direct synchronous repository/pipeline fixtures, not Redis
+    // producers. Use a real private-schema reservation for every execution.
+    const fenced = async <T>(action: () => Promise<T>): Promise<T> => {
+      const operations = new PgCatalogOperationRepository(
+        fixture.pools.primaryPool,
+      );
+      const identity = await operations.reserve(
+        { ownerId: userId, domain: 'competitor', kind: 'check' },
+        authorize,
+      );
+      let status: 'completed' | 'failed' = 'failed';
+      try {
+        const result = await withCatalogOperationExecution(
+          operations,
+          identity,
+          action,
+        );
+        status = 'completed';
+        return result;
+      } finally {
+        await operations.close(identity, { source: 'sync', status });
+        expect(await operations.release(identity)).toBe(true);
+      }
     };
     const context = (
       operation?: ReturnType<typeof createVariantCheckOperation>,
@@ -120,8 +151,6 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         repository,
         checker,
         {
-          claim: async () => 'claim-1',
-          write: async () => undefined,
           invalidate: async () => undefined,
           clearDeferred: async () => undefined,
         },
@@ -218,7 +247,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const { checker, service } = pipeline();
       const op = operation('asin');
       try {
-        const first = await service.checkSingle('a1', context(op));
+        const first = await fenced(() =>
+          service.checkSingle('a1', context(op)),
+        );
         expect(first).toMatchObject({ isBroken: false });
         expect(await history()).toMatchObject([
           {
@@ -232,7 +263,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await fixture.pools.competitorPool.query(
           "DELETE FROM competitor_asins WHERE id='a1'",
         );
-        expect(await service.checkSingle('a1', context(op))).toEqual(first);
+        expect(
+          await fenced(() => service.checkSingle('a1', context(op))),
+        ).toEqual(first);
         expect(checker.check).toHaveBeenCalledOnce();
         expect(await history()).toHaveLength(1);
         expect(await receiptCount()).toBe(1);
@@ -255,9 +288,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       checker.check.mockRejectedValueOnce(new Error('private upstream detail'));
       try {
-        const result = await service.checkGroup(
-          'g1',
-          context(operation('group')),
+        const result = await fenced(() =>
+          service.checkGroup('g1', context(operation('group'))),
         );
         expect(result).toMatchObject({
           isBroken: true,
@@ -350,7 +382,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       try {
         await expect(
-          service.checkSingle('a1', context(operation('asin'))),
+          fenced(() => service.checkSingle('a1', context(operation('asin')))),
         ).rejects.toBeInstanceOf(Error);
         expect(await history()).toEqual([]);
         expect(await receiptCount()).toBe(0);
@@ -377,15 +409,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "UPDATE competitor_asins SET variant_group_id='g2' WHERE id='a2'",
       );
       await expect(
-        repository.transaction((unit) =>
-          unit.commitGroup(
-            snapshot,
-            snapshot.asins.map((row) => ({
-              asinId: row.id,
-              kind: 'checked' as const,
-              result: catalog(row.asin),
-            })),
-            guard,
+        fenced(() =>
+          repository.transaction((unit) =>
+            unit.commitGroup(
+              snapshot,
+              snapshot.asins.map((row) => ({
+                asinId: row.id,
+                kind: 'checked' as const,
+                result: catalog(row.asin),
+              })),
+              guard,
+            ),
           ),
         ),
       ).rejects.toMatchObject({ code: 'snapshot-changed' });
@@ -396,7 +430,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const { checker, service } = pipeline();
       try {
         await expect(
-          service.checkSingle('a1', context(operation('asin'))),
+          fenced(() => service.checkSingle('a1', context(operation('asin')))),
         ).rejects.toThrow('Current primary authorization denied');
         expect(checker.check).not.toHaveBeenCalled();
         expect(await history()).toEqual([]);

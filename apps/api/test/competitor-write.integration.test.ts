@@ -5,7 +5,9 @@ import {
 import {
   createPgPool,
   formatShanghaiTimestamp,
+  PgCatalogOperationRepository,
   PgCompetitorWriteRepository,
+  withCatalogOperationExecution,
 } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
@@ -95,8 +97,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await f.pools.competitorPool.query(`DELETE FROM ${table}`);
         await legacy.query(`DELETE FROM ${table}`);
       }
-      userId = randomUUID();
-      sessionId = randomUUID();
+      ({ userId, sessionId, headers } = await writer());
+    });
+    async function writer() {
+      const userId = randomUUID(),
+        sessionId = randomUUID();
       f.userIds.add(userId);
       await f.pools.primaryPool.query(
         'INSERT INTO users(id,username,password,force_password_change) VALUES($1,$1,$2,false)',
@@ -110,23 +115,28 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
         [sessionId, userId],
       );
-      headers = {
-        authorization: `Bearer ${jwt.sign(
-          { userId, sessionId },
-          f.env.JWT_SECRET,
-          { expiresIn: '1h' },
-        )}`,
+      return {
+        userId,
+        sessionId,
+        headers: {
+          authorization: `Bearer ${jwt.sign(
+            { userId, sessionId },
+            f.env.JWT_SECRET,
+            { expiresIn: '1h' },
+          )}`,
+        },
       };
-    });
+    }
     const request = (
       method: 'POST' | 'PUT' | 'DELETE',
       path: string,
       payload: unknown = undefined,
+      auth = headers,
     ) =>
       f.http.inject({
         method,
         url: `/api/v1/competitor/${path}`,
-        headers,
+        headers: auth,
         payload: payload as Record<string, unknown>,
       });
     const read = () =>
@@ -1338,11 +1348,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).rejects.toMatchObject({ code: '23503' });
     });
     it('serializes competing equivalent ASIN creation across different parents with one success', async () => {
+      const other = await writer();
       await group('g1');
       await group('g2');
       const results = await Promise.all([
         request('POST', 'asins', { ...asinBody, asin: 'CAFÉ', parentId: 'g1' }),
-        request('POST', 'asins', { ...asinBody, asin: 'CAFE', parentId: 'g2' }),
+        request(
+          'POST',
+          'asins',
+          { ...asinBody, asin: 'CAFE', parentId: 'g2' },
+          other.headers,
+        ),
       ]);
       expect(
         results.filter((result) => result.statusCode === 200),
@@ -1350,6 +1366,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect([400, 409]).toContain(
         results.find((result) => result.statusCode !== 200)!.statusCode,
       );
+      const conflict = results.find((result) => result.statusCode !== 200)!;
+      if (conflict.statusCode === 409)
+        expect(conflict.json().errorMessage).toBe(
+          '该 ASIN 在此国家中已存在，请刷新后重试',
+        );
+      else
+        expect(conflict.json().errorMessage).toMatch(
+          /^ASIN (CAFÉ|CAFE) 在国家 US 中已存在$/,
+        );
       const current = await snapshot();
       expect(current.asins).toHaveLength(1);
       const winner = current.asins[0].variant_group_id;
@@ -1608,7 +1633,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
       expect((await request('POST', 'asins', asinBody)).statusCode).toBe(200);
     });
-    it('cancels a blocked write before commit and releases both borrowed transactions', async () => {
+    it('cancels a blocked write and releases borrowed transactions while retaining an unconfirmed physical fence', async () => {
       await group('g1');
       const before = await snapshot(),
         blocker = await f.pools.competitorPool.connect();
@@ -1616,15 +1641,25 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         f.pools.primaryPool,
         f.pools.competitorPool,
       );
+      const fences = new PgCatalogOperationRepository(f.pools.primaryPool);
+      // A private direct-repository fixture still needs the same real durable
+      // scope as the HTTP writers. Do not bypass the new mutation guard.
+      const operation = await fences.reserve(
+        { ownerId: userId, domain: 'competitor', kind: 'write' },
+        async () => undefined,
+      );
       try {
         await blocker.query('BEGIN');
         await blocker.query(
           "SELECT id FROM competitor_variant_groups WHERE id='g1' FOR UPDATE",
         );
         const abort = new AbortController();
-        const pending = repository.transaction(
-          (unit) => unit.createAsin({ ...asinBody, asinType: '1', name: null }),
-          abort.signal,
+        const pending = withCatalogOperationExecution(fences, operation, () =>
+          repository.transaction(
+            (unit) =>
+              unit.createAsin({ ...asinBody, asinType: '1', name: null }),
+            abort.signal,
+          ),
         );
         const rejected = expect(pending).rejects.toMatchObject({
           code: 'cancelled',
@@ -1638,7 +1673,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await blocker.query('ROLLBACK');
         blocker.release();
       }
-      expect((await request('POST', 'asins', asinBody)).statusCode).toBe(200);
+      await vi.waitFor(async () => {
+        expect(await fences.read(userId, 'competitor')).toMatchObject({
+          state: 'uncertain',
+          pendingPins: 0,
+          uncertainPins: 1,
+        });
+      });
+      await fences.close(operation, { source: 'sync', status: 'failed' });
+      expect(await fences.release(operation)).toBe(false);
+      expect((await request('POST', 'asins', asinBody)).statusCode).toBe(409);
+      expect(await snapshot()).toEqual(before);
     });
     it('rejects two pool objects connected to the same actual database before business SQL', async () => {
       const other = createPgPool(f.env.DATABASE_URL, {

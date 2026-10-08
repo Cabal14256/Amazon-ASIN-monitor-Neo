@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events';
 import type { Pool, PoolClient } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CatalogOperationIdentity } from '../src/domain/catalog-operation';
+import { withCatalogOperationExecution } from '../src/repositories/catalog-operation-execution';
+import type { PgCatalogOperationRepository } from '../src/repositories/catalog-operation-repository';
 import { PgCompetitorTransactions } from '../src/repositories/competitor-transactions';
 
 describe('paired competitor writes / commit outcome and authorization lifetime', () => {
@@ -50,6 +53,86 @@ describe('paired competitor writes / commit outcome and authorization lifetime',
     expect(p.release).toHaveBeenCalledExactlyOnceWith(false);
     expect(c.release).toHaveBeenCalledExactlyOnceWith(false);
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it('retains its durable pin after an outer timeout until the competitor COMMIT actually settles', async () => {
+    const identity: CatalogOperationIdentity = {
+      ownerId: 'owner',
+      domain: 'competitor',
+      kind: 'import',
+      generation: '1',
+      operationId: '00000000-0000-4000-8000-000000000224',
+    };
+    const pin = { identity, pinId: '00000000-0000-4000-8000-000000000225' };
+    const repository = {
+      beginPin: vi.fn(async () => pin),
+      assertPin: vi.fn(async () => undefined),
+      finishPin: vi.fn(async () => undefined),
+    };
+    let ack!: () => void;
+    const original = c.query.getMockImplementation()!;
+    c.query.mockImplementation(async (text) =>
+      text === 'COMMIT'
+        ? new Promise((resolve) => {
+            ack = () => resolve({ rows: [] });
+          })
+        : original(text),
+    );
+    const work = withCatalogOperationExecution(
+      repository as unknown as PgCatalogOperationRepository,
+      identity,
+      () =>
+        transactions.run(false, async ({ database }) => {
+          await database();
+          return 'done';
+        }),
+    );
+    const rejected = expect(work).rejects.toMatchObject({
+      code: 'commit-uncertain',
+    });
+    await vi.advanceTimersByTimeAsync(4000);
+    await rejected;
+    expect(repository.assertPin).toHaveBeenCalledTimes(1);
+    expect(repository.finishPin).not.toHaveBeenCalled();
+    expect(transactions.getDiagnostics().pendingOperations).toBe(1);
+    ack();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(repository.finishPin).toHaveBeenCalledExactlyOnceWith(
+      pin,
+      'uncertain',
+    );
+    expect(transactions.getDiagnostics().pendingOperations).toBe(0);
+    expect(p.query).not.toHaveBeenCalledWith('COMMIT');
+  });
+  it('settles a fenced pin only after both actual database COMMITs and connection releases', async () => {
+    const identity: CatalogOperationIdentity = {
+      ownerId: 'owner',
+      domain: 'competitor',
+      kind: 'write',
+      generation: '1',
+      operationId: '00000000-0000-4000-8000-000000000224',
+    };
+    const pin = { identity, pinId: '00000000-0000-4000-8000-000000000225' };
+    const repository = {
+      beginPin: vi.fn(async () => pin),
+      assertPin: vi.fn(async () => undefined),
+      finishPin: vi.fn(async (_pin, outcome) => {
+        expect(outcome).toBe('committed');
+        expect(p.query).toHaveBeenCalledWith('COMMIT');
+        expect(c.query).toHaveBeenCalledWith('COMMIT');
+        expect(p.release).toHaveBeenCalledExactlyOnceWith(false);
+        expect(c.release).toHaveBeenCalledExactlyOnceWith(false);
+      }),
+    };
+    await withCatalogOperationExecution(
+      repository as unknown as PgCatalogOperationRepository,
+      identity,
+      () =>
+        transactions.run(false, async ({ database }) => {
+          await database();
+          return 'done';
+        }),
+    );
+    expect(repository.finishPin).toHaveBeenCalledTimes(1);
   });
   it.each(['primary', 'competitor'])(
     'reports %s commit acknowledgement failure as uncertain, without promising rollback',

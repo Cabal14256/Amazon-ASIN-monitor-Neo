@@ -76,6 +76,56 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it('durably binds the exact prepared identity before any task EVAL, using an immutable copy', async () => {
+    const { repository, redis } = fixture();
+    const prepared = vi.fn(
+      async (task: Awaited<ReturnType<typeof repository.create>>) => {
+        expect(redis.eval).not.toHaveBeenCalled();
+        expect(task).toMatchObject({
+          ...checkInput,
+          createdAt: '2026-09-01T00:00:00.000Z',
+        });
+        task.userId = 'tampered-copy';
+        task.createdAt = '2026-10-01T00:00:00.000Z';
+      },
+    );
+    const task = await repository.create(checkInput, prepared);
+    expect(task).toMatchObject({
+      userId: checkInput.userId,
+      createdAt: '2026-09-01T00:00:00.000Z',
+    });
+    expect(await repository.read(task.taskId)).toEqual(task);
+    expect(prepared).toHaveBeenCalledTimes(1);
+    expect(redis.eval).toHaveBeenCalledTimes(1);
+  });
+  it('never issues EVAL when the durable prepared binding fails', async () => {
+    const { repository, redis } = fixture();
+    await expect(
+      repository.create(checkInput, async () => {
+        throw new Error('binding rejected');
+      }),
+    ).rejects.toThrow('binding rejected');
+    expect(redis.eval).not.toHaveBeenCalled();
+  });
+  it('does not invent or repeat a prepared identity after a lost committed EVAL acknowledgement', async () => {
+    const { repository, redis, rows } = fixture();
+    const evalOriginal = redis.eval.getMockImplementation()!;
+    redis.eval.mockImplementationOnce(async (...args) => {
+      await evalOriginal(...args);
+      throw new Error('lost EVAL acknowledgement');
+    });
+    const prepared = vi.fn(async () => undefined);
+    await expect(repository.create(checkInput, prepared)).rejects.toThrow(
+      'lost EVAL acknowledgement',
+    );
+    expect(prepared).toHaveBeenCalledTimes(1);
+    expect(redis.eval).toHaveBeenCalledTimes(1);
+    expect(rows.size).toBe(1);
+    expect(await repository.read(checkInput.taskId)).toMatchObject({
+      ...checkInput,
+      createdAt: '2026-09-01T00:00:00.000Z',
+    });
+  });
   it('preserves an accepted monitor cancellation against a racing final completion', async () => {
     const { repository } = fixture();
     const task = await repository.create({
