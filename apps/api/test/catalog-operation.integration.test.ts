@@ -206,8 +206,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           errorCode: expectedStatus,
         });
         expect(catalogAdmission).toHaveBeenCalledTimes(separateSession ? 1 : 0);
-        if (!separateSession)
-          expect(changed.json().errorMessage).toBe('鉴权服务暂时不可用');
+        if (!separateSession) {
+          // The existing HTTP filter masks every 5xx message. Verify the fixed
+          // public response and the internal auth category separately.
+          expect(changed.json().errorMessage).toBe('服务器内部错误');
+          expect(f.logger.error).toHaveBeenCalledWith(
+            '鉴权流程异常',
+            'AuthenticationService',
+            expect.objectContaining({ reason: 'auth_dependency_error' }),
+          );
+        }
         for (const secret of [
           identity.operationId,
           'catalog_operation_slots',
