@@ -140,17 +140,34 @@ export class DrizzleMonitorHistoryQueryUnit
     offset: number,
   ): Promise<MonitorHistoryReadResult> {
     this.ensureOpen();
+    // Keep keys, size and payload on this statement's MVCC snapshot. Number
+    // after pagination so even a later page starts its bounded walk at one.
+    // The recursive step evaluates one complete result at a time and stops
+    // after the first overflow; a window/SUM would still escape the whole page.
     const response = await this.db.execute(sql`
-      WITH page_keys AS MATERIALIZED (
-        SELECT mh.check_time,mh.id ${from} WHERE ${where}
-        ORDER BY mh.check_time DESC,mh.id DESC LIMIT ${limit} OFFSET ${offset}
-      ), size_bound AS MATERIALIZED (
-        SELECT COALESCE(sum(16384::bigint + 2::bigint * COALESCE(octet_length(to_json(mh.check_result::text)::text),4)),0)::text AS bytes
-        FROM ${monitorHistory} AS mh INNER JOIN page_keys p ON p.id=mh.id AND p.check_time=mh.check_time
+      WITH RECURSIVE page_keys AS MATERIALIZED (
+        SELECT selected.check_time,selected.id,
+          row_number() OVER (ORDER BY selected.check_time DESC,selected.id DESC) AS ordinal
+        FROM (
+          SELECT mh.check_time,mh.id ${from} WHERE ${where}
+          ORDER BY mh.check_time DESC,mh.id DESC LIMIT ${limit} OFFSET ${offset}
+        ) AS selected
+      ), size_bound(ordinal,bytes) AS (
+        SELECT 0::bigint,0::bigint
+        UNION ALL
+        SELECT p.ordinal,previous.bytes + 16384::bigint + 2::bigint *
+          COALESCE(octet_length(to_json(mh.check_result::text)::text),4)
+        FROM size_bound AS previous
+        INNER JOIN page_keys p ON p.ordinal=previous.ordinal+1
+        INNER JOIN ${monitorHistory} AS mh ON p.id=mh.id AND p.check_time=mh.check_time
+        WHERE previous.bytes<=${MAX_MONITOR_HISTORY_RESPONSE_BYTES}
+      ), measured AS MATERIALIZED (
+        SELECT max(bytes) AS bytes FROM size_bound
       )
-      SELECT (SELECT count(*)::text ${from} WHERE ${where}) AS total,
-        size_bound.bytes,
-        CASE WHEN size_bound.bytes::numeric<=${MAX_MONITOR_HISTORY_RESPONSE_BYTES} THEN (
+      SELECT CASE WHEN measured.bytes<=${MAX_MONITOR_HISTORY_RESPONSE_BYTES}
+          THEN (SELECT count(*)::text ${from} WHERE ${where}) ELSE NULL END AS total,
+        measured.bytes::text AS bytes,
+        CASE WHEN measured.bytes<=${MAX_MONITOR_HISTORY_RESPONSE_BYTES} THEN (
           SELECT COALESCE(jsonb_agg(to_jsonb(record) ORDER BY record.check_time DESC,record.sort_id DESC),'[]'::jsonb)
           FROM (
             SELECT mh.id::text AS id,mh.id AS sort_id,mh.variant_group_id,mh.asin_id,mh.check_type,mh.country,
@@ -159,7 +176,7 @@ export class DrizzleMonitorHistoryQueryUnit
               COALESCE(mh.asin_code,a.asin) AS asin,COALESCE(mh.asin_name,a.name) AS asin_name,a.asin_type
             ${from} INNER JOIN page_keys p ON p.id=mh.id AND p.check_time=mh.check_time
           ) AS record
-        ) ELSE NULL END AS records FROM size_bound
+        ) ELSE NULL END AS records FROM measured
     `);
     this.ensureOpen();
     const row = response.rows[0];

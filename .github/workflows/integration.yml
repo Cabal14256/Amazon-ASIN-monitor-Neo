@@ -321,6 +321,9 @@ jobs:
       - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
+      - name: Verify history preflight stops at the first overflowing prefix in one PostgreSQL snapshot
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-history-preflight.integration.test.ts --maxWorkers=1
+
       - name: Compare competitor monitor history with Legacy MySQL and verify dual-database authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-history.integration.test.ts
 
@@ -382,10 +385,10 @@ jobs:
       - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
         run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts
 
-      - name: Run ASIN batch deletion from HTTP through the compiled BullMQ Worker
+      - name: Verify literal ASIN deletion, real Legacy MySQL safety difference and compiled BullMQ Worker
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-delete.integration.test.ts
 
-      - name: Compare competitor batch deletion with Legacy and verify shared compiled Worker dispatch
+      - name: Verify literal competitor deletion, real Legacy safety difference and compiled Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-delete.integration.test.ts
 
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
