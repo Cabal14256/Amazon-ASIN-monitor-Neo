@@ -1,6 +1,13 @@
 import {
+  competitorMonitorJobSchema,
+  primaryMonitorJobSchema,
+} from '@asin-monitor/contracts';
+import {
+  asinBatchDeleteTaskDataSchema,
   CatalogOperationError,
+  competitorBatchDeleteTaskDataSchema,
   parseCatalogTaskBinding,
+  parseCompetitorMonitorCompletion,
   taskMatchesCatalogOperation,
   withCatalogOperationExecution,
   type CatalogOperationIdentity,
@@ -12,6 +19,15 @@ import {
   type RedisTaskRepository,
   type TaskState,
 } from '@asin-monitor/db';
+import {
+  isAsinImportTaskData,
+  isCompetitorImportTaskData,
+} from '@asin-monitor/import';
+import {
+  parseVariantCheckJob,
+  variantCheckJobOperation,
+  variantCheckResultOperation,
+} from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { logger } from './logger';
 
@@ -98,6 +114,7 @@ function binding(job: Job, taskType: CatalogTaskBinding['taskType']) {
   return task;
 }
 function rejected(error: unknown): Error {
+  if (error instanceof UnrecoverableError) return error;
   return error instanceof CatalogOperationError &&
     [
       'CATALOG_OPERATION_MISSING',
@@ -107,6 +124,54 @@ function rejected(error: unknown): Error {
     ].includes(error.code)
     ? new UnrecoverableError('目录操作身份无效，任务已停止')
     : new Error('目录操作状态暂不可用，请核实任务和目录后恢复');
+}
+function completedResult(job: Job, state: TaskState) {
+  // This path only reads an existing, exact task incarnation. It never invokes
+  // a processor or opens a catalog execution, and preserves the consumers'
+  // payload/result validation before returning their terminal metadata.
+  try {
+    switch (state.taskType) {
+      case 'batch-delete':
+        (state.taskSubType === 'competitor-variant-group-delete'
+          ? competitorBatchDeleteTaskDataSchema
+          : asinBatchDeleteTaskDataSchema
+        ).parse(job.data);
+        break;
+      case 'import': {
+        const raw = job.data as { domain?: unknown };
+        if (
+          state.taskSubType === 'competitor-asin'
+            ? !isCompetitorImportTaskData(raw)
+            : raw.domain !== undefined || !isAsinImportTaskData(raw)
+        )
+          throw new Error();
+        break;
+      }
+      case 'variant-check':
+      case 'batch-check': {
+        const data = parseVariantCheckJob(job.data);
+        if (
+          JSON.stringify(variantCheckJobOperation(data)) !==
+          JSON.stringify(variantCheckResultOperation(state, state.result))
+        )
+          throw new Error();
+        break;
+      }
+      case 'monitor':
+        primaryMonitorJobSchema.parse(job.data);
+        break;
+      case 'competitor-monitor':
+        return parseCompetitorMonitorCompletion(
+          competitorMonitorJobSchema.parse(job.data),
+          state.result,
+        );
+      default:
+        throw new Error();
+    }
+    return state.result;
+  } catch {
+    throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
+  }
 }
 function cancelledResult(taskType: CatalogTaskBinding['taskType']) {
   if (taskType === 'monitor' || taskType === 'competitor-monitor')
@@ -122,8 +187,9 @@ function cancelledResult(taskType: CatalogTaskBinding['taskType']) {
   };
 }
 
-/** Mandatory at every catalog consumer registration. No payload flag, missing
- * queue or expiring Redis metadata can manufacture a server reservation. */
+/** Mandatory at every catalog consumer registration. New business execution
+ * requires a server reservation; exact terminal metadata only replays a result,
+ * never starts work or proves that a physical transaction has settled. */
 export function createCatalogFencedProcessor(
   taskType: CatalogTaskBinding['taskType'],
   repository: PgCatalogOperationRepository,
@@ -135,21 +201,35 @@ export function createCatalogFencedProcessor(
     let task: CatalogTaskBinding, identity: CatalogOperationIdentity;
     try {
       task = binding(job, taskType);
-      identity = await repository.findByTask(task);
+      const state = await store.read(task.taskId);
+      if (!sameTask(state, task) || !state)
+        throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
+      // The original worker has already closed/released its PostgreSQL slot.
+      // A lost BullMQ completion ACK must replay metadata, not prepare new work.
+      if (state.status === 'completed') return completedResult(job, state);
+      if (state.status === 'failed')
+        throw new UnrecoverableError('目录任务已失败，请核实已提交结果');
+      try {
+        identity = await repository.findByTask(task);
+      } catch (error) {
+        if (
+          state.status === 'cancelled' &&
+          error instanceof CatalogOperationError &&
+          error.code === 'CATALOG_OPERATION_MISSING'
+        )
+          return cancelledResult(taskType);
+        throw error;
+      }
       const initial = requireSnapshot(
         await repository.read(identity.ownerId, identity.domain),
         identity,
         task,
       );
-      const state = await store.read(task.taskId);
-      if (!sameTask(state, task))
-        throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
-      if (initial.state !== 'open') {
+      if (state.status === 'cancelled') {
         // The cancelling API may have removed the exact queue job and closed
         // its generation. Preserve that first proof; never restart its work.
         if (
           initial.state === 'closed' &&
-          state?.status === 'cancelled' &&
           initial.terminal?.status === 'cancelled' &&
           ['cancel', 'worker'].includes(initial.terminal.source) &&
           sameTask(initial.terminal.task ?? null, task)
@@ -158,8 +238,12 @@ export function createCatalogFencedProcessor(
             await repository.close(identity);
             await repository.release(identity);
           }
-          return cancelledResult(taskType);
         }
+        // Terminal Redis metadata cannot start another processor, settle an
+        // open/uncertain generation, or clear a still-pending physical pin.
+        return cancelledResult(taskType);
+      }
+      if (initial.state !== 'open') {
         throw new CatalogOperationError(
           initial.state === 'uncertain'
             ? 'CATALOG_OPERATION_UNCERTAIN'

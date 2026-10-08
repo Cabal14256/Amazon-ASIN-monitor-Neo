@@ -4,7 +4,10 @@ import {
   type Env,
 } from '@asin-monitor/config';
 import { batchDeleteVariantGroupsResultSchema } from '@asin-monitor/contracts';
-import { RedisTaskRepository } from '@asin-monitor/db';
+import {
+  PgCatalogOperationRepository,
+  RedisTaskRepository,
+} from '@asin-monitor/db';
 import { Queue, type Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
@@ -866,26 +869,58 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await terminal(id!);
       expect(await rows('competitor_asins')).toHaveLength(0);
     });
-    it('replays terminal metadata without deleting a newly recreated matching group', async () => {
-      await group('g1');
-      const id = await accepted({ groupIds: ['g1'] });
-      await start();
-      const original = await terminal(id),
-        job = await queue.getJob(id);
-      await runtime!.close();
-      runtime = undefined;
-      const payload = job!.data;
-      await job!.remove();
-      await f.pools.competitorPool.query(
-        "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES('g1','recreated','US','Fixture')",
-      );
-      await queue.add('competitor-batch-delete', payload, { jobId: id });
-      await start();
-      expect((await terminal(id)).result).toEqual(original.result);
-      expect((await rows('competitor_variant_groups'))[0].name).toBe(
-        'recreated',
-      );
-    });
+    it.each([false, true])(
+      'replays terminal metadata without deleting a newly recreated matching group (replacement reservation=%s)',
+      async (replacement) => {
+        await group('g1');
+        const id = await accepted({ groupIds: ['g1'] });
+        await start();
+        const original = await terminal(id),
+          job = await queue.getJob(id);
+        await runtime!.close();
+        runtime = undefined;
+        const payload = job!.data;
+        await job!.remove();
+        await f.pools.competitorPool.query(
+          "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES('g1','recreated','US','Fixture')",
+        );
+        const operations = new PgCatalogOperationRepository(
+          f.pools.primaryPool,
+        );
+        expect(await operations.read(payload.userId, 'competitor')).toBeNull();
+        const next = replacement
+          ? await operations.reserve(
+              { ownerId: payload.userId, domain: 'competitor', kind: 'write' },
+              async () => undefined,
+            )
+          : undefined;
+        const nextSnapshot = await operations.read(
+          payload.userId,
+          'competitor',
+        );
+        const originalMetadata = await store.read(id);
+        try {
+          await queue.add('competitor-batch-delete', payload, { jobId: id });
+          await start();
+          expect((await terminal(id)).result).toEqual(original.result);
+          expect((await rows('competitor_variant_groups'))[0].name).toBe(
+            'recreated',
+          );
+          expect(await store.read(id)).toEqual(originalMetadata);
+          expect(await operations.read(payload.userId, 'competitor')).toEqual(
+            nextSnapshot,
+          );
+        } finally {
+          if (next) {
+            await operations.close(next, {
+              status: 'completed',
+              source: 'sync',
+            });
+            expect(await operations.release(next)).toBe(true);
+          }
+        }
+      },
+    );
     it('prevents a different authenticated user from querying or cancelling an owned competitor job', async () => {
       await group('g1');
       const id = await accepted({ groupIds: ['g1'] }),
