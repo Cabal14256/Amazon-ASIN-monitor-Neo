@@ -1105,6 +1105,52 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).toBe(0.0005);
 
         await seed([
+          {
+            ...rows[0],
+            asin_code: 'B226MILLI',
+            check_time: '1997-10-01 00:00:00',
+            is_broken: true,
+          },
+        ]);
+        await refreshAll();
+        for (const milliseconds of ['180', '540']) {
+          for (const [operation, method] of [
+            ['all-countries-summary', 'getAllCountriesSummary'],
+            ['region-summary', 'getRegionSummary'],
+          ] as const) {
+            const query = parseMonitorAnalyticsQuery(operation, {
+              startTime,
+              endTime: `1997-10-01 00:00:00.${milliseconds}`,
+              timeSlotGranularity: 'hour',
+            });
+            const actual = await read(query);
+            const expected = await legacy.model[method](query);
+            expect(actual.source, `${operation}/${milliseconds}ms`).toBe('agg');
+            expect(actual.data, `${operation}/${milliseconds}ms`).toEqual(
+              expected,
+            );
+            const metrics = Array.isArray(actual.data)
+              ? actual.data.find((row) => row.regionCode === 'US')
+              : actual.data;
+            expect(metrics).toMatchObject({
+              totalDurationHours: 0.0001,
+              abnormalDurationHours: 0.0001,
+            });
+          }
+        }
+        // Keep the half-round fixture out of later .123-start windows: the
+        // midnight check would correctly invalidate their aggregate coverage.
+        await legacy.query(
+          "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code='B226MILLI'",
+        );
+        await pool.query(
+          "DELETE FROM public.monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code='B226MILLI'",
+        );
+        await refreshAll();
+
+        const paddedAsinCode = `\t${rows[0].asin_code}\u00a0`;
+        const paddedLowerAsinCode = `\ufeff${rows[0].asin_code.toLowerCase()}\u3000`;
+        await seed([
           { ...rows[0], site_snapshot: 'second-site', is_broken: true },
           {
             ...rows[0],
@@ -1118,6 +1164,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             country: 'FR',
             site_snapshot: 'fourth-site',
             is_broken: true,
+          },
+          {
+            ...rows[0],
+            asin_code: paddedAsinCode,
+            country: 'IT',
+            site_snapshot: 'trimmed-site',
+            is_broken: true,
+          },
+          {
+            ...rows[0],
+            asin_code: paddedLowerAsinCode,
+            country: 'ES',
+            site_snapshot: 'trimmed-lower-site',
+            is_broken: false,
           },
         ]);
         await refreshAll();
@@ -1152,6 +1212,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const codes = [
           ...new Set(rows.map((row) => row.asin_code)),
           rows[0].asin_code.toLowerCase(),
+          `\t${rows[0].asin_code}\u00a0`,
+          `\ufeff${rows[0].asin_code.toLowerCase()}\u3000`,
+          'B226MILLI',
         ];
         await legacy.query(
           "DELETE FROM monitor_history WHERE variant_group_id='analytics-109-a' AND asin_code IN (?)",

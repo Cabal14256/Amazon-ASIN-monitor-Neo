@@ -32,8 +32,9 @@ export function monitorAggregateBucketHoursSql(
   )))) / 3600::numeric, 9)`;
 }
 
-/** Raw summaries clip only when BOTH bounds exist, preserve milliseconds and
- * perform binary64 division without the MySQL aggregate DECIMAL truncation. */
+/** Raw summaries clip only when BOTH bounds exist. Legacy subtracts integer
+ * Date milliseconds before binary64 division by 3600000: converting fractional
+ * seconds first changes display rounding at 180/540 ms boundaries. */
 export function monitorRawSummaryBucketHoursSql(
   query: MonitorAnalyticsQuery,
   granularity: MonitorSourceGranularity,
@@ -47,7 +48,7 @@ export function monitorRawSummaryBucketHoursSql(
     query.startTime && query.endTime
       ? sql`least(${end}, ${query.endTime}::timestamp) - greatest(${timeSlot}, ${query.startTime}::timestamp)`
       : sql`${end} - ${timeSlot}`;
-  return sql`greatest(0::double precision, extract(epoch FROM (${duration}))::double precision / 3600::double precision)`;
+  return sql`greatest(0::double precision, (extract(epoch FROM (${duration})) * 1000)::double precision / 3600000::double precision)`;
 }
 
 /** Sufficient statistics for the frozen Legacy raw summary finalizer. Use the
@@ -64,7 +65,7 @@ export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
   // differently cased keys coming from separate countries/dimensions.
   const whitespace =
     '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
-  const asinKey = sql`btrim(asin_key, ${whitespace}) COLLATE "C"`;
+  const asinKey = sql`btrim(base.asin_key, ${whitespace}) COLLATE "C"`;
   const fraction = sql`CASE WHEN base.check_count>0 THEN
     least(1::double precision, greatest(0::double precision,
       base.broken_count::double precision / base.check_count::double precision))
@@ -72,7 +73,7 @@ export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
   const abnormal = sql`least(base.bucket_hours, greatest(0::double precision,
     base.bucket_hours * (${fraction})))`;
   return sql`WITH base AS (${base}), contributions AS MATERIALIZED (
-    SELECT base.*, ${abnormal} AS abnormal_hours,
+    SELECT base.*, ${asinKey} AS normalized_asin_key, ${abnormal} AS abnormal_hours,
       greatest(0::double precision, base.bucket_hours - (${abnormal})) AS normal_hours
     FROM base WHERE base.bucket_hours>0
   ), global_metrics AS (
@@ -95,11 +96,11 @@ export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
       sum(check_count) AS "totalChecks", sum(broken_count) AS "brokenCount"
     FROM contributions GROUP BY group_key, group_label
   ), asin_metrics AS (
-    SELECT group_key, group_label, ${asinKey} AS asin_key,
+    SELECT group_key, group_label, normalized_asin_key AS asin_key,
       ${sum(sql`bucket_hours`)} AS total_hours,
       ${sum(sql`abnormal_hours`)} AS abnormal_hours
-    FROM contributions WHERE nullif(${asinKey},'') IS NOT NULL
-    GROUP BY group_key, group_label, ${asinKey}
+    FROM contributions WHERE nullif(normalized_asin_key,'') IS NOT NULL
+    GROUP BY group_key, group_label, normalized_asin_key
   ), asin_groups AS (
     SELECT group_key, group_label,
       sum(least(1::double precision,greatest(0::double precision,abnormal_hours/total_hours)) ORDER BY asin_key) AS "sumAsinDurationRate",
