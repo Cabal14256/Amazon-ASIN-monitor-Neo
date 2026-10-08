@@ -1,9 +1,11 @@
 import { getPhysicalQueueName, type Env } from '@asin-monitor/config';
+import { variantCheckJobSchema } from '@asin-monitor/contracts';
 import {
   PgPrimaryMonitorRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import type { HttpInput, HttpResponse } from '@asin-monitor/sp-api';
+import { variantCheckJobOperation } from '@asin-monitor/variant-check';
 import type { Queue, Worker } from 'bullmq';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
@@ -406,6 +408,107 @@ suite(
         25_000,
       );
     });
+    it('keeps literal batch targets, duplicate ordinals and original receipt identity through the compiled Worker', async () => {
+      // Frozen Legacy checks iterate their original array; deletion's first-ID
+      // deduplication policy must not change an accepted check job's ordinals.
+      const groupIds = [
+        literalIds[0],
+        literalIds[2],
+        literalIds[3],
+        literalIds[0],
+      ];
+      const seeded = [];
+      for (const [index, groupId] of [...new Set(groupIds)].entries())
+        seeded.push(await seed('primary', groupId, `batch-child-${index}`));
+      await start();
+      const response = await post('/variant-groups/batch-check', {
+        groupIds,
+        forceRefresh: true,
+        useAsync: true,
+      });
+      expect(response.statusCode, response.body.slice(0, 500)).toBe(200);
+      const task = await finish(response.json().data.taskId, 'completed');
+      const queue = runtime!.queues.find(
+        (value) => value.name === getPhysicalQueueName('batch-check'),
+      )!;
+      const queued = (await queue.getJob(task.taskId))!;
+      const data = variantCheckJobSchema.parse(queued.data);
+      expect(data).toMatchObject({
+        taskId: task.taskId,
+        userId,
+        createdAt: task.createdAt,
+        taskType: 'batch-check',
+        taskSubType: 'variant-group',
+        params: { groupIds, forceRefresh: true },
+      });
+      const result = await f.http.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${task.taskId}/download`,
+        headers,
+      });
+      expect(result.statusCode, result.body.slice(0, 500)).toBe(200);
+      expect(result.json()).toMatchObject({
+        total: groupIds.length,
+        successCount: groupIds.length,
+        failedCount: 0,
+      });
+      expect(
+        result
+          .json()
+          .results.map(
+            (item: { groupId: string; groupSnapshot: { id: string } }) => [
+              item.groupId,
+              item.groupSnapshot.id,
+            ],
+          ),
+      ).toEqual(groupIds.map((id) => [id, id]));
+      const receipts = (
+        await f.pools.primaryPool.query(
+          "SELECT *,expires_at AT TIME ZONE 'Asia/Shanghai' AS expires_at_instant FROM variant_check_receipts WHERE task_id=$1 ORDER BY step",
+          [task.taskId],
+        )
+      ).rows;
+      expect(receipts).toHaveLength(groupIds.length + 1);
+      for (const [index, groupId] of groupIds.entries()) {
+        const operation = variantCheckJobOperation(data, index);
+        const receipt = receipts.find((row) => row.step === operation.step)!;
+        expect(receipt).toMatchObject({
+          operation_key: operation.operationKey,
+          request_hash: operation.requestHash,
+          task_id: data.taskId,
+          user_id: data.userId,
+          task_type: data.taskType,
+          task_sub_type: data.taskSubType,
+          result_kind: 'group',
+          result: { groupSnapshot: { id: groupId } },
+        });
+        expect(receipt.task_created_at).toBe(data.createdAt);
+        expect(receipt.expires_at_instant.toISOString()).toBe(data.expiresAt);
+      }
+      expect(receipts[0].operation_key).not.toBe(receipts[3].operation_key);
+      expect(receipts[0].request_hash).toBe(receipts[3].request_hash);
+      for (const [index, item] of seeded.entries()) {
+        expect(
+          transport.request.mock.calls.filter(([input]) =>
+            input.url.pathname.endsWith(`/${item.asin}`),
+          ),
+        ).toHaveLength(index === 0 ? 2 : 1);
+        const row = (
+          await item.pool.query(
+            'SELECT id,is_broken,last_check_time FROM asins WHERE asin=$1',
+            [item.asin],
+          )
+        ).rows[0];
+        expect(row).toMatchObject({
+          id: `batch-child-${index}`,
+          is_broken: false,
+        });
+        expect(row.last_check_time).not.toBeNull();
+      }
+      expect(
+        (await f.pools.primaryPool.query('SELECT * FROM monitor_history')).rows,
+      ).toEqual([]);
+    }, 30_000);
     describe.each(['group', 'asin'] as const)(
       'missing literal competitor %s safety',
       (kind) => {
