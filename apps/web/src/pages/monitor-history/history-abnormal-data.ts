@@ -37,7 +37,7 @@ export function historyAbnormalScope(
   startTime?: string,
   endTime?: string,
 ): AbnormalDurationScope | null {
-  if (!startTime || !endTime || startTime >= endTime) return null;
+  if (!startTime || !endTime || startTime > endTime) return null;
   const codes = filters.asin
     .trim()
     .split(/[,\s]+/)

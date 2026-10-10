@@ -29,7 +29,7 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
-import { ApiError } from '../../lib/http';
+import { ApiError, type HttpClient } from '../../lib/http';
 import {
   abnormalDurationPath,
   type AbnormalDurationScope,
@@ -40,6 +40,7 @@ import {
   createHistoryReadAccess,
   type HistoryReadAccess,
 } from './history-access';
+import { historyAnalyticsAdmission } from './history-analytics-admission';
 import {
   historyError,
   historyHasIntervalWindow,
@@ -544,7 +545,17 @@ function HistoryBrowserSession({
   owner: string;
 }) {
   const { runtime } = useAuth();
+  const analytics = historyAnalyticsAdmission(runtime.http);
   const [readAccess] = useState(createHistoryReadAccess);
+  const readAnalytics = <T,>(
+    signal: AbortSignal,
+    load: (http: Pick<HttpClient, 'request'>) => Promise<T>,
+  ) =>
+    analytics.read(signal, (http) => {
+      const snapshot = readAccess.getSnapshot();
+      if (snapshot.denial && !snapshot.recovering) throw snapshot.denial;
+      return readAccess.read(() => load(http), signal);
+    });
   const access = useSyncExternalStore(
     readAccess.subscribe,
     readAccess.getSnapshot,
@@ -563,6 +574,9 @@ function HistoryBrowserSession({
   const [filterError, setFilterError] = useState<string | null>(null);
   const [abnormalScope, setAbnormalScope] =
     useState<AbnormalDurationScope | null>(null);
+  const [abnormalScopeError, setAbnormalScopeError] = useState<ApiError | null>(
+    null,
+  );
   const previousSearch = useRef(search);
   useEffect(() => {
     if (previousSearch.current === search) return;
@@ -574,6 +588,7 @@ function HistoryBrowserSession({
     setSelectedId(null);
     setFilterError(null);
     setAbnormalScope(null);
+    setAbnormalScopeError(null);
   }, [search]);
   const history = useQuery({
     queryKey: [source.key, 'list', query, owner],
@@ -617,14 +632,8 @@ function HistoryBrowserSession({
   const statistics = useQuery({
     queryKey: [source.key, 'statistics', statisticQueries.statistics, owner],
     queryFn: ({ signal }) =>
-      readAccess.read(
-        () =>
-          source.getStatistics!(
-            runtime.http,
-            statisticQueries.statistics,
-            signal,
-          ),
-        signal,
+      readAnalytics(signal, (http) =>
+        source.getStatistics!(http, statisticQueries.statistics, signal),
       ),
     enabled: Boolean(source.getStatistics) && !access.denial,
     staleTime: 0,
@@ -633,14 +642,8 @@ function HistoryBrowserSession({
   const peakHours = useQuery({
     queryKey: [source.key, 'peak-hours', statisticQueries.peakHours, owner],
     queryFn: ({ signal }) =>
-      readAccess.read(
-        () =>
-          source.getPeakHours!(
-            runtime.http,
-            statisticQueries.peakHours!,
-            signal,
-          ),
-        signal,
+      readAnalytics(signal, (http) =>
+        source.getPeakHours!(http, statisticQueries.peakHours!, signal),
       ),
     enabled:
       Boolean(source.getPeakHours && statisticQueries.peakHours) &&
@@ -651,11 +654,13 @@ function HistoryBrowserSession({
   const abnormal = useQuery({
     queryKey: [source.key, 'abnormal-duration', abnormalScope, owner],
     queryFn: ({ signal }) =>
-      readAccess.read(
-        () => source.getAbnormal!(runtime.http, abnormalScope!, signal),
-        signal,
+      readAnalytics(signal, (http) =>
+        source.getAbnormal!(http, abnormalScope!, signal),
       ),
-    enabled: Boolean(source.getAbnormal && abnormalScope) && !access.denial,
+    enabled:
+      Boolean(source.getAbnormal && abnormalScope) &&
+      !abnormalScopeError &&
+      !access.denial,
     staleTime: 0,
     gcTime: 0,
   });
@@ -708,8 +713,6 @@ function HistoryBrowserSession({
       : null;
     try {
       runtime.http.url(source.path, nextQuery);
-      if (nextAbnormalScope)
-        runtime.http.url(abnormalDurationPath(nextAbnormalScope));
     } catch {
       setFilterError(
         '筛选条件无法组成有效请求地址，请减少 ASIN 或其他筛选项。',
@@ -717,10 +720,22 @@ function HistoryBrowserSession({
       return;
     }
     setFilterError(null);
+    let nextAbnormalError: ApiError | null = null;
+    if (nextAbnormalScope) {
+      try {
+        runtime.http.url(abnormalDurationPath(nextAbnormalScope));
+      } catch {
+        nextAbnormalError = new ApiError(
+          'INVALID_INPUT',
+          '异常时长统计请求地址过长或无效，请减少 ASIN 或其他筛选项后查询。',
+        );
+      }
+    }
     setSelectedId(null);
     setQuery(nextQuery);
     setIntervalPage(1);
     setAbnormalScope(nextAbnormalScope);
+    setAbnormalScopeError(nextAbnormalError);
   }
   function changePage(next: number) {
     setSelectedId(null);
@@ -792,7 +807,7 @@ function HistoryBrowserSession({
                   if (!result.isSuccess) throw result.error;
                   return result.data;
                 });
-              if (source.getAbnormal && abnormalScope)
+              if (source.getAbnormal && abnormalScope && !abnormalScopeError)
                 readers.push(async () => {
                   const result = await abnormal.refetch({ throwOnError: true });
                   if (!result.isSuccess) throw result.error;
@@ -834,7 +849,7 @@ function HistoryBrowserSession({
                 if (source.getStatistics) void statistics.refetch();
                 if (source.getPeakHours && statisticQueries.peakHours)
                   void peakHours.refetch();
-                if (source.getAbnormal && abnormalScope)
+                if (source.getAbnormal && abnormalScope && !abnormalScopeError)
                   void abnormal.refetch();
               }}
             >
@@ -961,6 +976,7 @@ function HistoryBrowserSession({
                     setSelectedId(null);
                     setFilterError(null);
                     setAbnormalScope(null);
+                    setAbnormalScopeError(null);
                   }}
                 >
                   清空筛选
@@ -986,10 +1002,24 @@ function HistoryBrowserSession({
           <HistoryAbnormal
             key={JSON.stringify(abnormalScope)}
             scope={abnormalScope}
-            query={abnormal}
-            retry={() => {
-              void abnormal.refetch();
-            }}
+            query={
+              abnormalScopeError
+                ? {
+                    data: undefined,
+                    isPending: false,
+                    isFetching: false,
+                    isError: true,
+                    error: abnormalScopeError,
+                  }
+                : abnormal
+            }
+            retry={
+              abnormalScopeError
+                ? undefined
+                : () => {
+                    void abnormal.refetch();
+                  }
+            }
           />
         )}
         <Card>

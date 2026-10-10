@@ -348,6 +348,59 @@ describe('fetch and download transport boundary', () => {
       kind: 'CLOSED',
     });
   });
+  it.each(['cancel', 'timeout'] as const)(
+    'retains opt-in settlement ownership after %s until a non-cooperating fetch finishes',
+    async (kind) => {
+      vi.useFakeTimers();
+      const f = setup();
+      const response = deferred<Response>();
+      const bodyCancelled = deferred<void>();
+      const cancelBody = vi.fn(() => bodyCancelled.promise);
+      const controller = new AbortController();
+      f.fetcher.mockReturnValueOnce(response.promise);
+      let settled = false;
+      const outcome = f.client
+        .request('/v1/example', {
+          signal: controller.signal,
+          timeoutMs: 10,
+          waitForSettlement: true,
+        })
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      if (kind === 'cancel') controller.abort();
+      else await vi.advanceTimersByTimeAsync(10);
+      await Promise.resolve();
+      expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(settled).toBe(false);
+      response.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(stream) {
+              stream.enqueue(
+                new TextEncoder().encode(
+                  '{"success":true,"data":"late-private"}',
+                ),
+              );
+            },
+            cancel: cancelBody,
+          }),
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cancelBody).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      bodyCancelled.resolve();
+      expect(await outcome).toMatchObject({
+        kind: kind === 'cancel' ? 'CANCELLED' : 'TIMEOUT',
+      });
+      expect(settled).toBe(true);
+      await expect(
+        f.client.request('/v1/example', { waitForSettlement: true }),
+      ).resolves.toMatchObject({ success: true });
+    },
+  );
   it('only retries a Query once for network/deadline/5xx and never business/auth errors', () => {
     for (const kind of ['NETWORK', 'TIMEOUT'] as const)
       expect(shouldRetryQuery(0, new ApiError(kind, 'fixture'))).toBe(true);

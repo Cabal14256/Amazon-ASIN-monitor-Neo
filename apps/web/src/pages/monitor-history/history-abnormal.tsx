@@ -26,7 +26,7 @@ export function HistoryAbnormal({
     isError: boolean;
     error: unknown;
   };
-  retry: () => void;
+  retry?: () => void;
 }) {
   const [page, setPage] = useState(1);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -96,10 +96,12 @@ export function HistoryAbnormal({
         {query.isError ? (
           <div role="alert" className="space-y-3 text-sm text-status-danger">
             <p>{historyError(query.error, '异常时长统计')}</p>
-            <Button variant="secondary" size="small" onClick={retry}>
-              <RefreshCw aria-hidden="true" />
-              重试异常时长统计
-            </Button>
+            {retry && (
+              <Button variant="secondary" size="small" onClick={retry}>
+                <RefreshCw aria-hidden="true" />
+                重试异常时长统计
+              </Button>
+            )}
           </div>
         ) : query.isPending ? (
           <Skeleton aria-label="正在加载异常时长统计" className="h-24" />

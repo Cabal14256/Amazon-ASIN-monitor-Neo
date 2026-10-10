@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import type { CurrentUserData } from '@asin-monitor/contracts';
-import { QueryClientProvider } from '@tanstack/react-query';
+import { focusManager, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router';
 import {
   act,
@@ -108,6 +108,34 @@ const failure = (status: number) =>
     { success: false, errorCode: status, errorMessage: 'fixture refusal' },
     status,
   );
+const statisticsResponse = () =>
+  ok({
+    totalChecks: 1234,
+    brokenCount: '234',
+    normalCount: '1000',
+    groupCount: 3,
+    asinCount: 7,
+    totalDurationHours: 40,
+    abnormalDurationHours: 8,
+    normalDurationHours: 32,
+    ratioAllAsin: 21.5,
+    ratioAllTime: 20,
+  });
+const peakResponse = () =>
+  ok({
+    peakBroken: 2,
+    peakTotal: 8,
+    peakRate: 25,
+    offPeakBroken: 1,
+    offPeakTotal: 8,
+    offPeakRate: 12.5,
+    peakDurationHours: 4,
+    peakAbnormalDurationHours: 1,
+    peakDurationRate: 25,
+    offPeakDurationHours: 4,
+    offPeakAbnormalDurationHours: 0.5,
+    offPeakDurationRate: 12.5,
+  });
 interface RequestRead {
   url: URL;
   signal?: AbortSignal | null;
@@ -153,33 +181,9 @@ async function fixture(
           pageSize: Number(request.url.searchParams.get('pageSize') ?? 10),
         });
       case STATS:
-        return ok({
-          totalChecks: 1234,
-          brokenCount: '234',
-          normalCount: '1000',
-          groupCount: 3,
-          asinCount: 7,
-          totalDurationHours: 40,
-          abnormalDurationHours: 8,
-          normalDurationHours: 32,
-          ratioAllAsin: 21.5,
-          ratioAllTime: 20,
-        });
+        return statisticsResponse();
       case PEAK:
-        return ok({
-          peakBroken: 2,
-          peakTotal: 8,
-          peakRate: 25,
-          offPeakBroken: 1,
-          offPeakTotal: 8,
-          offPeakRate: 12.5,
-          peakDurationHours: 4,
-          peakAbnormalDurationHours: 1,
-          peakDurationRate: 25,
-          offPeakDurationHours: 4,
-          offPeakAbnormalDurationHours: 0.5,
-          offPeakDurationRate: 12.5,
-        });
+        return peakResponse();
       case INTERVALS:
         return ok({
           coverage: 'complete',
@@ -288,6 +292,42 @@ function csvCapture() {
     });
   return { blobs, links, createURL, revokeURL, click };
 }
+
+function holdAnalytics(f: Awaited<ReturnType<typeof fixture>>) {
+  let active = 0;
+  let maximum = 0;
+  let refusals = 0;
+  const pending: {
+    request: RequestRead;
+    release: (value?: Response) => void;
+  }[] = [];
+  for (const path of [STATS, PEAK, ABNORMAL])
+    f.handlers.set(path, (request) => {
+      if (active >= 2) {
+        refusals++;
+        return failure(429);
+      }
+      active++;
+      maximum = Math.max(maximum, active);
+      const response = deferred<Response>();
+      pending.push({
+        request,
+        release: (value) =>
+          response.resolve(
+            value ??
+              (path === STATS
+                ? statisticsResponse()
+                : path === PEAK
+                ? peakResponse()
+                : ok(result())),
+          ),
+      });
+      // Deliberately ignore abort: admission remains held until actual work
+      // completes, matching HttpClient's existing non-cooperating fetch guard.
+      return response.promise.finally(() => active--);
+    });
+  return { pending, maximum: () => maximum, refusals: () => refusals };
+}
 async function blobBytes(blob: Blob): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -305,6 +345,214 @@ const exportCsv = () =>
   fireEvent.click(screen.getByRole('button', { name: '导出 CSV' }));
 
 describe('Issue 241 mounted history abnormal summary and local CSV', () => {
+  it('review: retains summary and CSV for an accepted equal timestamp range', async () => {
+    const f = await fixture();
+    await historyReady();
+    applyScope({ '结束时间（上海）': '2026-09-01T00:00' });
+    await summaryReady();
+    expect(f.reads(BASE).at(-1)!.url.searchParams.get('endTime')).toBe(START);
+    expect(f.reads(ABNORMAL).at(-1)!.url.searchParams.get('endTime')).toBe(
+      START,
+    );
+    const csv = csvCapture();
+    exportCsv();
+    expect(csv.blobs).toHaveLength(1);
+  });
+
+  it.each([700, 1000])(
+    'review: applies %i supported list ASINs independently of the summary URL budget',
+    async (count) => {
+      const f = await fixture();
+      await historyReady();
+      applyScope();
+      await summaryReady();
+      const codes = Array.from(
+        { length: count },
+        (_, index) => `B${String(index).padStart(9, '0')}`,
+      ).join(',');
+      applyScope({ 'ASIN（支持多值）': codes });
+      await waitFor(() =>
+        expect(f.reads(BASE).at(-1)!.url.searchParams.get('asin')).toBe(codes),
+      );
+      const region = screen.getByRole('region', { name: '异常时长统计' });
+      expect(within(region).getByRole('alert').textContent).toMatch(
+        /请求地址|减少/,
+      );
+      expect(f.reads(ABNORMAL)).toHaveLength(1);
+      expect(screen.queryByRole('button', { name: '导出 CSV' })).toBeNull();
+      expect(screen.queryByText('SUMMARY-00000')).toBeNull();
+      const csv = csvCapture();
+      expect(csv.createURL).not.toHaveBeenCalled();
+      applyScope({ 'ASIN（支持多值）': 'B000000001' });
+      await summaryReady();
+      expect(f.reads(ABNORMAL)).toHaveLength(2);
+    },
+  );
+
+  it('review: stays within two actual analytics reads on apply and refresh', async () => {
+    const f = await fixture();
+    await historyReady();
+    const admission = holdAnalytics(f);
+    applyScope({ 国家代码: 'US' });
+    await waitFor(() => expect(admission.pending).toHaveLength(2));
+    expect(f.reads(ABNORMAL)).toHaveLength(0);
+    await act(async () => admission.pending[0].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(3));
+    await act(async () => {
+      admission.pending[1].release();
+      admission.pending[2].release();
+    });
+    await summaryReady();
+    const first = f.requests.length;
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    await waitFor(() => expect(admission.pending).toHaveLength(5));
+    expect(
+      f.requests.slice(first).filter((r) => r.url.pathname === ABNORMAL),
+    ).toHaveLength(0);
+    await act(async () => admission.pending[3].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(6));
+    await act(async () => {
+      admission.pending[4].release();
+      admission.pending[5].release();
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: '刷新' }).hasAttribute('disabled'),
+      ).toBe(false),
+    );
+    expect(admission.maximum()).toBe(2);
+    expect(admission.refusals()).toBe(0);
+  });
+
+  it('review: cancels queued scope work and retains occupied slots until delayed aborted fetches settle', async () => {
+    const f = await fixture();
+    await historyReady();
+    const admission = holdAnalytics(f);
+    applyScope({ 国家代码: 'US' });
+    await waitFor(() => expect(admission.pending).toHaveLength(2));
+    const old = admission.pending.map(({ request }) => request);
+    applyScope({ 国家代码: 'DE' });
+    await act(async () => undefined);
+    expect(old.every((request) => request.signal?.aborted)).toBe(true);
+    expect(admission.pending).toHaveLength(2);
+    expect(f.reads(ABNORMAL)).toHaveLength(0);
+    await act(async () => admission.pending[0].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(3));
+    expect(admission.pending[2].request.url.searchParams.get('country')).toBe(
+      'DE',
+    );
+    await act(async () => admission.pending[1].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(4));
+    await act(async () => admission.pending[2].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(5));
+    await act(async () => {
+      admission.pending[3].release();
+      admission.pending[4].release();
+    });
+    await summaryReady();
+    expect(f.reads(ABNORMAL)).toHaveLength(1);
+    expect(f.reads(ABNORMAL)[0].url.searchParams.get('country')).toBe('DE');
+    expect(admission.refusals()).toBe(0);
+  });
+
+  it('review: cancels queued abnormal reads after a 403 and limits concurrent recovery reads', async () => {
+    const f = await fixture();
+    await historyReady();
+    const admission = holdAnalytics(f);
+    applyScope({ 国家代码: 'US' });
+    await waitFor(() => expect(admission.pending).toHaveLength(2));
+    await act(async () => admission.pending[0].release(failure(403)));
+    await screen.findByRole('heading', { name: '读取权限需要重新确认' });
+    expect(f.reads(ABNORMAL)).toHaveLength(0);
+    expect(admission.pending[1].request.signal?.aborted).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '重新验证并读取' }));
+    await waitFor(() => expect(admission.pending).toHaveLength(3));
+    expect(f.reads(ABNORMAL)).toHaveLength(0);
+    await act(async () => admission.pending[1].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(4));
+    await act(async () => admission.pending[2].release());
+    await waitFor(() => expect(admission.pending).toHaveLength(5));
+    await act(async () => {
+      admission.pending[3].release();
+      admission.pending[4].release();
+    });
+    await summaryReady();
+    await historyReady();
+    expect(admission.refusals()).toBe(0);
+    expect(admission.maximum()).toBe(2);
+  });
+
+  it('review: limits focus refetches through the same analytics queue', async () => {
+    const f = await fixture();
+    await historyReady();
+    applyScope({ 国家代码: 'US' });
+    await summaryReady();
+    const prior = f.reads(ABNORMAL).length;
+    const admission = holdAnalytics(f);
+    try {
+      act(() => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      await waitFor(() => expect(admission.pending).toHaveLength(2));
+      expect(f.reads(ABNORMAL)).toHaveLength(prior);
+      await act(async () => admission.pending[0].release());
+      await waitFor(() => expect(admission.pending).toHaveLength(3));
+      await act(async () => {
+        admission.pending[1].release();
+        admission.pending[2].release();
+      });
+      await waitFor(() => expect(f.reads(ABNORMAL)).toHaveLength(prior + 1));
+      expect(admission.maximum()).toBe(2);
+      expect(admission.refusals()).toBe(0);
+    } finally {
+      focusManager.setFocused(undefined);
+    }
+  });
+
+  it.each(['owner', 'session'] as const)(
+    'review: shares occupied admission across a %s remount without starting stale queued work',
+    async (kind) => {
+      const f = await fixture();
+      await historyReady();
+      const admission = holdAnalytics(f);
+      applyScope({ 国家代码: 'US' });
+      await waitFor(() => expect(admission.pending).toHaveLength(2));
+      const next = user(
+        kind === 'session'
+          ? { sessionId: 'session-b' }
+          : { user: { ...user().user, id: 'reader-b' } },
+      );
+      f.setUser(next);
+      await act(async () => {
+        await f.identity.refresh();
+      });
+      expect(
+        admission.pending.every(({ request }) => request.signal?.aborted),
+      ).toBe(true);
+      expect(admission.pending).toHaveLength(2);
+      expect(f.reads(ABNORMAL)).toHaveLength(0);
+      expect(screen.queryByRole('button', { name: '导出 CSV' })).toBeNull();
+      await act(async () => admission.pending[0].release());
+      await waitFor(() => expect(admission.pending).toHaveLength(3));
+      expect(admission.pending[2].request.url.pathname).toBe(STATS);
+      expect(admission.pending[2].request.url.searchParams.has('country')).toBe(
+        false,
+      );
+      await act(async () => {
+        admission.pending[1].release();
+        admission.pending[2].release();
+      });
+      await historyReady();
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: '刷新' }).hasAttribute('disabled'),
+        ).toBe(false),
+      );
+      expect(admission.refusals()).toBe(0);
+      expect(f.reads(ABNORMAL)).toHaveLength(0);
+    },
+  );
   it('CONTROL: reads actual current-user and existing history/statistics without a scoped duration request', async () => {
     const f = await fixture();
     await historyReady();
