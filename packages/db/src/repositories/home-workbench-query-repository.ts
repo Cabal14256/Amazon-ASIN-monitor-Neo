@@ -45,7 +45,7 @@ function filters(query: HomeWorkbenchQuery, includeBrand: boolean): SQL {
     and(
       query.country === undefined
         ? undefined
-        : sql`lower(g.country)=lower(${query.country})`,
+        : sql`rtrim(g.country) COLLATE public.neo_import_group_ci=rtrim(${query.country}::text) COLLATE public.neo_import_group_ci`,
       query.site === undefined ? undefined : sql`g.site=${query.site}`,
       includeBrand && query.brand !== undefined
         ? sql`g.brand=${query.brand}`
@@ -118,7 +118,7 @@ export class DrizzleHomeWorkbenchQueryUnit
         count(*)::text AS checks,count(*) FILTER(WHERE m.is_broken=true)::text AS broken_checks,
         count(*) FILTER(WHERE m.is_broken IS NULL)::text AS unknown_checks
       FROM ${monitorHistory} m JOIN selected g ON rtrim(g.id) COLLATE public.neo_import_group_ci=rtrim(m.variant_group_id) COLLATE public.neo_import_group_ci
-        AND lower(m.country)=lower(g.country)
+        AND rtrim(m.country) COLLATE public.neo_import_group_ci=rtrim(g.country) COLLATE public.neo_import_group_ci
       WHERE m.check_time>=${
         days[0]
       }::timestamp AND m.check_time<=${formatShanghaiTimestamp(now)}::timestamp

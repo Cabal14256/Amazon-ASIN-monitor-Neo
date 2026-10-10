@@ -460,6 +460,56 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           );
       }
     });
+    it('matches padded migrated countries without changing returned catalog metadata or admitting leading-space neighbours', async () => {
+      const originals = await fixture().pools.primaryPool.query<{
+        id: string;
+        country: string;
+      }>(
+        "SELECT id::text,country FROM monitor_history WHERE variant_group_id=$1 AND lower(country)='us'",
+        [groups[0].id],
+      );
+      const historyIds = originals.rows.map((row) => row.id);
+      try {
+        await fixture().pools.primaryPool.query(
+          "UPDATE variant_groups SET country='uS  ' WHERE id=$1",
+          [groups[0].id],
+        );
+        await fixture().pools.primaryPool.query(
+          "UPDATE monitor_history SET country='US ' WHERE id=ANY($1::bigint[])",
+          [historyIds],
+        );
+        const padded = expected([groups[0]]);
+        padded.data.list[0].country = 'uS  ';
+        padded.data.facets = [groups[3], groups[1], groups[2], groups[0]].map(
+          (group) => ({
+            country: group.id === groups[0].id ? 'uS  ' : 'US',
+            site,
+            brand: group.brand,
+            totalGroups: 1,
+          }),
+        );
+        expect(await read({ country: 'us', brand: '' })).toEqual(padded);
+        await fixture().pools.primaryPool.query(
+          "UPDATE variant_groups SET country=' US' WHERE id=$1",
+          [groups[0].id],
+        );
+        const leading = expected([]);
+        leading.data.facets = expected().data.facets.filter(
+          (facet) => facet.brand !== '',
+        );
+        expect(await read({ country: 'US', brand: '' })).toEqual(leading);
+      } finally {
+        await fixture().pools.primaryPool.query(
+          "UPDATE variant_groups SET country='US' WHERE id=$1",
+          [groups[0].id],
+        );
+        for (const original of originals.rows)
+          await fixture().pools.primaryPool.query(
+            'UPDATE monitor_history SET country=$2 WHERE id=$1::bigint',
+            [original.id, original.country],
+          );
+      }
+    });
     it('uses current monitor/analytics grants and returns null trends after their withdrawal despite real cached permissions', async () => {
       const cached = await primePermissionCache();
       expect(JSON.parse(cached.raw!)).toContain('monitor:read');

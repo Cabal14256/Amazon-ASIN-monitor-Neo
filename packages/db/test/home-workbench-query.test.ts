@@ -188,4 +188,20 @@ describe('Home workbench genuine daily observations and bounded SQL', () => {
     );
     expect(compiled.sql).toContain('o.variant_group_id=p.id');
   });
+  it('uses Legacy PADSPACE country matching for catalog filters and trend observations', async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [raw()] });
+    const unit = new DrizzleHomeWorkbenchQueryUnit(
+      { execute } as unknown as Db,
+      vi.fn(),
+    );
+    await unit.workbench(parseHomeWorkbenchQuery({ country: 'us' }), now, true);
+    const compiled = new PgDialect().sqlToQuery(execute.mock.calls[0][0]);
+    expect(compiled.sql).toMatch(
+      /rtrim\(g\.country\) COLLATE public\.neo_import_group_ci=rtrim\(\$\d+::text\) COLLATE public\.neo_import_group_ci/,
+    );
+    expect(compiled.sql).toContain(
+      'rtrim(m.country) COLLATE public.neo_import_group_ci=rtrim(g.country) COLLATE public.neo_import_group_ci',
+    );
+    expect(compiled.params).toContain('us');
+  });
 });
