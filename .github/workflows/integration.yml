@@ -346,7 +346,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: monitor-sql-decimal-${{ github.run_id }}
-          path: artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+          path: |
+            artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+            artifacts/refactor-audit/monitor-analytics-226-identity-failure.json
           if-no-files-found: ignore
           retention-days: 14
 

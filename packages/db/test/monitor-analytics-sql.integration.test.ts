@@ -1345,6 +1345,136 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(new Set(mysqlFinalBuckets.map((row) => row.asin_key)).size).toBe(
           2,
         );
+        const writeIdentityFailureEvidence = async (
+          query: Parameters<typeof readMonitorDurationQuery>[1],
+          actual: unknown,
+          expected: unknown,
+        ) => {
+          const codes = [
+            ...new Set(rows.map((row) => row.asin_code)),
+            rows[0].asin_code.toLowerCase(),
+            paddedAsinCode,
+            paddedLowerAsinCode,
+            'B226REGION',
+            'B226CASECA',
+            'b226caseca',
+            'B226IDENTITY',
+            'b226identity',
+          ];
+          const allowedCodes = new Set(codes.map((code) => code.trim()));
+          const sites = new Set([
+            'precision-site',
+            'second-site',
+            'third-site',
+            'fourth-site',
+            'trimmed-site',
+            'trimmed-lower-site',
+            'regional-scope-site',
+            'identity-first-site',
+            'identity-second-site',
+          ]);
+          const diagnosticBuckets = (sourceRows: Record<string, unknown>[]) =>
+            sourceRows
+              .filter(
+                (row) =>
+                  allowedCodes.has(String(row.asin_key).trim()) &&
+                  sites.has(String(row.site)),
+              )
+              .map((row) => ({
+                slot_period: row.slot_period,
+                country: row.country,
+                site: row.site,
+                brand: row.brand,
+                asin_key: row.asin_key,
+                asin_key_utf8_hex: Buffer.from(String(row.asin_key)).toString(
+                  'hex',
+                ),
+                map_key: String(row.asin_key).trim(),
+                map_key_utf8_hex: Buffer.from(
+                  String(row.asin_key).trim(),
+                ).toString('hex'),
+                total_checks: Number(row.total_checks),
+                broken_count: Number(row.broken_count),
+                has_peak: Number(row.has_peak),
+              }));
+          const evidence: Record<string, unknown> = {
+            operation: query.operation,
+            timeSlotGranularity: query.timeSlotGranularity,
+            sourceGranularity: getMonitorDurationSourceGranularity(
+              query.timeSlotGranularity || 'day',
+              query.startTime,
+              query.endTime,
+            ),
+            bounds: { startTime: query.startTime, endTime: query.endTime },
+            actual,
+            expected,
+            initialHourlyRepresentative: {
+              asin_key: representative?.asin_key,
+              asin_key_utf8_hex: Buffer.from(
+                String(representative?.asin_key),
+              ).toString('hex'),
+            },
+          };
+          const capture = async (key: string, read: () => Promise<unknown>) => {
+            try {
+              evidence[key] = await read();
+            } catch {
+              evidence[key] = { captureFailed: true };
+            }
+          };
+          // Read-only evidence runs only after the unchanged exact comparison
+          // fails. The disposable fixture code allowlist excludes other data.
+          for (const sourceGranularity of granularities) {
+            await capture(sourceGranularity, async () => {
+              const mysql = await legacy.diagnoseDurationSourceRows({
+                startTime: query.startTime,
+                endTime: query.endTime,
+                sourceGranularity,
+              });
+              const neo = await createDb(pool).execute(
+                monitorRawDurationSourceSelect(query, 'dim', sourceGranularity),
+              );
+              return {
+                legacy: diagnosticBuckets(mysql.rows),
+                neo: diagnosticBuckets(neo.rows),
+                mysqlExplain: mysql.plan,
+              };
+            });
+          }
+          await capture('legacyRawChecks', () =>
+            legacy.query(
+              `SELECT id,DATE_FORMAT(check_time,'%Y-%m-%d %H:%i:%s') AS check_time,
+                asin_code,HEX(CONVERT(asin_code USING utf8mb4)) AS asin_code_utf8_hex,
+                country,site_snapshot,brand_snapshot,is_broken
+              FROM monitor_history WHERE variant_group_id='analytics-109-a'
+                AND BINARY asin_code IN (?) ORDER BY check_time,id`,
+              [codes],
+            ),
+          );
+          await capture(
+            'neoRawChecks',
+            async () =>
+              (
+                await pool.query(
+                  `SELECT id::text,to_char(check_time,'YYYY-MM-DD HH24:MI:SS') AS check_time,
+                  asin_code,encode(convert_to(asin_code,'UTF8'),'hex') AS asin_code_utf8_hex,
+                  country,site_snapshot,brand_snapshot,is_broken
+                FROM public.monitor_history WHERE variant_group_id='analytics-109-a'
+                  AND asin_code COLLATE "C"=ANY($1::text[]) ORDER BY check_time,id`,
+                  [codes],
+                )
+              ).rows,
+          );
+          const directory = resolve(
+            __dirname,
+            '../../../artifacts/refactor-audit',
+          );
+          await mkdir(directory, { recursive: true });
+          await writeFile(
+            resolve(directory, 'monitor-analytics-226-identity-failure.json'),
+            JSON.stringify(evidence, null, 2),
+          );
+        };
         for (const [timeSlotGranularity, bounds] of [
           ['hour', identityBounds],
           ['day', { startTime: '1997-09-01 00:00:00', endTime }],
@@ -1371,7 +1501,17 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               `${operation}/${timeSlotGranularity}/identity`,
             ).toBe('raw');
             expect(reasons).toEqual(['coverage']);
-            expect(actual.data).toEqual(await legacy.model[method](query));
+            const expected = await legacy.model[method](query);
+            try {
+              expect(actual.data).toEqual(expected);
+            } catch (error) {
+              await writeIdentityFailureEvidence(
+                query,
+                actual.data,
+                expected,
+              ).catch(() => {});
+              throw error;
+            }
             if (timeSlotGranularity === 'hour') {
               const metrics = Array.isArray(actual.data)
                 ? actual.data.find((row) => row.regionCode === 'US')
