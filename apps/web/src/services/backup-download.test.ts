@@ -97,13 +97,19 @@ function unpackFixtureBundle(bytes: Uint8Array) {
     const bodyStart = offset + 512;
     const next = bodyStart + Math.ceil(size / 512) * 512;
     if (
-      !Number.isSafeInteger(size) || size < 0 ||
-      actualChecksum !== expectedChecksum || header[156] !== 48 ||
+      !Number.isSafeInteger(size) ||
+      size < 0 ||
+      actualChecksum !== expectedChecksum ||
+      header[156] !== 48 ||
       text(header.subarray(257, 263)) !== 'ustar' ||
       next > bytes.length ||
       !bytes.subarray(bodyStart + size, next).every((byte) => byte === 0)
-    ) throw new Error('INVALID_FIXTURE_TAR');
-    members.push({ name: text(header.subarray(0, 100)), body: bytes.slice(bodyStart, bodyStart + size) });
+    )
+      throw new Error('INVALID_FIXTURE_TAR');
+    members.push({
+      name: text(header.subarray(0, 100)),
+      body: bytes.slice(bodyStart, bodyStart + size),
+    });
     offset = next;
   }
   if (
@@ -111,11 +117,15 @@ function unpackFixtureBundle(bytes: Uint8Array) {
     members[1].name !== `${members[0].name}.meta.json` ||
     bytes.length - offset !== 1024 ||
     !bytes.subarray(offset).every((byte) => byte === 0)
-  ) throw new Error('INCOMPLETE_FIXTURE_BUNDLE');
+  )
+    throw new Error('INCOMPLETE_FIXTURE_BUNDLE');
   const metadata = JSON.parse(new TextDecoder().decode(members[1].body));
   expect(metadata).toMatchObject({
-    version: 3, filename: members[0].name, target: 'primary',
-    sourceEngine: 'postgresql', scope: 'full',
+    version: 3,
+    filename: members[0].name,
+    target: 'primary',
+    sourceEngine: 'postgresql',
+    scope: 'full',
     archiveSha256: createHash('sha256').update(members[0].body).digest('hex'),
   });
   return { members, metadata };
@@ -130,7 +140,10 @@ function incompleteArchiveFixtures() {
   const truncatedMetadata = archive().slice(0, 2560);
   return [
     { name: 'missing metadata entry', bytes: missingMetadata },
-    { name: 'trailer truncation above the transport byte floor', bytes: truncatedMetadata },
+    {
+      name: 'trailer truncation above the transport byte floor',
+      bytes: truncatedMetadata,
+    },
   ];
 }
 const clients: HttpClient[] = [];
@@ -209,10 +222,14 @@ describe('bounded backup streaming save', () => {
     expect(result).toBe(expected.length);
     expect(f.sink.write).toHaveBeenCalledOnce();
     expect(f.sink.close).toHaveBeenCalledOnce();
-    const saved = (f.sink.write as ReturnType<typeof vi.fn>).mock.calls[0][0] as Uint8Array;
+    const saved = (f.sink.write as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Uint8Array;
     expect(saved).toEqual(expected);
     const { members } = unpackFixtureBundle(saved);
-    expect(members.map((member) => member.name)).toEqual([file.filename, `${file.filename}.meta.json`]);
+    expect(members.map((member) => member.name)).toEqual([
+      file.filename,
+      `${file.filename}.meta.json`,
+    ]);
     expect(new TextDecoder().decode(members[0].body)).toBe('PGDMPfixture-221!');
     expect(f.fetcher.mock.calls[0][0]).toBe(
       `https://api.test/gateway/api/v1/backup/${file.filename}/download`,
@@ -290,7 +307,9 @@ describe('bounded backup streaming save', () => {
       save,
     );
     expect(save).toHaveBeenCalledOnce();
-    const saved = new Uint8Array(await (save.mock.calls[0][0] as Blob).arrayBuffer());
+    const saved = new Uint8Array(
+      await (save.mock.calls[0][0] as Blob).arrayBuffer(),
+    );
     expect(saved).toEqual(archive());
     expect(unpackFixtureBundle(saved).members).toHaveLength(2);
     expect(() =>
@@ -301,8 +320,12 @@ describe('bounded backup streaming save', () => {
   it.each(incompleteArchiveFixtures())(
     'distinguishes $name in fixture inspection without extending the transport contract',
     ({ bytes }) => {
-      expect(bytes.length).toBeGreaterThanOrEqual(Math.ceil(file.size / 512) * 512 + 2048);
-      expect(() => validateBackupTarPrefix(bytes.subarray(0, 512), file)).not.toThrow();
+      expect(bytes.length).toBeGreaterThanOrEqual(
+        Math.ceil(file.size / 512) * 512 + 2048,
+      );
+      expect(() =>
+        validateBackupTarPrefix(bytes.subarray(0, 512), file),
+      ).not.toThrow();
       expect(() => unpackFixtureBundle(bytes)).toThrow();
     },
   );
