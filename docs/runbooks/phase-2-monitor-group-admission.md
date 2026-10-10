@@ -55,7 +55,9 @@ Integration job 提供 `RUN_INTEGRATION_TESTS=true`、Redis 7、PostgreSQL 16 / 
 corepack pnpm exec tsc --noEmit --strict --skipLibCheck --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --types node --lib ES2022,DOM apps/worker/src/monitor-group-admission.ts apps/worker/test/monitor-group-admission.test.ts apps/worker/test/competitor-monitor-entry.integration.test.ts
 ```
 
-原生执行在本机没有完成；Windows skip 与 OOM 不能登记为通过。主任务应在单 runner 窗口补最终 strict、相关测试、格式与仓库所需检查，推送后等待最新 CI；完整基线未由本轮只读审查执行，应在 PR `验证` 中逐项列出未执行命令与原因。
+根在单 runner 窗口补跑最终 fixture 的显式 strict（exit 0、无诊断）、config 42/42、pipeline 120 passed / 21 native skipped、Worker 相关 49 passed / 16 native skipped，以及 Worker build；上述结果均通过。日志分别为 `%TEMP%/neo-188-final-{strict,config,pipeline,worker-related,worker-build}.log`。13 个代码/文档文件的 Prettier 与 `git diff --check` 通过；环境示例不适用 Prettier parser。
+
+原生执行在本机没有完成；Windows skip 与早期 OOM 不能登记为原生通过。推送后等待最新 CI；完整基线未由本轮只读审查执行，应在 PR `验证` 中逐项列出未执行命令与原因。
 
 ## 回滚
 
