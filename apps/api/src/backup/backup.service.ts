@@ -205,10 +205,7 @@ export class BackupService implements OnModuleDestroy {
     }
   }
 
-  private async enqueue(
-    principal: AuthPrincipal,
-    data: Omit<BackupJobData, 'taskId' | 'createdAt' | 'userId'>,
-  ) {
+  private assertRetention() {
     try {
       assertBackupTaskRetention(this.env);
     } catch {
@@ -221,6 +218,13 @@ export class BackupService implements OnModuleDestroy {
       );
       fail(503, '备份任务元数据须至少保留七天');
     }
+  }
+
+  private async enqueue(
+    principal: AuthPrincipal,
+    data: Omit<BackupJobData, 'taskId' | 'createdAt' | 'userId'>,
+  ) {
+    this.assertRetention();
     const taskId = randomUUID();
     const deadline = performance.now() + 3000;
     let closed = false;
@@ -606,6 +610,8 @@ export class BackupService implements OnModuleDestroy {
       const input = parsed.data;
       const result = await this.configs.transaction(async (unit) => {
         await authorizeAdministration(unit, principal, 'settings:write');
+        if (input.enabled === true || input.enabled === 1)
+          this.assertRetention();
         return backupConfigView(await unit.upsert(input));
       });
       this.logger.info('备份配置已保存', 'BackupService');

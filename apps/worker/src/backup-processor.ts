@@ -765,6 +765,13 @@ export async function acquireBackupTargetLock(
           return result.rows.length === 1 && result.rows[0]?.owned === true;
         },
         async restrictStagingDatabase(name: string) {
+          // pg_restore authenticates before --role, so a SET-only membership
+          // needs an explicit CONNECT grant for the frozen login identity.
+          await lockedClient.query(
+            `GRANT CONNECT ON DATABASE ${quoteStagingDatabase(
+              name,
+            )} TO "${sessionUser.replaceAll('"', '""')}"`,
+          );
           await lockedClient.query(
             `REVOKE CONNECT ON DATABASE ${quoteStagingDatabase(
               name,

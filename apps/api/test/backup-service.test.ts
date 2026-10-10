@@ -149,6 +149,15 @@ async function fixture(maxBytes = 1024 * 1024) {
     })),
     lockSession: vi.fn(async () => ({ status: 'ACTIVE', expiresAt: null })),
     operatorPermissionCodes: vi.fn(async () => ['settings:write']),
+    upsert: vi.fn(async (input: Record<string, unknown>) => ({
+      id: 1,
+      enabled: input.enabled === true || input.enabled === 1,
+      scheduleType: input.scheduleType ?? 'daily',
+      scheduleValue: input.scheduleValue ?? null,
+      backupTime: input.backupTime ?? '02:00',
+      createTime: null,
+      updateTime: null,
+    })),
   };
   const repository = {
     transaction: vi.fn(async (operation: (value: typeof unit) => unknown) =>
@@ -222,6 +231,82 @@ async function fixture(maxBytes = 1024 * 1024) {
 }
 
 describe('backup submission HTTP / global exception boundary', () => {
+  it.each([
+    { ttl: 1, enabled: true },
+    { ttl: 604799, enabled: true },
+    { ttl: 1, enabled: 1 },
+    { ttl: 604800, enabled: true },
+    { ttl: 604800, enabled: 1 },
+  ])(
+    'enables an automatic backup only with a runnable retention window (%j)',
+    async ({ ttl, enabled }) => {
+      const f = await fixture();
+      f.env.TASK_META_TTL_SECONDS = ttl;
+      const app = await http(f.service);
+      try {
+        const input = {
+          enabled,
+          scheduleType: 'daily',
+          backupTime: '02:00',
+        };
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/backup/config',
+          payload: input,
+        });
+        expect(response.statusCode).toBe(ttl < 604800 ? 503 : 200);
+        if (ttl < 604800) {
+          expect(f.unit.upsert).not.toHaveBeenCalled();
+          expect(f.logger.warn).toHaveBeenCalledWith(
+            '备份任务元数据保留配置不满足执行窗口',
+            'BackupService',
+            { reason: 'backup_task_retention_too_short' },
+          );
+        } else {
+          expect(f.unit.upsert).toHaveBeenCalledOnce();
+          expect(response.json().success).toBe(true);
+        }
+      } finally {
+        await app.close();
+      }
+    },
+  );
+  it('allows disabling an automatic backup under short retention after authorization', async () => {
+    const f = await fixture();
+    f.env.TASK_META_TTL_SECONDS = 1;
+    const app = await http(f.service);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/backup/config',
+        payload: { enabled: false, scheduleType: 'daily', backupTime: '02:00' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(f.unit.upsert).toHaveBeenCalledOnce();
+      expect(f.unit.lockOperator).toHaveBeenCalled();
+      expect(f.logger.warn).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+  it('rechecks permission before exposing schedule retention or writing configuration', async () => {
+    const f = await fixture();
+    f.env.TASK_META_TTL_SECONDS = 1;
+    f.unit.operatorPermissionCodes.mockResolvedValue([]);
+    const app = await http(f.service);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/backup/config',
+        payload: { enabled: true },
+      });
+      expect(response.statusCode).toBe(403);
+      expect(f.unit.upsert).not.toHaveBeenCalled();
+      expect(f.logger.warn).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
   it('freezes the actual application-session schema for an unqualified selective table before enqueue', async () => {
     const f = await fixture();
     f.pools.primaryPool.query.mockImplementation(async (query) => ({

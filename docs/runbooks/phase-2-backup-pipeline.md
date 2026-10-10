@@ -89,6 +89,8 @@ API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变�
 
 ## 自动计划
 
+保存 `enabled: true` 或 `enabled: 1` 前，在当前管理员权限复核后检查 `TASK_META_TTL_SECONDS` 至少为七天。不满足时返回 503，保持数据库配置不变，避免开启没有消费者或调度器的计划。关闭计划仍可执行；直接创建与恢复使用相同保留期检查。
+
 若 Legacy 迁移留下多行 `backup_config`，读取、保存和调度均沿用 Legacy 的最小 ID 行；保存只更新该行，保留后续行供运维核查，不因多行状态中断 API 或自动计划。
 
 `GET/POST /api/v1/backup/config` 保存 daily/weekly/monthly 和上海时间。时间格式化请求 `hourCycle: h23` 并将兼容 ICU 的午夜 `24` 归一化为同一日的 `00`，三种 `00:00` 计划均可触发并保留原五分钟补偿边界。启用 `SCHEDULER_ENABLED=true` 后，Worker 通过 Redis scheduler lease 选出调度器。计划时间与目标库生成稳定任务 ID；如某一目标入队失败，下次轮询会沿用该 ID 补齐任务，避免重复创建已成功的一项。调度配置在每次计划检查时读取，可热更新。
@@ -106,6 +108,8 @@ API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变�
 备份创建审计沿用实际契约默认：省略 target 的成功请求记录 primary，显式 competitor 记录 competitor；无效/null target 以及整个 JSON 为数组/null 的拒绝记录不冒充默认目标。描述、表名和未经校验的文件名不进入审计摘要。
 
 ## 启动、权限与审计回归证据
+
+隔离库先显式授予冻结 `session_user` 的 `CONNECT`，再撤销 `PUBLIC` 连接权限；登录身份拥有非继承、允许 `SET ROLE` 的成员关系时也能完成连接。`pg_restore --role` 在连接后切换角色，不能代替此授权。数据库权限限定在本任务的隔离库，原目标库与其他角色不增加权限。真实 PostgreSQL 回归使用 `WITH INHERIT FALSE, SET TRUE` 的登录角色，核对恢复成功、无关角色不可连接和在线目标库不变。
 
 本次本机回归导入真实 `main.bootstrap`，保留实际 `loadEnv` 和 `resolveWorkerSelection`，仅替换外部运行时资源。旧启动与 Processor 源码运行首轮新增回归得到 24 项失败、45 项通过；后补的 TimescaleDB 同连接回归在旧 Processor 下也单独失败；冻结 session_user 等于登录用户的新实际 Processor 回归，在先前条件式重建环境的实现下精确得到一项失败，特殊身份健康对照一项通过，该次生产字节前后不变。修复后 Worker 五个受影响文件得到 113 项通过。启动四种配置包含默认队列选择下显式配置一天/七天 TTL、仅 backup 与 backup/monitor 混选，schema 的真实默认值仍为七天。用例验证其他队列继续运行、备份空闲时不创建 Redis/看门狗，不仅测试保留期 helper。Processor 回归核查实际四条 CLI 调用和隔离连接，包括异常/特殊身份、身份确认失败后释放连接及保留已提交恢复回执；TimescaleDB 分阶段恢复保留原有 CLI 参数，并核查重开连接的三次身份绑定和同一连接中的最终事务。
 

@@ -289,6 +289,19 @@ describe('committed restore recovery when the registry connection fails', () => 
         verification: 'unconfirmed',
       });
       if (scope === 'full') {
+        const sql = query.mock.calls.map(([input]) =>
+          typeof input === 'string' ? input : input.text,
+        );
+        const grant = `GRANT CONNECT ON DATABASE "${stagingDatabaseName(
+          taskId,
+          'primary',
+        )}" TO "${sessionUser.replaceAll('"', '""')}"`;
+        const revoke = `REVOKE CONNECT ON DATABASE "${stagingDatabaseName(
+          taskId,
+          'primary',
+        )}" FROM PUBLIC`;
+        expect(sql).toContain(grant);
+        expect(sql.indexOf(grant)).toBeLessThan(sql.indexOf(revoke));
         expect(query).toHaveBeenCalledWith(
           'SET SESSION AUTHORIZATION "' +
             sessionUser.replaceAll('"', '""') +

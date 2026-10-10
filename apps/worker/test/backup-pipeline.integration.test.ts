@@ -822,6 +822,95 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       },
       30000,
     );
+    it('connects to isolated recovery with a SET-only non-inheriting login membership', async () => {
+      const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+      const role = `backup_set_only_${suffix}`;
+      const login = `backup_login_${suffix}`;
+      const outsider = `backup_outsider_${suffix}`;
+      const password = randomUUID();
+      const taskId = randomUUID();
+      const staged = stagingDatabaseName(taskId, 'primary');
+      let restorePool: ReturnType<typeof createPgPool> | undefined;
+      try {
+        await adminPool.query(`CREATE ROLE ${role} NOLOGIN CREATEDB`);
+        await adminPool.query(
+          `CREATE ROLE ${login} LOGIN NOINHERIT PASSWORD '${password}'`,
+        );
+        await adminPool.query(`CREATE ROLE ${outsider} NOLOGIN`);
+        await adminPool.query(
+          `GRANT ${role} TO ${login} WITH INHERIT FALSE, SET TRUE`,
+        );
+        await adminPool.query(
+          `GRANT CONNECT ON DATABASE ${scratchName} TO ${login}`,
+        );
+        const archive = backupTaskResultDataSchema.parse(
+          (await runJob(scratchUrl, 'create', {})).result,
+        );
+        if (!archive.filename)
+          throw new Error('Missing SET-only fixture archive');
+        const source = new URL(scratchUrl);
+        source.username = login;
+        source.password = password;
+        source.searchParams.set('options', `-c role=${role}`);
+        const restored = await runJob(
+          source.toString(),
+          'restore',
+          { filename: archive.filename },
+          { taskId },
+        );
+        expect(restored.state.status).toBe('completed');
+        expect(restored.result).toMatchObject({
+          restoreMode: 'isolated',
+          restoredDatabase: staged,
+          targetDatabaseChanged: false,
+        });
+        expect(
+          (
+            await adminPool.query(
+              "SELECT has_database_privilege($1, $2, 'CONNECT') AS login, has_database_privilege($3, $2, 'CONNECT') AS outsider",
+              [login, staged, outsider],
+            )
+          ).rows,
+        ).toEqual([{ login: true, outsider: false }]);
+        source.pathname = `/${staged}`;
+        restorePool = createPgPool(source.toString(), { max: 1 });
+        expect(
+          (
+            await restorePool.query(
+              'SELECT current_user AS role, session_user AS "sessionUser"',
+            )
+          ).rows,
+        ).toEqual([{ role, sessionUser: login }]);
+        expect(
+          (
+            await restorePool.query(
+              `SELECT note FROM public.${tableA} WHERE id=1`,
+            )
+          ).rows,
+        ).toEqual([{ note: 'original-a' }]);
+        expect(
+          (
+            await scratchPool.query(
+              `SELECT note FROM public.${tableA} WHERE id=1`,
+            )
+          ).rows,
+        ).toEqual([{ note: 'original-a' }]);
+      } finally {
+        await restorePool?.end();
+        const owned = await adminPool.query(
+          'SELECT pg_get_userbyid(datdba) = $2 AS owned FROM pg_database WHERE datname = $1',
+          [staged, role],
+        );
+        if (owned.rows[0]?.owned === true)
+          await adminPool.query(`DROP DATABASE ${staged} WITH (FORCE)`);
+        await adminPool.query(
+          `REVOKE CONNECT ON DATABASE ${scratchName} FROM ${login}`,
+        );
+        await adminPool.query(
+          `DROP ROLE IF EXISTS ${login}, ${role}, ${outsider}`,
+        );
+      }
+    }, 30000);
     it('refuses a valid plus missing literal table instead of publishing a partial-selection archive', async () => {
       const taskId = randomUUID();
       await expect(
