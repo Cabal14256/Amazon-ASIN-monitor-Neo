@@ -4,11 +4,16 @@ import {
 } from '@asin-monitor/contracts';
 import {
   createPgPool,
+  PgAsinQueryRepository,
+  PgCompetitorQueryRepository,
   type AsinQueryRepositoryPort,
   type CompetitorQueryRepositoryPort,
 } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import type { PoolClient } from 'pg';
 import {
   afterAll,
   beforeAll,
@@ -283,9 +288,267 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
     };
 
+    type ExplainNode = {
+      'Node Type'?: string;
+      'Index Name'?: string;
+      'Index Cond'?: string;
+      'Relation Name'?: string;
+      'Total Cost'?: number;
+      Plans?: ExplainNode[];
+    };
+    const planNodes = (root: ExplainNode): ExplainNode[] => [
+      root,
+      ...(root.Plans ?? []).flatMap(planNodes),
+    ];
+    const indexEvidence: unknown[] = [];
+    const indexEvidencePath = resolve(
+      __dirname,
+      '../../../artifacts/refactor-audit/catalog-literal-index-242-evidence.json',
+    );
+
     describe.each(['primary', 'competitor'] as const)(
       '%s exact domain and raw key',
       (domain) => {
+        it('uses existing default-collation indexes for exact detail candidates under the normal planner', async () => {
+          const pool = db(domain);
+          const database = (
+            await pool.query(
+              'SELECT datcollate FROM pg_database WHERE datname=current_database()',
+            )
+          ).rows[0];
+          // The review regression requires the real database's non-C default,
+          // not a replacement production index or a forced execution plan.
+          expect(database.datcollate).not.toMatch(/^(C|POSIX)$/);
+          const indexes = (
+            await pool.query(
+              `SELECT t.relname AS table_name, i.relname AS index_name,
+                a.attname AS column_name, c.collname AS collation_name
+               FROM pg_index x JOIN pg_class t ON t.oid=x.indrelid
+               JOIN pg_namespace n ON n.oid=t.relnamespace
+               JOIN pg_class i ON i.oid=x.indexrelid
+               JOIN LATERAL unnest(x.indkey::smallint[],x.indcollation::oid[])
+                 AS key(column_number,collation_oid) ON true
+               JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=key.column_number
+               JOIN pg_collation c ON c.oid=key.collation_oid
+               WHERE n.nspname=current_schema() AND t.relname IN ($1,$2)
+                 AND x.indisvalid AND x.indexprs IS NULL`,
+              [groups(domain), asins(domain)],
+            )
+          ).rows as {
+            table_name: string;
+            index_name: string;
+            column_name: string;
+            collation_name: string;
+          }[];
+          const parentIndexes = indexes.filter(
+            (row) =>
+              row.table_name === groups(domain) && row.column_name === 'id',
+          );
+          const childIndexes = indexes.filter(
+            (row) =>
+              row.table_name === asins(domain) &&
+              row.column_name === 'variant_group_id',
+          );
+          expect(parentIndexes.length).toBeGreaterThan(0);
+          expect(childIndexes.length).toBeGreaterThan(0);
+          expect(
+            [...parentIndexes, ...childIndexes].every(
+              (row) => row.collation_name === 'default',
+            ),
+          ).toBe(true);
+          const site = domain === 'primary' ? ',site' : '';
+          const siteValue = domain === 'primary' ? ",'amazon.com'" : '';
+          await pool.query(
+            `INSERT INTO ${groups(domain)}(id,name,country,brand${site})
+             SELECT 'candidate-'||lpad(n::text,5,'0'),'Planner fixture','US','Fixture'${siteValue}
+             FROM generate_series(1,10000) n`,
+          );
+          await pool.query(
+            `INSERT INTO ${asins(
+              domain,
+            )}(id,asin,name,country,brand,variant_group_id${site})
+             SELECT 'child-'||lpad(n::text,5,'0'),'P'||lpad(n::text,9,'0'),
+               'Planner fixture','US','Fixture','candidate-'||lpad(n::text,5,'0')${siteValue}
+             FROM generate_series(1,10000) n`,
+          );
+          await pool.query(`ANALYZE ${groups(domain)}`);
+          await pool.query(`ANALYZE ${asins(domain)}`);
+
+          // Capture the compiled repository's actual bound SQL from its pg
+          // driver, then explain that exact statement on the same private schema.
+          const candidatePool = createPgPool(
+            domain === 'primary'
+              ? f!.env.DATABASE_URL
+              : f!.env.COMPETITOR_DATABASE_URL,
+            { max: 1, connectionTimeoutMillis: 2000 },
+          );
+          let statement: { text: string; values: unknown[] } | undefined;
+          const restores: (() => void)[] = [];
+          const capture = (client: PoolClient) => {
+            const originalQuery = client.query;
+            const spy = vi
+              .spyOn(client, 'query')
+              .mockImplementation(function (...args: unknown[]) {
+                const input = args[0] as { text?: string };
+                if (input?.text?.includes('WITH selected AS MATERIALIZED'))
+                  statement = {
+                    text: input.text,
+                    values: args[1] as unknown[],
+                  };
+                return Reflect.apply(originalQuery, client, args);
+              });
+            restores.push(() => spy.mockRestore());
+          };
+          const stopCapture = () => {
+            candidatePool.removeListener('connect', capture);
+            for (const restore of restores.splice(0)) restore();
+          };
+          candidatePool.on('connect', capture);
+          const repository =
+            domain === 'primary'
+              ? new PgAsinQueryRepository(candidatePool)
+              : new PgCompetitorQueryRepository(
+                  f!.pools.primaryPool,
+                  candidatePool,
+                );
+          const evidence: Record<string, unknown> = {
+            domain,
+            databaseCollation: database.datcollate,
+            fixtureRows: 10000,
+            indexes,
+          };
+          try {
+            const actual = await repository.read((unit) =>
+              unit.detail('candidate-05000', 'literal'),
+            );
+            evidence.repositoryResult = actual;
+            expect(actual.groups.map((row) => row.id)).toEqual([
+              'candidate-05000',
+            ]);
+            expect(actual.asins.map((row) => row.id)).toEqual(['child-05000']);
+            stopCapture();
+            if (!statement)
+              throw new Error('Compiled literal detail SQL was not captured');
+            const query = statement as { text: string; values: unknown[] };
+            evidence.query = query;
+            const explain = async (text: string, values: unknown[]) =>
+              (
+                await candidatePool.query(
+                  `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${text}`,
+                  values,
+                )
+              ).rows[0]['QUERY PLAN'][0] as { Plan: ExplainNode };
+            const repairedPlan = await explain(query.text, query.values);
+            evidence.normalPlanner = repairedPlan;
+            const repaired = repairedPlan.Plan;
+            const indexedCandidates = planNodes(repaired).filter(
+              (node) => node['Index Cond'],
+            );
+            expect(
+              indexedCandidates.some((node) =>
+                parentIndexes.some(
+                  (index) => index.index_name === node['Index Name'],
+                ),
+              ),
+            ).toBe(true);
+            expect(
+              indexedCandidates.filter((node) =>
+                childIndexes.some(
+                  (index) => index.index_name === node['Index Name'],
+                ),
+              ),
+            ).toHaveLength(2);
+            expect(
+              planNodes(repaired).filter(
+                (node) =>
+                  node['Node Type'] === 'Seq Scan' &&
+                  [groups(domain), asins(domain)].includes(
+                    node['Relation Name'] ?? '',
+                  ),
+              ),
+            ).toEqual([]);
+
+            // Remove only the three candidate equalities to reconstruct the
+            // pre-fix C-only plan, retaining the exact-result oracle and shape.
+            const cOnlyText = query.text
+              .replace(/"g"\."id" = \$\d+ AND /, '')
+              .replace(/"a"\."variant_group_id" = "g"\."id" AND /, '')
+              .replace(
+                /(?:p\.id = "a"\."variant_group_id"|"a"\."variant_group_id" = p\.id) AND /,
+                '',
+              );
+            const parameterMap = new Map<number, number>();
+            const cOnlyValues: unknown[] = [];
+            const controlText = cOnlyText.replace(
+              /\$(\d+)/g,
+              (_, raw: string) => {
+                const index = Number(raw);
+                if (!parameterMap.has(index)) {
+                  cOnlyValues.push(query.values[index - 1]);
+                  parameterMap.set(index, cOnlyValues.length);
+                }
+                return `$${parameterMap.get(index)}`;
+              },
+            );
+            const controlPlan = await explain(controlText, cOnlyValues);
+            evidence.cOnlyControl = {
+              text: controlText,
+              values: cOnlyValues,
+              plan: controlPlan,
+            };
+            const control = controlPlan.Plan;
+            expect(repaired['Total Cost']).toBeLessThan(control['Total Cost']!);
+            expect(
+              planNodes(control).some(
+                (node) =>
+                  node['Node Type'] === 'Seq Scan' &&
+                  node['Relation Name'] === asins(domain),
+              ),
+            ).toBe(true);
+            // Forced planning is solely an eligibility control, not measured
+            // performance: no ANALYZE or elapsed-time claim uses this setting.
+            const eligible = await candidatePool.connect();
+            let eligibilityPlan: unknown;
+            try {
+              await eligible.query('BEGIN');
+              await eligible.query('SET LOCAL enable_seqscan = off');
+              const plans = await eligible.query(
+                `EXPLAIN (FORMAT JSON) ${query.text}`,
+                query.values,
+              );
+              eligibilityPlan = plans.rows[0]['QUERY PLAN'][0];
+              evidence.eligibilityOnly = {
+                enableSeqscan: false,
+                analyze: false,
+                plan: eligibilityPlan,
+              };
+              expect(
+                planNodes(plans.rows[0]['QUERY PLAN'][0].Plan).filter(
+                  (node) => node['Index Cond'],
+                ),
+              ).toHaveLength(3);
+            } finally {
+              await eligible.query('ROLLBACK');
+              eligible.release();
+            }
+            const httpResult = (await read(domain, 'candidate-05000')).json();
+            evidence.httpResult = httpResult;
+            expect(httpResult.data.children).toHaveLength(1);
+          } finally {
+            indexEvidence.push(evidence);
+            // Only generated fixture identities and plans are persisted. Never
+            // include a connection URL, authorization header or live row.
+            mkdirSync(dirname(indexEvidencePath), { recursive: true });
+            writeFileSync(
+              indexEvidencePath,
+              JSON.stringify(indexEvidence, null, 2),
+            );
+            stopCapture();
+            if (repository instanceof PgCompetitorQueryRepository)
+              repository.close();
+            await candidatePool.end();
+          }
+        }, 30_000);
         it('proves literal mode against the original real SQL independently of the new HTTP route', async () => {
           await group(domain, ' ');
           await child(domain, 'space-child', ' ');

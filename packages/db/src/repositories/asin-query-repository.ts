@@ -183,9 +183,11 @@ export class DrizzleAsinQueryUnit
     mode?: 'literal',
   ): Promise<AsinGroupReadResult> {
     validateQuery(query);
+    // Literal native equality keeps existing default-collation indexes eligible;
+    // the C filter still requires the original exact bytes.
     const equal = (left: unknown, right: unknown) =>
       mode === 'literal'
-        ? sql`${left} COLLATE "C" = ${right} COLLATE "C"`
+        ? sql`(${left} = ${right} AND ${left} COLLATE "C" = ${right} COLLATE "C")`
         : sql`${left} = ${right}`;
     const keyword = textFilter(query.keyword);
     const groupWhere =

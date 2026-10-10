@@ -102,9 +102,11 @@ export class DrizzleCompetitorReadUnit {
     mode?: 'literal',
   ): Promise<CompetitorGroupReadResult> {
     validate(query);
+    // Literal native equality is an indexable candidate superset; C retains the
+    // literal filter independently of Legacy case/padding association.
     const match = (left: unknown, right: unknown) =>
       mode === 'literal'
-        ? sql`${left} COLLATE "C" = ${right} COLLATE "C"`
+        ? sql`(${left} = ${right} AND ${left} COLLATE "C" = ${right} COLLATE "C")`
         : equal(left, right);
     const keyword = query.keyword
       ? or(
