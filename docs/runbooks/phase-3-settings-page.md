@@ -14,7 +14,7 @@
 1. **SP-API 与监控**：编辑 19 个显示键，覆盖 US/EU 及通用备用 LWA、AWS 签名、监控间隔、竞品开关和备用客户端。页面只提交用户明确修改的键。监控并发输入允许正整数；Neo API 按其部署环境 `MAX_ALLOWED_CONCURRENT_GROUP_CHECKS` 校验整个更新批次，超过上限返回 400 且不写入。Neo API 与 Legacy server 必须使用相同的该环境变量值，避免两进程对上限的解释不同。竞品开关显示会归一 Legacy 存量值的大小写与前后空白。HTML 抓取可能违反 Amazon 服务条款并触发 IP 封禁或验证码，页面提示其仅作为 SP-API 和旧客户端失败后的最后兜底。
 2. **配额与错误**：读取 `/rate-limiter/status` 和 `/error-stats`，展示 US/EU 配额、Redis 回退状态和当前 API 进程的上游错误窗口。错误统计不代表所有 Worker 的全局累计值。
 3. **飞书通知**：按 US/EU 保存 Webhook 和启用状态。切换设置分区时，SP-API 与飞书的未保存草稿会保留在当前页面；权限撤销仍会清除草稿。只切换已有配置的启用状态时使用 PATCH，不重发旧 Webhook；首次编辑时固定原始配置版本，后台刷新不会替换草稿的对照版本。替换 Webhook 前重读并比较不透明 revision，更新提交原始 revision，新建提交 `expectedRevision: null`；服务端在同一事务内做原子条件写。若读后至写入之间发生其他管理员修改，409 会保留本地输入并刷新列表；管理员检查刷新后的配置后，可复制当前输入，放弃旧草稿并重新编辑。旧 Neo 客户端省略 revision 时只能新建，不能覆盖已有行。服务端仍负责当前权限、Origin 和输入校验。Compose 部署先运行 `corepack pnpm db:up` 更新挂载，再执行 `corepack pnpm db:upgrade:feishu-revision`，然后发布 API 和 Web；回滚顺序详见 `docs/refactor/feishu-config-api.md`，Legacy 管理入口继续保留。
-4. **备份与恢复**：当前明确显示不可用。Neo 尚未实现 backup controller、pg_dump Worker 和异步任务链路，不发送未实现请求；Legacy 入口继续承担备份业务。
+4. **备份与恢复**：Issue #221 接入 #171 的 Neo custom 备份、异步恢复、自动计划及计划执行记录，整个分区要求 `settings:write`。后端正式合入前只保存隔离验证，不能宣称已完成真实联调或生产恢复。下载与未知回执边界详见 [备份 UI runbook](./phase-3-backup-settings-ui.md)。Legacy 入口继续保留。
 
 ## 排障
 
