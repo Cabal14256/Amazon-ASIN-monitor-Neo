@@ -20,6 +20,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { homeWorkbenchFixture } from '../../../../../packages/contracts/test/helpers/home-workbench';
 import { AuthContext } from '../../auth/context';
@@ -33,6 +34,7 @@ import {
 } from '../../lib/transport-fixtures';
 import { HOME_WORKBENCH_QUERY_KEY } from '../../services/home-workbench';
 import { createTransportRuntime } from '../../services/runtime';
+import type { DashboardCountry } from './dashboard-data';
 import { HomeWorkbench } from './home-workbench';
 
 const ENDPOINT = '/api/v1/dashboard/workbench';
@@ -178,6 +180,40 @@ function fixture({ total = 2 } = {}) {
   runtime.queryClient.setDefaultOptions({ queries: { retry: false } });
   const identity = new IdentityStore(runtime);
   resources.push({ runtime, identity });
+  function FixtureHome() {
+    const [country, setCountry] = useState<DashboardCountry>('ALL');
+    const [mount, setMount] = useState(0);
+    return (
+      <RouteGate>
+        <HomeWorkbench
+          key={mount}
+          country={country}
+          countryControls={
+            <section aria-label="Fixture dashboard country controls">
+              {(['ALL', 'US'] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={country === value}
+                  onClick={() => setCountry(value)}
+                >
+                  Dashboard country {value}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setMount((value) => value + 1)}
+              >
+                Dashboard remount workbench
+              </button>
+            </section>
+          }
+          statusPanel={<p>Fixture independent dashboard status panel</p>}
+          alertsPanel={<p>Fixture independent dashboard alerts panel</p>}
+        />
+      </RouteGate>
+    );
+  }
   const root = createRootRoute({ component: Outlet });
   const router = createRouter({
     history: createMemoryHistory({ initialEntries: ['/home'] }),
@@ -185,16 +221,7 @@ function fixture({ total = 2 } = {}) {
       createRoute({
         getParentRoute: () => root,
         path: '/home',
-        component: () => (
-          <RouteGate>
-            <HomeWorkbench
-              country="ALL"
-              countryControls={<p>Fixture dashboard country controls</p>}
-              statusPanel={<p>Fixture independent dashboard status panel</p>}
-              alertsPanel={<p>Fixture independent dashboard alerts panel</p>}
-            />
-          </RouteGate>
-        ),
+        component: FixtureHome,
       }),
       createRoute({
         getParentRoute: () => root,
@@ -257,6 +284,182 @@ function clearFilters() {
 }
 
 describe('Home workbench actual identity, route and typed query boundaries', () => {
+  it('preserves the active same-scope query when an outer workbench mount replaces the old mount', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Dashboard remount workbench' }),
+    );
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    expect(
+      f.runtime.queryClient.getQueryCache().findAll({
+        queryKey: HOME_WORKBENCH_QUERY_KEY,
+        type: 'active',
+      }),
+    ).toHaveLength(1);
+    const response = f.holdWorkbench();
+    fireEvent.click(screen.getByRole('button', { name: '刷新工作台' }));
+    await waitFor(() => expect(f.reads()).toHaveLength(2));
+    const current = f.reads().at(-1)!;
+    expect(current.signal?.aborted).toBe(false);
+    await act(async () => {
+      response.resolve(f.responseFor(current.url));
+      await response.promise;
+    });
+    expect(screen.getByRole('link', { name: 'ALL group page 1' })).toBeTruthy();
+    expect(
+      f.runtime.queryClient.getQueryCache().findAll({
+        queryKey: HOME_WORKBENCH_QUERY_KEY,
+        type: 'active',
+      }),
+    ).toHaveLength(1);
+  });
+
+  it('keeps the new country query alive when the dashboard country prop remounts the inner workbench', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    const verified = f.identity.getSnapshot();
+    const response = f.holdWorkbench();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Dashboard country US' }),
+    );
+    await waitFor(() => expect(f.reads()).toHaveLength(2));
+    const us = f.reads().at(-1)!;
+    expect(us.url.searchParams.get('country')).toBe('US');
+    expect(us.signal?.aborted).toBe(false);
+    expect(
+      f.runtime.queryClient.getQueryCache().findAll({
+        queryKey: HOME_WORKBENCH_QUERY_KEY,
+      }),
+    ).toHaveLength(2);
+    await act(async () => {
+      response.resolve(f.responseFor(us.url));
+      await response.promise;
+    });
+    await screen.findByRole('link', { name: 'US group page 1' });
+    expect(f.identity.getSnapshot()).toBe(verified);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Dashboard country ALL' }),
+    );
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    expect(f.reads()).toHaveLength(2);
+    expect(f.requests.every((read) => read.method === 'GET')).toBe(true);
+  });
+
+  it('retires a departed country read without cancelling or overwriting the new country query', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    const response = f.holdWorkbench();
+    fireEvent.click(screen.getByRole('button', { name: '刷新工作台' }));
+    await waitFor(() => expect(f.reads()).toHaveLength(2));
+    const old = f.reads().at(-1)!;
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Dashboard country US' }),
+    );
+    await screen.findByRole('link', { name: 'US group page 1' });
+    expect(f.reads().at(-1)!.signal?.aborted).toBe(false);
+    expect(old.signal?.aborted).toBe(true);
+    await act(async () => {
+      response.resolve(f.responseFor(old.url));
+      await response.promise;
+    });
+    expect(screen.getByRole('link', { name: 'US group page 1' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'ALL group page 1' })).toBeNull();
+    const active = f.runtime.queryClient.getQueryCache().findAll({
+      queryKey: HOME_WORKBENCH_QUERY_KEY,
+      type: 'active',
+    });
+    expect(active).toHaveLength(1);
+    expect(
+      homeWorkbenchDataSchema.parse(active[0].state.data).list[0].name,
+    ).toBe('US group page 1');
+  });
+
+  it('retires a route-leaving read and reads afresh on a same-identity route remount', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    const verified = f.identity.getSnapshot();
+    const response = f.holdWorkbench();
+    fireEvent.click(screen.getByRole('button', { name: '刷新工作台' }));
+    await waitFor(() => expect(f.reads()).toHaveLength(2));
+    const old = f.reads().at(-1)!;
+    await act(async () => {
+      await f.router.navigate({ to: '/asin' });
+    });
+    await screen.findByText('Fixture catalog destination');
+    expect(old.signal?.aborted).toBe(true);
+    expect(
+      f.runtime.queryClient.getQueryCache().findAll({
+        queryKey: HOME_WORKBENCH_QUERY_KEY,
+      }),
+    ).toHaveLength(0);
+    await act(async () => {
+      await f.router.navigate({ to: '/home' });
+    });
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    expect(f.reads()).toHaveLength(3);
+    expect(f.reads().at(-1)!.signal?.aborted).toBe(false);
+    await act(async () => {
+      response.resolve(f.responseFor(old.url));
+      await response.promise;
+    });
+    expect(f.identity.getSnapshot()).toBe(verified);
+    expect(screen.getByRole('link', { name: 'ALL group page 1' })).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('retires the old identity scope before a late country read can enter the new owner cache', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    const response = f.holdWorkbench();
+    fireEvent.click(screen.getByRole('button', { name: '刷新工作台' }));
+    await waitFor(() => expect(f.reads()).toHaveLength(2));
+    const old = f.reads().at(-1)!;
+    f.identityData.user.id = 'workbench-replacement-owner';
+    f.identityData.sessionId = 'workbench-replacement-session';
+    await act(async () => {
+      await f.identity.refresh();
+    });
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    expect(f.reads()).toHaveLength(3);
+    expect(old.signal?.aborted).toBe(true);
+    const fresh = f.reads().at(-1)!;
+    expect(fresh.signal?.aborted).toBe(false);
+    await act(async () => {
+      response.resolve(f.responseFor(old.url));
+      await response.promise;
+    });
+    const cached = f.runtime.queryClient.getQueryCache().findAll({
+      queryKey: HOME_WORKBENCH_QUERY_KEY,
+    });
+    expect(cached).toHaveLength(1);
+    expect(JSON.stringify(cached[0].queryKey)).toContain(
+      'workbench-replacement-owner',
+    );
+    expect(JSON.stringify(cached[0].queryKey)).not.toContain(
+      'workbench-reader',
+    );
+    expect(screen.getByRole('link', { name: 'ALL group page 1' })).toBeTruthy();
+  });
+
+  it('keeps a real read denial across a dashboard country prop remount without starting another read', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    f.deny(true);
+    fireEvent.click(screen.getByRole('button', { name: '刷新工作台' }));
+    await screen.findByText('Workbench read revoked');
+    const verified = f.identity.getSnapshot();
+    const before = f.reads().length;
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Dashboard country US' }),
+    );
+    await screen.findByText('Workbench read revoked');
+    expect(f.identity.getSnapshot()).toBe(verified);
+    expect(f.reads()).toHaveLength(before);
+    expect(screen.queryByRole('link', { name: 'US group page 1' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'ALL group page 1' })).toBeNull();
+  });
+
   it('applies the exact nonempty facet through the real GET service', async () => {
     const f = fixture();
     await screen.findByRole('link', { name: 'ALL group page 1' });

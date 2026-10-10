@@ -124,14 +124,8 @@ function AuthorizedWorkbench({
     live.current = true;
     return () => {
       live.current = false;
-      void runtime.queryClient.cancelQueries({
-        queryKey: [...HOME_WORKBENCH_QUERY_KEY, scope],
-      });
-      runtime.queryClient.removeQueries({
-        queryKey: [...HOME_WORKBENCH_QUERY_KEY, scope],
-      });
     };
-  }, [runtime, scope]);
+  }, []);
   useEffect(
     () =>
       subscribeDashboardChanges(
@@ -588,6 +582,21 @@ export function HomeWorkbench(props: Props) {
     deniedTrends.get(identity),
   );
   const scope = workbenchScope(auth, runtime.session.revision);
+  useEffect(() => {
+    if (!scope) return;
+    return () => {
+      // Country changes only replace the inner workbench. Retire identity or
+      // route work after observers detach, preserving a new same-scope mount.
+      queueMicrotask(() => {
+        const retired = {
+          queryKey: [...HOME_WORKBENCH_QUERY_KEY, scope],
+          type: 'inactive' as const,
+        };
+        void runtime.queryClient.cancelQueries(retired);
+        runtime.queryClient.removeQueries(retired);
+      });
+    };
+  }, [runtime, scope]);
   const onDenied = (error: ApiError) => {
     if (auth.status !== 'authenticated' || identity.getSnapshot() !== auth)
       return;
