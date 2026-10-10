@@ -12,10 +12,14 @@ import { monitorAggregateCoverageSelect } from './monitor-aggregate-coverage';
 import {
   monitorAggregateBucketHoursSql,
   monitorAggregateMetricsSelect,
+  monitorRawSummaryBucketHoursSql,
+  monitorRawSummaryMetricsSelect,
 } from './monitor-analytics-metrics-sql';
 import {
   monitorAggregateSourceSelect,
   monitorPeriodSql,
+  monitorRawSummaryIdentityCoverageSelect,
+  monitorSupportedRegionCountryCondition,
 } from './monitor-analytics-sql';
 
 const operations = new Set([
@@ -37,41 +41,96 @@ const operations = new Set([
 export function monitorAggregateDurationSelect(
   query: MonitorAnalyticsQuery,
   granularity: MonitorSourceGranularity,
+  arithmetic: 'legacy-aggregate' | 'legacy-raw-summary' = 'legacy-aggregate',
 ): SQL {
   validateMonitorAnalyticsQuery(query);
   if (!operations.has(query.operation))
     throw new MonitorAnalyticsQueryError('input');
+  const rawSummary = arithmetic === 'legacy-raw-summary';
+  if (
+    !['legacy-aggregate', 'legacy-raw-summary'].includes(arithmetic) ||
+    (rawSummary &&
+      !['all-countries-summary', 'region-summary'].includes(query.operation))
+  )
+    throw new MonitorAnalyticsQueryError('input');
   const variant = query.operation === 'asin-by-variant-group';
-  const family = variant ? 'variant_group' : 'asin';
+  const family = variant ? 'variant_group' : rawSummary ? 'dim' : 'asin';
   const compatible =
     query.operation !== 'statistics' ||
     (!query.asinId &&
       !query.variantGroupId &&
       (!query.checkType || query.checkType === 'ASIN'));
-  const coverage = compatible
+  let coverage = compatible
     ? monitorAggregateCoverageSelect(query, family, granularity)
     : sql`SELECT false AS covered`;
-  const hours = monitorAggregateBucketHoursSql(
-    query,
-    granularity,
-    sql`agg.time_slot`,
-  );
+  if (rawSummary && query.startTime && query.endTime) {
+    const regional = query.operation === 'region-summary';
+    const identityCoverage = monitorRawSummaryIdentityCoverageSelect(
+      query,
+      granularity,
+      regional
+        ? monitorSupportedRegionCountryCondition(sql`mh.country`)
+        : undefined,
+      regional
+        ? monitorSupportedRegionCountryCondition(sql`agg.country`)
+        : undefined,
+    );
+    // Raw SQL filters checks before grouping. A clipped boundary bucket can be
+    // reused only if it contains no check excluded by the exact HTTP bounds.
+    // Its min/max are sufficient; identity and edges share the coverage/read
+    // snapshot, and unrelated countries cannot reject a regional summary.
+    coverage = sql`SELECT CASE WHEN covered THEN
+      (SELECT covered FROM (${identityCoverage}) identity_coverage)
+      AND NOT EXISTS (
+      SELECT 1 FROM public.monitor_history_agg_dim_v2 edge
+      WHERE edge.granularity=${granularity}
+        ${
+          regional
+            ? sql`AND ${monitorSupportedRegionCountryCondition(
+                sql`edge.country`,
+              )}`
+            : sql``
+        }
+        AND edge.time_slot IN (date_trunc(${granularity}, ${
+      query.startTime
+    }::timestamp),
+          date_trunc(${granularity}, ${query.endTime}::timestamp))
+        AND (edge.first_check_time<${
+          query.startTime
+        }::timestamp OR edge.last_check_time>${query.endTime}::timestamp)
+    ) ELSE false END AS covered FROM (${coverage}) projection_coverage`;
+  }
+  const hours = (
+    rawSummary
+      ? monitorRawSummaryBucketHoursSql
+      : monitorAggregateBucketHoursSql
+  )(query, granularity, sql`agg.time_slot`);
   const source = sql`SELECT agg.*, ${
-    query.operation === 'region-summary' ? sql`round(${hours},4)` : hours
+    query.operation === 'region-summary' && !rawSummary
+      ? sql`round(${hours},4)`
+      : hours
   } AS bucket_hours
     FROM (${monitorAggregateSourceSelect(query, family, granularity)}) agg
     WHERE (SELECT covered FROM coverage)`;
-  const values = sql`agg.asin_key, agg.total_checks AS check_count, agg.broken_count, agg.has_peak, agg.bucket_hours`;
+  const values = sql`${
+    rawSummary ? sql`agg.time_slot, agg.country, agg.site, agg.brand,` : sql``
+  } agg.asin_key, agg.total_checks AS check_count, agg.broken_count, agg.has_peak, agg.bucket_hours`;
+  const summaryMetrics = rawSummary
+    ? monitorRawSummaryMetricsSelect
+    : monitorAggregateMetricsSelect;
   let metrics: SQL;
   if (query.operation === 'region-summary') {
-    // Legacy UNION ALL materializes its base at the visible DECIMAL(…,4)
-    // bucket scale before multiplying by the per-bucket abnormal fraction.
-    const base = sql`SELECT agg.country AS group_key, agg.country AS group_label, ${values}
-      FROM source_base agg WHERE agg.country IN ('US','UK','DE','FR','ES','IT')
+    // The default Legacy aggregate UNION ALL materializes DECIMAL(…,4)
+    // hours before multiplication; raw summaries retain binary64 hours.
+    const country = rawSummary ? sql`upper(agg.country)` : sql`agg.country`;
+    const base = sql`SELECT ${country} AS group_key, ${country} AS group_label, ${values}
+      FROM source_base agg WHERE ${monitorSupportedRegionCountryCondition(
+        sql`agg.country`,
+      )}
       UNION ALL SELECT 'EU_TOTAL' AS group_key, 'EU_TOTAL' AS group_label, ${values}
       FROM source_base agg WHERE agg.country IN ('UK','DE','FR','ES','IT')`;
     metrics = sql`WITH source_base AS MATERIALIZED (${source})
-      SELECT * FROM (${monitorAggregateMetricsSelect(base)}) region_metrics`;
+      SELECT * FROM (${summaryMetrics(base)}) region_metrics`;
   } else {
     const period =
       query.operation === 'by-time' ||
@@ -98,10 +157,12 @@ export function monitorAggregateDurationSelect(
       FROM (${source}) agg ${
       variant ? sql`WHERE nullif(agg.asin_key,'') IS NOT NULL` : sql``
     }`;
-    metrics = monitorAggregateMetricsSelect(
-      base,
-      variant ? 'variant_group' : 'label',
-    );
+    metrics = rawSummary
+      ? monitorRawSummaryMetricsSelect(base)
+      : monitorAggregateMetricsSelect(
+          base,
+          variant ? 'variant_group' : 'label',
+        );
     if (variant)
       metrics = sql`SELECT * FROM (${metrics}) ranked ORDER BY "abnormalDurationHours" DESC,"ratioAllTime" DESC LIMIT ${query.limit}`;
     else if (query.operation === 'asin-by-country')
