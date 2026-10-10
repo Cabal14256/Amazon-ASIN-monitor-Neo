@@ -46,6 +46,8 @@ export interface RequestOptions {
   maxResponseBytes?: number;
   /** Login failures are not expired sessions; callers can suppress global logout. */
   authFailure?: 'notify' | 'ignore';
+  /** Internal admission owners retain their slot until aborted work settles. */
+  waitForSettlement?: boolean;
 }
 export interface ResponseSchema<T> {
   parse(value: unknown): T;
@@ -281,7 +283,19 @@ export class HttpClient {
         credentials: 'include',
         redirect: 'error',
       });
-      if (signal.aborted) throw signal.reason;
+      if (signal.aborted) {
+        // Fetch may resolve headers after an injected/native dependency has
+        // ignored abort. The opt-in admission owner must await body cleanup so
+        // a still-live response stream cannot release its slot early.
+        if (options.waitForSettlement) {
+          try {
+            await response.body?.cancel();
+          } catch {
+            /* The original cancellation/deadline reason remains authoritative. */
+          }
+        }
+        throw signal.reason;
+      }
       let parsed: unknown;
       try {
         parsed = await readJson(response, maxResponseBytes);
@@ -381,6 +395,7 @@ export class HttpClient {
         this.active.delete(controller);
       });
     // A non-cooperating injected fetch retains its actual-work admission slot.
+    if (options.waitForSettlement) return work;
     return new Promise<T>((resolve, reject) => {
       const cancelled = () => reject(signal.reason);
       if (signal.aborted) cancelled();
