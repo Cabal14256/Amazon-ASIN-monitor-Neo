@@ -1,11 +1,5 @@
-import {
-  validCatalogCheckGate,
-  type CatalogCheckGate,
-} from './catalog-check-types';
-
+// Immutable mixed-bundle fixture: original main 197925d catalog parser and writer.
 export type CatalogSafetyGate =
-  | { phase: 'check-invalid'; operationId: string }
-  | { phase: 'check'; operationId: string; check: CatalogCheckGate }
   | {
       phase: 'refresh';
       message: string | null;
@@ -43,7 +37,6 @@ export function readCatalogSafetyGate(
   try {
     const raw = storage.getItem(key);
     if (!raw) return null;
-    if (raw.length > 128 * 1024) throw new Error('invalid');
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('invalid');
@@ -58,21 +51,6 @@ export function readCatalogSafetyGate(
       typeof gate.operationId === 'string'
         ? { operationId: gate.operationId }
         : {};
-    if (
-      gate.phase === 'check' ||
-      (gate.phase === 'inspection' && Object.hasOwn(gate, 'check'))
-    ) {
-      if (
-        !validCatalogCheckGate(gate.check) ||
-        gate.operationId !== gate.check.requestId
-      )
-        throw new Error('invalid');
-      return {
-        phase: 'check',
-        operationId: gate.check.requestId,
-        check: gate.check,
-      };
-    }
     if (gate.phase === 'inspection')
       return { phase: 'inspection', ...operationId };
     if (
@@ -93,19 +71,6 @@ export function readCatalogSafetyGate(
       ...operationId,
     };
   } catch {
-    // Never discard a malformed async-operation record and permit a duplicate.
-    try {
-      const raw = storage.getItem(key);
-      if (raw?.includes('"check"'))
-        return { phase: 'check-invalid', operationId: 'invalid-check-record' };
-      if (raw?.includes('"inspection"'))
-        return {
-          phase: 'inspection',
-          operationId: 'invalid-inspection-record',
-        };
-    } catch {
-      return { phase: 'check-invalid', operationId: 'unreadable-check-record' };
-    }
     try {
       storage.removeItem(key);
     } catch {
@@ -124,18 +89,7 @@ export function writeCatalogSafetyGate(
   if (!owner) return false;
   try {
     if (gate)
-      // The previous bundle accepts inspection and preserves this key. A new
-      // phase at the storage boundary would be deleted by its old parser.
-      storage.setItem(
-        catalogSafetyKey(owner, source),
-        JSON.stringify(
-          gate.phase === 'check'
-            ? { ...gate, phase: 'inspection' }
-            : gate.phase === 'check-invalid'
-            ? { ...gate, phase: 'inspection', check: null }
-            : gate,
-        ),
-      );
+      storage.setItem(catalogSafetyKey(owner, source), JSON.stringify(gate));
     else storage.removeItem(catalogSafetyKey(owner, source));
     return true;
   } catch {

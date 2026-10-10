@@ -1,14 +1,17 @@
 import { ApiError } from '../../lib/http';
-import { isTerminalTask, isValidTaskId } from '../../services/tasks';
+import { isTerminalTask } from '../../services/tasks';
+import {
+  validCatalogCheckGate,
+  type CatalogCheckGate,
+  type CheckTarget,
+} from './catalog-check-types';
+import {
+  catalogSafetyKey,
+  readCatalogSafetyGate,
+  writeCatalogSafetyGate,
+} from './catalog-safety-gate';
 import type { CatalogCheckResult } from './catalog-types';
-
-export type CheckTarget = { kind: 'group' | 'asin'; id: string; label: string };
-export interface CatalogCheckGate {
-  requestId: string;
-  target: CheckTarget;
-  submittedAt: number;
-  taskId?: string;
-}
+export type { CatalogCheckGate, CheckTarget } from './catalog-check-types';
 type StoragePort = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 type Locks = Pick<LockManager, 'request'>;
 export const catalogCheckGateKey = (catalog: string, owner: string) =>
@@ -18,22 +21,9 @@ export const catalogCheckGateKey = (catalog: string, owner: string) =>
 
 function parse(raw: string | null): CatalogCheckGate | null {
   if (raw === null) return null;
-  if (raw.length > 4096) throw new Error('CHECK_GATE_INVALID');
+  if (raw.length > 128 * 1024) throw new Error('CHECK_GATE_INVALID');
   const gate = JSON.parse(raw) as CatalogCheckGate;
-  if (
-    !gate ||
-    typeof gate.requestId !== 'string' ||
-    !gate.requestId ||
-    !Number.isSafeInteger(gate.submittedAt) ||
-    !gate.target ||
-    !['group', 'asin'].includes(gate.target.kind) ||
-    typeof gate.target.id !== 'string' ||
-    !gate.target.id ||
-    typeof gate.target.label !== 'string' ||
-    (gate.taskId !== undefined &&
-      (typeof gate.taskId !== 'string' || !isValidTaskId(gate.taskId)))
-  )
-    throw new Error('CHECK_GATE_INVALID');
+  if (!validCatalogCheckGate(gate)) throw new Error('CHECK_GATE_INVALID');
   return gate;
 }
 
@@ -49,12 +39,53 @@ export class CatalogCheckRecovery {
     private readonly locks: Locks,
     private readonly clock = Date.now,
     private readonly uuid: () => string = () => crypto.randomUUID(),
+    private readonly shared?: {
+      owner: string;
+      catalog: string;
+      publish?: (
+        gate: import('./catalog-safety-gate').CatalogSafetyGate | null,
+      ) => void;
+    },
   ) {
     this.key = catalogCheckGateKey(catalog, owner);
   }
+  private get lockKey(): string {
+    return this.shared
+      ? catalogSafetyKey(this.shared.owner, this.shared.catalog)
+      : this.key;
+  }
+  private sharedGate() {
+    return this.shared
+      ? readCatalogSafetyGate(
+          this.local,
+          this.shared.owner,
+          this.shared.catalog,
+        )
+      : null;
+  }
+
+  private ownsSharedGate(
+    current: ReturnType<CatalogCheckRecovery['sharedGate']>,
+    requestId: string,
+  ): boolean {
+    if (!current) return true;
+    if (current.operationId !== requestId) return false;
+    if (current.phase === 'check') return true;
+    // An old client may rewrite its parsed inspection reservation, dropping
+    // the envelope payload. Only our matching independent receipt can prove
+    // this reservation belongs to the check being updated or reconciled.
+    return (
+      current.phase === 'inspection' &&
+      parse(this.local.getItem(this.key))?.requestId === requestId
+    );
+  }
 
   read(): CatalogCheckGate | null {
-    const local = parse(this.local.getItem(this.key));
+    const shared = this.sharedGate();
+    const local =
+      shared?.phase === 'check'
+        ? shared.check
+        : parse(this.local.getItem(this.key));
     let session: CatalogCheckGate | null = null;
     try {
       session = parse(this.session?.getItem(this.key) ?? null);
@@ -69,6 +100,26 @@ export class CatalogCheckRecovery {
   private write(gate: CatalogCheckGate): boolean {
     try {
       const raw = JSON.stringify(gate);
+      if (this.shared) {
+        const current = this.sharedGate();
+        if (!this.ownsSharedGate(current, gate.requestId)) return false;
+        const shared = {
+          phase: 'check' as const,
+          operationId: gate.requestId,
+          check: gate,
+        };
+        if (
+          !writeCatalogSafetyGate(
+            this.local,
+            this.shared.owner,
+            this.shared.catalog,
+            shared,
+          ) ||
+          JSON.stringify(this.sharedGate()) !== JSON.stringify(shared)
+        )
+          return false;
+        this.shared.publish?.(shared);
+      }
       this.local.setItem(this.key, raw);
       if (this.local.getItem(this.key) !== raw) return false;
       return true;
@@ -95,20 +146,47 @@ export class CatalogCheckRecovery {
     )
       return false;
     try {
+      const legacy = parse(this.local.getItem(this.key));
+      if (
+        legacy &&
+        (legacy.requestId !== expected.requestId ||
+          (legacy.taskId !== undefined && legacy.taskId !== expected.taskId))
+      )
+        return false;
+      if (this.shared) {
+        const shared = this.sharedGate();
+        if (!this.ownsSharedGate(shared, expected.requestId)) return false;
+      }
       this.local.removeItem(this.key);
       this.session?.removeItem(this.key);
-      return this.read() === null;
+      if (
+        this.shared &&
+        !writeCatalogSafetyGate(
+          this.local,
+          this.shared.owner,
+          this.shared.catalog,
+          null,
+        )
+      )
+        return false;
+      const cleared = this.read() === null;
+      if (cleared) this.shared?.publish?.(null);
+      return cleared;
     } catch {
       return false;
     }
   }
-  clear(expected: CatalogCheckGate): Promise<boolean> {
-    return this.locks.request(this.key, () => this.clearCurrent(expected));
+  clear(expected: CatalogCheckGate, current = () => true): Promise<boolean> {
+    return this.locks.request(
+      this.lockKey,
+      () => current() && this.clearCurrent(expected),
+    );
   }
   async reconcile(
     expected: CatalogCheckGate,
     readTask: (id: string) => Promise<{ taskId: string; status: string }>,
     beforeClear: () => Promise<void> = async () => undefined,
+    current = () => true,
   ) {
     if (expected.taskId) {
       const task = await readTask(expected.taskId).catch((error: unknown) => {
@@ -120,7 +198,7 @@ export class CatalogCheckRecovery {
       if (task && !isTerminalTask(task.status)) return 'active' as const;
     }
     await beforeClear();
-    return (await this.clear(expected))
+    return (await this.clear(expected, current))
       ? ('cleared' as const)
       : ('changed' as const);
   }
@@ -128,11 +206,17 @@ export class CatalogCheckRecovery {
     target: CheckTarget,
     send: () => Promise<CatalogCheckResult>,
     current = () => true,
+    onAccepted?: (gate: CatalogCheckGate, persisted: boolean) => void,
   ) {
-    return this.locks.request(this.key, async () => {
+    return this.locks.request(this.lockKey, async () => {
       if (!current()) return { kind: 'stale' as const };
       const existing = this.read();
       if (existing) return { kind: 'blocked' as const, gate: existing };
+      if (this.sharedGate())
+        throw new ApiError(
+          'INVALID_INPUT',
+          '目录已有操作结果待核实，请先恢复原操作。',
+        );
       const gate: CatalogCheckGate = {
         requestId: this.uuid(),
         target,
@@ -144,10 +228,16 @@ export class CatalogCheckRecovery {
         const result = await send();
         if (result.kind === 'task') {
           const accepted = { ...gate, taskId: result.taskId };
+          const persisted = this.remember(accepted);
+          try {
+            onAccepted?.(accepted, persisted);
+          } catch {
+            /* An optional UI receipt cannot invalidate the verified ACK. */
+          }
           return {
             kind: 'task' as const,
             gate: accepted,
-            persisted: this.remember(accepted),
+            persisted,
             uncertain: result.status === 'unknown',
           };
         }
@@ -182,6 +272,9 @@ export function definiteCheckRejection(error: unknown): boolean {
 export function browserCheckRecovery(
   catalog: string,
   owner: string,
+  publish?: (
+    gate: import('./catalog-safety-gate').CatalogSafetyGate | null,
+  ) => void,
 ): CatalogCheckRecovery {
   if (!owner || typeof window === 'undefined' || !navigator.locks)
     throw new Error('CHECK_GATE_UNAVAILABLE');
@@ -197,5 +290,8 @@ export function browserCheckRecovery(
     window.localStorage,
     session,
     navigator.locks,
+    Date.now,
+    () => crypto.randomUUID(),
+    { catalog, owner, publish },
   );
 }
