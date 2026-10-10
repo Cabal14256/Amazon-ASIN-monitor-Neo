@@ -9,6 +9,7 @@ export * from './dashboard';
 export * from './export';
 export * from './feishu';
 export * from './health';
+export * from './home-workbench-neo';
 export * from './monitor';
 export * from './monitor-analytics-neo';
 export * from './neo-batch-delete';

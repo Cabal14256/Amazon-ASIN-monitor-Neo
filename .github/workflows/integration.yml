@@ -330,6 +330,9 @@ jobs:
       - name: Compare complete dashboard with Legacy MySQL and verify current authorization, cache and PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/dashboard.integration.test.ts
 
+      - name: Verify Home workbench literal brands, Shanghai group trends and current authorization in isolated PostgreSQL and Redis
+        run: pnpm --filter @asin-monitor/api exec vitest run test/home-workbench.integration.test.ts --maxWorkers=1
+
       - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
 

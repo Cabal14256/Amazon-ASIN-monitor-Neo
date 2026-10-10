@@ -25,6 +25,14 @@
 - 联调输入是临时 HTTP fixture，不是真实生产数据库，未写入生产组件、接口或数据库；此证据覆盖 Home 当前消费者，不替代生产 15 页面完整验收。临时 fixture / dev 服务器在验收后停止。本 PR 没有后台 / Legacy 源码、合同、锁或迁移变化，其完整套件和构建没有重复执行，具体跳过命令与原因记录在 PR 验证段。
 - 本项回滚只恢复 Home 原来的 CSS 比例条；已经合入的图表基础封装、Legacy 服务和数据库不受影响。
 
+## 工作台国家切换与读取退休（Issue #133 / PR #243）
+
+- `HomeWorkbench` 根据国家重挂内层筛选组件，同一已验证 owner / session / revision 的其他国家缓存仍可复用。内层卸载只标记旧读取失效，不取消或删除整个身份范围；身份范围改变或外层离页时，等查询观察者卸载后只取消并删除该范围的 inactive 查询。同范围的新外层挂载已观察的查询继续保留，旧响应不得进入当前页面或新身份缓存。
+- 2026-10-10 在 `efbed17` 保全原 mounted 测试和产品文件后执行真实 RED：四项新增国家 / 外层 / 离页边界为 2 fail / 2 pass，日志在本地忽略目录 `artifacts/pr-243-verification/cleanup-red.log`；最小产品修复后四项全部通过。测试 fixture 的外部国家控件使用真实 React state 将 `country` prop 从 ALL 切到 US 再返回 ALL，未以内部筛选表单代替国家重挂。
+- 最终 mounted 页面 17/17 通过（65.06s）；原 11 项业务 oracle 的完整主体与保全源一致，normalized SHA256 为 `c1297696ffa6b430b36bc1f808d15b8635513d5bda08c82ef510bd4da895f77b`。原源文件 SHA256 为 `407CD053736F718936B2151608FF6E227070416B9AF4DFE1BDFBAB199535B75D`。原实际遍历 1000 页和全部 1000 个 GET 断言不变，`60_000` 超时不变，本次该项耗时 59,360ms。
+- 新增六项 mounted 场景覆盖 country prop 的新请求 / 缓存复用、旧国家迟到读取、外层同范围重挂、离页后同身份重挂、真实 IdentityStore owner / session 切换，以及真实 403 在国家重挂后继续阻止读取。正式 RouteGate、IdentityStore、Query、HttpClient 和 Zod 均执行，只有网络和 WebSocket 为合成 fixture；不宣称原生数据库或实际浏览器验收。
+- Web strict 与两个 owned 文件的 ESLint 通过，Prettier 与 `git diff --check` 通过。单 worker 完整 Web session 已启动，但为释放团队串行重型窗口而主动取消；本轮完整 Web 未完成，不引用此前 full 结果作为当前验证。完整 Web、build 与推送后 CI 由主任务统一安排。此项仅修改前端组件 / 测试 / runbook，不包含并行处理的数据库 country 匹配修复。
+
 ## 验收与回滚
 
 - 自动化检查：Web 测试、类型检查、Lint、构建，以及根级 URL 契约测试；检查 `/api` 前缀去重、权限导航和国家筛选。
