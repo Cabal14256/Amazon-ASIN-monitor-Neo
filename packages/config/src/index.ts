@@ -173,6 +173,13 @@ const envObjectSchema = z.object({
     (value) => Number(value) || 10,
     z.number().int().positive(),
   ),
+  MONITOR_MAX_CONCURRENT_GROUP_CHECKS: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0
+      ? Math.min(8, Math.max(1, Math.floor(number)))
+      : 3;
+  }, z.number().int().min(1).max(8)),
+  AUTO_ADJUST_CONCURRENCY: booleanFlagSchema(true),
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),

@@ -24,7 +24,10 @@ import {
   type RedisCatalogCheckStore,
 } from '@asin-monitor/sp-api';
 import { setTimeout as delay } from 'node:timers/promises';
-import { VariantCheckCommitUncertainError } from './pipeline';
+import {
+  VariantCheckCommitUncertainError,
+  type VariantGroupAdmission,
+} from './pipeline';
 import { normalizeAsinType } from './record-mapper';
 
 const MAX_RESULT_BYTES = 32 * 1024 * 1024;
@@ -32,6 +35,7 @@ const MAX_ACTIVE = 8;
 export interface CompetitorCheckContext {
   forceRefresh: boolean;
   signal?: AbortSignal;
+  groupAdmission?: VariantGroupAdmission;
   operation?: VariantCheckOperation;
   snapshotDigest?: string;
   authorize(unit: CompetitorCheckUnit): Promise<void>;
@@ -179,6 +183,7 @@ export class CompetitorCheckPipeline {
     context: CompetitorCheckContext,
     action: (scope: Scope) => Promise<T>,
   ): Promise<T> {
+    context = { ...context };
     if (this.closed) throw new SpApiError('CLOSED');
     if (this.active.size >= MAX_ACTIVE) throw new VariantCheckError('capacity');
     const controller = new AbortController();
@@ -209,7 +214,17 @@ export class CompetitorCheckPipeline {
         controller.signal.throwIfAborted();
       },
     };
-    const work = Promise.resolve().then(() => action(scope));
+    let releaseAdmission: (() => void) | undefined;
+    const work = Promise.resolve().then(async () => {
+      if (context.groupAdmission) {
+        releaseAdmission = await context.groupAdmission.acquire(
+          controller.signal,
+          () => scope.guard(),
+        );
+        await scope.guard();
+      }
+      return action(scope);
+    });
     try {
       return await waitFor(work, controller.signal);
     } catch (error) {
@@ -228,7 +243,12 @@ export class CompetitorCheckPipeline {
       clearTimeout(timer);
       context.signal?.removeEventListener('abort', abort);
       // The underlying transaction still owns its admission slot until settled.
-      void work.finally(() => this.active.delete(controller)).catch(() => {});
+      void work
+        .finally(() => {
+          this.active.delete(controller);
+          releaseAdmission?.();
+        })
+        .catch(() => {});
     }
   }
   private async read<T>(

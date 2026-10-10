@@ -29,9 +29,17 @@ import {
 } from './types';
 
 export const MAX_VARIANT_CHECK_RESULT_BYTES = 32 * 1024 * 1024;
+export interface VariantGroupAdmission {
+  /** The pipeline owns the returned permit until its actual work settles. */
+  acquire(
+    signal: AbortSignal,
+    checkpoint: () => Promise<void>,
+  ): Promise<() => void>;
+}
 export interface VariantCheckContext {
   forceRefresh?: boolean;
   signal?: AbortSignal;
+  groupAdmission?: VariantGroupAdmission;
   /** Immutable accepted job identity. Sync HTTP checks intentionally omit it. */
   operation?: VariantCheckOperation;
   /** HTTP authenticates the current session; accepted jobs verify current owner
@@ -152,12 +160,23 @@ export class VariantCheckPipeline {
         }
       },
     };
+    let releaseAdmission: (() => void) | undefined;
     const work = Promise.resolve()
-      .then(() => execute(scope))
+      .then(async () => {
+        if (context.groupAdmission) {
+          releaseAdmission = await context.groupAdmission.acquire(
+            controller.signal,
+            () => scope.guard(),
+          );
+          await scope.guard();
+        }
+        return execute(scope);
+      })
       .finally(() => {
         clearTimeout(timer);
         context.signal?.removeEventListener('abort', abort);
         this.active.delete(controller);
+        releaseAdmission?.();
       });
     try {
       return await waitFor(work, controller.signal);

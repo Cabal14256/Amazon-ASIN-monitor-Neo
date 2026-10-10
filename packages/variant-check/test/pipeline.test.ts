@@ -185,6 +185,51 @@ afterEach(() => {
 });
 
 describe('Primary variant business pipeline', () => {
+  it('retains shared group admission until cancelled noncooperative work actually settles', async () => {
+    const f = setup();
+    const blocked = deferred<ReturnType<typeof product>>();
+    f.check.mockImplementationOnce(async () => blocked.promise);
+    const release = vi.fn();
+    const acquire = vi.fn(async () => release);
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire },
+    } as VariantCheckContext);
+    void work.catch(() => {});
+    try {
+      await flush();
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(f.check).toHaveBeenCalledTimes(1);
+      stop.abort();
+      await expect(work).rejects.toThrow('CANCELLED');
+      expect(release).not.toHaveBeenCalled();
+      blocked.resolve(product(1));
+      await flush();
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      blocked.resolve(product(1));
+      await work.catch(() => {});
+    }
+  });
+  it('does not read business records while shared group admission is pending', async () => {
+    const f = setup();
+    const admitted = deferred<() => void>();
+    const release = vi.fn();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      groupAdmission: { acquire: async () => admitted.promise },
+    } as VariantCheckContext);
+    await flush();
+    expect(f.unit.loadGroup).not.toHaveBeenCalled();
+    expect(f.check).not.toHaveBeenCalled();
+    admitted.resolve(release);
+    await work;
+    expect(release).toHaveBeenCalledTimes(1);
+  });
   const operation = () =>
     createVariantCheckOperation(
       {

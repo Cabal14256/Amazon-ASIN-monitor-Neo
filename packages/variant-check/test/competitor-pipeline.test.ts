@@ -188,6 +188,41 @@ function monitorContext(f: ReturnType<typeof fixture>): CompetitorCheckContext {
 }
 
 describe('competitor check pipeline', () => {
+  it('retains shared group admission until cancelled noncooperative competitor work actually settles', async () => {
+    const f = fixture();
+    let settle!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    f.checker.check.mockImplementation(async (code: string) => {
+      await blocked;
+      return catalogResult(code, true);
+    });
+    const release = vi.fn();
+    const acquire = vi.fn(async () => release);
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire },
+    } as CompetitorCheckContext);
+    void work.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(f.checker.check).toHaveBeenCalledTimes(3));
+      expect(acquire).toHaveBeenCalledTimes(1);
+      stop.abort();
+      await expect(work).rejects.toThrow('CANCELLED');
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await work.catch(() => {});
+      f.pipeline.close();
+    }
+  });
   it('clears only the old deferred item after a normal force-refresh recovery without invalidating its successful cache', async () => {
     const f = fixture(),
       context = monitorContext(f);
