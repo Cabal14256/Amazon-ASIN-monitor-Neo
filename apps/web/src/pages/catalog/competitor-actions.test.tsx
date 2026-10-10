@@ -134,15 +134,15 @@ describe('competitor catalog single-item controls', () => {
       original.children = [originalChild];
       const destination = { ...target, id: ' Gróup cible ' };
       const fetcher = vi.fn<typeof fetch>(async (url, options) => {
-        const path = new URL(String(url)).pathname;
+        const groupId = new URL(String(url)).searchParams.get('groupId');
         if (options?.method === 'POST')
           return jsonResponse({
             success: true,
             data: { ...originalChild, variantGroupId: destination.id },
           });
-        if (path.endsWith(`/${encodeURIComponent(original.id)}`))
+        if (groupId === original.id)
           return jsonResponse({ success: true, data: original });
-        if (path.endsWith(`/${encodeURIComponent(destination.id)}`))
+        if (groupId === destination.id)
           return jsonResponse({ success: true, data: destination });
         return jsonResponse({
           success: true,
@@ -194,13 +194,13 @@ describe('competitor catalog single-item controls', () => {
         await waitFor(() => expect(saved).toHaveBeenCalledOnce());
         const urls = fetcher.mock.calls.map((call) => String(call[0]));
         expect(urls).toContain(
-          `https://app.test/api/v1/competitor/variant-groups/${encodeURIComponent(
-            original.id,
+          `https://app.test/api/v1/competitor/catalog/variant-groups/detail?${new URLSearchParams(
+            { groupId: original.id },
           )}`,
         );
         expect(urls).toContain(
-          `https://app.test/api/v1/competitor/variant-groups/${encodeURIComponent(
-            destination.id,
+          `https://app.test/api/v1/competitor/catalog/variant-groups/detail?${new URLSearchParams(
+            { groupId: destination.id },
           )}`,
         );
         expect(urls.some((url) => url.includes('/api/api/'))).toBe(false);

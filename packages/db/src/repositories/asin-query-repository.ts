@@ -1,3 +1,4 @@
+import { isNeoBatchDeleteId } from '@asin-monitor/contracts';
 import {
   and,
   eq,
@@ -36,7 +37,7 @@ export interface AsinGroupReadResult {
 }
 export interface AsinQueryUnit extends RoleWriteUnit {
   list(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
-  detail(groupId: string): Promise<AsinGroupReadResult>;
+  detail(groupId: string, mode?: 'literal'): Promise<AsinGroupReadResult>;
 }
 export interface AsinQueryRepositoryPort {
   read<T>(operation: (unit: AsinQueryUnit) => Promise<T>): Promise<T>;
@@ -161,7 +162,12 @@ export class DrizzleAsinQueryUnit
   list(query: AsinGroupQuery) {
     return this.query(query);
   }
-  detail(groupId: string) {
+  detail(groupId: string, mode?: 'literal') {
+    if (mode === 'literal') {
+      if (!isNeoBatchDeleteId(groupId))
+        throw new AsinQueryRepositoryError('input');
+      return this.query({ current: 1, pageSize: 1 }, groupId, mode);
+    }
     if (
       typeof groupId !== 'string' ||
       !groupId ||
@@ -174,12 +180,17 @@ export class DrizzleAsinQueryUnit
   private async query(
     query: AsinGroupQuery,
     groupId?: string,
+    mode?: 'literal',
   ): Promise<AsinGroupReadResult> {
     validateQuery(query);
+    const equal = (left: unknown, right: unknown) =>
+      mode === 'literal'
+        ? sql`${left} COLLATE "C" = ${right} COLLATE "C"`
+        : sql`${left} = ${right}`;
     const keyword = textFilter(query.keyword);
     const groupWhere =
       and(
-        groupId === undefined ? undefined : eq(g.id, groupId),
+        groupId === undefined ? undefined : equal(g.id, groupId),
         query.keyword
           ? or(
               ilike(g.name, `%${query.keyword}%`),
@@ -208,9 +219,10 @@ export class DrizzleAsinQueryUnit
       groupId === undefined
         ? sql`(SELECT count(*)::text FROM ${asins} AS a LEFT JOIN ${variantGroups} AS g ON ${g.id}=${a.variantGroupId} WHERE ${asinWhere})`
         : sql`'0'`;
-    const asinCount = sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${
-      a.variantGroupId
-    }=${g.id} AND ${keyword ?? sql`true`})`;
+    const asinCount = sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${equal(
+      a.variantGroupId,
+      g.id,
+    )} AND ${keyword ?? sql`true`})`;
     this.ensureOpen();
     const result = await this.db.execute(sql`
       WITH selected AS MATERIALIZED (
@@ -218,9 +230,10 @@ export class DrizzleAsinQueryUnit
         ORDER BY ${g.createTime} DESC NULLS LAST, ${g.id} DESC
         LIMIT ${query.pageSize} OFFSET ${(query.current - 1) * query.pageSize}
       ), child_page AS MATERIALIZED (
-        SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON p.id=${
-      a.variantGroupId
-    }
+        SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON ${equal(
+      sql`p.id`,
+      a.variantGroupId,
+    )}
         ORDER BY ${a.variantGroupId}, ${a.createTime} ASC NULLS FIRST, ${a.id}
         LIMIT ${MAX_ASIN_QUERY_CHILDREN + 1}
       )

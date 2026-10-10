@@ -20,7 +20,10 @@ import {
   ASIN_IMPORT_REPOSITORY,
   AsinImportService,
 } from './asin-import.service';
-import { AsinQueryController } from './asin-query.controller';
+import {
+  AsinLiteralDetailController,
+  AsinQueryController,
+} from './asin-query.controller';
 import { ASIN_QUERY_REPOSITORY, AsinQueryService } from './asin-query.service';
 import { AsinWriteController } from './asin-write.controller';
 import { ASIN_WRITE_REPOSITORY, AsinWriteService } from './asin-write.service';
@@ -29,6 +32,7 @@ import { ASIN_WRITE_REPOSITORY, AsinWriteService } from './asin-write.service';
   imports: [AuthModule, DatabaseModule, TaskQueryModule, ImportStorageModule],
   controllers: [
     AsinQueryController,
+    AsinLiteralDetailController,
     AsinWriteController,
     AsinBatchDeleteController,
     AsinImportController,

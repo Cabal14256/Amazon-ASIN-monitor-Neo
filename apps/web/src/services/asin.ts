@@ -8,6 +8,7 @@ import {
   deleteVariantGroupResultSchema,
   feishuNotifyRequestSchema,
   groupManualBrokenRequestSchema,
+  isNeoBatchDeleteId,
   moveAsinRequestSchema,
   updateAsinRequestSchema,
   variantCheckTaskDataSchema,
@@ -136,10 +137,16 @@ export async function getVariantGroup(
   id: string,
   signal?: AbortSignal,
 ): Promise<VariantGroup> {
-  // Segment encoding prevents a record identifier from changing the route.
+  if (!isNeoBatchDeleteId(id))
+    throw new ApiError('INVALID_INPUT', 'ASIN 或变体组 ID 无效');
   const response = await http.request(
-    `${GROUPS}/${segment(id)}`,
-    { signal, timeoutMs: 120_000, maxResponseBytes: ASIN_RESPONSE_LIMIT },
+    '/api/v1/catalog/variant-groups/detail',
+    {
+      query: { groupId: id },
+      signal,
+      timeoutMs: 120_000,
+      maxResponseBytes: ASIN_RESPONSE_LIMIT,
+    },
     variantGroupResultSchema,
   );
   if (!response.success || !response.data)
