@@ -23,6 +23,8 @@ Legacy 竞品批量检查菜单和契约登记已有，但 Neo 没有对应 cont
 - 网络断开、超时、取消、非法 ACK 与服务端 500 unknown 回执均保留提交时间和目标。已取得任务 ID 时恢复任务查询；无 ID 时引导按时间和目标到任务中心核实。重载页面不会解除防重。损坏的异步恢复记录阻止新提交。
 - pending / processing 任务不能解锁。终态任务先重读当前目录和已打开详情，成功后按 operationId / taskId 清除原记录；重读失败、身份变化或另一标签替换记录时继续保留门禁。无 ID 或已过保留期的任务必须人工确认原任务不会继续执行，再成功重读目录。
 - 筛选 A→B→A 会实际清空原选择和确认，而非仅暂时隐藏。其他标签核实并清除检查后，本页必须成功 GET 当前目录才解除缓存门禁；GET 失败明确提示操作仍暂停，并提供“重新读取检查后的目录”，重试只发 GET。离页、账号、权限或强制改密变化会中止重读，迟到结果和新的 peer 门禁不能被旧读取覆盖。
+- 检查后的目录重读绑定单调递增的筛选 / 展开版本；即使筛选 A→B→A 返回同一个 query key，早先 A 的迟到读取也不能清除门禁。有效 ACK 在 localStorage 和 sessionStorage 同时无法保存时，会保留同 owner / session / revision 的运行时回执，身份 loading 或可恢复 error 卸载目录后，只有独立持久化预约仍匹配才恢复任务 ID。更换 owner / session、退出和另一标签替换预约均不能复活旧回执。
+- 任务读取 403 通过真实身份重验证处理。同一身份连续两次拒绝后暂停自动跟踪，保留原目标和任务编号，提供人工重试；重试只恢复原任务查询，不发第二次检查 POST。身份最终确认变化时清除旧运行时回执，独立持久化预约保留给原账号核实。
 
 ## 本轮验证记录
 
@@ -45,6 +47,16 @@ Legacy 竞品批量检查菜单和契约登记已有，但 Neo 没有对应 cont
 - `corepack pnpm --filter web exec vitest run src/pages/catalog/catalog-check-recovery.test.ts src/pages/catalog/catalog-manual-check-page.test.tsx src/pages/catalog/catalog-safety-gate.test.ts --maxWorkers=1 --minWorkers=1`：74/74，3 文件通过（22 个挂载页面、48 个恢复单元、4 个共享门禁单元；10.63s）。新增两域 peer GET 失败重试、替换门禁及离页 / owner / 撤权 / 强制改密 Abort 回归。
 - 最后清理 effect cleanup 的 ref lint 提示后，挂载页面重跑 22/22（12.04s）；Web strict、lint 均通过，0 错误 / 0 警告；7 个本轮文件 `prettier --check`、`npm run test:api-url`（3/3）、`npm run test:changed-format`（5/5）和 `git diff --check` 通过。旧 parser / writer fixture 与 `git show 197925d:apps/web/src/pages/catalog/catalog-safety-gate.ts` 完全相同（仅增加来源注释和统一换行）。
 - 本次全 Web 与 build 尚未重跑：团队 #215 正占用串行重型验收窗口；本次先执行单 worker 专项、strict、lint 和格式 / URL 轻量检查，完整验收与最新 head CI 另行记录，不沿用旧 head 的全量结果。
+
+2026-10-10，继续 PR #216 的身份 / ACK / 目录重读边界：
+
+- 保全原 `catalog-check-lifecycle.test.tsx`，SHA256 为 `1B747787215D5474756E5F3F011B0C8898CE25B9B340C842E6D961E75BF8624A`；29 项业务 oracle 全程未改。在仅撤回本轮产品变动的原 HEAD `18c63d3` 上，实际 RED 为 18 fail / 11 pass，日志保留在本地忽略目录 `artifacts/pr-216-verification/lifecycle-head-red.log`。恢复产品实现后 lifecycle / manual-check / recovery / safety 四个专项文件 103/103 通过。
+- 单 worker 完整 Web 验证：`corepack pnpm --filter web exec vitest run --maxWorkers=1 --minWorkers=1`，66 文件、929/929，通过（122.87s，0 skip）。Web strict 与 lint 通过；strict 首次识别 accepted 回执的 nullable 窄化问题后，明确要求 durable 和 accepted gate 均存在才合并，两者缺失继续使用原 durable 结果。
+- `corepack pnpm --filter web build` 对应 package script（contracts → strict → Vite）通过，Vite 18.21s；保留入口 553.57 kB、ECharts 565.53 kB 的现有构建提示。环境 fallback `pnpm` 首次触发自动安装并因 no TTY 中止，未改依赖；使用同一 bundled pnpm CLI 重新执行成功。
+- 在独立的 `127.0.0.1:5191` fixture，通过 bundled Playwright 的真实 `msedge` 浏览器运行正式 Router、IdentityStore、CatalogPage、HttpClient 和 Zod。两个同 identity / scope 的标签同时点击确认，最终 POST 仅 1 次，两个标签均显示同一任务编号；浏览器 `isSecureContext`、`navigator.locks.request` 和原生 `Storage.prototype.setItem` 均核实存在。
+- 两域均填满真实 localStorage 与 sessionStorage 配额，触发原生 `QuotaExceededError`，有效 ACK 的任务 ID 在两处均未落盘；保留无 ID 的原预约。释放测试填充后，仅做同身份重验证，仍显示原任务并继续 GET，POST 保持 1 次。
+- 终态任务的旧 A 目录 GET 被延迟，切换 A→ 异常 B→A，同时让当前读取失败；旧响应返回后，原两个持久化门禁完全不变，新检查仍禁用。独立浏览器 JSON、五张截图和脚本保存在 `artifacts/pr-216-verification/`，最终无 page error。网络和 WS 为合成 fixture，这些证据仅证明真实浏览器 storage / Web Locks 与前端行为，不是原生 Neo API / PostgreSQL / Redis 验收。
+- 本轮只修改两处目录产品代码、保留新增 oracle 并补充本 runbook，不涉及 API URL、数据库迁移、Legacy 行为或生产切换。历史 review 的三项已提交修复继续由本轮 103 项专项和全量 Web 覆盖；最新提交的 CI 与 review 状态须在推送后独立记录。
 
 ## 人工验收
 

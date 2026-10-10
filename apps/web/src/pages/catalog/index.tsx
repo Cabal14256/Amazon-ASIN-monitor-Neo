@@ -99,6 +99,18 @@ type CheckState = {
   uncertain?: boolean;
   message?: string;
 };
+type AcceptedCheckMemory = {
+  scope: symbol;
+  gate?: CatalogCheckGate;
+  authorizationFailures?: number;
+};
+function sameCheckReservation(left: CatalogCheckGate, right: CatalogCheckGate) {
+  return (
+    left.requestId === right.requestId &&
+    left.submittedAt === right.submittedAt &&
+    JSON.stringify(left.target) === JSON.stringify(right.target)
+  );
+}
 const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
 function Notice({
   title,
@@ -1095,6 +1107,30 @@ function CatalogPageBody({
   const sessionId =
     auth.status === 'authenticated' ? auth.identity.sessionId : undefined;
   const sessionRevision = runtime.session?.revision;
+  const acceptedCheckKey = useMemo(
+    () =>
+      [
+        'catalog-check-accepted',
+        config.id,
+        userId,
+        sessionId,
+        sessionRevision,
+      ] as const,
+    [config.id, userId, sessionId, sessionRevision],
+  );
+  // A valid ACK may outlive the mounted route when both storage areas reject
+  // its update. A removed submission scope must never be recreated by late ACKs.
+  useEffect(() => {
+    runtime.queryClient.setQueryDefaults(['catalog-check-accepted'], {
+      gcTime: Infinity,
+    });
+  }, [runtime.queryClient]);
+  useQuery<AcceptedCheckMemory | null>({
+    queryKey: acceptedCheckKey,
+    queryFn: () => null,
+    enabled: false,
+    gcTime: Infinity,
+  });
   const currentCheckScope = useCallback(() => {
     const current = identity.getSnapshot();
     const grant = createAccess(
@@ -1134,6 +1170,12 @@ function CatalogPageBody({
   }, [config.id, runtime.queryClient]);
   const [forceRefresh, setForceRefresh] = useState(true);
   const selectionScope = JSON.stringify(query);
+  const catalogReadRevision = useRef(0);
+  useLayoutEffect(() => {
+    // Include a monotonic revision so changing away and back cannot authorize
+    // an earlier response to unlock the current catalog.
+    ++catalogReadRevision.current;
+  }, [selectionScope, selectedId]);
   const [selectedGroups, setSelectedGroups] = useState<{
     scope: string;
     ids: string[];
@@ -1204,16 +1246,33 @@ function CatalogPageBody({
   const restoreCheck = useCallback(() => {
     if (!recovery || !canCheck) return;
     try {
-      const gate = recovery.read();
+      const durable = recovery.read();
+      const memory =
+        runtime.queryClient.getQueryData<AcceptedCheckMemory>(acceptedCheckKey);
+      const accepted = memory?.gate;
+      const matches =
+        durable &&
+        accepted &&
+        sameCheckReservation(durable, accepted) &&
+        (!durable.taskId || durable.taskId === accepted.taskId);
+      const gate =
+        matches && !durable.taskId
+          ? { ...durable, taskId: accepted.taskId }
+          : durable;
+      if (accepted && !matches)
+        runtime.queryClient.setQueryData(acceptedCheckKey, null);
       if (gate) {
+        const paused = matches && (memory?.authorizationFailures ?? 0) >= 2;
         checkBusyRef.current = true;
         setCheckState({
           target: gate.target,
           gate,
-          phase: gate.taskId ? 'task' : 'unknown',
+          phase: gate.taskId && !paused ? 'task' : 'unknown',
           taskId: gate.taskId,
           uncertain: true,
-          message: '上次提交结果待核实，请先查看任务中心；核实前不会重复提交。',
+          message: paused
+            ? '任务状态连续无权读取，自动重试已暂停；请到任务中心核实，或重试核实原任务。任务编号和防重记录继续保留。'
+            : '上次提交结果待核实，请先查看任务中心；核实前不会重复提交。',
         });
       } else if (!checkRequest.current) {
         checkBusyRef.current = false;
@@ -1224,7 +1283,7 @@ function CatalogPageBody({
         '无法读取浏览器中的检查记录，请恢复本地存储后重试；尚未发送新请求。',
       );
     }
-  }, [canCheck, recovery]);
+  }, [canCheck, recovery, acceptedCheckKey, runtime.queryClient]);
   const restoreCurrentCheck = useRef(restoreCheck);
   restoreCurrentCheck.current = restoreCheck;
   useEffect(() => {
@@ -1476,14 +1535,52 @@ function CatalogPageBody({
     if (recheckActive.current) return;
     const outstanding =
       runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+    const accepted =
+      runtime.queryClient.getQueryData<AcceptedCheckMemory>(acceptedCheckKey);
+    let durable: CatalogCheckGate | null = null;
+    try {
+      durable = recovery?.read() ?? null;
+    } catch {
+      /* Storage failure must not prevent identity revalidation. */
+    }
+    const matching =
+      durable &&
+      accepted?.gate &&
+      sameCheckReservation(durable, accepted.gate) &&
+      (!durable.taskId || durable.taskId === accepted.gate.taskId);
+    const gate =
+      matching && durable && accepted?.gate
+        ? { ...durable, taskId: durable.taskId ?? accepted.gate.taskId }
+        : durable;
     runtime.clearUserWork();
     if (outstanding) runtime.queryClient.setQueryData(safetyKey, outstanding);
+    // A 403 suspends access until revalidation; it does not prove a new owner.
+    // IdentityStore clears this receipt if revalidation confirms another scope.
+    if (gate?.taskId && currentCheckScope())
+      runtime.queryClient.setQueryData<AcceptedCheckMemory>(acceptedCheckKey, {
+        scope: accepted?.scope ?? Symbol('catalog-check-revalidation'),
+        gate,
+        authorizationFailures:
+          (matching ? accepted.authorizationFailures ?? 0 : 0) + 1,
+      });
     void recheckAccess();
-  }, [recheckAccess, runtime, safetyKey]);
+  }, [
+    recheckAccess,
+    runtime,
+    safetyKey,
+    acceptedCheckKey,
+    currentCheckScope,
+    recovery,
+  ]);
 
   const refreshCheckedCatalog = useCallback(async () => {
+    const revision = catalogReadRevision.current;
     const guard = () => {
-      if (!mounted.current || !currentCheckScope())
+      if (
+        !mounted.current ||
+        !currentCheckScope() ||
+        revision !== catalogReadRevision.current
+      )
         throw new ApiError('CANCELLED', '身份或页面已变化');
     };
     guard();
@@ -1539,6 +1636,11 @@ function CatalogPageBody({
         : current,
     );
     const gate = checkState.gate;
+    const revision = catalogReadRevision.current;
+    const current = () =>
+      mounted.current &&
+      currentCheckScope() &&
+      revision === catalogReadRevision.current;
     void (async () => {
       const message =
         task.status === 'completed'
@@ -1565,16 +1667,12 @@ function CatalogPageBody({
         return;
       }
       if (!mounted.current || !currentCheckScope()) return;
-      const cleared =
-        !gate ||
-        Boolean(
-          await recovery?.clear(
-            gate,
-            () => mounted.current && currentCheckScope(),
-          ),
-        );
+      const cleared = !gate || Boolean(await recovery?.clear(gate, current));
       if (!mounted.current || checkOwner.current !== userId) return;
-      if (cleared) handledTasks.current.add(task.taskId);
+      if (cleared) {
+        handledTasks.current.add(task.taskId);
+        runtime.queryClient.setQueryData(acceptedCheckKey, null);
+      }
       checkBusyRef.current = !cleared;
       setCheckState((current) =>
         current?.taskId === task.taskId
@@ -1613,6 +1711,8 @@ function CatalogPageBody({
     recovery,
     userId,
     currentCheckScope,
+    runtime.queryClient,
+    acceptedCheckKey,
   ]);
 
   async function runCheck(
@@ -1637,6 +1737,10 @@ function CatalogPageBody({
     let staleSubmission = false;
     try {
       if (!recovery) throw new Error('CHECK_GATE_UNAVAILABLE');
+      const scope = Symbol('catalog-check-submission');
+      runtime.queryClient.setQueryData<AcceptedCheckMemory>(acceptedCheckKey, {
+        scope,
+      });
       const result = await recovery.submit(
         target,
         () =>
@@ -1654,6 +1758,24 @@ function CatalogPageBody({
                 controller.signal,
               ),
         current,
+        (gate, persisted) => {
+          if (persisted) return;
+          const memory =
+            runtime.queryClient.getQueryData<AcceptedCheckMemory>(
+              acceptedCheckKey,
+            );
+          const verified = identity.getSnapshot();
+          if (
+            memory?.scope !== scope ||
+            runtime.session?.revision !== sessionRevision ||
+            verified.status === 'anonymous' ||
+            (verified.status === 'authenticated' &&
+              (verified.identity.user.id !== userId ||
+                verified.identity.sessionId !== sessionId))
+          )
+            return;
+          runtime.queryClient.setQueryData(acceptedCheckKey, { scope, gate });
+        },
       );
       if (!current() || result.kind === 'stale') {
         staleSubmission = true;
@@ -1756,15 +1878,58 @@ function CatalogPageBody({
     const gate = checkState?.gate;
     if (!gate || !recovery || checkRequest.current || !currentCheckScope())
       return;
+    const revision = catalogReadRevision.current;
+    const current = () =>
+      mounted.current &&
+      currentCheckScope() &&
+      revision === catalogReadRevision.current;
+    const matchingReceipt = () => {
+      try {
+        const durable = recovery.read();
+        if (!durable || !sameCheckReservation(durable, gate)) return false;
+        const accepted =
+          runtime.queryClient.getQueryData<AcceptedCheckMemory>(
+            acceptedCheckKey,
+          )?.gate;
+        const taskId =
+          durable.taskId ??
+          (accepted && sameCheckReservation(durable, accepted)
+            ? accepted.taskId
+            : undefined);
+        return taskId === gate.taskId;
+      } catch {
+        return false;
+      }
+    };
     try {
       const outcome = await recovery.reconcile(
         gate,
         (id) => runtime.tasks.get(id),
-        refreshCheckedCatalog,
-        () => mounted.current && currentCheckScope(),
+        async () => {
+          if (!current()) throw new ApiError('CANCELLED', '目录或身份已变化');
+          await refreshCheckedCatalog();
+        },
+        current,
       );
       if (!mounted.current || !currentCheckScope()) return;
       if (outcome === 'active') {
+        if (!matchingReceipt()) {
+          restoreCurrentCheck.current();
+          return;
+        }
+        const memory =
+          runtime.queryClient.getQueryData<AcceptedCheckMemory>(
+            acceptedCheckKey,
+          );
+        if (
+          memory?.gate &&
+          sameCheckReservation(memory.gate, gate) &&
+          memory.gate.taskId === gate.taskId
+        )
+          runtime.queryClient.setQueryData(acceptedCheckKey, {
+            ...memory,
+            authorizationFailures: 0,
+          });
         setCheckState({
           target: gate.target,
           gate,
@@ -1780,10 +1945,15 @@ function CatalogPageBody({
         return;
       }
       checkBusyRef.current = false;
+      runtime.queryClient.setQueryData(acceptedCheckKey, null);
       setCheckState(null);
       setNotice('已核实原任务，可以重新提交检查。');
     } catch (error) {
-      if (!mounted.current || checkOwner.current !== userId) return;
+      if (!mounted.current || !currentCheckScope()) return;
+      if (!matchingReceipt()) {
+        restoreCurrentCheck.current();
+        return;
+      }
       if (catalogAccessDenied(error)) reportAccessDenied();
       else
         setNotice(

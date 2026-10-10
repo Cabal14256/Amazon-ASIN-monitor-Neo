@@ -206,6 +206,7 @@ export class CatalogCheckRecovery {
     target: CheckTarget,
     send: () => Promise<CatalogCheckResult>,
     current = () => true,
+    onAccepted?: (gate: CatalogCheckGate, persisted: boolean) => void,
   ) {
     return this.locks.request(this.lockKey, async () => {
       if (!current()) return { kind: 'stale' as const };
@@ -227,10 +228,16 @@ export class CatalogCheckRecovery {
         const result = await send();
         if (result.kind === 'task') {
           const accepted = { ...gate, taskId: result.taskId };
+          const persisted = this.remember(accepted);
+          try {
+            onAccepted?.(accepted, persisted);
+          } catch {
+            /* An optional UI receipt cannot invalidate the verified ACK. */
+          }
           return {
             kind: 'task' as const,
             gate: accepted,
-            persisted: this.remember(accepted),
+            persisted,
             uncertain: result.status === 'unknown',
           };
         }
