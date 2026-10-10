@@ -985,6 +985,166 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     }, 20_000);
 
+    it('selects the same UTF-8 byte minimum for summary CI/PAD buckets in either insertion order', async () => {
+      const prefix = 'binary-min-226-';
+      const bounds = {
+        startTime: '1997-10-28 00:00:00',
+        endTime: '1997-10-28 00:59:59',
+      };
+      // These are legal historical varchar values, including Unicode and
+      // fallback IDs. Preserve their bytes instead of imposing an ASIN format.
+      const cases = [
+        {
+          name: 'case-pad',
+          values: ['b226min ', 'B226MIN ', 'b226min', 'B226MIN'].map(
+            (asin_code) => ({ asin_code, asin_id: null }),
+          ),
+        },
+        {
+          name: 'unicode-pad',
+          values: ['é226min  ', 'É226MIN ', 'é226min ', 'É226MIN  '].map(
+            (asin_code) => ({ asin_code, asin_id: null }),
+          ),
+        },
+        {
+          name: 'id-fallback',
+          values: [
+            'é226min-id ',
+            'É226MIN-ID  ',
+            'é226min-id  ',
+            'É226MIN-ID ',
+          ].map((asin_id) => ({ asin_code: null, asin_id })),
+        },
+      ];
+      const expected = new Map<string, string>();
+      const seeded: {
+        asin_code: string | null;
+        asin_id: string | null;
+        site: string;
+      }[] = [];
+      const [{ mode }] = await legacy.query(
+        'SELECT @@SESSION.sql_mode AS mode',
+      );
+      try {
+        expect((await pool.query('SHOW server_encoding')).rows).toEqual([
+          { server_encoding: 'UTF8' },
+        ]);
+        await legacy.query(
+          "SET SESSION sql_mode=REPLACE(@@SESSION.sql_mode,'ONLY_FULL_GROUP_BY','')",
+        );
+        for (const item of cases) {
+          const spellings = item.values.map(
+            (value) => value.asin_code ?? `ID#${value.asin_id}`,
+          );
+          const minimum = [...spellings].sort((a, b) =>
+            Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')),
+          )[0];
+          for (const reverse of [false, true]) {
+            const site = `${prefix}${item.name}-${
+              reverse ? 'reverse' : 'forward'
+            }`;
+            expected.set(site, minimum);
+            const ordered = reverse ? [...item.values].reverse() : item.values;
+            for (const [index, value] of ordered.entries()) {
+              seeded.push({ ...value, site });
+              const params = [
+                value.asin_code,
+                value.asin_id,
+                index % 2,
+                `1997-10-28 00:${String(index + 5).padStart(2, '0')}:00`,
+                site,
+              ];
+              await legacy.query(
+                "INSERT INTO monitor_history(asin_code,asin_id,is_broken,check_time,site_snapshot,brand_snapshot,country,check_type,variant_group_id) VALUES(?,?,?,?,?,'binary-min-226-brand','US','ASIN','analytics-109-a')",
+                params,
+              );
+              await pool.query(
+                "INSERT INTO public.monitor_history(asin_code,asin_id,is_broken,check_time,site_snapshot,brand_snapshot,country,check_type,variant_group_id) VALUES($1,$2,$3,$4::timestamp,$5,'binary-min-226-brand','US','ASIN','analytics-109-a')",
+                params.map((value, index) =>
+                  index === 2 ? Boolean(value) : value,
+                ),
+              );
+            }
+          }
+        }
+        const raw = (rows: Record<string, unknown>[]) =>
+          rows.map((row) => ({
+            asin_code: row.asin_code,
+            asin_id: row.asin_id,
+            site: row.site,
+          }));
+        expect(
+          raw(
+            await legacy.query(
+              "SELECT asin_code,asin_id,site_snapshot AS site FROM monitor_history WHERE site_snapshot LIKE 'binary-min-226-%' ORDER BY id",
+            ),
+          ),
+        ).toEqual(seeded);
+        expect(
+          raw(
+            (
+              await pool.query(
+                "SELECT asin_code,asin_id,site_snapshot AS site FROM public.monitor_history WHERE site_snapshot LIKE 'binary-min-226-%' ORDER BY id",
+              )
+            ).rows,
+          ),
+        ).toEqual(seeded);
+        for (const granularity of granularities) {
+          const old = await legacy.model.getDurationSourceRowsFromRaw({
+            ...bounds,
+            sourceGranularity: granularity,
+            asinSpelling: 'binary-min',
+          });
+          const query = parseMonitorAnalyticsQuery(
+            'all-countries-summary',
+            bounds,
+          );
+          const neo = await createDb(pool).execute(
+            monitorRawDurationSourceSelect(
+              query,
+              'dim',
+              granularity,
+              undefined,
+              'binary-min',
+            ),
+          );
+          for (const [engine, rows] of [
+            ['mysql', old],
+            ['postgres', neo.rows],
+          ] as const) {
+            const selected = rows.filter((row) =>
+              expected.has(String(row.site)),
+            );
+            expect(
+              selected,
+              `${engine}/${granularity}/CI-PAD partitions`,
+            ).toHaveLength(expected.size);
+            for (const row of selected) {
+              const minimum = expected.get(String(row.site));
+              expect(row.asin_key, `${engine}/${granularity}/${row.site}`).toBe(
+                minimum,
+              );
+              expect(Buffer.from(String(row.asin_key)).toString('hex')).toBe(
+                Buffer.from(minimum!).toString('hex'),
+              );
+              expect(Number(row.total_checks)).toBe(4);
+              expect(Number(row.broken_count)).toBe(2);
+              expect(Number(row.has_peak)).toBe(0);
+              expect(row.country).toBe('US');
+            }
+          }
+        }
+      } finally {
+        await legacy.query(
+          "DELETE FROM monitor_history WHERE site_snapshot LIKE 'binary-min-226-%'",
+        );
+        await pool.query(
+          "DELETE FROM public.monitor_history WHERE site_snapshot LIKE 'binary-min-226-%'",
+        );
+        await legacy.query('SET SESSION sql_mode=?', [mode]);
+      }
+    }, 20_000);
+
     it('keeps guarded CAGG summaries exactly equal to Legacy raw for 24 clipped ASINs, month ratios and dimension splits', async () => {
       const countries = ['US', 'UK', 'DE', 'FR', 'ES', 'IT'];
       type Seed = {
@@ -1293,8 +1453,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
 
         // Same CI bucket, two raw spellings: CAGG stores only one of them.
-        // Read the actual MySQL representative, then put its opposite spelling
-        // in another dimension. Do not assume either engine chooses upper case.
+        // The user-approved summary contract now selects the binary minimum.
+        // Keep both original raw spellings and the opposite second dimension.
         const identitySeed = {
           ...rows[0],
           asin_code: 'B226IDENTITY',
@@ -1316,14 +1476,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         const mysqlBuckets = await legacy.model.getDurationSourceRowsFromRaw({
           ...identityBounds,
           sourceGranularity: 'hour',
+          asinSpelling: 'binary-min',
         });
         const representative = mysqlBuckets.find(
           (row) => row.site === identitySeed.site_snapshot,
         );
         expect(representative?.total_checks).toBe(2);
-        expect(['B226IDENTITY', 'b226identity']).toContain(
-          representative?.asin_key,
-        );
+        expect(representative?.asin_key).toBe('B226IDENTITY');
         await seed([
           {
             ...identitySeed,
@@ -1340,6 +1499,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           await legacy.model.getDurationSourceRowsFromRaw({
             ...identityBounds,
             sourceGranularity: 'hour',
+            asinSpelling: 'binary-min',
           });
         expect(mysqlFinalBuckets).toHaveLength(2);
         expect(new Set(mysqlFinalBuckets.map((row) => row.asin_key)).size).toBe(
@@ -1430,9 +1590,16 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                 startTime: query.startTime,
                 endTime: query.endTime,
                 sourceGranularity,
+                asinSpelling: 'binary-min',
               });
               const neo = await createDb(pool).execute(
-                monitorRawDurationSourceSelect(query, 'dim', sourceGranularity),
+                monitorRawDurationSourceSelect(
+                  query,
+                  'dim',
+                  sourceGranularity,
+                  undefined,
+                  'binary-min',
+                ),
               );
               return {
                 legacy: diagnosticBuckets(mysql.rows),

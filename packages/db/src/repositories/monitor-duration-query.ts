@@ -371,6 +371,10 @@ export async function readMonitorDurationQuery(
     query,
     root ? 'asin' : variant ? 'variant_group' : 'dim',
     granularity,
+    undefined,
+    query.operation === 'all-countries-summary' || region
+      ? 'binary-min'
+      : 'legacy',
   );
   if (root)
     select = sql`SELECT ${countsPayload()} AS statistics_counts,

@@ -34,6 +34,9 @@ const ci = (expression: SQL) =>
 const equals = (expression: SQL, value: string) =>
   sql`${ci(expression)} = rtrim(${value}::text)`;
 const rawAsinKey = sql`coalesce(nullif(rtrim(mh.asin_code), ''), 'ID#' || rtrim(mh.asin_id))`;
+// MySQL NULLIF uses PAD SPACE equality, but the chosen nonempty spelling still
+// contains its original bytes. Keep that separate from the CI grouping key.
+const rawAsinSpelling = sql`coalesce(CASE WHEN nullif(rtrim(mh.asin_code), '') IS NOT NULL THEN mh.asin_code END, 'ID#' || mh.asin_id)`;
 const asinKey = ci(rawAsinKey);
 const asinFilter = sql`${ci(sql`mh.check_type`)} = 'ASIN'
   AND (mh.asin_id IS NOT NULL OR nullif(rtrim(mh.asin_code), '') IS NOT NULL)`;
@@ -103,9 +106,12 @@ export function monitorRawDurationSourceSelect(
   family: MonitorAggregateFamily,
   granularity: MonitorSourceGranularity,
   scope?: SQL,
+  asinSpelling: 'legacy' | 'binary-min' = 'legacy',
 ): SQL {
   validateMonitorAnalyticsQuery(query);
   validateSource(family, granularity);
+  if (!['legacy', 'binary-min'].includes(asinSpelling))
+    throw new MonitorAnalyticsQueryError('input');
   const where = [...rawWhere(query), asinFilter];
   if (scope) where.push(scope);
   const slot = rawSlots[granularity],
@@ -131,7 +137,11 @@ export function monitorRawDurationSourceSelect(
     where.push(sql`mh.variant_group_id IS NOT NULL`);
   }
   return sql`SELECT ${monitorPeriodSql(slot, granularity)} AS slot_period,
-    ${country} AS country, ${asinKey} AS asin_key,
+    ${country} AS country, ${
+    asinSpelling === 'binary-min'
+      ? sql`min(${rawAsinSpelling} COLLATE "C")`
+      : asinKey
+  } AS asin_key,
     ${select.length ? sql`${sql.join(select, sql`, `)},` : sql``}
     count(*) AS total_checks,
     sum(CASE WHEN mh.is_broken IS TRUE THEN 1 ELSE 0 END) AS broken_count,
