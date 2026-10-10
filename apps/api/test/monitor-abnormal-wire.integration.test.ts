@@ -135,12 +135,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         )}`,
       };
       await f.pools.primaryPool.query(
-        "INSERT INTO public.variant_groups(id,name,country) VALUES($1,'wire241 group','US')",
+        "INSERT INTO public.variant_groups(id,name,country,site,brand) VALUES($1,'wire241 group','US','amazon.com','wire241')",
         [group],
       );
       for (let index = 0; index < ids.length; index++) {
         await f.pools.primaryPool.query(
-          "INSERT INTO public.asins(id,asin,variant_group_id,asin_type,country,name) VALUES($1,$2,$3,'MAIN_LINK','US','wire241 ASIN')",
+          "INSERT INTO public.asins(id,asin,variant_group_id,asin_type,country,name,site,brand) VALUES($1,$2,$3,'MAIN_LINK','US','wire241 ASIN','amazon.com','wire241')",
           [ids[index], codes[index], group],
         );
         for (const [time, broken] of [
