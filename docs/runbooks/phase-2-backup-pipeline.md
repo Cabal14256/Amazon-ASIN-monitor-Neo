@@ -62,6 +62,12 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 恢复在提交前被确认取消时，Worker 返回的 `{ cancelled: true }` 会使 BullMQ 作业成为 completed，但这不是数据库已恢复的凭据。任务详情与列表在缺失、无效或仅含取消标记的队列结果下保留已确认的 cancelled/failed，不自动改为 completed；只有符合恢复完成契约、且队列身份与原任务一致的 commit 回执，才能沿专用 CAS 修正旧取消或失败状态。
 
+保留的 backup 队列作业已失败而 registry 仍在 cancelling 时，任务查询使用取消优先的 `backup-uncommitted-failed` CAS，保留已受理取消，包括取消在读后才赢得原子变更的情况。没有取消的失败继续显示 failed；有效 completed commit 回执仍优先恢复真实已提交结果，不把 queued failed 当提交凭据。
+
+恢复先把来源归档有界复制到系统临时目录中的随机私有目录（0700）与独立文件（0600），校验私有副本自身的文件头、大小和 SHA-256，再将同一个副本传给三种 `pg_restore` 路径。共享卷路径替换或原 inode 被写入不能改变已经校验的消费文件。实际复制、摘要读取和子进程 settle 后才逐项清理本任务文件及空目录；清理未确认记录固定 warn，不覆盖已提交恢复回执。需要系统临时盘额外最多 `BACKUP_MAX_BYTES` 空间；强制终止或清理失败可能留下私有文件，按任务 ID 核对后处理，不能递归删除未知目录。
+
+新确定性文件名使用上海时间 `h23`，并把兼容 ICU 的残留 `24` 明确归为同一日 `00`。旧已发布归档仅兼容同一不可变任务、日期、分秒、完整 UUID 后缀和目标的原当日 `24` 名称；保留原 sidecar/hash/proof 和实际文件名，不重新 dump 或重命名。两个候选同时存在时明确失败待核对，不能任意选一个恢复发布结果。
+
 新 v3/v4 sidecar 的可选 `execution` 保存实际 `pg_dump` 启动前的 `dumpStartedAt`、成功退出后的 `dumpCompletedAt` 和归档/sidecar 原子发布开始前的 `publicationStartedAt`，并标明 `timeSource: dump-start`。列表、创建完成凭据与公开结果的 `createdAt` 使用该执行起点，重放和下载沿用原 sidecar 全部时间。`dump-start` 是 Legacy 同样采用的执行开始时刻，不能声称它是 PostgreSQL 精确 MVCC 快照瞬间；恢复点属于成功 dump 的执行窗口，`publicationStartedAt` 也不宣称文件 rename 已完成。队列不可变 `createdAt`、task identity、确定性文件名和 `creationIdentity` 摘要仍采用首次受理信息，执行时间不会重置六天期限或改变原私有 proof。
 
 API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变身份与 Worker 内的 `dumpStartedAt <= dumpCompletedAt <= publicationStartedAt`，不要求 dump 起点晚于 API 受理时刻。部署仍需时钟同步，执行窗口不是精确 MVCC 时间证明。

@@ -245,7 +245,8 @@ export class TaskQueryService {
       current = await port.store.mutate(
         task.taskId,
         {
-          kind: 'failed',
+          // A cancellation may win the atomic mutation after this task read.
+          kind: backupTask(task) ? 'backup-uncommitted-failed' : 'failed',
           message: '任务执行失败',
         },
         identity,

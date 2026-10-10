@@ -387,6 +387,8 @@ jobs:
 
       - name: Verify Neo backup commands against isolated PostgreSQL and TimescaleDB
         run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-pipeline.integration.test.ts
+      - name: Verify immutable restore snapshots against shared archive replacement and inode writes
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-archive-snapshot.integration.test.ts --maxWorkers=1
       - name: Verify migrated Legacy backup configuration row selection
         run: pnpm --filter @asin-monitor/db exec vitest run test/backup-configuration.integration.test.ts
 

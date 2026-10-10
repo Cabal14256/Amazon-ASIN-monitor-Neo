@@ -1,5 +1,5 @@
 import {
-  backupCreationFilename,
+  backupCreationFilenameMatches,
   backupCreationReceiptSchema,
   backupFilenameCreatedAt,
   createBackupJobDataSchema,
@@ -35,12 +35,12 @@ export function parseBackupCreationReceipt(input: unknown, result: unknown) {
     proof.userId !== data.data.userId ||
     proof.taskCreatedAt !== data.data.createdAt ||
     proof.creationIdentity !== backupCreationIdentity(data.data) ||
-    receipt.data.filename !==
-      backupCreationFilename(
-        data.data.taskId,
-        data.data.createdAt,
-        data.data.target,
-      ) ||
+    !backupCreationFilenameMatches(
+      receipt.data.filename,
+      data.data.taskId,
+      data.data.createdAt,
+      data.data.target,
+    ) ||
     receipt.data.target !== data.data.target ||
     // API acceptance and Worker execution use different host clocks. Only the
     // execution schema may order timestamps captured on the same Worker.

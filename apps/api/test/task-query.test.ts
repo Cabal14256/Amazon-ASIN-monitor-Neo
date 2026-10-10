@@ -519,6 +519,57 @@ describe('own task query HTTP and bounded reconciliation', () => {
       expect(port.store.mutate).not.toHaveBeenCalled();
     },
   );
+  it.each(
+    (['create', 'restore'] as const).flatMap((taskSubType) =>
+      (['detail', 'list'] as const).flatMap((endpoint) =>
+        ([false, true] as const).map((cancelRequested) => ({
+          taskSubType,
+          endpoint,
+          cancelRequested,
+        })),
+      ),
+    ),
+  )(
+    'reconciles a retained failed backup without losing acknowledged cancellation: %j',
+    async ({ taskSubType, endpoint, cancelRequested }) => {
+      task = taskFixture({
+        taskType: 'backup',
+        taskSubType,
+        status: cancelRequested ? 'cancelling' : 'processing',
+        cancelRequestedAt: cancelRequested ? taskFixture().createdAt : null,
+        result: null,
+      });
+      rows = [task];
+      queue = { ...task, status: 'failed', error: 'private-redis-payload' };
+      const response = await get(
+        endpoint === 'detail' ? `/tasks/${task.taskId}` : '/tasks',
+      );
+      expect(response.statusCode).toBe(200);
+      const actual =
+        endpoint === 'detail' ? response.json().data : response.json().data[0];
+      expect(actual).toMatchObject({
+        status: cancelRequested ? 'cancelled' : 'failed',
+        result: null,
+      });
+      expect(actual.error).toBe(cancelRequested ? null : '任务执行失败');
+      expect(response.body).not.toContain('private-redis');
+    },
+  );
+  it('preserves backup cancellation that wins the retained-failed CAS race', async () => {
+    task = taskFixture({ taskType: 'backup', taskSubType: 'restore' });
+    rows = [task];
+    queue = { ...task, status: 'failed' };
+    vi.mocked(port.store.mutate).mockImplementationOnce(async (_id, change) => {
+      task = transitionTask(task!, { kind: 'cancel-request' }, new Date());
+      task = transitionTask(task, change, new Date());
+      return task;
+    });
+    const response = await get(`/tasks/${task.taskId}`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.status).toBe('cancelled');
+    expect(task.status).toBe('cancelled');
+    expect(task.cancelRequestedAt).not.toBeNull();
+  });
   it.each(['createdAt', 'taskSubType'] as const)(
     'rejects a restore receipt from a different queue %s',
     async (field) => {

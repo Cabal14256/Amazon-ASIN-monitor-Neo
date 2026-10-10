@@ -58,16 +58,46 @@ export function backupCreationFilename(
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    hourCycle: 'h23',
   })
     .formatToParts(new Date(createdAt))
     .reduce<Record<string, string>>((out, part) => {
       if (part.type !== 'literal') out[part.type] = part.value;
       return out;
     }, {});
-  return `backup_${stamp.year}${stamp.month}${stamp.day}-${stamp.hour}${
+  const hour = stamp.hour === '24' ? '00' : stamp.hour;
+  return `backup_${stamp.year}${stamp.month}${stamp.day}-${hour}${
     stamp.minute
   }${stamp.second}-${taskId.replaceAll('-', '').toLowerCase()}-${target}.dump`;
+}
+
+/** At most two exact immutable names: canonical h23 plus old same-day h24.
+ * Never trim input, shift dates or shorten the task's full artifact identity. */
+export function backupCreationFilenames(
+  taskId: string,
+  createdAt: string,
+  target: BackupTarget,
+): readonly string[] {
+  const canonical = backupCreationFilename(taskId, createdAt, target);
+  return /^backup_\d{8}-00\d{4}-/.test(canonical)
+    ? [
+        canonical,
+        canonical.replace(
+          /^(backup_\d{8}-)00/,
+          (_match, prefix: string) => `${prefix}24`,
+        ),
+      ]
+    : [canonical];
+}
+
+/** Match only this task's original calendar/time, complete suffix and target. */
+export function backupCreationFilenameMatches(
+  filename: string,
+  taskId: string,
+  createdAt: string,
+  target: BackupTarget,
+): boolean {
+  return backupCreationFilenames(taskId, createdAt, target).includes(filename);
 }
 
 /** Older Intl h24 filenames encode midnight as 24 on that calendar day. */

@@ -1,5 +1,5 @@
 import {
-  backupCreationFilename,
+  backupCreationFilenameMatches,
   backupCreationReceiptSchema,
   backupFilenameCreatedAt,
   taskInfoSchema,
@@ -92,8 +92,12 @@ function historicalBackupTimeSource(
     proof.taskId !== task.taskId ||
     proof.userId !== task.userId ||
     proof.taskCreatedAt !== task.createdAt ||
-    value.filename !==
-      backupCreationFilename(task.taskId, task.createdAt, value.target) ||
+    !backupCreationFilenameMatches(
+      value.filename,
+      task.taskId,
+      task.createdAt,
+      value.target,
+    ) ||
     value.createdAt !== backupFilenameCreatedAt(value.filename)
   )
     return 'unavailable';

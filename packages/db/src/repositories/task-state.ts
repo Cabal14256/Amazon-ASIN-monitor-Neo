@@ -1,5 +1,5 @@
 import {
-  backupCreationFilename,
+  backupCreationFilenameMatches,
   backupCreationReceiptSchema,
   backupFilenameCreatedAt,
   backupRestoreReceiptSchema,
@@ -124,12 +124,12 @@ export function transitionTask(
       proof.taskId !== task.taskId ||
       proof.userId !== task.userId ||
       proof.taskCreatedAt !== task.createdAt ||
-      change.result.filename !==
-        backupCreationFilename(
-          task.taskId,
-          task.createdAt,
-          change.result.target,
-        ) ||
+      !backupCreationFilenameMatches(
+        change.result.filename,
+        task.taskId,
+        task.createdAt,
+        change.result.target,
+      ) ||
       (!change.result.execution &&
         change.result.createdAt !==
           backupFilenameCreatedAt(change.result.filename))

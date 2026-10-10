@@ -10,6 +10,7 @@ import {
   BACKUP_ARTIFACT_METADATA_MAX_BYTES,
   backupArtifactMetadataSchema,
   backupCreationFilename,
+  backupCreationFilenames,
   backupDatabaseSettingsSchema,
   backupFilenameCreatedAt,
   backupJobDataSchema,
@@ -829,6 +830,121 @@ async function assertCustomDump(path: string, maxBytes: number) {
   return details;
 }
 
+/** The caller owns this new private path until every actual file operation and
+ * restore child has settled. Hash the copy itself, never source read chunks. */
+async function copyRestoreSnapshot(
+  sourcePath: string,
+  snapshotPath: string,
+  input: {
+    maxBytes: number;
+    signal: AbortSignal;
+    checkpoint: () => Promise<void>;
+  },
+): Promise<string> {
+  input.signal.throwIfAborted();
+  await input.checkpoint();
+  const source = await open(sourcePath, 'r');
+  try {
+    const details = await source.stat();
+    if (!details.isFile() || details.size < 5 || details.size > input.maxBytes)
+      throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+    input.signal.throwIfAborted();
+    const snapshot = await open(snapshotPath, 'wx', 0o600);
+    try {
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let offset = 0;
+      let sinceCheckpoint = 0;
+      let lastCheckpoint = Date.now();
+      while (true) {
+        input.signal.throwIfAborted();
+        const { bytesRead } = await source.read(
+          buffer,
+          0,
+          buffer.length,
+          offset,
+        );
+        input.signal.throwIfAborted();
+        if (bytesRead === 0) break;
+        if (offset + bytesRead > input.maxBytes)
+          throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+        let written = 0;
+        while (written < bytesRead) {
+          input.signal.throwIfAborted();
+          const { bytesWritten } = await snapshot.write(
+            buffer,
+            written,
+            bytesRead - written,
+            offset + written,
+          );
+          input.signal.throwIfAborted();
+          if (bytesWritten === 0)
+            throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+          written += bytesWritten;
+        }
+        offset += bytesRead;
+        sinceCheckpoint += bytesRead;
+        if (
+          sinceCheckpoint >= 8 * 1024 * 1024 ||
+          Date.now() - lastCheckpoint >= 500
+        ) {
+          await input.checkpoint();
+          input.signal.throwIfAborted();
+          sinceCheckpoint = 0;
+          lastCheckpoint = Date.now();
+        }
+      }
+    } finally {
+      // Abort never races cleanup against a pending read/write. Both handle
+      // closes finish before the outer owner may unlink the private snapshot.
+      await snapshot.close();
+    }
+  } finally {
+    await source.close();
+  }
+  input.signal.throwIfAborted();
+  await assertCustomDump(snapshotPath, input.maxBytes);
+  input.signal.throwIfAborted();
+  const verified = await open(snapshotPath, 'r');
+  const hash = createHash('sha256');
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    let sinceCheckpoint = 0;
+    let lastCheckpoint = Date.now();
+    while (true) {
+      input.signal.throwIfAborted();
+      const { bytesRead } = await verified.read(
+        buffer,
+        0,
+        buffer.length,
+        offset,
+      );
+      input.signal.throwIfAborted();
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+      if (offset > input.maxBytes)
+        throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+      hash.update(buffer.subarray(0, bytesRead));
+      sinceCheckpoint += bytesRead;
+      if (
+        sinceCheckpoint >= 8 * 1024 * 1024 ||
+        Date.now() - lastCheckpoint >= 500
+      ) {
+        await input.checkpoint();
+        input.signal.throwIfAborted();
+        sinceCheckpoint = 0;
+        lastCheckpoint = Date.now();
+      }
+    }
+  } finally {
+    // The owner must not remove the file while a hashing read still owns it.
+    await verified.close();
+  }
+  await input.checkpoint();
+  input.signal.throwIfAborted();
+  return hash.digest('hex');
+}
+
 /** Keep one leased session so reconnects cannot silently restore login privileges. */
 async function openBackupStagingPool(
   databaseUrl: string,
@@ -1209,6 +1325,8 @@ export function createBackupProcessor(
     let artifactPath: string | undefined;
     let metadataPartialPath: string | undefined;
     let metadataPublishedPath: string | undefined;
+    let restoreSnapshotPath: string | undefined;
+    let restoreSnapshotDirectory: string | undefined;
     let publishedStagingDatabase: string | undefined;
     let committedRestore: BackupRestoreReceipt | undefined;
     let publishedCreation: BackupCreationReceipt | undefined;
@@ -1248,6 +1366,10 @@ export function createBackupProcessor(
       data.operation === 'create'
         ? backupCreationFilename(data.taskId, data.createdAt, data.target)
         : undefined;
+    const creationFilenames =
+      data.operation === 'create'
+        ? backupCreationFilenames(data.taskId, data.createdAt, data.target)
+        : undefined;
     const publicationSync =
       options.publicationSync ?? nativeBackupPublicationSync;
     const syncPublication = async (
@@ -1275,9 +1397,10 @@ export function createBackupProcessor(
     const resultFor = (
       metadata: BackupArtifactMetadata & { archiveSha256: string },
       details: { size: number },
+      filename = creationFilename!,
     ): BackupCreationReceipt => ({
       operation: 'create',
-      filename: creationFilename!,
+      filename,
       size: details.size,
       ...('execution' in metadata && metadata.execution
         ? {
@@ -1286,7 +1409,7 @@ export function createBackupProcessor(
             execution: metadata.execution,
           }
         : {
-            createdAt: backupFilenameCreatedAt(creationFilename!)!,
+            createdAt: backupFilenameCreatedAt(filename)!,
             timeSource: 'filename' as const,
           }),
       target: data.target,
@@ -1306,15 +1429,26 @@ export function createBackupProcessor(
       },
     });
     const recoverPublishedCreation = async (): Promise<boolean> => {
-      if (!creationFilename) return false;
-      const output = resolve(directory, creationFilename);
-      try {
-        await lstat(output);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
-        publishedCreationObserved = true;
-        throw error;
+      if (!creationFilenames) return false;
+      const existing: { filename: string; output: string }[] = [];
+      for (const filename of creationFilenames) {
+        const output = resolve(directory, filename);
+        try {
+          await lstat(output);
+          existing.push({ filename, output });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+            publishedCreationObserved = true;
+            throw error;
+          }
+        }
       }
+      if (existing.length === 0) return false;
+      publishedCreationObserved = true;
+      // Never guess which publication is authoritative or start another dump.
+      if (existing.length !== 1)
+        throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
+      const [{ filename: publishedFilename, output }] = existing;
       publishedCreationObserved = true;
       const metadata = await readBackupArtifactMetadataFile(
         `${output}.meta.json`,
@@ -1322,7 +1456,7 @@ export function createBackupProcessor(
       if (
         (metadata.version !== 3 && metadata.version !== 4) ||
         metadata.creationIdentity !== creationIdentity ||
-        metadata.filename !== creationFilename ||
+        metadata.filename !== publishedFilename ||
         metadata.target !== data.target
       )
         throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
@@ -1347,7 +1481,7 @@ export function createBackupProcessor(
       // emitting the existing proof; never changes identity or archive hash.
       await syncPublication([output, `${output}.meta.json`], true);
       verify(await store.read(data.taskId));
-      publishedCreation = resultFor(metadata, details);
+      publishedCreation = resultFor(metadata, details, publishedFilename);
       await mutate({
         kind: 'backup-create-committed',
         result: publishedCreation,
@@ -1615,18 +1749,33 @@ export function createBackupProcessor(
         throw new BackupCommandError('BACKUP_SOURCE_TARGET_MISMATCH');
       if (metadata.version !== 3 && metadata.version !== 4)
         throw new BackupCommandError('BACKUP_METADATA_UNVERIFIED');
-      if (
-        (await archiveSha256(
-          input,
-          async () => {
-            await check();
-            await lock.ensureHeld();
-          },
-          maxBytes,
-          controller.signal,
-        )) !== metadata.archiveSha256
-      )
-        throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+      // A private copy separates restoration from shared archive writers. Keep
+      // the timeout active through copy/header/hash, and await real settlement
+      // before its owner cleans anything; never Promise.race file operations.
+      const snapshotTimer = setTimeout(() => {
+        controller.abort(new BackupCommandError('BACKUP_COMMAND_TIMEOUT'));
+      }, timeoutMs);
+      snapshotTimer.unref();
+      try {
+        restoreSnapshotDirectory = await mkdtemp(
+          resolve(tmpdir(), 'neo-backup-restore-'),
+        );
+        await chmod(restoreSnapshotDirectory, 0o700);
+        restoreSnapshotPath = resolve(restoreSnapshotDirectory, 'archive.dump');
+        if (
+          (await copyRestoreSnapshot(input, restoreSnapshotPath, {
+            maxBytes,
+            signal: controller.signal,
+            checkpoint: async () => {
+              await check();
+              await lock.ensureHeld();
+            },
+          })) !== metadata.archiveSha256
+        )
+          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+      } finally {
+        clearTimeout(snapshotTimer);
+      }
       if (metadata.sourceEngine === 'timescaledb') {
         const liveManifest = await lock.readTimescaleManifest();
         if (
@@ -1636,7 +1785,7 @@ export function createBackupProcessor(
         await progress(5, '正在创建隔离 TimescaleDB 恢复数据库');
         const restoredDatabase = await restoreTimescaleIsolated({
           databaseUrl,
-          directoryFile: input,
+          directoryFile: restoreSnapshotPath,
           taskId: data.taskId,
           target: data.target,
           manifest: metadata.timescale,
@@ -1658,7 +1807,7 @@ export function createBackupProcessor(
         await progress(5, '正在创建隔离 PostgreSQL 恢复数据库');
         const restoredDatabase = await restorePostgresqlIsolated({
           databaseUrl,
-          directoryFile: input,
+          directoryFile: restoreSnapshotPath,
           taskId: data.taskId,
           target: data.target,
           databaseSettings: metadata.databaseSettings,
@@ -1684,7 +1833,11 @@ export function createBackupProcessor(
       await lock.assertSelectiveRestoreSupported(metadata.tables);
       await processCommand(
         commandPath(options.env.PG_RESTORE_PATH, 'pg_restore'),
-        restoreCommandArgs(environment.PGDATABASE!, input, lock.effectiveRole),
+        restoreCommandArgs(
+          environment.PGDATABASE!,
+          restoreSnapshotPath,
+          lock.effectiveRole,
+        ),
         environment,
         {
           timeoutMs,
@@ -1890,6 +2043,26 @@ export function createBackupProcessor(
       throw new UnrecoverableError(message);
     } finally {
       if (lifecycleTimer) clearTimeout(lifecycleTimer);
+      // A cleanup failure is an operational warning, never a failed committed
+      // restore receipt. Remove only our exact private file and empty directory.
+      for (const [path, cleanup] of [
+        [restoreSnapshotPath, unlink],
+        [restoreSnapshotDirectory, rmdir],
+      ] as const) {
+        if (!path) continue;
+        try {
+          await cleanup(path);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          if (code !== 'ENOENT')
+            log.warn('恢复临时归档清理未确认，请按任务 ID 核对', {
+              reason: 'backup_restore_snapshot_cleanup_failed',
+              taskId: data.taskId,
+              target: data.target,
+              code: code && cleanupErrorCodes.has(code) ? code : 'UNKNOWN',
+            });
+        }
+      }
       try {
         await targetLock?.release();
       } catch {
