@@ -439,9 +439,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               { expiresIn: '1h' },
             )}`,
           };
-          expect([401, 403]).toContain(
-            (await read(domain, 'Raw', foreign)).statusCode,
-          );
+          const denied = await read(domain, 'Raw', foreign);
+          expect(denied.statusCode).toBe(403);
+          expect(denied.json()).toMatchObject({
+            success: false,
+            errorCode: 403,
+            errorMessage: '会话已失效',
+          });
           await f!.pools.primaryPool.query(
             "UPDATE sessions SET status='REVOKED' WHERE id=$1",
             [sessionId],
