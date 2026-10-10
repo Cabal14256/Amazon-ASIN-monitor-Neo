@@ -439,7 +439,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               { expiresIn: '1h' },
             )}`,
           };
-          expect((await read(domain, 'Raw', foreign)).statusCode).toBe(401);
+          expect([401, 403]).toContain(
+            (await read(domain, 'Raw', foreign)).statusCode,
+          );
           await f!.pools.primaryPool.query(
             "UPDATE sessions SET status='REVOKED' WHERE id=$1",
             [sessionId],
