@@ -27,6 +27,7 @@ import {
 import type {
   CompetitorCheckPipeline,
   CompetitorGroupCheckData,
+  VariantGroupAdmission,
 } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { createHash } from 'node:crypto';
@@ -61,6 +62,7 @@ export function competitorMonitorGroupOperation(
 }
 interface Options {
   pipeline: Pick<CompetitorCheckPipeline, 'checkGroup'>;
+  groupAdmission?: VariantGroupAdmission;
   repository: Pick<
     PgCompetitorMonitorRepository,
     | 'groups'
@@ -305,6 +307,7 @@ export function createCompetitorMonitorProcessor(
         for (const group of groups.filter((item) => item.country === country)) {
           await check();
           const result = await options.pipeline.checkGroup(group.groupId, {
+            groupAdmission: options.groupAdmission,
             forceRefresh: false,
             snapshotDigest: group.snapshotDigest,
             operation: competitorMonitorGroupOperation(data, group),

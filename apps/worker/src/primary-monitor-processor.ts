@@ -20,7 +20,10 @@ import {
   type FeishuNotifications,
   type NotificationData,
 } from '@asin-monitor/notify';
-import type { VariantCheckPipeline } from '@asin-monitor/variant-check';
+import type {
+  VariantCheckPipeline,
+  VariantGroupAdmission,
+} from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -48,6 +51,7 @@ export function monitorGroupOperation(job: PrimaryMonitorJob, groupId: string) {
 
 interface MonitorProcessorOptions {
   pipeline: Pick<VariantCheckPipeline, 'checkGroup'>;
+  groupAdmission?: VariantGroupAdmission;
   repository: Pick<
     PgPrimaryMonitorRepository,
     'groups' | 'claimNotification' | 'completeNotification'
@@ -260,6 +264,7 @@ export function createPrimaryMonitorProcessor(
           await check();
           try {
             const result = await options.pipeline.checkGroup(group.groupId, {
+              groupAdmission: options.groupAdmission,
               signal: controller.signal,
               operation: monitorGroupOperation(data, group.groupId),
               validateResult: (value) => {

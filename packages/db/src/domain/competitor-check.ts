@@ -64,5 +64,6 @@ export interface CompetitorCheckRepositoryPort {
   transaction<T>(
     action: (unit: CompetitorCheckUnit) => Promise<T>,
     signal?: AbortSignal,
+    onActualWork?: (work: Promise<unknown>) => void,
   ): Promise<T>;
 }

@@ -1,6 +1,7 @@
 import { resolveConfig, snapshotConfig } from './config';
 import { abortError, SpApiError, waitFor } from './errors';
 import type { ConfigSource, SpApiConfig } from './types';
+import { inheritWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 export type ConfigValuesReader = (
   signal: AbortSignal,
@@ -64,6 +65,7 @@ export class DatabaseConfigSource implements ConfigSource {
     if (this.controllers.size >= this.maxActive)
       throw new SpApiError('CAPACITY');
     const controller = new AbortController();
+    inheritWorkSettlement(signal, controller.signal);
     const abort = () => controller.abort(abortError(signal));
     signal.addEventListener('abort', abort, { once: true });
     this.controllers.add(controller);
@@ -100,6 +102,7 @@ export class DatabaseConfigSource implements ConfigSource {
         signal.removeEventListener('abort', abort);
         this.controllers.delete(controller);
       });
+    trackWorkSettlement(controller.signal, work);
     return waitFor(work, controller.signal);
   }
   close(): void {

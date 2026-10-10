@@ -14,9 +14,12 @@ import {
 import {
   abortError,
   CatalogDeferredError,
+  createWorkSettlement,
   decodeCatalogVariantResult,
+  inheritWorkSettlement,
   normalizeCountry,
   SpApiError,
+  trackWorkSettlement,
   waitFor,
   type CatalogVariantChecker,
   type CatalogVariantResult,
@@ -24,7 +27,10 @@ import {
   type RedisCatalogCheckStore,
 } from '@asin-monitor/sp-api';
 import { setTimeout as delay } from 'node:timers/promises';
-import { VariantCheckCommitUncertainError } from './pipeline';
+import {
+  VariantCheckCommitUncertainError,
+  type VariantGroupAdmission,
+} from './pipeline';
 import { normalizeAsinType } from './record-mapper';
 
 const MAX_RESULT_BYTES = 32 * 1024 * 1024;
@@ -32,6 +38,7 @@ const MAX_ACTIVE = 8;
 export interface CompetitorCheckContext {
   forceRefresh: boolean;
   signal?: AbortSignal;
+  groupAdmission?: VariantGroupAdmission;
   operation?: VariantCheckOperation;
   snapshotDigest?: string;
   authorize(unit: CompetitorCheckUnit): Promise<void>;
@@ -40,6 +47,7 @@ export interface CompetitorCheckContext {
 }
 interface Scope {
   signal: AbortSignal;
+  trackWork?: (work: Promise<unknown>) => void;
   guard(unit?: CompetitorCheckUnit): Promise<void>;
   confirmed(value: unknown): void;
   started(): void;
@@ -179,9 +187,13 @@ export class CompetitorCheckPipeline {
     context: CompetitorCheckContext,
     action: (scope: Scope) => Promise<T>,
   ): Promise<T> {
+    context = { ...context };
     if (this.closed) throw new SpApiError('CLOSED');
     if (this.active.size >= MAX_ACTIVE) throw new VariantCheckError('capacity');
     const controller = new AbortController();
+    const settlement = context.groupAdmission
+      ? createWorkSettlement(controller.signal)
+      : undefined;
     this.active.add(controller);
     const abort = () => controller.abort(new SpApiError('CANCELLED'));
     context.signal?.addEventListener('abort', abort, { once: true });
@@ -195,6 +207,7 @@ export class CompetitorCheckPipeline {
     let confirmation: { value: T } | undefined;
     const scope: Scope = {
       signal: controller.signal,
+      trackWork: settlement ? (work) => settlement.track(work) : undefined,
       started: () => {
         commitStarted = true;
       },
@@ -209,7 +222,17 @@ export class CompetitorCheckPipeline {
         controller.signal.throwIfAborted();
       },
     };
-    const work = Promise.resolve().then(() => action(scope));
+    let releaseAdmission: (() => void) | undefined;
+    const work = Promise.resolve().then(async () => {
+      if (context.groupAdmission) {
+        releaseAdmission = await context.groupAdmission.acquire(
+          controller.signal,
+          () => scope.guard(),
+        );
+        await scope.guard();
+      }
+      return action(scope);
+    });
     try {
       return await waitFor(work, controller.signal);
     } catch (error) {
@@ -228,7 +251,16 @@ export class CompetitorCheckPipeline {
       clearTimeout(timer);
       context.signal?.removeEventListener('abort', abort);
       // The underlying transaction still owns its admission slot until settled.
-      void work.finally(() => this.active.delete(controller)).catch(() => {});
+      void work
+        .finally(() => {
+          const release = () => {
+            this.active.delete(controller);
+            releaseAdmission?.();
+          };
+          if (settlement) void settlement.drain().then(release);
+          else release();
+        })
+        .catch(() => {});
     }
   }
   private async read<T>(
@@ -236,15 +268,19 @@ export class CompetitorCheckPipeline {
     scope: Scope,
     load: (unit: CompetitorCheckUnit) => Promise<T>,
   ): Promise<{ snapshot: T } | { completed: unknown }> {
-    return this.repository.transaction(async (unit) => {
-      await scope.guard(unit);
-      if (context.operation) {
-        const result = await unit.readReceipt(context.operation);
+    return this.repository.transaction(
+      async (unit) => {
         await scope.guard(unit);
-        if (result !== undefined) return { completed: bounded(result) };
-      }
-      return { snapshot: await load(unit) };
-    }, scope.signal);
+        if (context.operation) {
+          const result = await unit.readReceipt(context.operation);
+          await scope.guard(unit);
+          if (result !== undefined) return { completed: bounded(result) };
+        }
+        return { snapshot: await load(unit) };
+      },
+      scope.signal,
+      scope.trackWork,
+    );
   }
   private async persist<T>(
     context: CompetitorCheckContext,
@@ -253,21 +289,25 @@ export class CompetitorCheckPipeline {
   ): Promise<T> {
     let readyToCommit = false;
     try {
-      const output = await this.repository.transaction(async (unit) => {
-        await scope.guard(unit);
-        if (context.operation) {
-          const existing = await unit.readReceipt(context.operation, true);
+      const output = await this.repository.transaction(
+        async (unit) => {
           await scope.guard(unit);
-          if (existing !== undefined) return bounded(existing) as T;
-        }
-        scope.started();
-        const result = bounded(await commit(unit));
-        if (context.operation)
-          await unit.saveReceipt(context.operation, result);
-        await scope.guard(unit);
-        readyToCommit = true;
-        return result;
-      }, scope.signal);
+          if (context.operation) {
+            const existing = await unit.readReceipt(context.operation, true);
+            await scope.guard(unit);
+            if (existing !== undefined) return bounded(existing) as T;
+          }
+          scope.started();
+          const result = bounded(await commit(unit));
+          if (context.operation)
+            await unit.saveReceipt(context.operation, result);
+          await scope.guard(unit);
+          readyToCommit = true;
+          return result;
+        },
+        scope.signal,
+        scope.trackWork,
+      );
       scope.confirmed(output);
       return output;
     } catch (error) {
@@ -282,6 +322,7 @@ export class CompetitorCheckPipeline {
       failed: boolean;
       notFound: boolean;
     }[],
+    parentSignal?: AbortSignal,
   ) {
     const entries = rows.filter((row) => row.failed || row.notFound);
     if (!entries.length || this.closed) return;
@@ -292,6 +333,7 @@ export class CompetitorCheckPipeline {
       return;
     }
     const controller = new AbortController();
+    inheritWorkSettlement(parentSignal, controller.signal);
     this.cleanups.add(controller);
     const timer = setTimeout(
       () => controller.abort(new SpApiError('TIMEOUT')),
@@ -325,6 +367,7 @@ export class CompetitorCheckPipeline {
       this.cleanups.delete(controller);
     });
     try {
+      trackWorkSettlement(controller.signal, work);
       await waitFor(work, controller.signal);
     } catch {
       failed = true;
@@ -370,14 +413,17 @@ export class CompetitorCheckPipeline {
         ),
       );
       scope.confirmed(output);
-      await this.cleanupCache([
-        {
-          asin: snapshot.asin.asin,
-          country: snapshot.asin.country,
-          failed: false,
-          notFound: result.errorType === 'NOT_FOUND',
-        },
-      ]);
+      await this.cleanupCache(
+        [
+          {
+            asin: snapshot.asin.asin,
+            country: snapshot.asin.country,
+            failed: false,
+            notFound: result.errorType === 'NOT_FOUND',
+          },
+        ],
+        scope.signal,
+      );
       this.logger.info('竞品 ASIN 检查完成');
       return output;
     });
@@ -573,6 +619,7 @@ export class CompetitorCheckPipeline {
               (deferred.includes(index) &&
                 observations[index].result.errorType !== 'SP_API_ERROR')),
         })),
+        scope.signal,
       );
       this.logger.info('竞品变体组检查完成', {
         count: snapshot.asins.length,

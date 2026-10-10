@@ -10,8 +10,11 @@ import {
 import {
   abortError,
   CatalogDeferredError,
+  createWorkSettlement,
+  inheritWorkSettlement,
   normalizeCountry,
   SpApiError,
+  trackWorkSettlement,
   waitFor,
   type CatalogVariantChecker,
   type Logger,
@@ -29,9 +32,17 @@ import {
 } from './types';
 
 export const MAX_VARIANT_CHECK_RESULT_BYTES = 32 * 1024 * 1024;
+export interface VariantGroupAdmission {
+  /** The pipeline owns the returned permit until its actual work settles. */
+  acquire(
+    signal: AbortSignal,
+    checkpoint: () => Promise<void>,
+  ): Promise<() => void>;
+}
 export interface VariantCheckContext {
   forceRefresh?: boolean;
   signal?: AbortSignal;
+  groupAdmission?: VariantGroupAdmission;
   /** Immutable accepted job identity. Sync HTTP checks intentionally omit it. */
   operation?: VariantCheckOperation;
   /** HTTP authenticates the current session; accepted jobs verify current owner
@@ -55,6 +66,7 @@ export class VariantCheckCommitUncertainError extends Error {
 }
 interface CheckScope {
   signal: AbortSignal;
+  trackWork?: (work: Promise<unknown>) => void;
   guard(unit?: VariantCheckUnit): Promise<void>;
   stop(error: unknown): void;
   beginPersistence(): void;
@@ -116,6 +128,9 @@ export class VariantCheckPipeline {
     // callbacks and signal for this invocation before any asynchronous work.
     context = { ...context };
     const controller = new AbortController();
+    const settlement = context.groupAdmission
+      ? createWorkSettlement(controller.signal)
+      : undefined;
     this.active.add(controller);
     const abort = () => controller.abort(new SpApiError('CANCELLED'));
     context.signal?.addEventListener('abort', abort, { once: true });
@@ -130,6 +145,7 @@ export class VariantCheckPipeline {
     };
     const scope: CheckScope = {
       signal: controller.signal,
+      trackWork: settlement ? (work) => settlement.track(work) : undefined,
       stop(error) {
         controller.abort(error);
       },
@@ -152,12 +168,29 @@ export class VariantCheckPipeline {
         }
       },
     };
+    let releaseAdmission: (() => void) | undefined;
     const work = Promise.resolve()
-      .then(() => execute(scope))
+      .then(async () => {
+        if (context.groupAdmission) {
+          releaseAdmission = await context.groupAdmission.acquire(
+            controller.signal,
+            () => scope.guard(),
+          );
+          await scope.guard();
+        }
+        return execute(scope);
+      })
       .finally(() => {
         clearTimeout(timer);
         context.signal?.removeEventListener('abort', abort);
-        this.active.delete(controller);
+        const release = () => {
+          this.active.delete(controller);
+          releaseAdmission?.();
+        };
+        // Public cancellation/success remain prompt. Only ownership of the
+        // monitor permit and pipeline capacity waits for physical completion.
+        if (settlement) void settlement.drain().then(release);
+        else release();
       });
     try {
       return await waitFor(work, controller.signal);
@@ -199,7 +232,7 @@ export class VariantCheckPipeline {
         await scope.guard(unit);
         readyToCommit = true;
         return value;
-      });
+      }, scope.trackWork);
       scope.confirm(output);
       return output;
     } catch (error) {
@@ -225,10 +258,11 @@ export class VariantCheckPipeline {
         }
       }
       return { snapshot: await action(unit) };
-    });
+    }, scope.trackWork);
   }
   private async invalidate(
     entries: { asin: string; country: string; notFound: boolean }[],
+    parentSignal?: AbortSignal,
   ): Promise<void> {
     if (!entries.length || this.closed) return;
     if (this.cleanups.size >= 8) {
@@ -238,6 +272,7 @@ export class VariantCheckPipeline {
       return;
     }
     const controller = new AbortController();
+    inheritWorkSettlement(parentSignal, controller.signal);
     this.cleanups.add(controller);
     const timer = setTimeout(
       () => controller.abort(new SpApiError('TIMEOUT')),
@@ -270,6 +305,7 @@ export class VariantCheckPipeline {
       this.cleanups.delete(controller);
     });
     try {
+      trackWorkSettlement(controller.signal, work);
       await waitFor(work, controller.signal);
     } catch {
       failed = true;
@@ -326,13 +362,16 @@ export class VariantCheckPipeline {
         },
         operation,
       );
-      await this.invalidate([
-        {
-          asin: snapshot.asin.asin,
-          country: snapshot.asin.country,
-          notFound: result.errorType === 'NOT_FOUND',
-        },
-      ]);
+      await this.invalidate(
+        [
+          {
+            asin: snapshot.asin.asin,
+            country: snapshot.asin.country,
+            notFound: result.errorType === 'NOT_FOUND',
+          },
+        ],
+        scope.signal,
+      );
       this.logger.info('单 ASIN 检查完成');
       return output;
     });
@@ -411,6 +450,7 @@ export class VariantCheckPipeline {
               (monitorDeferred.has(observation.asinId) &&
                 observation.result.errorType !== 'SP_API_ERROR')),
         })),
+        scope.signal,
       );
       this.logger.info('变体组检查完成', { count: observations.length });
       return output;

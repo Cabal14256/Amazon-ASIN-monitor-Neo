@@ -12,6 +12,7 @@ import {
   type QuotaWindow,
 } from './quota-policy';
 import type { Region } from './types';
+import { trackWorkSettlement } from './work-settlement';
 
 export interface QuotaRedisPort {
   readonly status: string;
@@ -183,6 +184,7 @@ export class RedisQuotaStore {
       return work(assertActive);
     });
     this.pending.set(slot, promise);
+    trackWorkSettlement(signal, promise);
     const cleanup = () => {
       if (this.pending.get(slot) === promise) this.pending.delete(slot);
     };

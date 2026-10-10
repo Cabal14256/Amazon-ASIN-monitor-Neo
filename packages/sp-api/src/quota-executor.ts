@@ -20,6 +20,7 @@ import type {
   Region,
   ResponseMetadata,
 } from './types';
+import { inheritWorkSettlement } from './work-settlement';
 
 type Mode = 'memory' | 'redis-distributed';
 interface Group {
@@ -194,6 +195,7 @@ export class SpApiQuotaExecutor implements QuotaExecutor {
         abort: () => {},
         state: 'queued',
       };
+      inheritWorkSettlement(context.signal, job.controller.signal);
       job.abort = () => this.stop(job, abortError(job.context.signal));
       context.signal.addEventListener('abort', job.abort, { once: true });
       job.timer = setTimeout(
