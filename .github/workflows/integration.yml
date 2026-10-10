@@ -371,6 +371,12 @@ jobs:
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
+      - name: Typecheck backup failure, file-handle and cancellation fixtures
+        run: |
+          pnpm --filter @asin-monitor/db exec tsc -p tsconfig.backup.test.json --pretty false
+          pnpm --filter @asin-monitor/api exec tsc -p tsconfig.backup.test.json --pretty false
+          pnpm --filter @asin-monitor/worker exec tsc -p tsconfig.backup.test.json --pretty false
+
       - name: Run owned task queries and BullMQ terminal reconciliation
         run: pnpm --filter @asin-monitor/api exec vitest run test/task-query.integration.test.ts
 
@@ -381,6 +387,16 @@ jobs:
         run: |
           pnpm --filter @asin-monitor/worker build
           pnpm --filter @asin-monitor/worker exec vitest run test/auth-maintenance.integration.test.ts test/auth-maintenance-entry.integration.test.ts --no-file-parallelism
+
+      - name: Install PostgreSQL client for real backup and restore checks
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+
+      - name: Verify Neo backup commands against isolated PostgreSQL and TimescaleDB
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-pipeline.integration.test.ts
+      - name: Verify immutable restore snapshots against shared archive replacement and inode writes
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-archive-snapshot.integration.test.ts --maxWorkers=1
+      - name: Verify migrated Legacy backup configuration row selection
+        run: pnpm --filter @asin-monitor/db exec vitest run test/backup-configuration.integration.test.ts
 
       - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
         run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts

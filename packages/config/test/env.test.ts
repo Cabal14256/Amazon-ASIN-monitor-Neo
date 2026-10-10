@@ -2,7 +2,11 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertBackupTaskRetention,
+  BACKUP_TASK_MAX_AGE_MS,
+  BACKUP_TASK_MIN_META_TTL_SECONDS,
   EnvValidationError,
+  getBackupStorageDirectory,
   getDefaultEnvironmentFiles,
   getImportStorageDirectory,
   getQueuePolicy,
@@ -22,6 +26,21 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('requires seven-day metadata for a six-day total backup lifecycle without changing other queues', () => {
+    expect(BACKUP_TASK_MAX_AGE_MS).toBe(6 * 86400000);
+    expect(BACKUP_TASK_MIN_META_TTL_SECONDS).toBe(604800);
+    expect(() => assertBackupTaskRetention(loadEnv(validEnv))).not.toThrow();
+    for (const ttl of [1, 518400, 604799]) {
+      const env = loadEnv({ ...validEnv, TASK_META_TTL_SECONDS: String(ttl) });
+      expect(env.TASK_META_TTL_SECONDS).toBe(ttl);
+      expect(() => assertBackupTaskRetention(env)).toThrow(
+        'BACKUP_TASK_RETENTION_TOO_SHORT',
+      );
+    }
+    expect(() =>
+      assertBackupTaskRetention({ TASK_META_TTL_SECONDS: 604800 }),
+    ).not.toThrow();
+  });
   it('keeps competitor manual monitoring default compatible while retaining terminal jobs for metadata lifetime', () => {
     const env = loadEnv({
       ...validEnv,
@@ -204,6 +223,69 @@ describe('loadEnv', () => {
       expect(() =>
         loadEnv({ ...validEnv, IMPORT_STORAGE_DIRECTORY: value }),
       ).toThrow(EnvValidationError);
+  });
+  it('uses one persistent backup directory, bounded commands and custom artifact limits', () => {
+    const env = loadEnv(validEnv);
+    const root = resolve(__dirname, '../../..');
+    const expected = resolve(root, 'var/neo/backups');
+    expect(getBackupStorageDirectory(env, resolve(root, 'apps/api'))).toBe(
+      expected,
+    );
+    expect(getBackupStorageDirectory(env, resolve(root, 'apps/worker'))).toBe(
+      expected,
+    );
+    const configured = resolve(root, 'artifacts/backup-storage-test');
+    expect(
+      getBackupStorageDirectory(
+        loadEnv({ ...validEnv, BACKUP_STORAGE_DIRECTORY: configured }),
+      ),
+    ).toBe(configured);
+    expect(loadEnv(validEnv).PG_DUMP_PATH).toBe('pg_dump');
+    expect(loadEnv(validEnv).PG_RESTORE_PATH).toBe('pg_restore');
+    expect(loadEnv(validEnv).BACKUP_COMMAND_TIMEOUT_MS).toBe(3_600_000);
+    expect(loadEnv(validEnv).BACKUP_MAX_BYTES).toBe(10_737_418_240);
+    for (const value of ['backups', '../backups', 'x\0y', 'C:relative'])
+      expect(() =>
+        loadEnv({ ...validEnv, BACKUP_STORAGE_DIRECTORY: value }),
+      ).toThrow(EnvValidationError);
+    for (const key of ['PG_DUMP_PATH', 'PG_RESTORE_PATH'] as const) {
+      expect(
+        loadEnv({ ...validEnv, [key]: 'x'.repeat(512) })[key],
+      ).toHaveLength(512);
+      for (const length of [513, 4096])
+        expect(() =>
+          loadEnv({ ...validEnv, [key]: 'x'.repeat(length) }),
+        ).toThrow(EnvValidationError);
+      expect(() =>
+        loadEnv({ ...validEnv, [key]: 'pg_dump --format=custom' }),
+      ).toThrow(EnvValidationError);
+      expect(() =>
+        loadEnv({ ...validEnv, [key]: 'pg_dump\n--format=custom' }),
+      ).toThrow(EnvValidationError);
+    }
+    for (const key of [
+      'BACKUP_COMMAND_TIMEOUT_MS',
+      'BACKUP_MAX_BYTES',
+    ] as const) {
+      for (const value of ['0', '-1', '1.5', 'NaN', 'Infinity'])
+        expect(() => loadEnv({ ...validEnv, [key]: value })).toThrow(
+          EnvValidationError,
+        );
+    }
+    expect(
+      loadEnv({ ...validEnv, BACKUP_COMMAND_TIMEOUT_MS: '5000' })
+        .BACKUP_COMMAND_TIMEOUT_MS,
+    ).toBe(5000);
+    expect(
+      loadEnv({ ...validEnv, BACKUP_MAX_BYTES: '1048576' }).BACKUP_MAX_BYTES,
+    ).toBe(1048576);
+    for (const value of ['1', '2', '3', '4'])
+      expect(() => loadEnv({ ...validEnv, BACKUP_MAX_BYTES: value })).toThrow(
+        EnvValidationError,
+      );
+    expect(
+      loadEnv({ ...validEnv, BACKUP_MAX_BYTES: '5' }).BACKUP_MAX_BYTES,
+    ).toBe(5);
   });
   it('keeps batch deletion defaults, Legacy fallback/flooring and a nonzero bounded chunk size', () => {
     const defaults = loadEnv(validEnv);

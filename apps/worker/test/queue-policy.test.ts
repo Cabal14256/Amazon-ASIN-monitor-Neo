@@ -94,18 +94,26 @@ describe('Legacy to BullMQ queue policy parity', () => {
         const baseline = legacy(name, raw);
         const policy = getQueuePolicy(name, loadEnv(raw));
         expect(policy.physicalName).toBe(baseline.physicalName);
-        expect(policy.defaultJobOptions).toEqual(
-          name === 'monitor' ||
+        if (name === 'backup') {
+          expect(policy.defaultJobOptions).toMatchObject({
+            attempts: 2,
+            backoff: { type: 'exponential', delay: 5000 },
+          });
+        } else {
+          expect(policy.defaultJobOptions).toEqual({
+            ...(baseline.options.defaultJobOptions as object),
+            // Neo terminal monitor jobs also serve as task recovery receipts.
+            ...(name === 'monitor' ||
             name === 'competitor-monitor' ||
             name === 'variant-check' ||
             name === 'batch-check'
-            ? {
-                ...(baseline.options.defaultJobOptions as object),
-                removeOnComplete: { age: 604800 },
-                removeOnFail: { age: 604800 },
-              }
-            : baseline.options.defaultJobOptions,
-        );
+              ? {
+                  removeOnComplete: { age: 604_800 },
+                  removeOnFail: { age: 604_800 },
+                }
+              : {}),
+          });
+        }
         expect(policy.limiter).toEqual(baseline.options.limiter);
         expect(policy.concurrency).toBe(baseline.concurrency);
       }
@@ -202,6 +210,19 @@ describe('Legacy to BullMQ queue policy parity', () => {
       concurrency: 1,
     });
   });
+
+  it.each([3600, 604800, 1209600])(
+    'retains backup outcomes for the complete %s-second registry lifetime without count eviction',
+    (ttl) => {
+      const env = loadEnv({ ...source, TASK_META_TTL_SECONDS: String(ttl) });
+      const { defaultJobOptions } = getQueueOptions('backup', env, {
+        host: 'localhost',
+      });
+      const expected = { age: Math.max(604800, ttl) };
+      expect(defaultJobOptions?.removeOnComplete).toEqual(expected);
+      expect(defaultJobOptions?.removeOnFail).toEqual(expected);
+    },
+  );
 
   it('preflights missing processors without executing registered handlers', () => {
     const processor = vi.fn();

@@ -1,8 +1,17 @@
+import {
+  backupCreationFilename,
+  backupFilenameCreatedAt,
+  type BackupCreationReceipt,
+} from '@asin-monitor/contracts';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
+import {
+  backupCreationIdentity,
+  parseBackupCreationReceipt,
+} from '../src/domain/backup-creation-receipt';
 import { createVariantCheckOperation } from '../src/domain/variant-check-receipt';
 import {
   RedisTaskRepository,
@@ -10,6 +19,181 @@ import {
   type TaskRedisPort,
 } from '../src/repositories/redis-task-repository';
 import { transitionTask } from '../src/repositories/task-state';
+
+function creationReceipt(task: {
+  taskId: string;
+  userId: string;
+  createdAt: string;
+}) {
+  const data = {
+    taskId: task.taskId,
+    userId: task.userId,
+    createdAt: task.createdAt,
+    taskType: 'backup' as const,
+    taskSubType: 'create' as const,
+    operation: 'create' as const,
+    target: 'primary' as const,
+    params: { description: 'original request' },
+  };
+  const filename = backupCreationFilename(
+    task.taskId,
+    task.createdAt,
+    'primary',
+  );
+  const result: BackupCreationReceipt = {
+    operation: 'create',
+    format: 'custom',
+    filename,
+    createdAt: backupFilenameCreatedAt(filename)!,
+    target: 'primary',
+    size: 12,
+    sourceEngine: 'postgresql',
+    restoreSupported: true,
+    backupCreationCommit: {
+      version: 1,
+      taskId: task.taskId,
+      userId: task.userId,
+      taskCreatedAt: task.createdAt,
+      creationIdentity: backupCreationIdentity(data),
+      archiveSha256: 'a'.repeat(64),
+    },
+  };
+  return { data, result };
+}
+
+describe('backup creation execution time proof', () => {
+  it('binds delayed execution to the original immutable task without changing its creation digest', () => {
+    const { data, result } = creationReceipt({
+      taskId: '10000000-0000-4000-8000-000000000161',
+      userId: 'owner',
+      createdAt: '2026-10-01T00:00:00.000Z',
+    });
+    const execution = {
+      timeSource: 'dump-start' as const,
+      dumpStartedAt: '2026-10-03T01:00:00.123Z',
+      dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+      publicationStartedAt: '2026-10-03T01:03:00.789Z',
+    };
+    const timed = {
+      ...result,
+      createdAt: execution.dumpStartedAt,
+      timeSource: 'dump-start',
+      execution,
+    };
+    expect(parseBackupCreationReceipt(data, timed)).toEqual(timed);
+    expect(timed.backupCreationCommit).toEqual(result.backupCreationCommit);
+    expect(parseBackupCreationReceipt(data, result)).toEqual(result);
+    const task = {
+      ...data,
+      title: 'backup fixture',
+      status: 'cancelled' as const,
+      progress: 0,
+      message: '',
+      error: null,
+      result: null,
+      updatedAt: data.createdAt,
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: data.createdAt,
+      cancelledAt: data.createdAt,
+      revision: 1,
+    };
+    const completed = transitionTask(
+      task,
+      {
+        kind: 'backup-create-committed',
+        result: parseBackupCreationReceipt(data, timed),
+      },
+      new Date(execution.publicationStartedAt),
+    );
+    expect(completed).toMatchObject({
+      status: 'completed',
+      createdAt: data.createdAt,
+      cancelledAt: null,
+      result: timed,
+    });
+    expect(
+      transitionTask(
+        completed,
+        {
+          kind: 'backup-create-committed',
+          result: parseBackupCreationReceipt(data, timed),
+        },
+        new Date('2026-10-04T00:00:00.000Z'),
+      ),
+    ).toEqual(completed);
+    for (const changed of [
+      { ...timed, createdAt: data.createdAt },
+      { ...timed, execution: undefined },
+      {
+        ...timed,
+        execution: {
+          ...execution,
+          dumpCompletedAt: '2026-10-03T00:59:59.999Z',
+        },
+      },
+    ]) {
+      expect(() => parseBackupCreationReceipt(data, changed)).toThrow(
+        'BACKUP_CREATION_RECEIPT_INVALID',
+      );
+      expect(() =>
+        transitionTask(
+          task,
+          { kind: 'backup-create-committed', result: changed as never },
+          new Date(execution.publicationStartedAt),
+        ),
+      ).toThrow();
+    }
+  });
+
+  it('accepts a valid worker execution window earlier than the API clock without changing task identity', () => {
+    const { data, result } = creationReceipt({
+      taskId: '10000000-0000-4000-8000-000000000161',
+      userId: 'owner',
+      createdAt: '2026-10-03T01:00:05.000Z',
+    });
+    const execution = {
+      timeSource: 'dump-start' as const,
+      dumpStartedAt: '2026-10-03T01:00:00.000Z',
+      dumpCompletedAt: '2026-10-03T01:00:01.000Z',
+      publicationStartedAt: '2026-10-03T01:00:02.000Z',
+    };
+    const timed = {
+      ...result,
+      createdAt: execution.dumpStartedAt,
+      timeSource: 'dump-start' as const,
+      execution,
+    };
+    expect(parseBackupCreationReceipt(data, timed)).toEqual(timed);
+    const task = {
+      ...data,
+      title: 'clock-skew fixture',
+      status: 'processing' as const,
+      progress: 99,
+      message: '',
+      error: null,
+      result: null,
+      updatedAt: data.createdAt,
+      startedAt: data.createdAt,
+      completedAt: null,
+      cancelRequestedAt: null,
+      cancelledAt: null,
+      revision: 1,
+    };
+    expect(
+      transitionTask(
+        task,
+        { kind: 'backup-create-committed', result: timed },
+        new Date(execution.publicationStartedAt),
+      ),
+    ).toMatchObject({
+      status: 'completed',
+      createdAt: data.createdAt,
+      result: timed,
+    });
+    expect(timed.backupCreationCommit).toEqual(result.backupCreationCommit);
+  });
+});
 
 const config = {
   BULL_PREFIX: 'fixture',
@@ -76,6 +260,278 @@ function fixture() {
   return { repository, redis, rows };
 }
 describe('Redis task registry behavior', () => {
+  it.each(['create', 'restore'])(
+    're-evaluates accepted cancel after an uncommitted %s failure loses CAS',
+    async (operation) => {
+      const { repository, redis, rows } = fixture();
+      const task = await repository.create({
+        ...input,
+        taskType: 'backup',
+        taskSubType: operation,
+      });
+      redis.eval.mockImplementationOnce(async () => {
+        rows.set(
+          'fixture:neo:task:meta:task-a',
+          JSON.stringify(
+            transitionTask(task, { kind: 'cancel-request' }, new Date()),
+          ),
+        );
+        return 0;
+      });
+      expect(
+        await repository.mutate(
+          task.taskId,
+          { kind: 'backup-uncommitted-failed', message: 'unpublished failure' },
+          task,
+        ),
+      ).toMatchObject({ status: 'cancelled', error: null });
+      expect(
+        (await repository.read(task.taskId))?.cancelRequestedAt,
+      ).not.toBeNull();
+    },
+  );
+  it('retains cleanup uncertainty failure and restricts the specialized backup transition', async () => {
+    const { repository } = fixture();
+    const task = await repository.create({
+      ...input,
+      taskType: 'backup',
+      taskSubType: 'restore',
+    });
+    await repository.mutate(task.taskId, { kind: 'cancel-request' }, task);
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'failed', message: 'cleanup unconfirmed' },
+        task,
+      ),
+    ).toMatchObject({ status: 'failed', error: 'cleanup unconfirmed' });
+    expect(() =>
+      transitionTask(
+        { ...task, taskType: 'export' },
+        { kind: 'backup-uncommitted-failed', message: 'wrong caller' },
+        new Date(),
+      ),
+    ).toThrow('BACKUP_TASK_IDENTITY_INVALID');
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'backup-uncommitted-failed', message: 'late failure' },
+        task,
+      ),
+    ).toMatchObject({ status: 'failed' });
+  });
+  it.each(['cancelling', 'cancelled', 'failed'] as const)(
+    'corrects postpublication %s only with identity-bound creation proof',
+    async (status) => {
+      const { repository } = fixture();
+      const task = await repository.create({
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: input.userId,
+        taskType: 'backup',
+        taskSubType: 'create',
+      });
+      await repository.mutate(
+        task.taskId,
+        status === 'cancelling'
+          ? { kind: 'cancel-request' }
+          : { kind: status, message: 'prior terminal' },
+      );
+      const published = creationReceipt(task);
+      const result = parseBackupCreationReceipt(
+        published.data,
+        published.result,
+      );
+      const done = await repository.mutate(
+        task.taskId,
+        { kind: 'backup-create-committed', result },
+        task,
+      );
+      expect(done).toMatchObject({
+        status: 'completed',
+        cancelledAt: null,
+        error: null,
+        result,
+      });
+      expect(
+        await repository.mutate(task.taskId, { kind: 'cancelled' }),
+      ).toEqual(done);
+      expect(
+        await repository.mutate(
+          task.taskId,
+          { kind: 'backup-create-committed', result },
+          task,
+        ),
+      ).toEqual(done);
+    },
+  );
+  it.each(['userId', 'taskId', 'taskCreatedAt', 'version'] as const)(
+    'rejects a wrong publication proof %s without CAS writes',
+    async (field) => {
+      const { repository, redis } = fixture();
+      const task = await repository.create({
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: input.userId,
+        taskType: 'backup',
+        taskSubType: 'create',
+      });
+      await repository.mutate(task.taskId, { kind: 'cancelled' });
+      const { result } = creationReceipt(task);
+      Object.assign(result.backupCreationCommit, {
+        [field]:
+          field === 'version'
+            ? 2
+            : field === 'taskCreatedAt'
+            ? '2026-09-02T00:00:00.000Z'
+            : field === 'taskId'
+            ? '10000000-0000-4000-8000-000000000162'
+            : 'foreign-owner',
+      });
+      redis.eval.mockClear();
+      await expect(
+        repository.mutate(
+          task.taskId,
+          { kind: 'backup-create-committed', result },
+          task,
+        ),
+      ).rejects.toThrow();
+      expect(redis.eval).not.toHaveBeenCalled();
+      expect((await repository.read(task.taskId))?.status).toBe('cancelled');
+    },
+  );
+  it('refuses restore/export families even with an otherwise well-formed creation receipt', async () => {
+    for (const [taskType, taskSubType] of [
+      ['backup', 'restore'],
+      ['export', 'create'],
+    ]) {
+      const { repository, redis } = fixture();
+      const task = await repository.create({
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: input.userId,
+        taskType,
+        taskSubType,
+      });
+      const { result } = creationReceipt(task);
+      redis.eval.mockClear();
+      await expect(
+        repository.mutate(
+          task.taskId,
+          { kind: 'backup-create-committed', result },
+          task,
+        ),
+      ).rejects.toThrow('BACKUP_CREATION_TASK_INVALID');
+      expect(redis.eval).not.toHaveBeenCalled();
+    }
+  });
+  it('keeps a publication CAS bound to the original incarnation after task ID reuse', async () => {
+    const { repository, redis, rows } = fixture();
+    const task = await repository.create({
+      taskId: '10000000-0000-4000-8000-000000000161',
+      userId: input.userId,
+      taskType: 'backup',
+      taskSubType: 'create',
+    });
+    const { result } = creationReceipt(task);
+    redis.eval.mockImplementationOnce(async () => {
+      rows.set(
+        `fixture:neo:task:meta:${task.taskId}`,
+        JSON.stringify({ ...task, userId: 'replacement-owner' }),
+      );
+      return 0;
+    });
+    await expect(
+      repository.mutate(
+        task.taskId,
+        { kind: 'backup-create-committed', result },
+        task,
+      ),
+    ).rejects.toMatchObject({ code: 'TASK_IDENTITY_CHANGED' });
+    expect((await repository.read(task.taskId))?.userId).toBe(
+      'replacement-owner',
+    );
+    expect((await repository.read(task.taskId))?.status).toBe('pending');
+  });
+  it.each(['in-place', 'isolated'] as const)(
+    'preserves a retained %s restore across cancellation and later confirmation',
+    async (restoreMode) => {
+      const { repository } = fixture();
+      const task = await repository.create({
+        taskId: 'restore-task',
+        userId: 'owner-a',
+        taskType: 'backup',
+        taskSubType: 'restore',
+      });
+      const cancelled = await repository.mutate(task.taskId, {
+        kind: 'cancelled',
+      });
+      expect(cancelled?.status).toBe('cancelled');
+      const result = {
+        operation: 'restore' as const,
+        format: 'custom' as const,
+        filename: 'backup_20260927-020000-abcdef01-primary.dump',
+        target: 'primary' as const,
+        ...(restoreMode === 'in-place'
+          ? {
+              restoreMode: 'in-place' as const,
+              targetDatabaseChanged: true as const,
+            }
+          : {
+              restoreMode: 'isolated' as const,
+              targetDatabaseChanged: false as const,
+              restoredDatabase: 'neo_restore_primary_0123456789abcdef',
+            }),
+        verification: 'unconfirmed' as const,
+        message: '恢复事务已提交，健康检查待确认',
+      };
+      const committed = await repository.mutate(task.taskId, {
+        kind: 'restore-committed',
+        result,
+      });
+      expect(committed).toMatchObject({
+        status: 'completed',
+        error: null,
+        cancelledAt: null,
+        result,
+      });
+      expect(
+        await repository.mutate(task.taskId, {
+          kind: 'cancelled',
+        }),
+      ).toMatchObject({ status: 'completed', result });
+      if (result.restoreMode === 'isolated')
+        expect(
+          await repository.mutate(task.taskId, {
+            kind: 'restore-confirmed',
+            result: {
+              ...result,
+              restoredDatabase: 'neo_restore_primary_fedcba9876543210',
+              verification: 'confirmed',
+            },
+          }),
+        ).toMatchObject({ result });
+      const confirmed = await repository.mutate(task.taskId, {
+        kind: 'restore-confirmed',
+        result: {
+          ...result,
+          verification: 'confirmed',
+          message: '恢复完成',
+        },
+      });
+      expect(confirmed).toMatchObject({
+        status: 'completed',
+        result: {
+          targetDatabaseChanged: restoreMode === 'in-place',
+          verification: 'confirmed',
+        },
+      });
+      expect(
+        await repository.mutate(task.taskId, {
+          kind: 'restore-committed',
+          result,
+        }),
+      ).toEqual(confirmed);
+    },
+  );
+
   it('preserves an accepted monitor cancellation against a racing final completion', async () => {
     const { repository } = fixture();
     const task = await repository.create({

@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": [
+    "test/backup-commit.test.ts",
+    "test/backup-creation-replay.test.ts",
+    "test/backup-pipeline.integration.test.ts",
+    "test/backup-processor.test.ts",
+    "test/backup-restore-snapshot.test.ts",
+    "test/backup-timescale-cleanup.test.ts"
+  ]
+}

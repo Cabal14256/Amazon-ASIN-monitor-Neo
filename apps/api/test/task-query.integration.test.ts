@@ -5,11 +5,13 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  backupJobDataSchema,
   competitorMonitorJobSchema,
   taskInfoResultSchema,
   taskListResultSchema,
 } from '@asin-monitor/contracts';
 import {
+  backupUncommittedFailureReason,
   competitorMonitorJobDigest,
   RedisTaskRepository,
   type TaskState,
@@ -35,6 +37,7 @@ import {
   TASK_QUERY_QUEUES,
   TaskQueryRuntime,
 } from '../src/tasks/task-query.runtime';
+import { backupCreationFixture } from './helpers/backup-creation-fixtures';
 import { spApiConfigApp } from './helpers/sp-api-config-app';
 
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
@@ -236,6 +239,23 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           { jobId: id, removeOnComplete: false, removeOnFail: false },
         );
       }
+      if (type === 'backup') {
+        const data = backupJobDataSchema.parse({
+          taskId: id,
+          userId,
+          taskType: 'backup',
+          taskSubType: 'create',
+          operation: 'create',
+          target: 'primary',
+          createdAt: new Date().toISOString(),
+          params: {},
+        });
+        return (await queueFor(type)).add(data.operation, data, {
+          jobId: id,
+          removeOnComplete: false,
+          removeOnFail: false,
+        });
+      }
       return (await queueFor(type)).add(
         'fixture',
         {
@@ -273,6 +293,196 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await worker.close(true);
       }
     }
+    it('recovers a cancelled creation from actual immutable BullMQ publication data without exposing its proof', async () => {
+      const published = backupCreationFixture(owner.userId);
+      const task = await store.create({
+        taskId: published.data.taskId,
+        userId: owner.userId,
+        taskType: 'backup',
+        taskSubType: 'create',
+      });
+      const source = backupCreationFixture(owner.userId, task.createdAt);
+      await store.mutate(task.taskId, { kind: 'cancelled' });
+      const queue = await queueFor('backup');
+      await queue.add('create', source.data, {
+        jobId: task.taskId,
+        removeOnComplete: false,
+      });
+      const worker = new Worker(queue.name, undefined, {
+        autorun: false,
+        prefix: getNeoQueuePrefix(env),
+        connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+      });
+      worker.on('error', () => undefined);
+      try {
+        await worker.waitUntilReady();
+        const job = await worker.getNextJob('fixture-backup-proof-161', {
+          block: false,
+        });
+        expect(job?.id).toBe(task.taskId);
+        await job!.moveToCompleted(
+          source.result,
+          'fixture-backup-proof-161',
+          false,
+        );
+      } finally {
+        await worker.close(true);
+      }
+      const response = await get(task.taskId);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'completed',
+        result: {
+          filename: source.result.filename,
+          createdAt: source.result.createdAt,
+        },
+      });
+      expect((await store.read(task.taskId))?.status).toBe('completed');
+      expect(response.body).not.toContain('backupCreationCommit');
+      expect(response.body).not.toContain('params');
+      expect(response.body).not.toContain(
+        source.result.backupCreationCommit.creationIdentity,
+      );
+    });
+    it.each(['create', 'restore'] as const)(
+      'reconciles retained real failed %s according to confirmed cleanup rather than cancellation alone',
+      async (operation) => {
+        for (const clean of [true, false]) {
+          const taskId = randomUUID();
+          const task = await store.create({
+            taskId,
+            userId: owner.userId,
+            taskType: 'backup',
+            taskSubType: operation,
+          });
+          const data = backupJobDataSchema.parse({
+            taskId,
+            userId: owner.userId,
+            taskType: 'backup',
+            taskSubType: operation,
+            operation,
+            target: 'primary',
+            createdAt: task.createdAt,
+            params:
+              operation === 'create'
+                ? {}
+                : { filename: 'backup_20260927-230000-1234abcd-primary.dump' },
+          });
+          await store.mutate(taskId, { kind: 'processing' });
+          await store.mutate(taskId, { kind: 'cancel-request' });
+          const queue = await queueFor('backup');
+          await queue.add(operation, data, {
+            jobId: taskId,
+            removeOnFail: false,
+          });
+          const worker = new Worker(queue.name, undefined, {
+            autorun: false,
+            prefix: getNeoQueuePrefix(env),
+            connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+          });
+          worker.on('error', () => undefined);
+          try {
+            await worker.waitUntilReady();
+            const job = await worker.getNextJob('fixture-clean-failure-161', {
+              block: false,
+            });
+            expect(job?.id).toBe(taskId);
+            await job!.moveToFailed(
+              new Error(
+                clean
+                  ? backupUncommittedFailureReason(data, '备份任务失败')
+                  : '清理未确认 private-worker-payload',
+              ),
+              'fixture-clean-failure-161',
+              false,
+            );
+          } finally {
+            await worker.close(true);
+          }
+          const response = await get(taskId);
+          expect(response.statusCode).toBe(200);
+          expect(response.json().data.status).toBe(
+            clean ? 'cancelled' : 'failed',
+          );
+          expect((await store.read(taskId))?.status).toBe(
+            clean ? 'cancelled' : 'failed',
+          );
+          if (!clean)
+            expect(response.json().data.message).toContain('清理未确认');
+          expect(response.body).not.toContain('private-worker');
+          expect(response.body).not.toContain('BACKUP_UNCOMMITTED');
+          expect(response.body).not.toContain('backupUncommittedFailure');
+        }
+      },
+    );
+    it.each(['cancelled', 'failed'] as const)(
+      'preserves terminal restore %s after a real completed BullMQ cancellation marker',
+      async (status) => {
+        const task = await store.create({
+          taskId: randomUUID(),
+          userId: owner.userId,
+          taskType: 'backup',
+          taskSubType: 'restore',
+        });
+        await store.mutate(
+          task.taskId,
+          status === 'cancelled'
+            ? { kind: 'cancelled', message: '备份任务已取消' }
+            : { kind: 'failed', message: '恢复未提交' },
+        );
+        const before = await redis.get(metaKey(task.taskId));
+        const data = backupJobDataSchema.parse({
+          taskId: task.taskId,
+          userId: owner.userId,
+          createdAt: task.createdAt,
+          taskType: 'backup',
+          taskSubType: 'restore',
+          operation: 'restore',
+          target: 'primary',
+          params: { filename: 'backup_20260927-230000-1234abcd-primary.dump' },
+        });
+        const queue = await queueFor('backup');
+        await queue.add('restore', data, {
+          jobId: task.taskId,
+          removeOnComplete: false,
+        });
+        const worker = new Worker(queue.name, undefined, {
+          autorun: false,
+          prefix: getNeoQueuePrefix(env),
+          connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+        });
+        worker.on('error', () => undefined);
+        try {
+          await worker.waitUntilReady();
+          const queued = await worker.getNextJob(
+            'fixture-restore-cancellation-161',
+            { block: false },
+          );
+          expect(queued?.id).toBe(task.taskId);
+          await queued!.moveToCompleted(
+            { cancelled: true, message: '备份任务已取消' },
+            'fixture-restore-cancellation-161',
+            false,
+          );
+        } finally {
+          await worker.close(true);
+        }
+        const detail = await get(task.taskId);
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().data).toMatchObject({ status, result: null });
+        const listed = await list();
+        expect(listed.statusCode).toBe(200);
+        expect(
+          listed
+            .json()
+            .data.find((row: TaskState) => row.taskId === task.taskId),
+        ).toMatchObject({ status, result: null });
+        expect(await redis.get(metaKey(task.taskId))).toBe(before);
+        expect(await (await queue.getJob(task.taskId))!.getState()).toBe(
+          'completed',
+        );
+      },
+    );
     it('admits only one final monitor slot across independent API runtimes', async () => {
       const queue = await queueFor('monitor');
       const createdAt = new Date().toISOString();
@@ -455,6 +665,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       'batch-check',
       'monitor',
       'competitor-monitor',
+      'backup',
     ] as const)(
       'rejects an incomplete %s queue payload without recreating metadata',
       async (type) => {
