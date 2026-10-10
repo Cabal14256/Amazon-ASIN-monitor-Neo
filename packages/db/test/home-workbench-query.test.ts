@@ -171,4 +171,21 @@ describe('Home workbench genuine daily observations and bounded SQL', () => {
     expect(compiled.params).toContain('');
     expect(execute).toHaveBeenCalledOnce();
   });
+  it('joins migrated history with Legacy key matching and groups aliases under the selected catalog identity', async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [raw()] });
+    const unit = new DrizzleHomeWorkbenchQueryUnit(
+      { execute } as unknown as Db,
+      vi.fn(),
+    );
+    await unit.workbench(query, now, true);
+    const compiled = new PgDialect().sqlToQuery(execute.mock.calls[0][0]);
+    expect(compiled.sql).toContain(
+      'rtrim(g.id) COLLATE public.neo_import_group_ci=rtrim(m.variant_group_id) COLLATE public.neo_import_group_ci',
+    );
+    expect(compiled.sql).toContain('SELECT g.id AS variant_group_id');
+    expect(compiled.sql).toContain(
+      "GROUP BY g.id,date_trunc('day',m.check_time)::date",
+    );
+    expect(compiled.sql).toContain('o.variant_group_id=p.id');
+  });
 });

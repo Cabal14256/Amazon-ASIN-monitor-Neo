@@ -366,6 +366,100 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         { day: '2026-10-07', checks: 2, brokenChecks: 1, unknownChecks: 0 },
       ]);
     });
+    it('combines case and trailing-padding history aliases under the exact selected catalog ID without merging leading-space neighbours', async () => {
+      const observations: [string, string, string, string, boolean | null][] = [
+        [
+          groups[0].id.toUpperCase(),
+          '2026-10-07 00:01:00',
+          'GROUP',
+          'US',
+          false,
+        ],
+        [
+          `${groups[0].id.toUpperCase()}  `,
+          '2026-10-07 00:02:00',
+          'gRoUp ',
+          'us',
+          true,
+        ],
+        [groups[0].id.trimEnd(), '2026-10-07 00:03:00', 'GROUP', 'US', null],
+        [
+          groups[1].id.toUpperCase(),
+          '2026-10-07 00:03:00',
+          'GROUP',
+          'US',
+          true,
+        ],
+        [groups[0].id.trimStart(), '2026-10-07 00:01:00', 'GROUP', 'US', true],
+        [groups[0].id.toUpperCase(), '2026-10-07 00:01:00', 'ASIN', 'US', true],
+        [
+          groups[0].id.toUpperCase(),
+          '2026-10-07 00:01:00',
+          'GROUP',
+          'UK',
+          true,
+        ],
+        [
+          groups[0].id.toUpperCase(),
+          '2026-09-30 23:59:59',
+          'GROUP',
+          'US',
+          true,
+        ],
+        [
+          groups[0].id.toUpperCase(),
+          '2026-10-07 00:05:07',
+          'GROUP',
+          'US',
+          true,
+        ],
+      ];
+      const insertedIds: string[] = [];
+      try {
+        for (const [groupId, time, type, country, broken] of observations) {
+          const inserted = await fixture().pools.primaryPool.query<{
+            id: string;
+          }>(
+            'INSERT INTO monitor_history(variant_group_id,variant_group_name,asin_id,asin_code,country,check_type,is_broken,check_time,check_result) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) RETURNING id::text',
+            [
+              groupId,
+              'Alias history keeps the original catalog identity',
+              asinIds[0],
+              `B${suffix.slice(0, 8)}0`,
+              country,
+              type,
+              broken,
+              time,
+              JSON.stringify({ alias: true }),
+            ],
+          );
+          insertedIds.push(inserted.rows[0].id);
+        }
+        const expectedData = expected();
+        expectedData.data.list[0].trend![6] = {
+          day: '2026-10-07',
+          checks: 5,
+          brokenChecks: 2,
+          unknownChecks: 1,
+        };
+        expectedData.data.list[1].trend![6] = {
+          day: '2026-10-07',
+          checks: 1,
+          brokenChecks: 1,
+          unknownChecks: 0,
+        };
+        expect(await read()).toEqual(expectedData);
+        expect((await read({ brand: '' })).data?.list).toEqual([
+          expectedData.data.list[0],
+        ]);
+      } finally {
+        if (insertedIds.length)
+          await fixture().pools.primaryPool.query(
+            'DELETE FROM monitor_history WHERE id=ANY($1::bigint[])',
+            [insertedIds],
+          );
+      }
+    });
     it('uses current monitor/analytics grants and returns null trends after their withdrawal despite real cached permissions', async () => {
       const cached = await primePermissionCache();
       expect(JSON.parse(cached.raw!)).toContain('monitor:read');

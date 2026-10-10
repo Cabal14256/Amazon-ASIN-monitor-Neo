@@ -114,16 +114,16 @@ export class DrizzleHomeWorkbenchQueryUnit
           days[6]
         }::timestamp,interval '1 day') AS tick(day)
     ), observations AS MATERIALIZED (
-      SELECT m.variant_group_id,date_trunc('day',m.check_time)::date AS day,
+      SELECT g.id AS variant_group_id,date_trunc('day',m.check_time)::date AS day,
         count(*)::text AS checks,count(*) FILTER(WHERE m.is_broken=true)::text AS broken_checks,
         count(*) FILTER(WHERE m.is_broken IS NULL)::text AS unknown_checks
-      FROM ${monitorHistory} m JOIN selected g ON g.id=m.variant_group_id
+      FROM ${monitorHistory} m JOIN selected g ON rtrim(g.id) COLLATE public.neo_import_group_ci=rtrim(m.variant_group_id) COLLATE public.neo_import_group_ci
         AND lower(m.country)=lower(g.country)
       WHERE m.check_time>=${
         days[0]
       }::timestamp AND m.check_time<=${formatShanghaiTimestamp(now)}::timestamp
         AND rtrim(m.check_type) COLLATE public.neo_import_group_ci='GROUP'
-      GROUP BY m.variant_group_id,date_trunc('day',m.check_time)::date
+      GROUP BY g.id,date_trunc('day',m.check_time)::date
     )`
       : sql``;
     const trend = trendsAuthorized

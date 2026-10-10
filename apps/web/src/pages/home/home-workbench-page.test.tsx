@@ -66,6 +66,7 @@ interface Read {
 function fixture({ total = 2 } = {}) {
   const requests: Read[] = [];
   let deny = false;
+  let trendsAuthorized = true;
   let authResponse: ReturnType<typeof deferred<Response>> | undefined;
   let nextWorkbenchResponse: ReturnType<typeof deferred<Response>> | undefined;
   const identityData: CurrentUserData = {
@@ -125,6 +126,10 @@ function fixture({ total = 2 } = {}) {
       totalGroups:
         item === BLANK_BRAND ? Math.floor(total / 2) : Math.ceil(total / 2),
     }));
+    if (!trendsAuthorized) {
+      value.trendsAuthorized = false;
+      value.list = value.list.map((group) => ({ ...group, trend: null }));
+    }
     // A malformed test response must fail here, before reaching the product.
     return homeWorkbenchDataSchema.parse(value);
   };
@@ -220,6 +225,9 @@ function fixture({ total = 2 } = {}) {
     reads: () => requests.filter((read) => read.url.pathname === ENDPOINT),
     deny: (value: boolean) => {
       deny = value;
+    },
+    trends: (value: boolean) => {
+      trendsAuthorized = value;
     },
     holdIdentity: () => {
       authResponse = deferred<Response>();
@@ -388,6 +396,62 @@ describe('Home workbench actual identity, route and typed query boundaries', () 
     ).toBeNull();
     expect(f.reads()).toHaveLength(before);
     expect(f.requests.every((read) => read.method === 'GET')).toBe(true);
+  });
+
+  it('retires all same-identity historical caches after a 200 response withdraws trend authority', async () => {
+    const f = fixture();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    await applyUS();
+    expect(
+      screen.getAllByRole('img', { name: /近七日组检查异常率/ }),
+    ).toHaveLength(2);
+    f.trends(false);
+    fireEvent.click(screen.getByRole('button', { name: '刷新工作台' }));
+    await screen.findByText(/没有历史读取权限/);
+    expect(screen.getByRole('link', { name: 'US group page 1' })).toBeTruthy();
+    clearFilters();
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    expect(
+      screen.queryAllByRole('img', { name: /近七日组检查异常率/ }),
+    ).toHaveLength(0);
+    const cached = f.runtime.queryClient.getQueriesData({
+      queryKey: HOME_WORKBENCH_QUERY_KEY,
+    });
+    for (const [, data] of cached) {
+      if (!data) continue;
+      expect(homeWorkbenchDataSchema.parse(data).trendsAuthorized).toBe(false);
+      expect(
+        homeWorkbenchDataSchema
+          .parse(data)
+          .list.every((group) => group.trend === null),
+      ).toBe(true);
+    }
+    // A later authorized response under the same verified identity cannot
+    // restore history after the server withdrew its current grant.
+    f.trends(true);
+    await act(async () => {
+      await f.runtime.queryClient.invalidateQueries({
+        queryKey: HOME_WORKBENCH_QUERY_KEY,
+      });
+    });
+    expect(
+      screen.queryAllByRole('img', { name: /近七日组检查异常率/ }),
+    ).toHaveLength(0);
+    await act(async () => {
+      await f.router.navigate({ to: '/asin' });
+    });
+    await screen.findByText('Fixture catalog destination');
+    await act(async () => {
+      await f.router.navigate({ to: '/home' });
+    });
+    await screen.findByRole('link', { name: 'ALL group page 1' });
+    expect(
+      screen.queryAllByRole('img', { name: /近七日组检查异常率/ }),
+    ).toHaveLength(0);
+    await act(async () => {
+      await f.identity.refresh();
+    });
+    await screen.findByRole('img', { name: /^ALL group page 1近七日/ });
   });
 
   it('recovers only after actual identity verification and a successful fresh workbench GET', async () => {

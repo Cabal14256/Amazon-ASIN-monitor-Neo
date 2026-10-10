@@ -1,4 +1,7 @@
-import type { HomeWorkbenchQuery } from '@asin-monitor/contracts';
+import type {
+  HomeWorkbenchData,
+  HomeWorkbenchQuery,
+} from '@asin-monitor/contracts';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
@@ -47,17 +50,29 @@ type DeniedRead = {
 // A read denial outlives filter/country/route remounts for this verified identity.
 // IdentityStore publishes a new authenticated snapshot after real verification.
 const deniedReads = new WeakMap<IdentityStore, DeniedRead>();
+const deniedTrends = new WeakMap<IdentityStore, DeniedRead['auth']>();
+function withoutTrends(data: HomeWorkbenchData): HomeWorkbenchData {
+  return {
+    ...data,
+    trendsAuthorized: false,
+    list: data.list.map((group) => ({ ...group, trend: null })),
+  };
+}
 const isDenied = (error: unknown): error is ApiError =>
   error instanceof ApiError && [401, 403].includes(error.status ?? 0);
 function AuthorizedWorkbench({
   scope,
   denial,
   onDenied,
+  trendsDenied,
+  onTrendsDenied,
   ...props
 }: Props & {
   scope: string;
   denial?: ApiError;
   onDenied: (error: ApiError) => void;
+  trendsDenied: boolean;
+  onTrendsDenied: () => void;
 }) {
   const { runtime, identity } = useAuth();
   const [query, setQuery] = useState<HomeWorkbenchQuery>({
@@ -85,7 +100,10 @@ function AuthorizedWorkbench({
       try {
         const data = await getHomeWorkbench(runtime.http, query, signal);
         if (!current()) throw new ApiError('CANCELLED', '身份或权限已变化');
-        return data;
+        if (!data.trendsAuthorized) onTrendsDenied();
+        return deniedTrends.get(identity) === identity.getSnapshot()
+          ? withoutTrends(data)
+          : data;
       } catch (error) {
         if (current() && isDenied(error)) onDenied(error);
         throw error;
@@ -135,7 +153,11 @@ function AuthorizedWorkbench({
   );
   const denied = Boolean(denial || isDenied(result.error));
   const error = denial ?? result.error;
-  const data = denied ? undefined : result.data;
+  const data = denied
+    ? undefined
+    : result.data && trendsDenied
+    ? withoutTrends(result.data)
+    : result.data;
   const apply = (event: FormEvent) => {
     event.preventDefault();
     if (!current()) return;
@@ -153,7 +175,7 @@ function AuthorizedWorkbench({
   };
   const refresh = async () => {
     if (!current()) return;
-    if (denied) {
+    if (denied || trendsDenied) {
       const previous = identity.getSnapshot();
       const verified = await identity.refresh();
       if (verified === previous || verified.status !== 'authenticated') return;
@@ -562,6 +584,9 @@ export function HomeWorkbench(props: Props) {
   const { runtime, identity } = useAuth(),
     auth = useIdentity();
   const [denial, setDenial] = useState(() => deniedReads.get(identity));
+  const [trendDenial, setTrendDenial] = useState(() =>
+    deniedTrends.get(identity),
+  );
   const scope = workbenchScope(auth, runtime.session.revision);
   const onDenied = (error: ApiError) => {
     if (auth.status !== 'authenticated' || identity.getSnapshot() !== auth)
@@ -570,10 +595,27 @@ export function HomeWorkbench(props: Props) {
     deniedReads.set(identity, value);
     setDenial(value);
   };
+  const onTrendsDenied = () => {
+    if (auth.status !== 'authenticated' || identity.getSnapshot() !== auth)
+      return;
+    deniedTrends.set(identity, auth);
+    setTrendDenial(auth);
+    runtime.queryClient.setQueriesData<HomeWorkbenchData>(
+      { queryKey: [...HOME_WORKBENCH_QUERY_KEY, scope] },
+      (data) => data && withoutTrends(data),
+    );
+  };
   useEffect(() => {
     const previous = deniedReads.get(identity);
     if (auth.status === 'authenticated' && previous && previous.auth !== auth)
       deniedReads.delete(identity);
+    const previousTrend = deniedTrends.get(identity);
+    if (
+      auth.status === 'authenticated' &&
+      previousTrend &&
+      previousTrend !== auth
+    )
+      deniedTrends.delete(identity);
   }, [auth, identity]);
   return scope ? (
     <AuthorizedWorkbench
@@ -581,6 +623,8 @@ export function HomeWorkbench(props: Props) {
       scope={scope}
       denial={denial?.auth === auth ? denial.error : undefined}
       onDenied={onDenied}
+      trendsDenied={trendDenial === auth}
+      onTrendsDenied={onTrendsDenied}
       {...props}
     />
   ) : (
