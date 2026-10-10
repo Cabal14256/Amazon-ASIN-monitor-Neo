@@ -2,10 +2,12 @@ import {
   abortError,
   CatalogDeferredError,
   getMarketplaceId,
+  inheritWorkSettlement,
   MAX_CATALOG_BYTES,
   normalizeCountry,
   parseCatalogRelationships,
   SpApiError,
+  trackWorkSettlement,
   waitFor,
   type CatalogVariantChecker,
   type Logger,
@@ -87,6 +89,7 @@ export class CatalogHybridChecker {
     if (this.active.size >= 4) throw new SpApiError('CAPACITY');
     options = { ...options };
     const controller = new AbortController();
+    inheritWorkSettlement(options.signal, controller.signal);
     this.active.add(controller);
     const abort = () => controller.abort(new SpApiError('CANCELLED'));
     options.signal?.addEventListener('abort', abort, { once: true });
@@ -190,6 +193,7 @@ export class CatalogHybridChecker {
         options.signal?.removeEventListener('abort', abort);
         this.active.delete(controller);
       });
+    trackWorkSettlement(controller.signal, work);
     return waitFor(work, controller.signal);
   }
   private async search(

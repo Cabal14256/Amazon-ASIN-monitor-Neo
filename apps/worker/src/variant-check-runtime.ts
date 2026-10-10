@@ -17,9 +17,11 @@ import {
   type FeishuNotifications,
 } from '@asin-monitor/notify';
 import {
+  createWorkSettlement,
   DatabaseConfigSource,
   NodeHttpTransport,
   SpApiRuntime,
+  trackWorkSettlement,
 } from '@asin-monitor/sp-api';
 import {
   CompetitorCheckRuntime,
@@ -180,10 +182,11 @@ export async function startVariantCheckRuntime(
     const configRepository = new PgSpApiConfigurationRepository(pool);
     source = new DatabaseConfigSource(environment, async (signal) =>
       Object.fromEntries(
-        (await configRepository.readConfiguration(signal)).map((row) => [
-          row.configKey.toUpperCase(),
-          row.configValue,
-        ]),
+        (
+          await configRepository.readConfiguration(signal, (work) =>
+            trackWorkSettlement(signal, work),
+          )
+        ).map((row) => [row.configKey.toUpperCase(), row.configValue]),
       ),
     );
     transport = new NodeHttpTransport({
@@ -218,7 +221,12 @@ export async function startVariantCheckRuntime(
     if (selected.includes('monitor') || selected.includes('competitor-monitor'))
       monitorGroupAdmission = new MonitorGroupAdmission(
         env,
-        (signal) => configRepository.readConfiguration(signal),
+        (signal) => {
+          const settlement = createWorkSettlement(signal);
+          return configRepository
+            .readConfiguration(signal, (work) => settlement.track(work))
+            .finally(() => settlement.drain());
+        },
         spApi.risk,
       );
     runtime = new VariantCheckRuntime({

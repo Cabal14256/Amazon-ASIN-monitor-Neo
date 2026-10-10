@@ -1,5 +1,6 @@
 import { abortError, SpApiError } from './errors';
 import type { Priority } from './types';
+import { createWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 export interface CatalogCheckLimits {
   concurrency?: number;
@@ -20,6 +21,8 @@ interface Work<T> {
   run(signal: AbortSignal, priority: Priority): Promise<T>;
   started: boolean;
   timer: ReturnType<typeof setTimeout>;
+  actualDone: Promise<void>;
+  completeActual(): void;
 }
 
 /** Bounded admission for complete checks (cache, flags, upstream and deferred
@@ -70,15 +73,28 @@ export class CatalogCheckScheduler<T> {
         this.queue.length >= this.maxQueued
       )
         throw new SpApiError('CAPACITY');
+      const controller = new AbortController();
+      const settlement = createWorkSettlement(controller.signal);
+      let completeActual!: () => void;
+      let completing = false;
+      const actualDone = new Promise<void>((resolve) => {
+        completeActual = () => {
+          if (completing) return;
+          completing = true;
+          void settlement.drain().then(resolve);
+        };
+      });
       work = {
         key,
         priority,
-        controller: new AbortController(),
+        controller,
         waiters: new Set(),
         started: false,
         run,
         // Joining callers cannot prolong one real check indefinitely.
         timer: setTimeout(() => this.expire(selected), 900_000),
+        actualDone,
+        completeActual,
       };
       this.latest.set(key, work);
       this.queue.push(work);
@@ -86,6 +102,8 @@ export class CatalogCheckScheduler<T> {
       work.priority = priority;
     }
     const selected = work;
+    // This exists even when a default subscriber created the shared work first.
+    trackWorkSettlement(signal, selected.actualDone);
     return new Promise<T>((resolve, reject) => {
       const abort = () => leave(new SpApiError('CANCELLED'));
       const timer = setTimeout(
@@ -113,6 +131,7 @@ export class CatalogCheckScheduler<T> {
           if (!selected.started) {
             const index = this.queue.indexOf(selected);
             if (index >= 0) this.queue.splice(index, 1);
+            selected.completeActual();
           }
         }
       };
@@ -148,6 +167,7 @@ export class CatalogCheckScheduler<T> {
     }
   }
   private finish(work: Work<T>, result: { value: T } | { error: unknown }) {
+    work.completeActual();
     clearTimeout(work.timer);
     for (const waiter of [...work.waiters]) {
       waiter.detach();
@@ -169,6 +189,7 @@ export class CatalogCheckScheduler<T> {
     if (!work.started) {
       const index = this.queue.indexOf(work);
       if (index >= 0) this.queue.splice(index, 1);
+      work.completeActual();
     }
   }
   close(): void {
@@ -182,6 +203,7 @@ export class CatalogCheckScheduler<T> {
         waiter.detach();
         waiter.reject(error);
       }
+      if (!work.started) work.completeActual();
     }
     this.queue.length = 0;
     this.latest.clear();

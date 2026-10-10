@@ -1,6 +1,6 @@
 # Neo 监控组检查准入（Refs #188）
 
-本片段接通 `MONITOR_MAX_CONCURRENT_GROUP_CHECKS` 与现有 SP-API 风控策略，让同一个 Neo Worker runtime 的主营和竞品监控消费者共享组检查准入。它是 #188 的一个独立片段，PR 使用 `Refs #188`，不能使用 `Closes #188`。定时任务系统身份、首次固定集合、组收据恢复、25 分钟过期判断、US 原始 child 投递和故障重启链路仍需后续片段完成；#189 才处理业务调度器。本片段不注册 scheduled processor 或 repeat job，不启用生产 scheduler，不改变 #48 的生产暂停决定。
+本片段接通 `MONITOR_MAX_CONCURRENT_GROUP_CHECKS` 与现有 SP-API 风控策略，让同一个 Neo Worker runtime 的主营和竞品监控消费者共享组检查准入。它由独立 Issue #248 跟踪，PR 使用 `Closes #248` 和 `Refs #188`，不能使用 `Closes #188`。定时任务系统身份、首次固定集合、组收据恢复、25 分钟过期判断、US 原始 child 投递和故障重启链路仍需后续片段完成；#189 才处理业务调度器。本片段不注册 scheduled processor 或 repeat job，不启用生产 scheduler，不改变 #48 的生产暂停决定。
 
 ## 运行范围
 
@@ -9,6 +9,8 @@
 这是进程内的组并发限制。同一 Worker runtime 的两个监控队列共享上限；不同 Worker 进程和副本各自持有门禁，不能把这个数字当作集群总上限。BullMQ 的队列 job concurrency、Redis SP-API 配额、单 pipeline 的 8 个活动调用上限和此门禁各自继续生效。两个监控 processor 的既有每任务串行组循环保留；要在隔离 fixture 验证跨域并发，必须让多个队列任务实际同时运行。
 
 许可由 pipeline 的真实 work 生命周期持有，直到检查、事务或其他底层 I/O 实际 settle 才释放。调用者已观察到取消、超时或关停也不会提前释放仍在运行的物理操作。release 幂等；关停阻止新申请、拒绝等待者，并保留已运行工作的计数到实际结束。
+
+组检查使用内部 signal settlement registry 登记真实 Redis 命令、共享 catalog scheduler / LWA flight、SP-API 与 HTML 请求、事务连接获取及查询、提交后 cache cleanup。默认调用先创建共享检查而监控组后来加入时，组仍登记同一物理工作。native HTTP 请求直到 `ClientRequest.close` 才结束物理所有权；DB helper 的公共 deadline 提前返回不会使未完成的原始 driver Promise 释放许可。公共取消与默认 caller 的 deadline 保持原样；配置 reader 同样保留物理读取槽，直到底层事务结束。
 
 ## 配置与恢复
 
@@ -58,6 +60,19 @@ corepack pnpm exec tsc --noEmit --strict --skipLibCheck --target ES2022 --module
 根在单 runner 窗口补跑最终 fixture 的显式 strict（exit 0、无诊断）、config 42/42、pipeline 120 passed / 21 native skipped、Worker 相关 49 passed / 16 native skipped，以及 Worker build；上述结果均通过。日志分别为 `%TEMP%/neo-188-final-{strict,config,pipeline,worker-related,worker-build}.log`。13 个代码/文档文件的 Prettier 与 `git diff --check` 通过；环境示例不适用 Prettier parser。
 
 原生执行在本机没有完成；Windows skip 与早期 OOM 不能登记为原生通过。推送后等待最新 CI；完整基线未由本轮只读审查执行，应在 PR `验证` 中逐项列出未执行命令与原因。
+
+2026-10-10 的物理结束补丁已在 Windows 单 worker 窗口完成真实 RED→GREEN：两个真实 catalog scheduler/cache 与 SP-API caller 先取消而物理 I/O 尚未结束；主营真实 PostgreSQL helper 的 `BEGIN` deadline、竞品真实 repository 的迟到连接获取均在旧源码上提前 release，在补丁上保持 permit 到实际结束。原断言、期限与 Legacy oracle 均保留。
+
+| 本轮命令 | 结果 / 日志 |
+| --- | --- |
+| `corepack pnpm --filter @asin-monitor/sp-api exec vitest run --maxWorkers=1` | 445 passed / 24 native skipped；`%TEMP%/neo-248-settlement-sp-api-final.log` |
+| DB `vitest run`（排除环境、schema、data-migration、storage-performance 4 个原生文件），`--maxWorkers=1` | 894 passed / 231 opt-in skipped；`%TEMP%/neo-248-settlement-db-full-final.log` |
+| `corepack pnpm --filter @asin-monitor/variant-check exec vitest run --maxWorkers=1` | 130 passed / 21 native skipped；`%TEMP%/neo-248-settlement-pipeline-full-final.log` |
+| `corepack pnpm --filter @asin-monitor/worker exec vitest run --maxWorkers=1` | 258 passed / 42 native skipped；`%TEMP%/neo-248-settlement-worker-full-final.log` |
+| 原准入相关 3 个 Worker 单元文件及 competitor native 文件 | 49 passed / 16 native skipped；`%TEMP%/neo-248-settlement-worker-related-final.log` |
+| `sp-api`、`db`、`variant-check`、`worker` 各自 build / typecheck，以及上述 fixture 显式 strict | exit 0；`%TEMP%/neo-248-settlement-build-strict-final.log` |
+
+原 PR249 head `c7740a6` 的 Linux Integration run `38044526902` 已真正执行并通过完整 competitor suite 16/16，包括双消费者 DB 配置 1→2（7539ms）；日志保存为 `%TEMP%/neo-248-integration-38044526902.log`。该记录属于补丁前 head，不能用于宣称本轮未提交修改已通过 native；新 head 仍需 CI/Integration 与最新审查。
 
 ## 回滚
 

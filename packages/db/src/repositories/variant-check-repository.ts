@@ -402,12 +402,15 @@ export class PgVariantCheckRepository implements VariantCheckRepositoryPort {
   constructor(private readonly pool: Pool) {}
   async transaction<T>(
     action: (unit: VariantCheckUnit) => Promise<T>,
+    onActualWork?: (work: Promise<unknown>) => void,
   ): Promise<T> {
     if (this.active >= 16) throw new VariantCheckError('capacity');
     this.active++;
     try {
-      return await withAsinDatabaseTransaction(this.pool, (db, ensureOpen) =>
-        action(new DrizzleVariantCheckUnit(db, ensureOpen)),
+      return await withAsinDatabaseTransaction(
+        this.pool,
+        (db, ensureOpen) => action(new DrizzleVariantCheckUnit(db, ensureOpen)),
+        onActualWork,
       );
     } finally {
       this.active--;

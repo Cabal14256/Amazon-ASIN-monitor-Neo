@@ -54,7 +54,10 @@ export interface VariantCheckUnit extends AsinQueryUnit {
   ): Promise<void>;
 }
 export interface VariantCheckRepositoryPort {
-  transaction<T>(action: (unit: VariantCheckUnit) => Promise<T>): Promise<T>;
+  transaction<T>(
+    action: (unit: VariantCheckUnit) => Promise<T>,
+    onActualWork?: (work: Promise<unknown>) => void,
+  ): Promise<T>;
 }
 export class VariantCheckError extends Error {
   constructor(
