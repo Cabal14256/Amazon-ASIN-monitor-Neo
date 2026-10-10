@@ -25,6 +25,8 @@ export type QueueTaskSnapshot = Omit<
   /** Internal only: derived from validated immutable BullMQ data, never serialized. */
   checkOperation?: VariantCheckOperation;
   backupData?: BackupJobData;
+  /** Private proof from this immutable queue incarnation's failedReason. */
+  backupUncommittedFailure?: boolean;
 };
 export class TaskQueryInputError extends Error {}
 export function parseTaskId(raw: unknown): string {

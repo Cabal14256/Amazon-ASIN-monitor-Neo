@@ -1,10 +1,14 @@
-import { backupRestoreReceiptSchema } from '@asin-monitor/contracts';
 import {
+  backupRestoreReceiptSchema,
+  type BackupJobData,
+} from '@asin-monitor/contracts';
+import {
+  isBackupUncommittedFailure,
   transitionTask,
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
-import type { Job } from 'bullmq';
+import { UnrecoverableError, type Job } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -31,6 +35,18 @@ const dependencies = vi.hoisted(() => ({
   beforeSnapshotRead: undefined as (() => Promise<void>) | undefined,
   snapshotPath: undefined as string | undefined,
   failSnapshotCleanup: false,
+  closeFailureStage: undefined as
+    | 'source-copy'
+    | 'snapshot-write'
+    | 'snapshot-header'
+    | 'digest'
+    | undefined,
+  sourceReads: 0,
+  snapshotReads: 0,
+  closeAttempts: 0,
+  failedHandle: undefined as import('node:fs/promises').FileHandle | undefined,
+  releaseFailedHandle: undefined as (() => Promise<void>) | undefined,
+  cancelAtClose: undefined as (() => void) | undefined,
 }));
 vi.mock('@asin-monitor/db', async (original) => ({
   ...(await original<typeof import('@asin-monitor/db')>()),
@@ -73,6 +89,40 @@ vi.mock('node:fs/promises', async (original) => {
           },
         });
       }
+      const isSnapshot = String(args[0]).includes('neo-backup-restore-');
+      const sourceRead =
+        String(args[0]).includes('neo-backup-snapshot-test-') && args[1] === 'r'
+          ? ++dependencies.sourceReads
+          : 0;
+      const snapshotRead =
+        isSnapshot && args[1] === 'r' ? ++dependencies.snapshotReads : 0;
+      const stage =
+        sourceRead === 2
+          ? 'source-copy'
+          : isSnapshot && args[1] === 'wx'
+          ? 'snapshot-write'
+          : snapshotRead === 1
+          ? 'snapshot-header'
+          : snapshotRead === 2
+          ? 'digest'
+          : undefined;
+      if (stage && stage === dependencies.closeFailureStage) {
+        const close = file.close.bind(file);
+        dependencies.failedHandle = file;
+        dependencies.releaseFailedHandle = close;
+        Object.assign(file, {
+          close: async () => {
+            dependencies.closeAttempts += 1;
+            if (dependencies.closeAttempts === 1) {
+              dependencies.cancelAtClose?.();
+              // Fail before releasing the real descriptor. No injected stat,
+              // read, write, or hash result replaces its actual filesystem IO.
+              throw new Error('authorization=Bearer raw-close-secret');
+            }
+            return close();
+          },
+        });
+      }
       return file;
     },
     unlink: async (...args: Parameters<typeof fs.unlink>) => {
@@ -90,6 +140,14 @@ vi.mock('node:fs/promises', async (original) => {
 
 let directory: string | undefined;
 afterEach(async () => {
+  await dependencies.releaseFailedHandle?.().catch(() => undefined);
+  dependencies.closeFailureStage = undefined;
+  dependencies.sourceReads = 0;
+  dependencies.snapshotReads = 0;
+  dependencies.closeAttempts = 0;
+  dependencies.failedHandle = undefined;
+  dependencies.releaseFailedHandle = undefined;
+  dependencies.cancelAtClose = undefined;
   if (directory) await rm(directory, { recursive: true, force: true });
   directory = undefined;
   if (dependencies.snapshotPath)
@@ -136,9 +194,40 @@ describe('restore consumes the verified archive snapshot', () => {
       holdWrite: false,
       holdRead: true,
     },
+    {
+      scope: 'selective',
+      attack: 'same-inode-write',
+      cleanupFails: true,
+      holdWrite: false,
+      holdRead: false,
+      cancelBeforeRestore: true,
+    },
+    {
+      scope: 'selective',
+      attack: 'same-inode-write',
+      cleanupFails: false,
+      holdWrite: false,
+      holdRead: false,
+      cancelBeforeRestore: true,
+    },
+    ...(
+      ['source-copy', 'snapshot-write', 'snapshot-header', 'digest'] as const
+    ).map((closeFailure) => ({
+      scope: 'selective',
+      attack: 'same-inode-write',
+      cleanupFails: false,
+      holdWrite: false,
+      holdRead: false,
+      closeFailure,
+    })),
   ] as const)(
-    'keeps verified bytes for $scope after $attack (cleanup=$cleanupFails, held-write=$holdWrite, held-read=$holdRead)',
-    async ({ scope, attack, cleanupFails, holdWrite, holdRead }) => {
+    'keeps verified bytes for $scope after $attack (cleanup=$cleanupFails, held-write=$holdWrite, held-read=$holdRead, before-cli=$cancelBeforeRestore, close=$closeFailure)',
+    async (inputCase) => {
+      const { scope, attack, cleanupFails, holdWrite, holdRead } = inputCase;
+      const cancelBeforeRestore =
+        'cancelBeforeRestore' in inputCase && inputCase.cancelBeforeRestore;
+      const closeFailure =
+        'closeFailure' in inputCase ? inputCase.closeFailure : undefined;
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-snapshot-test-'));
       const taskId = '10000000-0000-4000-8000-000000000171';
       const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -289,6 +378,10 @@ describe('restore consumes the verified archive snapshot', () => {
           await writeReleased;
         };
       dependencies.failSnapshotCleanup = cleanupFails;
+      dependencies.closeFailureStage = closeFailure;
+      dependencies.cancelAtClose = () => {
+        state = transitionTask(state, { kind: 'cancel-request' }, new Date());
+      };
       // Keep a writer FD open before verification to prove that chmod on the
       // shared archive, or retaining its reader FD, cannot protect its bytes.
       const writer = await open(input, 'r+');
@@ -319,6 +412,14 @@ describe('restore consumes the verified archive snapshot', () => {
             updateProgress: async (_job, value) => {
               if (value !== 5 || attacked) return;
               attacked = true;
+              if (cancelBeforeRestore) {
+                state = transitionTask(
+                  state,
+                  { kind: 'cancel-request' },
+                  new Date(),
+                );
+                return;
+              }
               if (attack === 'pathname-replacement') {
                 await rename(input, `${input}.replaced`);
                 await writeFile(input, unchecked);
@@ -340,6 +441,78 @@ describe('restore consumes the verified archive snapshot', () => {
           () => undefined,
           () => undefined,
         );
+        if (closeFailure) {
+          const failure = await execution.catch((error: Error) => error);
+          expect(failure).toBeInstanceOf(UnrecoverableError);
+          expect(
+            isBackupUncommittedFailure(
+              data as BackupJobData,
+              (failure as Error).message,
+            ),
+          ).toBe(false);
+          expect(state.status).toBe('failed');
+          expect(state.message).toContain('文件关闭结果未确认');
+          expect(dependencies.spawn).not.toHaveBeenCalled();
+          expect(dependencies.closeAttempts).toBe(2);
+          await expect(dependencies.failedHandle!.stat()).rejects.toMatchObject(
+            {
+              code: 'EBADF',
+            },
+          );
+          expect(log.error).toHaveBeenCalledWith('PostgreSQL 备份任务失败', {
+            target: 'primary',
+            reason: 'BACKUP_RESTORE_SNAPSHOT_CLOSE_UNCONFIRMED',
+          });
+          const emitted = JSON.stringify({
+            state,
+            error: (failure as Error).message,
+            logs: [
+              ...log.info.mock.calls,
+              ...log.warn.mock.calls,
+              ...log.error.mock.calls,
+            ],
+          });
+          expect(emitted).not.toContain('raw-close-secret');
+          expect(emitted).not.toContain('Bearer');
+          await expect(stat(dependencies.snapshotPath!)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          await expect(
+            stat(dirname(dependencies.snapshotPath!)),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+          return;
+        }
+        if (cancelBeforeRestore) {
+          if (!cleanupFails) {
+            await expect(execution).resolves.toMatchObject({
+              cancelled: true,
+            });
+            expect(state.status).toBe('cancelled');
+            expect(dependencies.spawn).not.toHaveBeenCalled();
+            await expect(
+              stat(dependencies.snapshotPath!),
+            ).rejects.toMatchObject({
+              code: 'ENOENT',
+            });
+            await expect(
+              stat(dirname(dependencies.snapshotPath!)),
+            ).rejects.toMatchObject({ code: 'ENOENT' });
+            return;
+          }
+          const failure = await execution.catch((error: Error) => error);
+          expect(failure).toBeInstanceOf(UnrecoverableError);
+          expect(
+            isBackupUncommittedFailure(
+              data as BackupJobData,
+              (failure as Error).message,
+            ),
+          ).toBe(false);
+          expect(state.status).toBe('failed');
+          expect(state.message).toContain('清理未确认');
+          expect(dependencies.spawn).not.toHaveBeenCalled();
+          expect((await stat(dependencies.snapshotPath!)).isFile()).toBe(true);
+          return;
+        }
         if (holdWrite || holdRead) {
           let settled = false;
           const settlement = execution.then(

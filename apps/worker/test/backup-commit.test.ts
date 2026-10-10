@@ -1,10 +1,14 @@
-import { backupRestoreReceiptSchema } from '@asin-monitor/contracts';
 import {
+  backupRestoreReceiptSchema,
+  type BackupJobData,
+} from '@asin-monitor/contracts';
+import {
+  isBackupUncommittedFailure,
   transitionTask,
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
-import type { Job } from 'bullmq';
+import { UnrecoverableError, type Job } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -58,6 +62,18 @@ describe('committed restore recovery when the registry connection fails', () => 
     },
     { scope: 'full', cancel: false, expires: false, unconfirmedStage: 'role' },
     {
+      scope: 'selective',
+      cancel: true,
+      expires: false,
+      unknownClose: 'nonzero',
+    },
+    {
+      scope: 'selective',
+      cancel: true,
+      expires: false,
+      unknownClose: 'signal',
+    },
+    {
       scope: 'full',
       cancel: false,
       expires: false,
@@ -73,6 +89,8 @@ describe('committed restore recovery when the registry connection fails', () => 
         'unconfirmedStage' in input ? input.unconfirmedStage : undefined;
       const timescale =
         'sourceEngine' in input && input.sourceEngine === 'timescaledb';
+      const unknownClose =
+        'unknownClose' in input ? input.unknownClose : undefined;
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-commit-'));
       const taskId = '10000000-0000-4000-8000-000000000161';
       const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -180,6 +198,22 @@ describe('committed restore recovery when the registry connection fails', () => 
           kill: vi.fn(),
         });
         const committed = () => {
+          if (unknownClose) {
+            state = transitionTask(
+              state,
+              { kind: 'cancel-request' },
+              new Date(),
+            );
+            // A committed server transaction with a lost acknowledgement can
+            // leave the CLI nonzero/signalled. The worker cannot infer rollback.
+            child.exitCode = unknownClose === 'nonzero' ? 1 : null;
+            child.emit(
+              'close',
+              child.exitCode,
+              unknownClose === 'signal' ? 'SIGTERM' : null,
+            );
+            return;
+          }
           child.exitCode = 0;
           child.emit('close', 0, null);
         };
@@ -224,6 +258,8 @@ describe('committed restore recovery when the registry connection fails', () => 
       const store = {
         read: vi.fn(async () => state),
         mutate: vi.fn(async (_id: string, change: TaskMutation) => {
+          if (unknownClose && change.kind === 'failed')
+            throw new Error('registry unavailable');
           if (change.kind === 'restore-committed') {
             if (cancel)
               state = transitionTask(
@@ -265,6 +301,29 @@ describe('committed restore recovery when the registry connection fails', () => 
         { id: taskId, name: 'restore', data } as Job,
         'lock',
       );
+      if (unknownClose) {
+        const failure = await execution.catch((error: Error) => error);
+        expect(failure).toBeInstanceOf(UnrecoverableError);
+        expect(
+          isBackupUncommittedFailure(
+            data as BackupJobData,
+            (failure as Error).message,
+          ),
+        ).toBe(false);
+        expect((failure as Error).message).toContain(
+          '原位恢复已启动但提交结果未确认',
+        );
+        expect(state.status).toBe('cancelling');
+        expect(
+          store.mutate.mock.calls.some(
+            ([, change]) =>
+              change.kind === 'cancelled' ||
+              change.kind === 'backup-uncommitted-failed',
+          ),
+        ).toBe(false);
+        expect(dependencies.spawn).toHaveBeenCalledOnce();
+        return;
+      }
       if (unconfirmedStage) {
         await expect(execution).rejects.toThrow(
           '备份任务失败，请核实数据库状态和备份文件',

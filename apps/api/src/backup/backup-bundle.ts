@@ -1,9 +1,10 @@
 import type { BackupArtifactMetadata } from '@asin-monitor/contracts';
-import { createReadStream } from 'node:fs';
-import { lstat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 
 const BLOCK_SIZE = 512;
+const READ_SIZE = 64 * 1024;
 
 function tarHeader(name: string, size: number, modifiedAt: Date): Buffer {
   if (
@@ -64,25 +65,79 @@ export async function backupBundle(
   filename: string,
   metadata: BackupArtifactMetadata,
 ): Promise<Readable> {
-  const details = await lstat(path);
-  if (!details.isFile() || details.size < 5 || metadata.filename !== filename)
+  if (metadata.filename !== filename) throw new Error('BACKUP_BUNDLE_INVALID');
+  let file: FileHandle | undefined;
+  try {
+    // Freeze the directory entry as well: Windows has no O_NOFOLLOW, so fstat
+    // must reject a changed inode before any bytes are read from the handle.
+    const entry = await lstat(path);
+    if (!entry.isFile()) throw new Error('BACKUP_BUNDLE_INVALID');
+    file = await open(
+      path,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    const handle = file;
+    const details = await file.stat();
+    if (
+      !details.isFile() ||
+      details.size < 5 ||
+      entry.dev !== details.dev ||
+      entry.ino !== details.ino
+    )
+      throw new Error('BACKUP_BUNDLE_INVALID');
+    const header = Buffer.alloc(5);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    if (bytesRead !== header.length || header.toString('ascii') !== 'PGDMP')
+      throw new Error('BACKUP_BUNDLE_INVALID');
+    const sidecar = Buffer.from(JSON.stringify(metadata), 'utf8');
+    let closing: Promise<void> | undefined;
+    const closeFile = () => (closing ??= handle.close());
+    const sidecarName = `${filename}.meta.json`;
+    async function* entries(): AsyncGenerator<Buffer> {
+      try {
+        yield tarHeader(filename, details.size, details.mtime);
+        for (let offset = 0; offset < details.size; ) {
+          const chunk = Buffer.allocUnsafe(
+            Math.min(READ_SIZE, details.size - offset),
+          );
+          const { bytesRead } = await handle.read(
+            chunk,
+            0,
+            chunk.length,
+            offset,
+          );
+          if (!bytesRead) throw new Error('BACKUP_BUNDLE_INVALID');
+          offset += bytesRead;
+          yield chunk.subarray(0, bytesRead);
+        }
+        const dumpPadding = padding(details.size);
+        if (dumpPadding) yield dumpPadding;
+        yield tarHeader(sidecarName, sidecar.length, details.mtime);
+        yield sidecar;
+        const sidecarPadding = padding(sidecar.length);
+        if (sidecarPadding) yield sidecarPadding;
+        yield Buffer.alloc(BLOCK_SIZE * 2);
+      } finally {
+        await closeFile();
+      }
+    }
+    const stream = Readable.from(entries());
+    const destroy = stream._destroy.bind(stream);
+    stream._destroy = (error, callback) => {
+      // Returning an unstarted generator does not run its finally block. Close
+      // the handle here as well, and keep close emission after actual cleanup.
+      destroy(error, (destroyError) => {
+        void closeFile().then(
+          () => callback(destroyError),
+          (closeError: Error) => callback(destroyError ?? closeError),
+        );
+      });
+    };
+    return stream;
+  } catch (error) {
+    await file?.close().catch(() => undefined);
+    if (error instanceof Error && error.message === 'BACKUP_BUNDLE_INVALID')
+      throw error;
     throw new Error('BACKUP_BUNDLE_INVALID');
-  const sidecar = Buffer.from(JSON.stringify(metadata), 'utf8');
-  const sidecarName = `${filename}.meta.json`;
-  async function* entries(): AsyncGenerator<Buffer> {
-    yield tarHeader(filename, details.size, details.mtime);
-    for await (const chunk of createReadStream(path, {
-      start: 0,
-      end: details.size - 1,
-    }))
-      yield chunk as Buffer;
-    const dumpPadding = padding(details.size);
-    if (dumpPadding) yield dumpPadding;
-    yield tarHeader(sidecarName, sidecar.length, details.mtime);
-    yield sidecar;
-    const sidecarPadding = padding(sidecar.length);
-    if (sidecarPadding) yield sidecarPadding;
-    yield Buffer.alloc(BLOCK_SIZE * 2);
   }
-  return Readable.from(entries());
 }

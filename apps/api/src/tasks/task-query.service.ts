@@ -246,8 +246,14 @@ export class TaskQueryService {
         task.taskId,
         {
           // A cancellation may win the atomic mutation after this task read.
-          kind: backupTask(task) ? 'backup-uncommitted-failed' : 'failed',
-          message: '任务执行失败',
+          kind:
+            backupTask(task) && queued.backupUncommittedFailure === true
+              ? 'backup-uncommitted-failed'
+              : 'failed',
+          message:
+            backupTask(task) && queued.backupUncommittedFailure !== true
+              ? '备份任务失败，副作用或清理未确认，请核对数据库状态和残留产物'
+              : '任务执行失败',
         },
         identity,
       );

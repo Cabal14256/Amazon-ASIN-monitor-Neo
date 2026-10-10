@@ -17,6 +17,7 @@ import {
 import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
+  isBackupUncommittedFailure,
   parseCompetitorMonitorCompletion,
   type BatchDeleteTaskData,
   type TaskRedisPort,
@@ -111,10 +112,16 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   const owner = job.data?.userId;
   let checkOperation: QueueTaskSnapshot['checkOperation'];
   let backupData: QueueTaskSnapshot['backupData'];
+  let backupUncommittedFailure: boolean | undefined;
   if (type === 'backup') {
     backupData = backupJobDataSchema.parse(job.data);
     if (backupData.taskId !== job.id || job.name !== backupData.operation)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+    if (state === 'failed')
+      backupUncommittedFailure = isBackupUncommittedFailure(
+        backupData,
+        job.failedReason,
+      );
   }
   if (['variant-check', 'batch-check'].includes(type)) {
     const data = parseVariantCheckJob(job.data);
@@ -145,6 +152,9 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   return {
     ...(checkOperation ? { checkOperation } : {}),
     ...(backupData ? { backupData } : {}),
+    ...(backupUncommittedFailure !== undefined
+      ? { backupUncommittedFailure }
+      : {}),
     taskId: job.id!,
     taskType: type,
     userId:
@@ -159,7 +169,9 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
         ? Math.min(100, Math.max(0, job.progress))
         : 0,
     message:
-      failure ||
+      (status === 'failed' && type === 'backup' && !backupUncommittedFailure
+        ? '备份任务失败，副作用或清理未确认，请核对数据库状态和残留产物'
+        : failure) ||
       text(
         resultObject.summary || resultObject.message || job.data?.message,
         2000,

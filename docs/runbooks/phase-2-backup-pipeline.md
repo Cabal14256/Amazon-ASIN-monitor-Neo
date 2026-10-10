@@ -2,9 +2,11 @@
 
 ## 格式与边界
 
-Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，文件名为 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-primary.dump` 或 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-competitor.dump`，读取时兼容既有任务 ID 前八位的文件名。每个正式文件附带 `<文件名>.meta.json`，记录来源数据库类型和目标；两者都须保留。Legacy MySQL `.sql` 文件仅作为历史资料保留，不能通过 Neo 恢复接口导入。创建期间只写同目录 `.partial` 文件；校验 `PGDMP` 文件头、大小和权限后才改为正式文件名。同一创建任务重试会清理自己的未发布临时文件；其他异常退出留下的 `.partial` 文件须由运维核对无活跃任务后清理。
+Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，文件名为 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-primary.dump` 或 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-competitor.dump`，读取时兼容既有任务 ID 前八位的文件名。每个正式文件附带 `<文件名>.meta.json`，记录来源数据库类型和目标；两者都须保留。Legacy MySQL `.sql` 文件仅作为历史资料保留，不能通过 Neo 恢复接口导入。创建期间在备份卷内新建随机私有目录（0700），以独占文件（0600）接收 `pg_dump` 的 stdout；校验 `PGDMP` 文件头、大小、原 inode、摘要和权限后才发布正式文件。正常失败或重试只清理本次持有的确切文件及空目录，兼容处理同一任务旧版本的确定性 `.partial`；不递归清扫其他任务或未知目录。
 
 `GET /api/v1/backup/:filename/download` 下载 `.tar`，其中包含原始 `.dump` 和经过校验的同名 `.meta.json`；缺失或无效的元数据会拒绝下载。跨实例恢复时先在受控环境解包，把两个文件以原文件名一起放入目标实例的 `BACKUP_STORAGE_DIRECTORY`，再执行恢复。备份创建时填写的描述会保存在元数据中，并出现在列表中。普通 PostgreSQL 新产物使用 v3 元数据；TimescaleDB 新产物使用 v4 元数据并同样强制保存和核对 SHA-256。旧 Timescale v2 元数据可保留及下载，但缺少绑定摘要，不能自动恢复。普通 PostgreSQL v3 元数据以 `scope: full` 或 `scope: selective` 明确完整/按表归档，并记录归档 SHA-256；恢复前 Worker 流式核对，错配时不运行 `pg_restore`。按表备份使用 PostgreSQL 16 的 `--table-and-children`，包括所选父表的分区与继承子表。新元数据也保存来源数据库的 TimeZone（优先数据库级配置，否则取来源连接有效值）、编码、`LC_COLLATE`、`LC_CTYPE`、locale provider 与 ICU locale/rules；旧元数据缺少可靠范围或字符集信息时 Neo 不自动恢复。
+
+下载 bundle 先拒绝非普通文件，以 `lstat` 与已打开描述符的 `fstat` 核对 inode，并在支持的平台使用 `O_NOFOLLOW`。`PGDMP` 头和后续 tar 正文始终从同一描述符读取，不在校验后重新打开共享路径；路径被替换不会让流改读新文件。流结束、读取异常或客户端在生成器启动前中止都会关闭该描述符。创建路径同样不让 `pg_dump` 重新打开 `--file` 路径：子进程 stdout 绑定已独占打开的文件，进度、文件头、哈希和发布前 inode 核对沿用该描述符，等待子进程 close 和描述符关闭后才进行失败清理。
 
 创建和恢复始终提交到 `backup-task-queue` 异步执行。任务元数据先写入 Redis task registry， Worker 再执行 `pg_dump`/`pg_restore`，每次检查 BullMQ lease、任务身份和取消状态。
 
@@ -62,9 +64,13 @@ API 与 Worker 必须挂载同一个持久化目录，并设置绝对路径 `BAC
 
 恢复在提交前被确认取消时，Worker 返回的 `{ cancelled: true }` 会使 BullMQ 作业成为 completed，但这不是数据库已恢复的凭据。任务详情与列表在缺失、无效或仅含取消标记的队列结果下保留已确认的 cancelled/failed，不自动改为 completed；只有符合恢复完成契约、且队列身份与原任务一致的 commit 回执，才能沿专用 CAS 修正旧取消或失败状态。
 
-保留的 backup 队列作业已失败而 registry 仍在 cancelling 时，任务查询使用取消优先的 `backup-uncommitted-failed` CAS，保留已受理取消，包括取消在读后才赢得原子变更的情况。没有取消的失败继续显示 failed；有效 completed commit 回执仍优先恢复真实已提交结果，不把 queued failed 当提交凭据。
+保留的 backup 队列作业已失败而 registry 仍在 cancelling 时，普通或旧版 `failedReason` 不能证明未提交或已清理，任务查询保留 failed 与人工核对提示。只有 Worker 在确认未发布、未保留恢复结果且清理成功后生成的私有 clean failure proof，才允许使用取消优先的 `backup-uncommitted-failed` CAS，保留已受理取消，包括取消在读后才赢得原子变更的情况。proof 的摘要绑定原始 job 的 taskId、所有者、createdAt、target、operation、子类型和参数；API 同时核对队列 job ID/name 和原任务 incarnation。缺失、截断、畸形、超长或属于不同 job/request 的 proof 均不可信；原始 failedReason、摘要和任务参数不返回 HTTP/WS。没有取消的可信失败仍显示 failed；有效 completed commit 回执继续优先恢复真实已提交结果。
 
-恢复先把来源归档有界复制到系统临时目录中的随机私有目录（0700）与独立文件（0600），校验私有副本自身的文件头、大小和 SHA-256，再将同一个副本传给三种 `pg_restore` 路径。共享卷路径替换或原 inode 被写入不能改变已经校验的消费文件。实际复制、摘要读取和子进程 settle 后才逐项清理本任务文件及空目录；清理未确认记录固定 warn，不覆盖已提交恢复回执。需要系统临时盘额外最多 `BACKUP_MAX_BYTES` 空间；强制终止或清理失败可能留下私有文件，按任务 ID 核对后处理，不能递归删除未知目录。
+选择性原位 `pg_restore` 的 `onStarted` 一旦触发，后续非零退出、信号、超时或取消都只能说明提交结果未知，不能据此生成 clean failure proof 或确认 cancelled，即使命令使用单事务。Worker 保留 failed 并明确提示核对在线目标数据库，不自动重试。成功零退出仍以已提交回执优先，后续健康或状态确认失败不能覆盖真实完成点；确定在启动前拒绝、且清理已确认的失败仍可使用 clean proof。
+
+恢复先把来源归档有界复制到系统临时目录中的随机私有目录（0700）与独立文件（0600），校验私有副本自身的文件头、大小和 SHA-256，再将同一个副本传给三种 `pg_restore` 路径。共享卷路径替换或原 inode 被写入不能改变已经校验的消费文件。实际复制、摘要读取和子进程 settle 后才逐项清理本任务文件及空目录；失败路径先确认 snapshot 清理，再判断可否取消或生成 clean proof，清理未确认保持 failed。读取、写入、文件头或摘要描述符首次关闭失败时保留句柄重试一次，仍保持不确定失败；不能以 Unix unlink 成功替代 FD 关闭证据。TimescaleDB 临时连接池关闭失败也不能被后续成功 DROP DATABASE 清除。已经提交并保留的恢复结果仍优先，之后的清理异常只记录固定 warn，不覆盖 commit 回执。需要系统临时盘额外最多 `BACKUP_MAX_BYTES` 空间。
+
+Worker 硬崩或清理失败可能在备份卷留下私有创建目录，或在系统临时盘留下私有恢复副本。人工回收前须核对原任务 ID、不可变 createdAt/target、原始作业与目录归属，确认没有该任务的运行中 `pg_dump`/`pg_restore` 子进程及数据库执行会话，并先核对正式归档或未知恢复结果。确认后仅回收该任务的确切残留文件和空目录；不能只因 registry 终态、TTL 过期或目录前缀相同就删除，也不新增自动递归清扫功能。
 
 新确定性文件名使用上海时间 `h23`，并把兼容 ICU 的残留 `24` 明确归为同一日 `00`。旧已发布归档仅兼容同一不可变任务、日期、分秒、完整 UUID 后缀和目标的原当日 `24` 名称；保留原 sidecar/hash/proof 和实际文件名，不重新 dump 或重命名。两个候选同时存在时明确失败待核对，不能任意选一个恢复发布结果。
 
@@ -122,3 +128,17 @@ API 受理时间与 Worker 执行窗口来自不同主机，只验证不可变�
 API 使用真实 BackupController、Fastify、全局校验和审计生命周期，七项 HTTP 场景在旧审计映射下精确得到两项默认目标失败、五项对照通过；恢复修复后，备份服务和审计两个文件共 123 项通过。测试身份包含生产 AuthPrincipal 必需的 user 字段。首次缺少该字段导致审计无法记录的夹具失败已纠正，该次运行不作为产品 RED 证据。每次临时运行旧产品源码均在 finally 按原字节恢复，并保留哈希核验；Worker/API 扩展严格类型检查包含受影响测试及其源码依赖，均通过。
 
 真实 PostgreSQL/TimescaleDB 集成文件新增至 29 项，本机以 `RUN_INTEGRATION_TESTS=false` 明确跳过全部 29 项；原有 22 项场景及新增七项真实权限模式保留原期限和成功/拒绝断言。首次新增 TimescaleDB 本机夹具误用普通 PostgreSQL 的单事务参数断言已按两种既有引擎流程纠正，该次失败不作为产品 RED。上述本机通过数只证明 mock 外部资源下的实际入口行为及类型闭包，不能替代隔离 CI 中实际数据库、pg_dump/pg_restore 与 TimescaleDB 的执行结果。
+
+## 最新审查修复的本机验证
+
+本轮修复三个 P2：下载校验后重新打开路径、创建命令重新打开输出路径，以及未知 failedReason 被当作安全取消；另补原位恢复启动后的未知提交保护和 snapshot 清理先于取消判断。它保留旧验收记录及原生回归数字，不把 mock 文件/子进程端口当作真实 PostgreSQL 恢复证据。
+
+- 私有 clean failure proof 测试：11 项通过，覆盖原始 job 绑定、不同 incarnation/request、缺失与畸形 proof。
+- 任务查询相关测试：134 项通过，覆盖 trusted proof 与 raw/旧/不同请求 failedReason、取消竞争和公开响应隔离。
+- API bundle 测试：5 项通过，覆盖同描述符读取、路径替换拒绝/冻结及中止后关闭。
+- Worker 最终相关五文件：140 项通过；另 1 项 Linux symlink 用例在 Windows 明确 skip，须由 Linux CI 实际运行，不能计作通过。此前 135 项是关闭故障增强前的不同五文件范围，保留日志而不累加计数。
+- 快照关闭故障：旧处理四项 RED（错误确认 cancelled）；修复后完整快照 15/15，覆盖四个实际 FD 关闭故障、重试释放及健康取消对照。Timescale 连接池关闭故障：旧处理 1 RED/1 健康对照，修复后 2/2。
+- 首次 DB/API 类型检查因本机低 heap OOM，不计通过。内存恢复后 DB 完整 build、API/Worker build 与三个包受影响测试 strict 均通过；此前仅两份忽略的本地 JS 转译输出已被完整 DB build 替代。
+- 新提交必须执行独立 CI；不能沿用旧 head 的绿色检查。Linux symlink、原生 task-query、实际 PostgreSQL/TimescaleDB、pg_dump/pg_restore 及完整工作区基线由最新 head CI/Integration 收敛。
+
+证据位于 `%TEMP%/neo171-review3-*.log`、`neo171-timescale-cleanup-proof/` 与 `neo171-snapshot-close-final/`，保留故障实现、恢复 SHA 和健康对照。生产切换、Legacy 退役、真实恢复演练与未完成 CI 门禁继续保留。

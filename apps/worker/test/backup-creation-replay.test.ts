@@ -4,12 +4,14 @@ import {
 } from '@asin-monitor/contracts';
 import {
   backupCreationIdentity,
+  isBackupUncommittedFailure,
   transitionTask,
   type TaskMutation,
   type TaskState,
 } from '@asin-monitor/db';
 import { UnrecoverableError, type Job } from 'bullmq';
 import { EventEmitter } from 'node:events';
+import { writeSync } from 'node:fs';
 import {
   mkdtemp,
   open,
@@ -17,13 +19,15 @@ import {
   readFile,
   rename,
   rm,
+  symlink,
+  unlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { addAbortSignal, PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createBackupProcessor } from '../src/backup-processor';
+import { createBackupProcessor, processCommand } from '../src/backup-processor';
 
 const dependencies = vi.hoisted(() => ({ pool: vi.fn(), spawn: vi.fn() }));
 const filesystemFailure = vi.hoisted(() => ({
@@ -32,6 +36,9 @@ const filesystemFailure = vi.hoisted(() => ({
   code: 'EACCES',
   stallHash: false,
   hashStream: null as import('node:stream').PassThrough | null,
+  closeSuffix: null as string | null,
+  rejectCloseBeforeRelease: false,
+  retainedHandles: [] as import('node:fs/promises').FileHandle[],
 }));
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>();
@@ -51,6 +58,34 @@ vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return {
     ...fs,
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const file = await fs.open(...args);
+      const path = String(args[0]);
+      if (
+        filesystemFailure.closeSuffix &&
+        path.endsWith(filesystemFailure.closeSuffix) &&
+        (args[1] === 'wx' || args[1] === 'wx+')
+      ) {
+        const close = file.close.bind(file);
+        let firstClose = true;
+        const rejectBeforeRelease = filesystemFailure.rejectCloseBeforeRelease;
+        if (rejectBeforeRelease) filesystemFailure.retainedHandles.push(file);
+        file.close = async () => {
+          if (rejectBeforeRelease) {
+            if (!firstClose) return close();
+            firstClose = false;
+            throw Object.assign(new Error('private-close-token'), {
+              code: 'ESECRET_TOKEN_VALUE',
+            });
+          }
+          await close();
+          throw Object.assign(new Error('private-close-token'), {
+            code: 'ESECRET_TOKEN_VALUE',
+          });
+        };
+      }
+      return file;
+    },
     unlink: async (path: string) => {
       if (
         filesystemFailure.unlinkSuffix &&
@@ -81,6 +116,20 @@ vi.mock('@asin-monitor/db', async (original) => ({
 }));
 vi.mock('node:child_process', () => ({ spawn: dependencies.spawn }));
 const directories: string[] = [];
+async function artifactPaths(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map((entry) =>
+      entry.isDirectory()
+        ? artifactPaths(join(directory, entry.name))
+        : [join(directory, entry.name)],
+    ),
+  );
+  return nested.flat();
+}
+async function artifactNames(directory: string): Promise<string[]> {
+  return (await artifactPaths(directory)).map((path) => basename(path));
+}
 afterEach(async () => {
   vi.useRealTimers();
   filesystemFailure.stallHash = false;
@@ -88,6 +137,10 @@ afterEach(async () => {
   filesystemFailure.hashStream = null;
   filesystemFailure.unlinkSuffix = null;
   filesystemFailure.renameSuffix = null;
+  filesystemFailure.closeSuffix = null;
+  filesystemFailure.rejectCloseBeforeRelease = false;
+  for (const file of filesystemFailure.retainedHandles.splice(0))
+    await file.close().catch(() => undefined);
   await Promise.all(
     directories
       .splice(0)
@@ -175,22 +228,25 @@ async function fixture(
     end: vi.fn(),
   }));
   let failedDumps = 0;
-  dependencies.spawn.mockImplementation((_command: string, args: string[]) => {
-    const child = Object.assign(new EventEmitter(), {
-      exitCode: null as number | null,
-      signalCode: null,
-      stderr: { resume: vi.fn() },
-      kill: vi.fn(),
-    });
-    void Promise.resolve().then(async () => {
-      const output = args.find((arg) => arg.startsWith('--file='))!.slice(7);
-      await writeFile(output, 'PGDMPfixture');
-      const code = failedDumps-- > 0 ? 1 : 0;
-      child.exitCode = code;
-      child.emit('close', code, null);
-    });
-    return child;
-  });
+  dependencies.spawn.mockImplementation(
+    (_command: string, args: string[], childOptions: { stdio: unknown[] }) => {
+      const child = Object.assign(new EventEmitter(), {
+        exitCode: null as number | null,
+        signalCode: null,
+        stderr: { resume: vi.fn() },
+        kill: vi.fn(),
+      });
+      void Promise.resolve().then(async () => {
+        const output = args.find((arg) => arg.startsWith('--file='))?.slice(7);
+        if (output) await writeFile(output, 'PGDMPfixture');
+        else writeSync(childOptions.stdio[1] as number, 'PGDMPfixture');
+        const code = failedDumps-- > 0 ? 1 : 0;
+        child.exitCode = code;
+        child.emit('close', code, null);
+      });
+      return child;
+    },
+  );
   const store = {
     read: vi.fn(async () => current),
     mutate: vi.fn(async (_id: string, change: TaskMutation) => {
@@ -269,6 +325,184 @@ async function fixture(
 }
 
 describe('creation attempts and durable publication', () => {
+  it.each(['.dump.partial', '.meta.json.partial'])(
+    'retains and retries %s descriptor ownership after close rejects before release',
+    async (suffix) => {
+      const f = await fixture();
+      filesystemFailure.closeSuffix = suffix;
+      filesystemFailure.rejectCloseBeforeRelease = true;
+      const outcome = await f
+        .processor(f.job, 'lock')
+        .catch((error: unknown) => error);
+      expect(outcome).toBeInstanceOf(UnrecoverableError);
+      expect(
+        isBackupUncommittedFailure(f.data, (outcome as Error).message),
+      ).toBe(false);
+      expect(filesystemFailure.retainedHandles.length).toBeGreaterThan(0);
+      for (const file of filesystemFailure.retainedHandles)
+        await expect(file.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      expect(f.state().status).toBe('failed');
+      expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+        'private-close-token',
+      );
+    },
+  );
+  it.each(['.dump.partial', '.meta.json.partial'])(
+    'does not emit a clean cancellation proof after %s FD close becomes unconfirmed',
+    async (suffix) => {
+      const f = await fixture();
+      filesystemFailure.closeSuffix = suffix;
+      const mutate = f.store.mutate.getMockImplementation()!;
+      f.store.mutate.mockImplementation(async (id, change) => {
+        if (change.kind === 'failed')
+          f.setState(
+            transitionTask(f.state(), { kind: 'cancel-request' }, new Date()),
+          );
+        return mutate(id, change);
+      });
+      await expect(f.processor(f.job, 'lock')).rejects.toBeInstanceOf(
+        UnrecoverableError,
+      );
+      expect(f.state()).toMatchObject({
+        status: 'failed',
+        message: expect.stringContaining('清理未确认'),
+      });
+      expect(f.log.warn).toHaveBeenCalledWith(
+        '备份输出描述符关闭未确认，请按任务 ID 核对',
+        expect.objectContaining({ code: 'UNKNOWN' }),
+      );
+      expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+        'private-close-token',
+      );
+      expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+        'ESECRET_TOKEN_VALUE',
+      );
+      expect(
+        f.store.mutate.mock.calls.some(
+          ([, change]) => change.kind === 'cancelled',
+        ),
+      ).toBe(false);
+    },
+  );
+  it('never writes a replacement pathname or publishes it after pg_dump has inherited the reserved FD', async () => {
+    const f = await fixture();
+    const mutate = f.store.mutate.getMockImplementation()!;
+    let replacedPath: string | undefined;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      const state = await mutate(id, change);
+      if (change.kind === 'progress' && change.progress === 1) {
+        replacedPath = (await artifactPaths(f.directory)).find((path) =>
+          path.endsWith('.dump.partial'),
+        )!;
+        await rename(replacedPath, `${replacedPath}.held`);
+        await writeFile(
+          replacedPath,
+          'replacement must not receive pg_dump bytes',
+        );
+      }
+      return state;
+    });
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow();
+    expect(replacedPath).toBeDefined();
+    expect(await readFile(`${replacedPath}.held`, 'utf8')).toBe('PGDMPfixture');
+    expect(
+      (await artifactNames(f.directory)).some((name) => name.endsWith('.dump')),
+    ).toBe(false);
+    expect(
+      dependencies.spawn.mock.calls[0]?.[1].some((arg: string) =>
+        arg.startsWith('--file='),
+      ),
+    ).toBe(false);
+    expect(dependencies.spawn.mock.calls[0]?.[2].stdio[1]).toEqual(
+      expect.any(Number),
+    );
+    expect(f.state().status).not.toBe('completed');
+  });
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a replacement symlink outside the backup volume when spawning pg_dump',
+    async () => {
+      const f = await fixture();
+      const outside = await mkdtemp(join(tmpdir(), 'neo-backup-outside-'));
+      directories.push(outside);
+      const victim = join(outside, 'victim');
+      await writeFile(victim, 'outside original bytes');
+      const mutate = f.store.mutate.getMockImplementation()!;
+      f.store.mutate.mockImplementation(async (id, change) => {
+        const state = await mutate(id, change);
+        if (change.kind === 'progress' && change.progress === 1) {
+          const path = (await artifactPaths(f.directory)).find((entry) =>
+            entry.endsWith('.dump.partial'),
+          )!;
+          await unlink(path);
+          await symlink(victim, path);
+        }
+        return state;
+      });
+      await expect(f.processor(f.job, 'lock')).rejects.toThrow();
+      expect(await readFile(victim, 'utf8')).toBe('outside original bytes');
+      expect(
+        (await artifactNames(f.directory)).some((name) =>
+          name.endsWith('.dump'),
+        ),
+      ).toBe(false);
+      expect(f.state().status).not.toBe('completed');
+    },
+  );
+  it.each(['cancel', 'onStarted'] as const)(
+    'keeps the inherited output FD until real child close after %s',
+    async (reason) => {
+      const f = await fixture();
+      const file = await open(join(f.directory, 'owned.partial'), 'wx+', 0o600);
+      const child = Object.assign(new EventEmitter(), {
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        stderr: { resume: vi.fn() },
+        kill: vi.fn(() => true),
+      });
+      dependencies.spawn.mockReturnValue(child);
+      const stop = new AbortController();
+      let visibleEnded = false;
+      const work = processCommand(
+        'fixture-pg-dump',
+        ['--format=custom'],
+        {},
+        {
+          signal: stop.signal,
+          timeoutMs: 2000,
+          maxBytes: 1024,
+          outputHandle: file,
+          checkpoint: async () => undefined,
+          onProgress: async () => undefined,
+          ...(reason === 'onStarted'
+            ? {
+                onStarted: () => {
+                  throw new Error('fixture start observer failure');
+                },
+              }
+            : {}),
+        },
+      ).catch((error: Error) => {
+        visibleEnded = true;
+        return error;
+      });
+      try {
+        if (reason === 'cancel') stop.abort();
+        await Promise.resolve();
+        expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+        expect(visibleEnded).toBe(false);
+        await expect(file.stat()).resolves.toMatchObject({ size: 0 });
+        child.signalCode = 'SIGTERM';
+        child.emit('close', null, 'SIGTERM');
+        expect(await work).toBeInstanceOf(Error);
+        await expect(file.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      } finally {
+        child.signalCode = 'SIGTERM';
+        child.emit('close', null, 'SIGTERM');
+        await work;
+        await file.close().catch(() => undefined);
+      }
+    },
+  );
   it('rejects a changed session user before starting a CLI that authenticates as another login', async () => {
     const f = await fixture();
     const original = f.query.getMockImplementation()!;
@@ -290,7 +524,7 @@ describe('creation attempts and durable publication', () => {
     );
     expect(dependencies.spawn).not.toHaveBeenCalled();
     expect(f.state().result).toBeNull();
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
   });
   it('keeps the confirmed login session while stripping ignored startup authorization options', async () => {
     const f = await fixture();
@@ -344,7 +578,7 @@ describe('creation attempts and durable publication', () => {
       );
       expect(dependencies.spawn).not.toHaveBeenCalled();
       expect(f.state().result).toBeNull();
-      expect(await readdir(f.directory)).toEqual([]);
+      expect(await artifactNames(f.directory)).toEqual([]);
     },
   );
   it.each([undefined, null, '', 'invalid\0session', 42, 'x'.repeat(1025)])(
@@ -363,7 +597,7 @@ describe('creation attempts and durable publication', () => {
       );
       expect(dependencies.spawn).not.toHaveBeenCalled();
       expect(f.state().result).toBeNull();
-      expect(await readdir(f.directory)).toEqual([]);
+      expect(await artifactNames(f.directory)).toEqual([]);
     },
   );
   it('preserves literal login and role identifiers without forwarding startup options', async () => {
@@ -431,7 +665,7 @@ describe('creation attempts and durable publication', () => {
     );
     expect(dependencies.spawn).not.toHaveBeenCalled();
     expect(f.state().result).toBeNull();
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
   });
   it('checks incoming dependency safety again under the target lease before any restore command', async () => {
     const f = await fixture();
@@ -478,7 +712,7 @@ describe('creation attempts and durable publication', () => {
       cancelled: true,
     });
     expect(f.state().status).toBe('cancelled');
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
     expect(f.publicationSync.syncDirectory).not.toHaveBeenCalled();
   });
   it('finishes a durable publication when cancellation races with successful directory sync', async () => {
@@ -520,7 +754,7 @@ describe('creation attempts and durable publication', () => {
         ([, mutation]) => mutation.kind === 'backup-create-committed',
       ),
     ).toBe(false);
-    expect(await readdir(f.directory)).toHaveLength(2);
+    expect(await artifactNames(f.directory)).toHaveLength(2);
     f.publicationSync.syncDirectory.mockResolvedValue(undefined);
     await f.processor(f.job, 'lock');
     expect(f.state().status).toBe('completed');
@@ -533,7 +767,7 @@ describe('creation attempts and durable publication', () => {
     );
     await expect(f.processor(f.job, 'lock')).rejects.toThrow();
     expect(f.state().status).toBe('processing');
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
     expect(f.publicationSync.syncDirectory).not.toHaveBeenCalled();
     expect(
       f.store.mutate.mock.calls.some(
@@ -583,7 +817,7 @@ describe('creation attempts and durable publication', () => {
           f.directory,
         );
         expect(
-          (await readdir(f.directory)).some((name) =>
+          (await artifactNames(f.directory)).some((name) =>
             name.endsWith('.partial'),
           ),
         ).toBe(false);
@@ -608,7 +842,9 @@ describe('creation attempts and durable publication', () => {
       ),
     ).toBe(false);
     expect(
-      (await readdir(f.directory)).filter((name) => !name.endsWith('.partial')),
+      (await artifactNames(f.directory)).filter(
+        (name) => !name.endsWith('.partial'),
+      ),
     ).toHaveLength(2);
     f.publicationSync.syncDirectory.mockResolvedValue(undefined);
     await f.processor(f.job, 'lock');
@@ -750,7 +986,7 @@ describe('creation attempts and durable publication', () => {
       cancelled: true,
     });
     expect(f.state()).toMatchObject({ status: 'cancelled', error: null });
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
   });
   it('preserves failure when partial cleanup is uncertain while cancellation races', async () => {
     const f = await fixture();
@@ -769,7 +1005,72 @@ describe('creation attempts and durable publication', () => {
     );
     expect(f.state().status).toBe('failed');
     expect(f.state().message).toContain('清理未确认');
-    expect(await readdir(f.directory)).toHaveLength(1);
+    expect(await artifactNames(f.directory)).toHaveLength(1);
+  });
+  it('retains an independent clean failure receipt when a cancellation acknowledgement is lost', async () => {
+    const f = await fixture();
+    f.setState({
+      ...f.state(),
+      status: 'cancelling',
+      cancelRequestedAt: new Date().toISOString(),
+    });
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'cancelled')
+        throw new Error('private-registry-connection');
+      return mutate(id, change);
+    });
+    const failed = await f
+      .processor(f.job, 'lock')
+      .catch((error: Error) => error);
+    expect(failed).toBeInstanceOf(UnrecoverableError);
+    expect(isBackupUncommittedFailure(f.data, (failed as Error).message)).toBe(
+      true,
+    );
+    expect(f.state().status).toBe('cancelling');
+    expect(await artifactNames(f.directory)).toEqual([]);
+    expect(dependencies.spawn).not.toHaveBeenCalled();
+  });
+  it('retains proof of a cleaned unpublished dump when final registry writes fail', async () => {
+    const f = await fixture();
+    f.failDumps(1);
+    f.job.attemptsMade = 1;
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'backup-uncommitted-failed')
+        throw new Error('private-registry-connection');
+      return mutate(id, change);
+    });
+    const failed = await f
+      .processor(f.job, 'lock')
+      .catch((error: Error) => error);
+    expect(failed).toBeInstanceOf(UnrecoverableError);
+    expect(isBackupUncommittedFailure(f.data, (failed as Error).message)).toBe(
+      true,
+    );
+    expect(await artifactNames(f.directory)).toEqual([]);
+    expect((failed as Error).message).not.toContain('private-registry');
+  });
+  it('does not emit clean failure proof when partial cleanup and registry acknowledgement both fail', async () => {
+    const f = await fixture();
+    f.failDumps(1);
+    f.job.attemptsMade = 1;
+    filesystemFailure.unlinkSuffix = '.dump.partial';
+    const mutate = f.store.mutate.getMockImplementation()!;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'failed')
+        throw new Error('private-registry-connection');
+      return mutate(id, change);
+    });
+    const failed = await f
+      .processor(f.job, 'lock')
+      .catch((error: Error) => error);
+    expect(failed).toBeInstanceOf(UnrecoverableError);
+    expect(isBackupUncommittedFailure(f.data, (failed as Error).message)).toBe(
+      false,
+    );
+    expect((failed as Error).message).toContain('清理未确认');
+    expect(await artifactNames(f.directory)).toHaveLength(1);
   });
   it('does not retry or confirm cancellation after an interrupted creation cannot clean its partial', async () => {
     const f = await fixture();
@@ -788,7 +1089,7 @@ describe('creation attempts and durable publication', () => {
     );
     expect(f.state().status).toBe('failed');
     expect(f.state().message).toContain('清理未确认');
-    expect(await readdir(f.directory)).toHaveLength(1);
+    expect(await artifactNames(f.directory)).toHaveLength(1);
   });
   it('aborts a stalled hash at the original queue deadline and never publishes on a late read', async () => {
     const f = await fixture();
@@ -813,7 +1114,7 @@ describe('creation attempts and durable publication', () => {
     expect(aborted).toBe(true);
     expect(result).toContain('备份任务超过六天执行期限');
     expect(f.state().status).toBe('failed');
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
   });
   it('terminates a silent restore at the queue deadline and ignores a late callback', async () => {
     const f = await fixture();
@@ -941,7 +1242,7 @@ describe('creation attempts and durable publication', () => {
       const initial = await f
         .processor(f.job, 'lock')
         .catch((error: unknown) => error);
-      const files = await readdir(f.directory);
+      const files = await artifactNames(f.directory);
       expect(files).toHaveLength(1);
       expect(files[0]?.endsWith(suffix)).toBe(true);
       // Even an unexpected redelivery after a user requests cancellation must
@@ -958,7 +1259,7 @@ describe('creation attempts and durable publication', () => {
         status: 'failed',
         message: expect.stringContaining('产物清理未确认'),
       });
-      expect(await readdir(f.directory)).toEqual(files);
+      expect(await artifactNames(f.directory)).toEqual(files);
       expect(dependencies.spawn).toHaveBeenCalledOnce();
       expect(f.log.warn).not.toHaveBeenCalledWith(
         '备份创建未发布，将使用原任务重试',
@@ -997,7 +1298,9 @@ describe('creation attempts and durable publication', () => {
         message: expect.stringContaining('产物清理未确认'),
       });
       expect(
-        (await readdir(f.directory)).some((name) => name.endsWith(suffix)),
+        (await artifactNames(f.directory)).some((name) =>
+          name.endsWith(suffix),
+        ),
       ).toBe(true);
       const logs = JSON.stringify([
         f.log.warn.mock.calls,
@@ -1015,13 +1318,13 @@ describe('creation attempts and durable publication', () => {
     await expect(failed).rejects.not.toBeInstanceOf(UnrecoverableError);
     expect(f.state().status).toBe('processing');
     expect(f.log.error).not.toHaveBeenCalled();
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
     f.job.attemptsMade = 1;
     const result = (await f.processor(f.job, 'lock')) as { filename: string };
     expect(f.state().status).toBe('completed');
     expect(dependencies.spawn).toHaveBeenCalledTimes(2);
     expect(result.filename).toContain(f.data.taskId.replaceAll('-', ''));
-    expect((await readdir(f.directory)).sort()).toEqual(
+    expect((await artifactNames(f.directory)).sort()).toEqual(
       [result.filename, `${result.filename}.meta.json`].sort(),
     );
     const metadata = backupArtifactMetadataSchema.parse(
@@ -1173,7 +1476,7 @@ describe('creation attempts and durable publication', () => {
       UnrecoverableError,
     );
     expect(f.state().status).toBe('failed');
-    expect(await readdir(f.directory)).toEqual([]);
+    expect(await artifactNames(f.directory)).toEqual([]);
   });
   it('cleans its own interrupted prepublication files and publishes one final archive', async () => {
     const f = await fixture();
@@ -1189,7 +1492,7 @@ describe('creation attempts and durable publication', () => {
       filename: result.filename,
     });
     expect(dependencies.spawn).toHaveBeenCalledTimes(2);
-    expect((await readdir(f.directory)).sort()).toEqual(
+    expect((await artifactNames(f.directory)).sort()).toEqual(
       [result.filename, `${result.filename}.meta.json`].sort(),
     );
     expect(f.state().status).toBe('completed');

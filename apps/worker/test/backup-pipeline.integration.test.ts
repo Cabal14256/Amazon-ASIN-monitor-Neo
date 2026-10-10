@@ -1512,9 +1512,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           {
             taskId,
             onDigestCheckpoint: async () => {
-              const names = (await readdir(directory)).filter((name) =>
-                name.includes(taskId.slice(0, 8)),
-              );
+              const names = (
+                await readdir(directory, { recursive: true })
+              ).filter((name) => name.includes(taskId.slice(0, 8)));
               expect(names.some((name) => name.endsWith('.dump.partial'))).toBe(
                 true,
               );

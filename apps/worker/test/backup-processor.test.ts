@@ -11,7 +11,9 @@ import type { Job } from 'bullmq';
 import {
   lstat,
   mkdtemp,
+  open,
   readFile,
+  rename,
   rm,
   truncate,
   writeFile,
@@ -196,6 +198,36 @@ describe('backup command boundary', () => {
         ),
       ).rejects.toThrow('BACKUP_MAX_BYTES_EXCEEDED');
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds the actual inherited dump FD even when its old pathname now names a tiny replacement', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-command-fd-'));
+    const output = join(directory, 'artifact.partial');
+    const file = await open(output, 'wx+', 0o600);
+    try {
+      await rename(output, `${output}.held`);
+      await writeFile(output, 'tiny');
+      await expect(
+        processCommand(
+          process.execPath,
+          [
+            '-e',
+            'process.stdout.write(Buffer.alloc(2048)); setInterval(() => undefined, 1000)',
+          ],
+          { ...process.env },
+          {
+            ...options(new AbortController().signal),
+            outputHandle: file,
+            maxBytes: 1024,
+          },
+        ),
+      ).rejects.toThrow('BACKUP_MAX_BYTES_EXCEEDED');
+      expect(await readFile(output, 'utf8')).toBe('tiny');
+      expect((await readFile(`${output}.held`)).length).toBe(2048);
+    } finally {
+      await file.close().catch(() => undefined);
       await rm(directory, { recursive: true, force: true });
     }
   });

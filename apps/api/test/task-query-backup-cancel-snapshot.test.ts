@@ -8,7 +8,11 @@ import {
   variantCheckJobSchema,
   type BackupJobData,
 } from '@asin-monitor/contracts';
-import { backupCreationIdentity, taskStateSchema } from '@asin-monitor/db';
+import {
+  backupCreationIdentity,
+  backupUncommittedFailureReason,
+  taskStateSchema,
+} from '@asin-monitor/db';
 import { isImportTaskData, type ImportTaskData } from '@asin-monitor/import';
 import jwt from 'jsonwebtoken';
 import { EventEmitter } from 'node:events';
@@ -29,6 +33,7 @@ interface RetainedJob {
   name: string;
   data: unknown;
   returnvalue: unknown;
+  failedReason?: string;
   progress: number;
   getState: () => Promise<string>;
 }
@@ -186,6 +191,79 @@ describe('retained backup BullMQ snapshot to authenticated HTTP detail', () => {
     );
     expect(transport.redisEval).not.toHaveBeenCalled();
   }
+
+  it.each(identities)(
+    'binds clean failure proof to the immutable $operation/$target queue and keeps it private',
+    async (identity) => {
+      const data = backupData(identity);
+      const job = retain(data, null);
+      job.getState = vi.fn(async () => 'failed');
+      job.failedReason = backupUncommittedFailureReason(
+        data,
+        'private-worker-message',
+      );
+      const direct = await app.app
+        .get(TaskQueryRuntime)
+        .open(() => undefined)
+        .findJob(data.taskId, 'backup');
+      expect(direct).toMatchObject({
+        status: 'failed',
+        backupUncommittedFailure: true,
+      });
+      const response = await get();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'failed',
+        message: '任务执行失败',
+      });
+      expect(response.body).not.toContain('backupUncommittedFailure');
+      expect(response.body).not.toContain('BACKUP_UNCOMMITTED');
+      expect(response.body).not.toContain('private-worker-message');
+      assertReadOnly();
+    },
+  );
+  it.each(['missing', 'older-worker', 'different-request', 'malformed'])(
+    'retains manual verification for an unproven failed queue (%s)',
+    async (mode) => {
+      const data = backupData({ operation: 'restore', target: 'primary' });
+      const job = retain(data, null);
+      job.getState = vi.fn(async () => 'failed');
+      const reason = backupUncommittedFailureReason(
+        data,
+        'private-worker-message',
+      );
+      job.failedReason =
+        mode === 'missing'
+          ? undefined
+          : mode === 'older-worker'
+          ? '清理未确认 private-token'
+          : mode === 'different-request'
+          ? backupUncommittedFailureReason(
+              {
+                ...data,
+                params: {
+                  filename: 'backup_20260927-020000-abcdef01-primary.dump',
+                },
+              } as BackupJobData,
+              'private-worker-message',
+            )
+          : reason.slice(0, -1);
+      const direct = await app.app
+        .get(TaskQueryRuntime)
+        .open(() => undefined)
+        .findJob(data.taskId, 'backup');
+      expect(direct).toMatchObject({
+        status: 'failed',
+        backupUncommittedFailure: false,
+      });
+      const response = await get();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.status).toBe('failed');
+      expect(response.json().data.message).toContain('清理未确认');
+      expect(response.body).not.toContain('private-');
+      assertReadOnly();
+    },
+  );
 
   it.each(identities)(
     'reports missing-registry cancellation for the retained $operation/$target job in real HTTP',

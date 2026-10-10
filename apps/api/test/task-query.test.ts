@@ -540,7 +540,12 @@ describe('own task query HTTP and bounded reconciliation', () => {
         result: null,
       });
       rows = [task];
-      queue = { ...task, status: 'failed', error: 'private-redis-payload' };
+      queue = {
+        ...task,
+        status: 'failed',
+        error: 'private-redis-payload',
+        backupUncommittedFailure: true,
+      };
       const response = await get(
         endpoint === 'detail' ? `/tasks/${task.taskId}` : '/tasks',
       );
@@ -558,7 +563,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
   it('preserves backup cancellation that wins the retained-failed CAS race', async () => {
     task = taskFixture({ taskType: 'backup', taskSubType: 'restore' });
     rows = [task];
-    queue = { ...task, status: 'failed' };
+    queue = { ...task, status: 'failed', backupUncommittedFailure: true };
     vi.mocked(port.store.mutate).mockImplementationOnce(async (_id, change) => {
       task = transitionTask(task!, { kind: 'cancel-request' }, new Date());
       task = transitionTask(task, change, new Date());
@@ -570,6 +575,47 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(task.status).toBe('cancelled');
     expect(task.cancelRequestedAt).not.toBeNull();
   });
+  it.each(['create', 'restore'])(
+    'preserves a failed %s warning when cancellation races an unknown cleanup result',
+    async (taskSubType) => {
+      task = taskFixture({ taskType: 'backup', taskSubType });
+      rows = [task];
+      queue = { ...task, status: 'failed', backupUncommittedFailure: false };
+      vi.mocked(port.store.mutate).mockImplementationOnce(
+        async (_id, change) => {
+          task = transitionTask(task!, { kind: 'cancel-request' }, new Date());
+          task = transitionTask(task, change, new Date());
+          return task;
+        },
+      );
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toMatchObject({
+        status: 'failed',
+        result: null,
+        message: '备份任务失败，副作用或清理未确认，请核对数据库状态和残留产物',
+      });
+      expect(task.status).toBe('failed');
+      expect(task.cancelRequestedAt).not.toBeNull();
+    },
+  );
+  it.each([undefined, false])(
+    'never confirms backup cancellation without a positive queue failure proof (%s)',
+    async (backupUncommittedFailure) => {
+      task = taskFixture({
+        taskType: 'backup',
+        taskSubType: 'restore',
+        status: 'cancelling',
+        cancelRequestedAt: taskFixture().createdAt,
+      });
+      rows = [task];
+      queue = { ...task, status: 'failed', backupUncommittedFailure };
+      const response = await get(`/tasks/${task.taskId}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.status).toBe('failed');
+      expect(response.json().data.message).toContain('清理未确认');
+    },
+  );
   it.each(['createdAt', 'taskSubType'] as const)(
     'rejects a restore receipt from a different queue %s',
     async (field) => {

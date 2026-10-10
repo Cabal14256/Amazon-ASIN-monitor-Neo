@@ -28,6 +28,7 @@ import {
   backupCreationIdentity,
   backupSelectiveRestoreQuery,
   backupTableSelectionQuery,
+  backupUncommittedFailureReason,
   createPgPool,
   isTerminalTaskStatus,
   RedisTaskRepository,
@@ -52,6 +53,7 @@ import {
   stat,
   unlink,
   writeFile,
+  type FileHandle,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
@@ -333,12 +335,16 @@ async function archiveSha256(
   checkpoint: () => Promise<void>,
   maxBytes: number,
   signal?: AbortSignal,
+  file?: FileHandle,
 ): Promise<string> {
   const hash = createHash('sha256');
   let bytesSinceCheckpoint = 0;
   let bytes = 0;
   await checkpoint();
-  for await (const chunk of createReadStream(path, { signal })) {
+  for await (const chunk of createReadStream(path, {
+    signal,
+    ...(file ? { fd: file.fd, autoClose: false, start: 0 } : {}),
+  })) {
     bytes += chunk.length;
     if (bytes > maxBytes)
       throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
@@ -351,6 +357,30 @@ async function archiveSha256(
   }
   await checkpoint();
   return hash.digest('hex');
+}
+
+async function assertOpenCustomDump(file: FileHandle, maxBytes: number) {
+  const details = await file.stat();
+  if (!details.isFile() || details.size < 5 || details.size > maxBytes)
+    throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+  const header = Buffer.alloc(5);
+  const { bytesRead } = await file.read(header, 0, header.length, 0);
+  if (bytesRead !== 5 || header.toString('ascii') !== 'PGDMP')
+    throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+  return details;
+}
+
+async function assertOpenArtifactPath(file: FileHandle, path: string) {
+  const [fdDetails, pathDetails] = await Promise.all([
+    file.stat(),
+    lstat(path),
+  ]);
+  if (
+    !pathDetails.isFile() ||
+    fdDetails.dev !== pathDetails.dev ||
+    fdDetails.ino !== pathDetails.ino
+  )
+    throw new BackupCommandError('BACKUP_OUTPUT_PATH_REPLACED');
 }
 
 export function connectionForDatabase(url: string, database: string): string {
@@ -433,8 +463,27 @@ interface BackupCommandOptions {
   checkpoint: () => Promise<void>;
   onProgress: (bytes: number) => Promise<void>;
   pollIntervalMs?: number;
+  /** Keep pg_dump on an already-open private inode instead of reopening a path. */
+  outputHandle?: FileHandle;
+  outputPath?: string;
+  retainOutputHandle?: boolean;
+  onStarted?(): void;
   /** A zero pg_restore exit means its single transaction committed. */
   zeroExitIsCommitted?: boolean;
+}
+
+async function closeCommandOutput(file: FileHandle | undefined) {
+  if (!file) return;
+  try {
+    await file.close();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    logger.warn('备份输出描述符关闭未确认', {
+      reason: 'backup_output_close_unconfirmed',
+      code: code && cleanupErrorCodes.has(code) ? code : 'UNKNOWN',
+    });
+    throw new BackupCommandError('BACKUP_OUTPUT_CLOSE_UNCONFIRMED');
+  }
 }
 
 async function defaultNodeCertificateAuthorities(): Promise<string[]> {
@@ -463,8 +512,11 @@ export async function processCommand(
   environment: NodeJS.ProcessEnv,
   options: BackupCommandOptions,
 ): Promise<void> {
-  if (options.signal.aborted)
+  if (options.signal.aborted) {
+    if (!options.retainOutputHandle)
+      await closeCommandOutput(options.outputHandle);
     throw new BackupCommandError('BACKUP_COMMAND_CANCELLED');
+  }
   let trustDirectory: string | undefined;
   let trustFile: string | undefined;
   try {
@@ -486,6 +538,10 @@ export async function processCommand(
       options,
     );
   } finally {
+    // The child has closed before executeBackupCommand resolves. Close the
+    // private FD before the caller's failure path removes its exact filename.
+    if (!options.retainOutputHandle)
+      await closeCommandOutput(options.outputHandle);
     // Only remove our exact newly-created file and empty owned directory. A
     // retained public CA is a recoverable hygiene issue, not a failed archive.
     if (trustFile)
@@ -547,7 +603,7 @@ function executeBackupCommand(
         env: environment,
         shell: false,
         windowsHide: true,
-        stdio: ['ignore', 'ignore', 'pipe'],
+        stdio: ['ignore', options.outputHandle?.fd ?? 'ignore', 'pipe'],
       });
     } catch {
       finish(new BackupCommandError('BACKUP_COMMAND_START_FAILED'));
@@ -565,6 +621,16 @@ function executeBackupCommand(
       void (async () => {
         await pollingTask;
         if (settled) return;
+        if (options.outputHandle && options.outputPath) {
+          try {
+            await assertOpenArtifactPath(
+              options.outputHandle,
+              options.outputPath,
+            );
+          } catch {
+            stopError ??= new BackupCommandError('BACKUP_OUTPUT_PATH_REPLACED');
+          }
+        }
         if (options.zeroExitIsCommitted && code === 0 && !signal) finish();
         else if (stopError) finish(stopError);
         else if (code === 0) finish();
@@ -576,6 +642,15 @@ function executeBackupCommand(
           );
       })();
     });
+    try {
+      options.onStarted?.();
+    } catch (error) {
+      stop(
+        error instanceof Error
+          ? error
+          : new Error('BACKUP_COMMAND_START_CALLBACK_FAILED'),
+      );
+    }
     options.signal.addEventListener('abort', abort, { once: true });
     if (options.signal.aborted) abort();
     timer = setTimeout(() => {
@@ -588,16 +663,20 @@ function executeBackupCommand(
       pollingTask = (async () => {
         try {
           await options.checkpoint();
-          const output = args
-            .find((value) => value.startsWith('--file='))
-            ?.slice(7);
-          if (!output) return;
           let bytes: number;
-          try {
-            bytes = (await stat(output)).size;
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-            throw error;
+          if (options.outputHandle)
+            bytes = (await options.outputHandle.stat()).size;
+          else {
+            const output = args
+              .find((value) => value.startsWith('--file='))
+              ?.slice(7);
+            if (!output) return;
+            try {
+              bytes = (await stat(output)).size;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+              throw error;
+            }
           }
           if (bytes > options.maxBytes) {
             stop(new BackupCommandError('BACKUP_MAX_BYTES_EXCEEDED'));
@@ -819,14 +898,38 @@ async function assertCustomDump(path: string, maxBytes: number) {
   if (!details.isFile() || details.size < 5 || details.size > maxBytes)
     throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
   const file = await open(path, 'r');
+  let validationError: unknown;
+  let closeFailure: unknown;
   try {
     const header = Buffer.alloc(5);
     const { bytesRead } = await file.read(header, 0, header.length, 0);
     if (bytesRead !== 5 || header.toString('ascii') !== 'PGDMP')
       throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+  } catch (error) {
+    validationError = error;
   } finally {
-    await file.close();
+    try {
+      await file.close();
+    } catch (firstError) {
+      // A close failure is itself an integrity failure.  Retry once so a
+      // transient close rejection cannot leave our descriptor owned forever,
+      // but keep the first error as the cause and fail closed below.
+      closeFailure = firstError;
+      try {
+        await file.close();
+      } catch {
+        // The descriptor may already have been closed by the first attempt.
+      }
+    }
   }
+  if (closeFailure) {
+    const error = new BackupCommandError(
+      'BACKUP_RESTORE_SNAPSHOT_CLOSE_UNCONFIRMED',
+    ) as BackupCommandError & { cause?: unknown };
+    error.cause = validationError ?? closeFailure;
+    throw error;
+  }
+  if (validationError) throw validationError;
   return details;
 }
 
@@ -843,70 +946,95 @@ async function copyRestoreSnapshot(
 ): Promise<string> {
   input.signal.throwIfAborted();
   await input.checkpoint();
-  const source = await open(sourcePath, 'r');
+  let closeFailure: unknown;
+  const closeTracked = async (file: FileHandle | undefined) => {
+    if (!file) return;
+    try {
+      await file.close();
+    } catch (error) {
+      closeFailure ??= error;
+      // Keep the first failure authoritative, while making one bounded retry
+      // to release the actual descriptor before its private path is removed.
+      try {
+        await file.close();
+      } catch {
+        // The first attempt may have closed the descriptor before rejecting.
+      }
+    }
+  };
+  const closeError = (cause: unknown) => {
+    const error = new BackupCommandError(
+      'BACKUP_RESTORE_SNAPSHOT_CLOSE_UNCONFIRMED',
+    ) as BackupCommandError & { cause?: unknown };
+    error.cause = cause ?? closeFailure;
+    return error;
+  };
+  let copyError: unknown;
+  let source: FileHandle | undefined;
+  let snapshot: FileHandle | undefined;
   try {
+    source = await open(sourcePath, 'r');
     const details = await source.stat();
     if (!details.isFile() || details.size < 5 || details.size > input.maxBytes)
       throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
     input.signal.throwIfAborted();
-    const snapshot = await open(snapshotPath, 'wx', 0o600);
-    try {
-      const buffer = Buffer.allocUnsafe(64 * 1024);
-      let offset = 0;
-      let sinceCheckpoint = 0;
-      let lastCheckpoint = Date.now();
-      while (true) {
+    snapshot = await open(snapshotPath, 'wx', 0o600);
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    let sinceCheckpoint = 0;
+    let lastCheckpoint = Date.now();
+    while (true) {
+      input.signal.throwIfAborted();
+      const { bytesRead } = await source.read(buffer, 0, buffer.length, offset);
+      input.signal.throwIfAborted();
+      if (bytesRead === 0) break;
+      if (offset + bytesRead > input.maxBytes)
+        throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+      let written = 0;
+      while (written < bytesRead) {
         input.signal.throwIfAborted();
-        const { bytesRead } = await source.read(
+        const { bytesWritten } = await snapshot.write(
           buffer,
-          0,
-          buffer.length,
-          offset,
+          written,
+          bytesRead - written,
+          offset + written,
         );
         input.signal.throwIfAborted();
-        if (bytesRead === 0) break;
-        if (offset + bytesRead > input.maxBytes)
+        if (bytesWritten === 0)
           throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
-        let written = 0;
-        while (written < bytesRead) {
-          input.signal.throwIfAborted();
-          const { bytesWritten } = await snapshot.write(
-            buffer,
-            written,
-            bytesRead - written,
-            offset + written,
-          );
-          input.signal.throwIfAborted();
-          if (bytesWritten === 0)
-            throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
-          written += bytesWritten;
-        }
-        offset += bytesRead;
-        sinceCheckpoint += bytesRead;
-        if (
-          sinceCheckpoint >= 8 * 1024 * 1024 ||
-          Date.now() - lastCheckpoint >= 500
-        ) {
-          await input.checkpoint();
-          input.signal.throwIfAborted();
-          sinceCheckpoint = 0;
-          lastCheckpoint = Date.now();
-        }
+        written += bytesWritten;
       }
-    } finally {
-      // Abort never races cleanup against a pending read/write. Both handle
-      // closes finish before the outer owner may unlink the private snapshot.
-      await snapshot.close();
+      offset += bytesRead;
+      sinceCheckpoint += bytesRead;
+      if (
+        sinceCheckpoint >= 8 * 1024 * 1024 ||
+        Date.now() - lastCheckpoint >= 500
+      ) {
+        await input.checkpoint();
+        input.signal.throwIfAborted();
+        sinceCheckpoint = 0;
+        lastCheckpoint = Date.now();
+      }
     }
+  } catch (error) {
+    copyError = error;
   } finally {
-    await source.close();
+    // Abort never races cleanup against a pending read/write. Both handle
+    // closes finish before the outer owner may unlink the private snapshot.
+    await closeTracked(snapshot);
+    await closeTracked(source);
   }
+  if (closeFailure) throw closeError(copyError);
+  if (copyError) throw copyError;
+
   input.signal.throwIfAborted();
-  await assertCustomDump(snapshotPath, input.maxBytes);
-  input.signal.throwIfAborted();
-  const verified = await open(snapshotPath, 'r');
+  let verifyError: unknown;
+  let verified: FileHandle | undefined;
   const hash = createHash('sha256');
   try {
+    await assertCustomDump(snapshotPath, input.maxBytes);
+    input.signal.throwIfAborted();
+    verified = await open(snapshotPath, 'r');
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let offset = 0;
     let sinceCheckpoint = 0;
@@ -936,10 +1064,14 @@ async function copyRestoreSnapshot(
         lastCheckpoint = Date.now();
       }
     }
+  } catch (error) {
+    verifyError = error;
   } finally {
     // The owner must not remove the file while a hashing read still owns it.
-    await verified.close();
+    await closeTracked(verified);
   }
+  if (closeFailure) throw closeError(verifyError);
+  if (verifyError) throw verifyError;
   await input.checkpoint();
   input.signal.throwIfAborted();
   return hash.digest('hex');
@@ -1247,7 +1379,6 @@ async function restoreTimescaleIsolated(input: {
     if (created && !keep) {
       try {
         await input.lock.dropStagingDatabase(database);
-        cleanupFailed = false;
       } catch {
         cleanupFailed = true;
       }
@@ -1323,15 +1454,63 @@ export function createBackupProcessor(
     };
     let progressBytes = 0;
     let artifactPath: string | undefined;
+    let creationOutputHandle: FileHandle | undefined;
+    let creationOutputDirectory: string | undefined;
     let metadataPartialPath: string | undefined;
     let metadataPublishedPath: string | undefined;
     let restoreSnapshotPath: string | undefined;
     let restoreSnapshotDirectory: string | undefined;
     let publishedStagingDatabase: string | undefined;
     let committedRestore: BackupRestoreReceipt | undefined;
+    let inPlaceRestoreStarted = false;
     let publishedCreation: BackupCreationReceipt | undefined;
     let publishedCreationObserved = false;
     let cleanupFailed = false;
+    const unclosedCreationHandles = new Set<FileHandle>();
+    const closeCreationHandle = async (file: FileHandle | undefined) => {
+      if (!file) return true;
+      try {
+        await file.close();
+        unclosedCreationHandles.delete(file);
+        return true;
+      } catch (error) {
+        cleanupFailed = true;
+        // A rejected close may leave an open FD. Retain ownership through the
+        // outer cleanup attempt even after the inner publication scope ends.
+        unclosedCreationHandles.add(file);
+        const code = (error as NodeJS.ErrnoException)?.code;
+        log.warn('备份输出描述符关闭未确认，请按任务 ID 核对', {
+          reason: 'backup_output_close_unconfirmed',
+          taskId: data.taskId,
+          target: data.target,
+          code: code && cleanupErrorCodes.has(code) ? code : 'UNKNOWN',
+        });
+        return false;
+      }
+    };
+    const cleanupRestoreSnapshot = async (): Promise<boolean> => {
+      let complete = true;
+      for (const [path, cleanup] of [
+        [restoreSnapshotPath, unlink],
+        [restoreSnapshotDirectory, rmdir],
+      ] as const) {
+        if (!path) continue;
+        try {
+          await cleanup(path);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          if (code === 'ENOENT') continue;
+          complete = false;
+          log.warn('恢复临时归档清理未确认，请按任务 ID 核对', {
+            reason: 'backup_restore_snapshot_cleanup_failed',
+            taskId: data.taskId,
+            target: data.target,
+            code: code && cleanupErrorCodes.has(code) ? code : 'UNKNOWN',
+          });
+        }
+      }
+      return complete;
+    };
     const cleanupOwnedArtifact = async (
       path: string,
       artifact: 'archive-partial' | 'metadata-partial' | 'metadata-orphan',
@@ -1359,6 +1538,26 @@ export function createBackupProcessor(
         return false;
       }
     };
+    const cleanupCreationDirectory = async () => {
+      if (!creationOutputDirectory) return;
+      try {
+        await rmdir(creationOutputDirectory);
+        creationOutputDirectory = undefined;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT') {
+          creationOutputDirectory = undefined;
+          return;
+        }
+        cleanupFailed = true;
+        log.warn('备份临时目录清理未确认，请按任务 ID 核对', {
+          reason: 'backup_creation_directory_cleanup_failed',
+          taskId: data.taskId,
+          target: data.target,
+          code: code && cleanupErrorCodes.has(code) ? code : 'UNKNOWN',
+        });
+      }
+    };
     const creationIdentity =
       data.operation === 'create' ? backupCreationIdentity(data) : undefined;
     const directory = resolve(getBackupStorageDirectory(options.env));
@@ -1376,11 +1575,16 @@ export function createBackupProcessor(
       paths: readonly string[],
       includeDirectory: boolean,
       signal?: AbortSignal,
+      handles?: readonly FileHandle[],
     ) => {
       try {
-        for (const path of paths)
+        for (const [index, path] of paths.entries())
           await waitForBackupSync(
-            () => publicationSync.syncFile(path),
+            () =>
+              publicationSync === nativeBackupPublicationSync &&
+              handles?.[index]
+                ? handles[index].sync()
+                : publicationSync.syncFile(path),
             options.env.BACKUP_COMMAND_TIMEOUT_MS,
             signal,
           );
@@ -1560,7 +1764,6 @@ export function createBackupProcessor(
       if (data.operation === 'create') {
         const filename = creationFilename!;
         const output = resolve(directory, basename(filename));
-        const partial = `${output}.partial`;
         // Re-check after obtaining the lease: a previous publisher may have
         // committed between the initial read and advisory lock acquisition.
         if (await recoverPublishedCreation()) return publishedCreation;
@@ -1568,163 +1771,190 @@ export function createBackupProcessor(
         // contain the full immutable task UUID, so an interrupted attempt can
         // clean only its own unpublished files before starting another dump.
         for (const [path, artifact] of [
-          [partial, 'archive-partial'],
+          [`${output}.partial`, 'archive-partial'],
           [`${output}.meta.json.partial`, 'metadata-partial'],
           [`${output}.meta.json`, 'metadata-orphan'],
         ] as const)
           if (!(await cleanupOwnedArtifact(path, artifact)))
             throw new BackupCommandError('BACKUP_CREATION_CLEANUP_FAILED');
+        creationOutputDirectory = await mkdtemp(
+          resolve(directory, `.${filename}-`),
+        );
+        await chmod(creationOutputDirectory, 0o700);
+        const partial = resolve(creationOutputDirectory, `${filename}.partial`);
         artifactPath = partial;
-        const reservation = await open(partial, 'wx', 0o600);
-        await reservation.close();
-        const requestedTables = data.params.tables?.filter(validTable) ?? [];
-        if (
-          data.params.tables &&
-          requestedTables.length !== data.params.tables.length
-        )
-          throw new BackupCommandError('BACKUP_TABLES_INVALID');
-        const tables = requestedTables.length
-          ? await lock.resolveTables(requestedTables)
-          : [];
-        const sourceManifest = lock.hasTimescale
-          ? await lock.readTimescaleManifest()
-          : undefined;
-        const databaseSettings = await lock.readDatabaseSettings();
-        await progress(1, '正在创建 PostgreSQL 自定义格式备份');
-        const dumpStartedAt = new Date().toISOString();
-        await processCommand(
-          commandPath(options.env.PG_DUMP_PATH, 'pg_dump'),
-          [
-            '--format=custom',
-            '--no-owner',
-            '--no-acl',
-            `--role=${lock.effectiveRole}`,
-            `--file=${partial}`,
-            ...(tables.length ? ['--strict-names'] : []),
-            ...tables.map(
-              (table) => `--table-and-children=${literalTablePattern(table)}`,
-            ),
-          ],
-          environment,
-          {
-            timeoutMs,
-            maxBytes,
-            signal: controller.signal,
-            checkpoint: async () => {
+        const reservation = await open(partial, 'wx+', 0o600);
+        creationOutputHandle = reservation;
+        let metadataHandle: FileHandle | undefined;
+        try {
+          const requestedTables = data.params.tables?.filter(validTable) ?? [];
+          if (
+            data.params.tables &&
+            requestedTables.length !== data.params.tables.length
+          )
+            throw new BackupCommandError('BACKUP_TABLES_INVALID');
+          const tables = requestedTables.length
+            ? await lock.resolveTables(requestedTables)
+            : [];
+          const sourceManifest = lock.hasTimescale
+            ? await lock.readTimescaleManifest()
+            : undefined;
+          const databaseSettings = await lock.readDatabaseSettings();
+          await progress(1, '正在创建 PostgreSQL 自定义格式备份');
+          const dumpStartedAt = new Date().toISOString();
+          await processCommand(
+            commandPath(options.env.PG_DUMP_PATH, 'pg_dump'),
+            [
+              '--format=custom',
+              '--no-owner',
+              '--no-acl',
+              `--role=${lock.effectiveRole}`,
+              ...(tables.length ? ['--strict-names'] : []),
+              ...tables.map(
+                (table) => `--table-and-children=${literalTablePattern(table)}`,
+              ),
+            ],
+            environment,
+            {
+              timeoutMs,
+              maxBytes,
+              signal: controller.signal,
+              outputHandle: reservation,
+              outputPath: partial,
+              retainOutputHandle: true,
+              checkpoint: async () => {
+                await check();
+                await lock.ensureHeld();
+              },
+              onProgress: async (bytes) => {
+                progressBytes = bytes;
+                await progress(
+                  Math.min(
+                    95,
+                    Math.max(2, Math.floor((bytes / maxBytes) * 90)),
+                  ),
+                  '正在写入备份文件',
+                );
+              },
+            },
+          );
+          const dumpCompletedAt = new Date().toISOString();
+          const details = await assertOpenCustomDump(reservation, maxBytes);
+          await lock.ensureHeld();
+          if (
+            sourceManifest &&
+            !sameTimescaleManifest(
+              sourceManifest,
+              await lock.readTimescaleManifest(),
+            )
+          )
+            throw new BackupCommandError('BACKUP_TIMESCALE_SCHEMA_CHANGED');
+          await reservation.chmod(0o600);
+          await progress(96, '正在校验备份文件');
+          const digest = await archiveSha256(
+            partial,
+            async () => {
               await check();
               await lock.ensureHeld();
             },
-            onProgress: async (bytes) => {
-              progressBytes = bytes;
-              await progress(
-                Math.min(95, Math.max(2, Math.floor((bytes / maxBytes) * 90))),
-                '正在写入备份文件',
-              );
-            },
-          },
-        );
-        const dumpCompletedAt = new Date().toISOString();
-        const details = await assertCustomDump(partial, maxBytes);
-        await lock.ensureHeld();
-        if (
-          sourceManifest &&
-          !sameTimescaleManifest(
-            sourceManifest,
-            await lock.readTimescaleManifest(),
-          )
-        )
-          throw new BackupCommandError('BACKUP_TIMESCALE_SCHEMA_CHANGED');
-        await chmod(partial, 0o600);
-        await progress(96, '正在校验备份文件');
-        const digest = await archiveSha256(
-          partial,
-          async () => {
-            await check();
-            await lock.ensureHeld();
-          },
-          maxBytes,
-          controller.signal,
-        );
-        const execution = {
-          timeSource: 'dump-start' as const,
-          dumpStartedAt,
-          dumpCompletedAt,
-          publicationStartedAt: new Date().toISOString(),
-        };
-        const metadata = backupArtifactMetadataSchema.parse(
-          sourceManifest
-            ? {
-                version: 4,
-                creationIdentity,
-                execution,
-                filename,
-                target: data.target,
-                sourceEngine: 'timescaledb',
-                timescale: sourceManifest,
-                archiveSha256: digest,
-                databaseSettings,
-                ...(data.params.description
-                  ? { description: data.params.description }
-                  : {}),
-              }
-            : {
-                version: 3,
-                creationIdentity,
-                execution,
-                filename,
-                target: data.target,
-                sourceEngine: 'postgresql',
-                scope: tables.length ? 'selective' : 'full',
-                archiveSha256: digest,
-                databaseSettings,
-                ...(tables.length ? { tables } : {}),
-                ...(data.params.description
-                  ? { description: data.params.description }
-                  : {}),
-              },
-        );
-        metadataPartialPath = `${output}.meta.json.partial`;
-        await writeFile(metadataPartialPath, JSON.stringify(metadata), {
-          encoding: 'utf8',
-          flag: 'wx',
-          mode: 0o600,
-        });
-        await syncPublication(
-          [partial, metadataPartialPath],
-          false,
-          controller.signal,
-        );
-        await check();
-        await lock.ensureHeld();
-        checkDeadline();
-        await rename(metadataPartialPath, `${output}.meta.json`);
-        metadataPartialPath = undefined;
-        metadataPublishedPath = `${output}.meta.json`;
-        // The final dump name is the API's discovery boundary. Publish it
-        // only after its complete sidecar exists; a failed rename removes the
-        // orphan sidecar and partial archive in the catch path.
-        await check();
-        await lock.ensureHeld();
-        checkDeadline();
-        await rename(partial, output);
-        publishedCreationObserved = true;
-        artifactPath = undefined;
-        metadataPublishedPath = undefined;
-        await syncPublication([], true, controller.signal);
-        if (metadata.version !== 3 && metadata.version !== 4)
-          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
-        publishedCreation = resultFor(metadata, details);
-        const completed = await mutate({
-          kind: 'backup-create-committed',
-          result: publishedCreation,
-          message: '备份完成',
-        });
-        log.info('PostgreSQL 备份任务完成', {
-          target: data.target,
-          size: details.size,
-          progressBytes,
-        });
-        return completed.result;
+            maxBytes,
+            controller.signal,
+            reservation,
+          );
+          const execution = {
+            timeSource: 'dump-start' as const,
+            dumpStartedAt,
+            dumpCompletedAt,
+            publicationStartedAt: new Date().toISOString(),
+          };
+          const metadata = backupArtifactMetadataSchema.parse(
+            sourceManifest
+              ? {
+                  version: 4,
+                  creationIdentity,
+                  execution,
+                  filename,
+                  target: data.target,
+                  sourceEngine: 'timescaledb',
+                  timescale: sourceManifest,
+                  archiveSha256: digest,
+                  databaseSettings,
+                  ...(data.params.description
+                    ? { description: data.params.description }
+                    : {}),
+                }
+              : {
+                  version: 3,
+                  creationIdentity,
+                  execution,
+                  filename,
+                  target: data.target,
+                  sourceEngine: 'postgresql',
+                  scope: tables.length ? 'selective' : 'full',
+                  archiveSha256: digest,
+                  databaseSettings,
+                  ...(tables.length ? { tables } : {}),
+                  ...(data.params.description
+                    ? { description: data.params.description }
+                    : {}),
+                },
+          );
+          metadataPartialPath = resolve(
+            creationOutputDirectory,
+            `${filename}.meta.json.partial`,
+          );
+          metadataHandle = await open(metadataPartialPath, 'wx', 0o600);
+          await metadataHandle.writeFile(JSON.stringify(metadata), 'utf8');
+          await syncPublication(
+            [partial, metadataPartialPath],
+            false,
+            controller.signal,
+            [reservation, metadataHandle],
+          );
+          await check();
+          await lock.ensureHeld();
+          checkDeadline();
+          await assertOpenArtifactPath(metadataHandle, metadataPartialPath);
+          if (!(await closeCreationHandle(metadataHandle)))
+            throw new BackupCommandError('BACKUP_OUTPUT_CLOSE_UNCONFIRMED');
+          metadataHandle = undefined;
+          await rename(metadataPartialPath, `${output}.meta.json`);
+          metadataPartialPath = undefined;
+          metadataPublishedPath = `${output}.meta.json`;
+          // The final dump name is the API's discovery boundary. Publish it
+          // only after its complete sidecar exists; a failed rename removes the
+          // orphan sidecar and partial archive in the catch path.
+          await check();
+          await lock.ensureHeld();
+          checkDeadline();
+          await assertOpenArtifactPath(reservation, partial);
+          if (!(await closeCreationHandle(reservation)))
+            throw new BackupCommandError('BACKUP_OUTPUT_CLOSE_UNCONFIRMED');
+          creationOutputHandle = undefined;
+          await rename(partial, output);
+          publishedCreationObserved = true;
+          artifactPath = undefined;
+          metadataPublishedPath = undefined;
+          await syncPublication([], true, controller.signal);
+          if (metadata.version !== 3 && metadata.version !== 4)
+            throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+          publishedCreation = resultFor(metadata, details);
+          const completed = await mutate({
+            kind: 'backup-create-committed',
+            result: publishedCreation,
+            message: '备份完成',
+          });
+          log.info('PostgreSQL 备份任务完成', {
+            target: data.target,
+            size: details.size,
+            progressBytes,
+          });
+          return completed.result;
+        } finally {
+          await closeCreationHandle(metadataHandle);
+          await closeCreationHandle(creationOutputHandle);
+          creationOutputHandle = undefined;
+        }
       }
       const filename = data.params.filename;
       if (
@@ -1831,6 +2061,7 @@ export function createBackupProcessor(
         throw new BackupCommandError('BACKUP_TARGET_LOCALE_MISMATCH');
       await progress(5, '正在恢复 PostgreSQL 备份');
       await lock.assertSelectiveRestoreSupported(metadata.tables);
+      await check();
       await processCommand(
         commandPath(options.env.PG_RESTORE_PATH, 'pg_restore'),
         restoreCommandArgs(
@@ -1844,6 +2075,9 @@ export function createBackupProcessor(
           maxBytes,
           signal: controller.signal,
           zeroExitIsCommitted: true,
+          onStarted: () => {
+            inPlaceRestoreStarted = true;
+          },
           checkpoint: async () => {
             await check();
             await lock.ensureHeld();
@@ -1889,6 +2123,7 @@ export function createBackupProcessor(
         [
           'BACKUP_RESTORE_CLEANUP_FAILED',
           'BACKUP_RESTORE_CREATE_UNCONFIRMED',
+          'BACKUP_RESTORE_SNAPSHOT_CLOSE_UNCONFIRMED',
         ].includes(caught.reason)
           ? caught
           : !(caught instanceof TaskStopped) &&
@@ -1901,6 +2136,7 @@ export function createBackupProcessor(
         await cleanupOwnedArtifact(metadataPartialPath, 'metadata-partial');
       if (metadataPublishedPath)
         await cleanupOwnedArtifact(metadataPublishedPath, 'metadata-orphan');
+      await cleanupCreationDirectory();
       if (publishedCreation) {
         // Publication is the durable commit. A lost registry acknowledgement
         // cannot cause a second pg_dump or turn an existing archive into failure.
@@ -1930,18 +2166,45 @@ export function createBackupProcessor(
         // reconciliation can recover it when registry writes failed.
         return committedRestore;
       }
+      // Confirm private archive cleanup before issuing a no-side-effects queue
+      // receipt. Successful commits keep warning-only cleanup in finally.
+      if (!(await cleanupRestoreSnapshot())) cleanupFailed = true;
+      const uncertain = Boolean(
+        cleanupFailed ||
+          publishedStagingDatabase ||
+          publishedCreationObserved ||
+          inPlaceRestoreStarted ||
+          (error instanceof BackupCommandError &&
+            [
+              'BACKUP_RESTORE_CLEANUP_FAILED',
+              'BACKUP_RESTORE_CREATE_UNCONFIRMED',
+              'BACKUP_RESTORE_SNAPSHOT_CLOSE_UNCONFIRMED',
+            ].includes(error.reason)),
+      );
       if (error instanceof TaskStopped) {
-        if (error.state.status === 'cancelled') return cancelledResult;
+        if (error.state.status === 'cancelled' && !uncertain)
+          return cancelledResult;
         if (error.state.status === 'completed') return error.state.result;
         if (
           (error.state.cancelRequestedAt ||
             error.state.status === 'cancelling') &&
-          !cleanupFailed
+          !uncertain
         ) {
-          await mutate({ kind: 'cancelled', message: cancelledResult.message });
+          try {
+            await mutate({
+              kind: 'cancelled',
+              message: cancelledResult.message,
+            });
+          } catch {
+            // The queue receipt independently preserves confirmed cleanup when
+            // the registry connection loses the cancellation acknowledgement.
+            throw new UnrecoverableError(
+              backupUncommittedFailureReason(data, cancelledResult.message),
+            );
+          }
           return cancelledResult;
         }
-        if (!cleanupFailed) throw new UnrecoverableError('备份任务已停止');
+        if (!uncertain) throw new UnrecoverableError('备份任务已停止');
       }
       let message = publishedStagingDatabase
         ? `隔离数据库 ${publishedStagingDatabase} 已恢复，但任务状态未确认；请人工核对，在线目标库未切换`
@@ -1964,6 +2227,9 @@ export function createBackupProcessor(
           error.reason === 'BACKUP_RESTORE_CREATE_UNCONFIRMED'
         ? '隔离数据库创建结果未确认，请人工核对任务 ID 与数据库，在线目标库未切换'
         : error instanceof BackupCommandError &&
+          error.reason === 'BACKUP_RESTORE_SNAPSHOT_CLOSE_UNCONFIRMED'
+        ? '恢复临时归档文件关闭结果未确认，请人工核对任务 ID 与临时残留，在线目标库未切换'
+        : error instanceof BackupCommandError &&
           error.reason === 'BACKUP_RESTORE_DATABASE_EXISTS'
         ? '该任务的隔离恢复数据库已存在，禁止覆盖，请人工核对'
         : error instanceof BackupCommandError &&
@@ -1985,6 +2251,8 @@ export function createBackupProcessor(
           error.reason === 'BACKUP_PUBLICATION_SYNC_UNCONFIRMED'
         ? '备份文件持久化同步未确认，请按任务 ID 核对归档和元数据，禁止自动创建替代备份'
         : '备份任务失败，请核实数据库状态和备份文件';
+      if (inPlaceRestoreStarted)
+        message += '；原位恢复已启动但提交结果未确认，请人工核对在线目标数据库';
       if (cleanupFailed)
         message += '；备份产物清理未确认，请按任务 ID 核对残留产物';
       let cancelled = false;
@@ -1997,16 +2265,6 @@ export function createBackupProcessor(
           error.reason === 'BACKUP_TASK_EXPIRED'
         ) &&
         job.attemptsMade + 1 < (job.opts?.attempts ?? 2);
-      const uncertain = Boolean(
-        cleanupFailed ||
-          publishedStagingDatabase ||
-          publishedCreationObserved ||
-          (error instanceof BackupCommandError &&
-            [
-              'BACKUP_RESTORE_CLEANUP_FAILED',
-              'BACKUP_RESTORE_CREATE_UNCONFIRMED',
-            ].includes(error.reason)),
-      );
       try {
         await options.assertJobLock(job, token);
         const state = verify(await store.read(data.taskId));
@@ -2040,29 +2298,18 @@ export function createBackupProcessor(
         reason:
           error instanceof BackupCommandError ? error.reason : 'backup_failed',
       });
-      throw new UnrecoverableError(message);
+      throw new UnrecoverableError(
+        uncertain ? message : backupUncommittedFailureReason(data, message),
+      );
     } finally {
       if (lifecycleTimer) clearTimeout(lifecycleTimer);
+      await closeCreationHandle(creationOutputHandle);
+      for (const file of unclosedCreationHandles)
+        await closeCreationHandle(file);
+      await cleanupCreationDirectory();
       // A cleanup failure is an operational warning, never a failed committed
       // restore receipt. Remove only our exact private file and empty directory.
-      for (const [path, cleanup] of [
-        [restoreSnapshotPath, unlink],
-        [restoreSnapshotDirectory, rmdir],
-      ] as const) {
-        if (!path) continue;
-        try {
-          await cleanup(path);
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException)?.code;
-          if (code !== 'ENOENT')
-            log.warn('恢复临时归档清理未确认，请按任务 ID 核对', {
-              reason: 'backup_restore_snapshot_cleanup_failed',
-              taskId: data.taskId,
-              target: data.target,
-              code: code && cleanupErrorCodes.has(code) ? code : 'UNKNOWN',
-            });
-        }
-      }
+      await cleanupRestoreSnapshot();
       try {
         await targetLock?.release();
       } catch {

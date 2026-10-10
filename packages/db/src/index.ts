@@ -5,6 +5,7 @@ export * from './domain/asin-batch-delete';
 export * from './domain/asin-manual-history';
 export * from './domain/backup-configuration';
 export * from './domain/backup-creation-receipt';
+export * from './domain/backup-failure-receipt';
 export * from './domain/competitor-check';
 export * from './domain/competitor-history-filters';
 export * from './domain/competitor-history-query';
