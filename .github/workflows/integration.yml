@@ -333,6 +333,9 @@ jobs:
       - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
 
+      - name: Verify abnormal duration raw identifier query through HTTP and PostgreSQL
+        run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-abnormal-wire.integration.test.ts --maxWorkers=1
+
       - name: Verify monitor continuous aggregate freshness after late writes and historical corrections
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
 
