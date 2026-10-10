@@ -40,6 +40,16 @@ UI 对应 #171 实际存在的八个接口：`POST /api/v1/backup`、`POST /back
 - 完整 Web/full graph/build 尚未执行：与 #212/#171 的重型窗口串行协调，待 #171 正式合入后验收真实接口。
 - 实际浏览器 File System Access、本轮截图和真实备份 API/数据库恢复联调未执行。现有浏览器运行链路此前返回连接/附加失败；mounted 测试不能代替浏览器或生产恢复证据。
 
+## 后续最小验证切片：已准备，未执行
+
+- 从原 `b48ddfb` 干净工作树正常 merge 正式 main `3df5a2a`，得到 `5fda806c`，无冲突；merge 前后的原 15 文件字节及 SHA256 一致。原清单与核验记录保存在本机临时证据目录 `neo-221-verification`，不提交临时日志或哈希文件。
+- `backup-download.test.ts` 的成功输入改为真实双 member ustar：dump 与对应 `<filename>.meta.json`，各有合法头部校验和、对齐填充及两个终止块。元数据的 `archiveSha256` 绑定测试 dump；保存后的磁盘端口与 Blob 字节均解包检查成员、正文、padding 和终止块。该 dump 是带 `PGDMP` 前缀的测试内容，不是实际 `pg_dump`，不能据此声称真实恢复通过。
+- 准备缺失 metadata 与字节数仍达到下载下限的截断终止块输入，仅在测试夹具解包检查中识别其不完整。当前下载传输只校验首 tar 头及有界字节数，metadata 的 schema 校验由 #171 服务端下载前执行；本切片不增加前端二次验证 sidecar 的产品契约，也不声称当前传输会拒绝这两种输入。真实完整归档仍需 #171 正式接口下载后解包与恢复演练。
+- 新增 `backup-panel-identity.test.tsx`，使用实际 `IdentityStore`、`RouteGate`、`BackupPanel`、认证 HTTP 层与原任务 GET。准备 7 项生命周期场景：loading/error 后相同 verified session 恢复、localStorage 保护加 sessionStorage 已知回执恢复、最终 anonymous、不同 owner、相同 owner 的真实 sessionId 变化退休旧 GET，以及 loading 期间取消 POST 后保留未知保护。不同身份隐藏原上下文；未核实操作的 owner 保护继续保留，不因 logout 自动删除。恢复查询只用原 taskId GET，不重发 POST。
+- 静态复核发现现有 workspace key 和请求 scope 只核 owner 与 `SessionStore.revision`，没有核服务端验证的 `sessionId`。上述 7 项显式等待 loading 画面，原页的 session 测试则改变本地 revision，因此两者不能代替 authenticated→authenticated 且同 owner、同 revision 的组件边界。另准备 `backup-panel-session-scope.test.tsx` 三项严格 mounted 测试：相同 session 的健康 ACK 控制、仅 sessionId 改变时退休旧 POST 并保留未知保护、仅 sessionId 改变时退休旧 GET 并允许原 taskId 的新 GET。它使用明确的认证 snapshot 测试端口和实际 BackupPanel/HTTP 层，不伪称真实 IdentityStore 跳过 loading，也不触发 runtime reset 来掩盖 scope 缺失。
+- 该补充目前只有静态源码与测试准备，尚无实际 RED/GREEN。原身份 7 项、下载 2 项及 9 个产品文件 SHA 保持；新的测试不是通过记录。当前 tree 没有 node_modules；与已安装 tree 的根锁文件 SHA 相同，后续可在串行窗口从根执行 frozen-lockfile 安装并复用现有 pnpm 内容存储，不直接引用另一 tree 的 workspace 源码或 dist 作为本分支验收。
+- 上述新增/更新用例、当前 head 的 strict/lint/full Web/build 与真实 FSA 浏览器检查尚未执行。上一节 67/67 是原 `b48ddfb` 夹具的历史结果，不能计作本切片通过。后续获串行验证窗口后先运行五个受影响 focused 文件，核实健康控制与实际身份生命周期，再执行 strict/lint/build、URL 与格式检查；真实浏览器仍需保存用户激活、慢盘背压、取消后原文件与解包证据。
+
 ## 回归与回滚
 
 正式合入 #171 后正常 merge 最新 main，复核新增字段与双布局导出 HTTP 下载默认值，运行 Web 全套、strict/lint/build、请求/导出 URL 与格式检查。重点回归两个 target、未知提交 GET-only 恢复、active/404/损坏回执、peer 解除后 GET 失败、同 owner 的 session revision、撤权与强制改密、配置并发及大文件直接保存。

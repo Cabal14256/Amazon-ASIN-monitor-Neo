@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DownloadSink } from '../lib/download-stream';
 import { ApiError, HttpClient } from '../lib/http';
@@ -27,20 +28,110 @@ function archive(
   filename = file.filename,
   size = file.size,
 ): Uint8Array<ArrayBuffer> {
-  const bytes = new Uint8Array(3072);
-  bytes.set(new TextEncoder().encode(filename));
-  bytes.set(
-    new TextEncoder().encode(size.toString(8).padStart(11, '0') + '\0'),
-    124,
+  // This is a portable tar fixture, not a real pg_dump/restore proof.
+  const dump = new Uint8Array(size);
+  dump.set(new TextEncoder().encode('PGDMPfixture-221!').subarray(0, size));
+  const metadata = new TextEncoder().encode(
+    JSON.stringify({
+      version: 3,
+      filename,
+      target: 'primary',
+      sourceEngine: 'postgresql',
+      scope: 'full',
+      archiveSha256: createHash('sha256').update(dump).digest('hex'),
+      databaseSettings: {
+        encoding: 'UTF8',
+        lcCollate: 'C',
+        lcCtype: 'C',
+        localeProvider: 'libc',
+      },
+    }),
   );
-  bytes.fill(32, 148, 156);
-  bytes[156] = 48;
-  const sum = bytes.subarray(0, 512).reduce((total, value) => total + value, 0);
-  bytes.set(
-    new TextEncoder().encode(sum.toString(8).padStart(6, '0') + '\0 '),
-    148,
+  const members = [
+    { name: filename, body: dump },
+    { name: `${filename}.meta.json`, body: metadata },
+  ];
+  const total = members.reduce(
+    (bytes, member) => bytes + 512 + Math.ceil(member.body.length / 512) * 512,
+    1024,
   );
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const member of members) {
+    const header = bytes.subarray(offset, offset + 512);
+    const text = (value: string, start: number) =>
+      header.set(new TextEncoder().encode(value), start);
+    text(member.name, 0);
+    text('0000600\0', 100);
+    text('0000000\0', 108);
+    text('0000000\0', 116);
+    text(member.body.length.toString(8).padStart(11, '0') + '\0', 124);
+    text('00000000000\0', 136);
+    header.fill(32, 148, 156);
+    header[156] = 48;
+    text('ustar\0', 257);
+    text('00', 263);
+    const checksum = header.reduce((sum, byte) => sum + byte, 0);
+    text(checksum.toString(8).padStart(6, '0') + '\0 ', 148);
+    bytes.set(member.body, offset + 512);
+    offset += 512 + Math.ceil(member.body.length / 512) * 512;
+  }
   return bytes;
+}
+
+/** Inspect saved fixture bytes independently of the production prefix check. */
+function unpackFixtureBundle(bytes: Uint8Array) {
+  const members: { name: string; body: Uint8Array }[] = [];
+  const text = (field: Uint8Array) =>
+    new TextDecoder().decode(field).replace(/\0.*$/, '').trim();
+  let offset = 0;
+  while (offset + 512 <= bytes.length) {
+    const header = bytes.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const size = parseInt(text(header.subarray(124, 136)), 8);
+    const expectedChecksum = parseInt(text(header.subarray(148, 156)), 8);
+    const actualChecksum = header.reduce(
+      (sum, byte, index) => sum + (index >= 148 && index < 156 ? 32 : byte),
+      0,
+    );
+    const bodyStart = offset + 512;
+    const next = bodyStart + Math.ceil(size / 512) * 512;
+    if (
+      !Number.isSafeInteger(size) || size < 0 ||
+      actualChecksum !== expectedChecksum || header[156] !== 48 ||
+      text(header.subarray(257, 263)) !== 'ustar' ||
+      next > bytes.length ||
+      !bytes.subarray(bodyStart + size, next).every((byte) => byte === 0)
+    ) throw new Error('INVALID_FIXTURE_TAR');
+    members.push({ name: text(header.subarray(0, 100)), body: bytes.slice(bodyStart, bodyStart + size) });
+    offset = next;
+  }
+  if (
+    members.length !== 2 ||
+    members[1].name !== `${members[0].name}.meta.json` ||
+    bytes.length - offset !== 1024 ||
+    !bytes.subarray(offset).every((byte) => byte === 0)
+  ) throw new Error('INCOMPLETE_FIXTURE_BUNDLE');
+  const metadata = JSON.parse(new TextDecoder().decode(members[1].body));
+  expect(metadata).toMatchObject({
+    version: 3, filename: members[0].name, target: 'primary',
+    sourceEngine: 'postgresql', scope: 'full',
+    archiveSha256: createHash('sha256').update(members[0].body).digest('hex'),
+  });
+  return { members, metadata };
+}
+
+// Later native/backend probes may use these negatives. They are outside the
+// current transport contract (first tar header + bounded byte count), so this
+// preparation does not invent a client-side sidecar-validation requirement.
+function incompleteArchiveFixtures() {
+  const missingMetadata = archive();
+  missingMetadata.fill(0, 1024);
+  const truncatedMetadata = archive().slice(0, 2560);
+  return [
+    { name: 'missing metadata entry', bytes: missingMetadata },
+    { name: 'trailer truncation above the transport byte floor', bytes: truncatedMetadata },
+  ];
 }
 const clients: HttpClient[] = [];
 function fixture(body = archive()) {
@@ -114,9 +205,15 @@ describe('bounded backup streaming save', () => {
       () => true,
       progress,
     );
-    expect(result).toBe(3072);
+    const expected = archive();
+    expect(result).toBe(expected.length);
     expect(f.sink.write).toHaveBeenCalledOnce();
     expect(f.sink.close).toHaveBeenCalledOnce();
+    const saved = (f.sink.write as ReturnType<typeof vi.fn>).mock.calls[0][0] as Uint8Array;
+    expect(saved).toEqual(expected);
+    const { members } = unpackFixtureBundle(saved);
+    expect(members.map((member) => member.name)).toEqual([file.filename, `${file.filename}.meta.json`]);
+    expect(new TextDecoder().decode(members[0].body)).toBe('PGDMPfixture-221!');
     expect(f.fetcher.mock.calls[0][0]).toBe(
       `https://api.test/gateway/api/v1/backup/${file.filename}/download`,
     );
@@ -127,7 +224,7 @@ describe('bounded backup streaming save', () => {
     expect(
       new Headers(f.fetcher.mock.calls[0][1]?.headers).get('authorization'),
     ).toBe('Bearer fixture-legacy');
-    expect(progress).toHaveBeenLastCalledWith(3072);
+    expect(progress).toHaveBeenLastCalledWith(expected.length);
   });
   it('honors disk backpressure without reading ahead in the consumer', async () => {
     const f = fixture();
@@ -193,12 +290,22 @@ describe('bounded backup streaming save', () => {
       save,
     );
     expect(save).toHaveBeenCalledOnce();
-    expect((save.mock.calls[0][0] as Blob).size).toBe(3072);
+    const saved = new Uint8Array(await (save.mock.calls[0][0] as Blob).arrayBuffer());
+    expect(saved).toEqual(archive());
+    expect(unpackFixtureBundle(saved).members).toHaveLength(2);
     expect(() =>
       chooseBackupDestination({ ...file, size: BACKUP_BLOB_MAX_BYTES }),
     ).toThrow('支持');
     expect(f.fetcher).toHaveBeenCalledOnce();
   });
+  it.each(incompleteArchiveFixtures())(
+    'distinguishes $name in fixture inspection without extending the transport contract',
+    ({ bytes }) => {
+      expect(bytes.length).toBeGreaterThanOrEqual(Math.ceil(file.size / 512) * 512 + 2048);
+      expect(() => validateBackupTarPrefix(bytes.subarray(0, 512), file)).not.toThrow();
+      expect(() => unpackFixtureBundle(bytes)).toThrow();
+    },
+  );
   it.each([
     archive('different.dump'),
     archive(file.filename, 18),

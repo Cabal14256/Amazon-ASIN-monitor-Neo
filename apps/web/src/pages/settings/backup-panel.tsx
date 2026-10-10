@@ -70,6 +70,7 @@ export function BackupPanel() {
     identity.status === 'authenticated' ? identity.identity : undefined;
   const access = createAccess(principal);
   const owner = principal?.user.id;
+  const sessionId = principal?.sessionId;
   const revision = runtime.session.revision;
   const allowed = Boolean(
     owner && access.canWriteSettings && !access.mustChangePassword,
@@ -80,6 +81,7 @@ export function BackupPanel() {
     const policy = createAccess(user);
     return (
       user?.user.id === owner &&
+      user?.sessionId === sessionId &&
       policy.canWriteSettings &&
       !policy.mustChangePassword &&
       runtime.session.revision === revision
@@ -99,7 +101,7 @@ export function BackupPanel() {
     );
   return (
     <BackupWorkspace
-      key={JSON.stringify([owner, revision])}
+      key={JSON.stringify([owner, sessionId, revision])}
       owner={owner}
       current={current}
     />
