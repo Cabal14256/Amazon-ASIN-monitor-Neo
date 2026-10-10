@@ -8,3 +8,5 @@
 | [`Amazon-ASIN-monitor-重构总体计划.md`](./Amazon-ASIN-monitor-重构总体计划.md) | `zatanna-animal-man-phil-coulson.md` | `d733f0ca9100385fb0cc4b43dd902f9f0ec3b5cf025dcf625f08edf21c15a1c8` |
 
 归档日期：2026-08-26。校验时将 CRLF/LF 统一为 LF，并忽略文件末尾单个换行。
+
+当前代码与待合入成果的核查见 [2026-10-10 接续清单](./progress-2026-10-10.md)。原始方案保持冻结，实际验收状态单独记录。
