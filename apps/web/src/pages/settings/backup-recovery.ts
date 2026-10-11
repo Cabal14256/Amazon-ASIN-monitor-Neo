@@ -32,6 +32,7 @@ function decode(raw: string): BackupGate {
     !['sending', 'unknown', 'task'].includes(String(value.state)) ||
     !Number.isSafeInteger(value.submittedAt) ||
     (value.submittedAt as number) < 0 ||
+    !Number.isFinite(new Date(value.submittedAt as number).getTime()) ||
     (value.description !== undefined &&
       (typeof value.description !== 'string' ||
         value.description.length > 500)) ||
@@ -303,12 +304,17 @@ export class BackupRecovery {
 }
 
 export function definiteBackupRejection(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  // A proxy/server error can follow an accepted POST. Never release its guard,
+  // including errors wrapped in a local-admission or authentication kind.
+  if ((error.status ?? 0) >= 500 || (error.errorCode ?? 0) >= 500) return false;
+  if (['INVALID_INPUT', 'CAPACITY', 'CLOSED'].includes(error.kind))
+    return error.status === undefined && error.errorCode === undefined;
   return (
-    error instanceof ApiError &&
-    (['INVALID_INPUT', 'AUTH', 'CAPACITY', 'CLOSED'].includes(error.kind) ||
-      (['HTTP', 'BUSINESS'].includes(error.kind) &&
-        [400, 401, 403, 404, 409, 413, 429, 503].includes(
-          error.status ?? error.errorCode ?? 0,
-        )))
+    error.kind === 'AUTH' ||
+    (['HTTP', 'BUSINESS'].includes(error.kind) &&
+      [400, 401, 403, 404, 409, 413, 429].includes(
+        error.status ?? error.errorCode ?? 0,
+      ))
   );
 }

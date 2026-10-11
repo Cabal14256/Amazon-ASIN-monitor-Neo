@@ -171,6 +171,98 @@ const ready = () =>
   );
 
 describe('actual Neo backup panel security and task continuation', () => {
+  it.each(['create', 'restore'] as const)(
+    'keeps an accepted %s guarded when the proxy returns 503, including reload',
+    async (operation) => {
+      const f = fixture();
+      await ready();
+      let accepted = 0;
+      f.write.mockImplementationOnce(async () => {
+        accepted++;
+        return jsonResponse(
+          {
+            success: false,
+            errorCode: 503,
+            errorMessage: 'Proxy unavailable after accepting request',
+          },
+          503,
+        );
+      });
+      if (operation === 'create') {
+        fireEvent.click(
+          screen.getByRole('button', { name: '创建异步备份任务' }),
+        );
+      } else {
+        fireEvent.click(screen.getByRole('button', { name: '隔离恢复' }));
+        fireEvent.click(screen.getByRole('button', { name: '确认恢复' }));
+      }
+      await waitFor(() =>
+        expect(
+          JSON.parse(localStorage.getItem(backupGateKey('operator'))!)?.state,
+        ).toBe('unknown'),
+      );
+      expect(accepted).toBe(1);
+      f.view.unmount();
+      render(f.page());
+      await waitFor(() => expect(screen.getByText(/编号未确认/)).toBeTruthy());
+      expect(
+        screen
+          .getByRole('button', { name: '创建异步备份任务' })
+          .hasAttribute('disabled'),
+      ).toBe(true);
+      expect(
+        screen
+          .getByRole('button', { name: '隔离恢复' })
+          .hasAttribute('disabled'),
+      ).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: '创建异步备份任务' }));
+      expect(f.write).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole('checkbox', { name: /已核实原任务/ }));
+      fireEvent.click(
+        screen.getByRole('button', { name: '已核实，重读列表并解除保护' }),
+      );
+      await waitFor(() =>
+        expect(localStorage.getItem(backupGateKey('operator'))).toBeNull(),
+      );
+      expect(f.write).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['local', 'session'] as const)(
+    'renders an out-of-Date-range %s guard as damaged and recovers only after explicit verification',
+    async (location) => {
+      const storage = location === 'local' ? localStorage : sessionStorage;
+      storage.setItem(
+        backupGateKey('operator'),
+        JSON.stringify({
+          operation: 'create',
+          target: 'primary',
+          requestId: 'damaged-time',
+          submittedAt: 8_640_000_000_000_001,
+          state: 'unknown',
+        }),
+      );
+      const f = fixture();
+      await waitFor(() =>
+        expect(screen.getByText(/备份操作保护记录损坏或不可读/)).toBeTruthy(),
+      );
+      expect(
+        screen
+          .getByRole('button', { name: '创建异步备份任务' })
+          .hasAttribute('disabled'),
+      ).toBe(true);
+      expect(f.write).not.toHaveBeenCalled();
+      expect(storage.getItem(backupGateKey('operator'))).not.toBeNull();
+      fireEvent.click(screen.getByRole('checkbox', { name: /已核实原任务/ }));
+      fireEvent.click(
+        screen.getByRole('button', { name: '已核实，重读列表并解除保护' }),
+      );
+      await waitFor(() =>
+        expect(storage.getItem(backupGateKey('operator'))).toBeNull(),
+      );
+      expect(f.write).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not send even read requests for settings:read-only users', () => {
     const f = fixture(user({ permissions: ['settings:read'] }));
     expect(screen.getByText(/都需要当前有效的 settings:write/)).toBeTruthy();

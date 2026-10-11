@@ -62,7 +62,17 @@ UI 对应 #171 实际存在的八个接口：`POST /api/v1/backup`、`POST /back
 | `pnpm --filter @asin-monitor/api --filter @asin-monitor/worker build` | 成功 |
 | `pnpm run test:changed-format`、`pnpm run check:changed-format` | 5/5 与改动文件格式检查成功 |
 
-[Integration 38053489518](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/actions/runs/38053489518) 同样绑定 `0dcd837`，97 步成功，其中正式 main 的 task-query 24 项实际通过。该 workflow 没有 #171 的真实备份/恢复步骤，不能据此宣称本 UI 已与未合并备份后端联调。当前没有最新 head 的 Codex Review。
+[Integration 38053489518](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/actions/runs/38053489518) 同样绑定 `0dcd837`，97 步成功，其中正式 main 的 task-query 24 项实际通过。该 workflow 没有 #171 的真实备份/恢复步骤，不能据此宣称本 UI 已与未合并备份后端联调。后续文档 head 7c4563d 的 Review 已完成并提出一项 P1 和一项 P2，修复与新 head 门禁见下节。
+
+## 503 未知提交与损坏日期保护
+
+文档 head 7c4563d 的最新 Codex Review 已完成，提出一项 P1（503 可能发生在 POST 已接受后，不能解除保护）和一项 P2（安全整数超出 Date 范围会导致渲染崩溃）。这两项在新的修复提交完成 CI 与 Review 前仍属于开放门禁，PR 保持 Draft。
+
+- 所有 5xx HTTP 状态或业务错误码保留 unknown 保护，即使错误被包装为 CLOSED、CAPACITY、AUTH 或 INVALID_INPUT。CLOSED/CAPACITY/INVALID_INPUT 仅在没有响应状态与业务错误码的本地发送前拒绝时释放；刷新页面不会自动重复提交创建或恢复。
+- decode 要求提交时间能产生有效 Date；精确上限 8.64e15 和合法未来时间保留。超范围整数、NaN、负值和非安全整数进入现有损坏保护恢复流程；必须人工核实并成功重读，不能自动删除记录来开放提交。
+- 本轮冻结原 head 7c4563d 的源码并恢复原字节实际执行：选定 RED 为 15 failed / 8 passed；健康控制 12 passed。mounted 测试使用实际 BackupPanel 与 HttpClient，create/restore 的代理 503 在重载后仍需阻止第二次 POST，损坏 local/session 日期原实现实际抛出 RangeError。
+- 恢复修复源码并核对 SHA 后，备份相关六文件 110/110 通过；Web strict、lint 和 production build 通过。完整 Web、根契约及格式结果按本次实际命令另列于 PR 验证；旧 CI 不能替代新 head。
+- 临时完整日志、原始和修复源码、SHA 清单位于 %TEMP%/neo-250-review-repair-7c4563d，不提交生产凭据或真实用户数据。mounted 与传输夹具不替代下述真实 FSA 或正式后端联调。
 
 ## 尚未通过的阶段门禁
 

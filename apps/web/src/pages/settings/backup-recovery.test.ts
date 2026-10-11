@@ -65,6 +65,139 @@ const accepted = async () => ({ taskId, status: 'pending' as const });
 const current = () => true;
 
 describe('backup durable submission and GET-only recovery', () => {
+  it.each([
+    new ApiError('HTTP', 'proxy unavailable', 503),
+    new ApiError('HTTP', 'gateway failed', 502, 403),
+    new ApiError('HTTP', 'backend failed', 500),
+    new ApiError('HTTP', 'gateway timeout', 504),
+    new ApiError('BUSINESS', 'unavailable', 503, 503),
+    new ApiError('BUSINESS', 'unavailable', 200, 503),
+    new ApiError('CLOSED', 'unavailable', 503),
+    new ApiError('CAPACITY', 'unavailable', 503),
+    new ApiError('CLOSED', 'unavailable', 200, 503),
+    new ApiError('CAPACITY', 'unavailable', undefined, 503),
+    new ApiError('AUTH', 'unavailable', 503, 401),
+    new ApiError('INVALID_INPUT', 'unavailable', 503, 400),
+  ])(
+    'keeps ambiguous server errors guarded even when wrapped as %s',
+    async (error) => {
+      const f = fixture(true);
+      const send = vi.fn(async () => {
+        throw error;
+      });
+      expect((await f.recovery.submit(operation, send, current)).kind).toBe(
+        'unknown',
+      );
+      expect(f.create().read()).toMatchObject({
+        ...operation,
+        state: 'unknown',
+      });
+      expect(
+        (
+          await f.create().submit(
+            {
+              operation: 'restore',
+              target: 'primary',
+              filename: 'backup_20261007-080000-01234567-primary.dump',
+            },
+            send,
+            current,
+          )
+        ).kind,
+      ).toBe('blocked');
+      expect(send).toHaveBeenCalledOnce();
+      expect(f.storage.removeItem).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    new ApiError('CLOSED', 'client closed before dispatch'),
+    new ApiError('CAPACITY', 'client slot unavailable before dispatch'),
+    new ApiError('INVALID_INPUT', 'invalid local input'),
+    new ApiError('HTTP', 'forbidden', 403),
+    new ApiError('AUTH', 'unauthenticated', 401, 401),
+  ])('releases only definite non-execution errors: %s', async (error) => {
+    const f = fixture();
+    expect(
+      (
+        await f.recovery.submit(
+          operation,
+          async () => {
+            throw error;
+          },
+          current,
+        )
+      ).kind,
+    ).toBe('rejected');
+    expect(f.create().read()).toBeNull();
+  });
+  it.each(['local', 'session'] as const)(
+    'routes out-of-Date-range %s timestamps to damaged recovery without deleting protection',
+    async (location) => {
+      const f = fixture(true);
+      const values = location === 'local' ? f.values : f.sessionValues;
+      const raw = JSON.stringify({
+        ...operation,
+        requestId: 'damaged-time',
+        submittedAt: 8_640_000_000_000_001,
+        state: 'unknown',
+      });
+      values.set(f.recovery.key, raw);
+      expect(() => f.create().read()).toThrow('BACKUP_GATE_INVALID');
+      const send = vi.fn(accepted);
+      await expect(
+        f.recovery.submit(operation, send, current),
+      ).rejects.toThrow();
+      expect(send).not.toHaveBeenCalled();
+      await expect(
+        f.recovery.clearDamagedVerified(async () => {
+          throw new Error('GET failed');
+        }, current),
+      ).rejects.toThrow('GET failed');
+      expect(values.get(f.recovery.key)).toBe(raw);
+      const refresh = vi.fn(async () => undefined);
+      expect(await f.recovery.clearDamagedVerified(refresh, current)).toBe(
+        true,
+      );
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(f.create().read()).toBeNull();
+    },
+  );
+  it.each([NaN, -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects damaged timestamp %s before it can reach rendering',
+    (submittedAt) => {
+      const f = fixture();
+      f.values.set(
+        f.recovery.key,
+        JSON.stringify({
+          ...operation,
+          requestId: 'damaged-time',
+          submittedAt,
+          state: 'unknown',
+        }),
+      );
+      expect(() => f.recovery.read()).toThrow('BACKUP_GATE_INVALID');
+      expect(f.storage.removeItem).not.toHaveBeenCalled();
+    },
+  );
+  it.each([0, Date.now() + 86_400_000, 8_640_000_000_000_000])(
+    'keeps valid timestamp %s including the exact Date limit and future times',
+    (submittedAt) => {
+      const f = fixture();
+      f.values.set(
+        f.recovery.key,
+        JSON.stringify({
+          ...operation,
+          requestId: 'valid-time',
+          submittedAt,
+          state: 'unknown',
+        }),
+      );
+      const gate = f.recovery.read()!;
+      expect(gate.submittedAt).toBe(submittedAt);
+      expect(() => new Date(gate.submittedAt).toISOString()).not.toThrow();
+    },
+  );
+
   it.each(['NETWORK', 'TIMEOUT', 'CANCELLED', 'INVALID_RESPONSE'] as const)(
     'retains %s across reload and never dispatches a second POST',
     async (kind) => {
