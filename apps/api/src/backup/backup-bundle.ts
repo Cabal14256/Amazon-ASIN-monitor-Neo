@@ -10,8 +10,7 @@ import {
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 
 const BLOCK_SIZE = 512;
@@ -130,7 +129,11 @@ export async function backupBundle(
       throw new Error('BACKUP_BUNDLE_INVALID');
     // A public inode can be overwritten through another descriptor. Copy it
     // into a private, exclusively created file before validating any response.
-    snapshotDirectory = await mkdtemp(join(tmpdir(), 'neo-backup-download-'));
+    // The artifact parent is the configured persistent backup volume. Keep
+    // download copies on that capacity-managed mount, not the host temp disk.
+    snapshotDirectory = await mkdtemp(
+      join(dirname(path), 'neo-backup-download-'),
+    );
     await chmod(snapshotDirectory, 0o700);
     snapshotPath = join(snapshotDirectory, 'archive.dump');
     snapshot = await open(snapshotPath, 'wx+', 0o600);

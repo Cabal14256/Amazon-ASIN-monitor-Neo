@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { createWriteStream, fstatSync } from 'node:fs';
 import {
   access,
+  lstat,
   mkdtemp,
   readFile,
   rename,
@@ -23,11 +24,23 @@ const opened = vi.hoisted(() => ({
   handles: [] as FileHandle[],
   paths: new Map<FileHandle, string>(),
   failSnapshotWrite: false,
+  failSystemTempSnapshot: false,
 }));
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return {
     ...fs,
+    mkdtemp: async (...args: Parameters<typeof fs.mkdtemp>) => {
+      const prefix = String(args[0]);
+      if (
+        opened.failSystemTempSnapshot &&
+        prefix === join(tmpdir(), 'neo-backup-download-')
+      )
+        throw Object.assign(new Error('fixture system temporary disk full'), {
+          code: 'ENOSPC',
+        });
+      return fs.mkdtemp(...args);
+    },
     open: async (...args: Parameters<typeof fs.open>) => {
       const handle = await fs.open(...args);
       vi.spyOn(handle, 'close');
@@ -49,6 +62,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   opened.paths.clear();
   opened.failSnapshotWrite = false;
+  opened.failSystemTempSnapshot = false;
 });
 
 const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -65,6 +79,75 @@ async function consume(stream: Awaited<ReturnType<typeof backupBundle>>) {
   for await (const chunk of stream) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks);
 }
+
+describe('review5 capacity-managed download snapshots', () => {
+  it('downloads a valid backup-volume archive while system temporary snapshots have no capacity', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-volume-'));
+    try {
+      const path = join(directory, filename);
+      const dump = Buffer.from('PGDMPbackup-volume');
+      await writeFile(path, dump);
+      opened.failSystemTempSnapshot = true;
+      const tar = await consume(await backupBundle(path, filename, metadata));
+      expect(tar.subarray(512, 512 + dump.length)).toEqual(dump);
+      expect(opened.handles.every((handle) => handle.fd === -1)).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a private snapshot on the archive volume until its actual descriptor closes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-placement-'));
+    let stream: Awaited<ReturnType<typeof backupBundle>> | undefined;
+    try {
+      const path = join(directory, filename);
+      await writeFile(path, 'PGDMPbackup-volume');
+      stream = await backupBundle(path, filename, metadata);
+      const snapshot = opened.handles.at(-1)!;
+      const snapshotPath = opened.paths.get(snapshot)!;
+      expect(dirname(dirname(snapshotPath))).toBe(directory);
+      expect((await snapshot.stat()).dev).toBe((await lstat(path)).dev);
+      expect(snapshot.fd).not.toBe(-1);
+      if (process.platform !== 'win32') {
+        expect((await lstat(dirname(snapshotPath))).mode & 0o777).toBe(0o700);
+        expect((await snapshot.stat()).mode & 0o777).toBe(0o600);
+      }
+      await consume(stream);
+      expect(snapshot.fd).toBe(-1);
+      await expect(access(snapshotPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(access(dirname(snapshotPath))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(await readFile(path, 'utf8')).toBe('PGDMPbackup-volume');
+    } finally {
+      if (stream && !stream.closed) {
+        const closed = new Promise<void>((resolve) =>
+          stream!.once('close', resolve),
+        );
+        stream.destroy();
+        await closed;
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('healthy control streams the original archive and sidecar when both volumes have capacity', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-control-'));
+    try {
+      const path = join(directory, filename);
+      const dump = Buffer.from('PGDMPhealthy');
+      await writeFile(path, dump);
+      const tar = await consume(await backupBundle(path, filename, metadata));
+      expect(tar.subarray(512, 512 + dump.length)).toEqual(dump);
+      expect(tar.includes(Buffer.from(JSON.stringify(metadata)))).toBe(true);
+      expect(opened.handles.every((handle) => handle.fd === -1)).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('backup download bundle', () => {
   it('closes both actual descriptors and removes a constructor snapshot on digest rejection', async () => {

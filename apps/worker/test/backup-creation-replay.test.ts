@@ -13,6 +13,7 @@ import { UnrecoverableError, type Job } from 'bullmq';
 import { EventEmitter } from 'node:events';
 import { writeSync } from 'node:fs';
 import {
+  lstat,
   mkdtemp,
   open,
   readdir,
@@ -27,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { addAbortSignal, PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { nativeBackupPublicationSync } from '../src/backup-artifact-durability';
 import { createBackupProcessor, processCommand } from '../src/backup-processor';
 
 const dependencies = vi.hoisted(() => ({ pool: vi.fn(), spawn: vi.fn() }));
@@ -39,7 +41,21 @@ const filesystemFailure = vi.hoisted(() => ({
   closeSuffix: null as string | null,
   rejectCloseBeforeRelease: false,
   retainedHandles: [] as import('node:fs/promises').FileHandle[],
+  replayHandles: [] as import('node:fs/promises').FileHandle[],
+  modelHighInodeIdentity: false,
 }));
+const modeledArchiveInode = 9_223_372_036_854_775_808n;
+function withModeledInode<T extends { ino: number | bigint }>(
+  details: T,
+  inode: bigint,
+): T {
+  Reflect.set(
+    details,
+    'ino',
+    typeof details.ino === 'bigint' ? inode : Number(inode),
+  );
+  return details;
+}
 vi.mock('node:fs', async (original) => {
   const fs = await original<typeof import('node:fs')>();
   return {
@@ -62,9 +78,24 @@ vi.mock('node:fs/promises', async (original) => {
       const file = await fs.open(...args);
       const path = String(args[0]);
       if (
+        filesystemFailure.modelHighInodeIdentity &&
+        args[1] === 'wx+' &&
+        path.endsWith('.dump.partial')
+      ) {
+        const stat = file.stat.bind(file);
+        vi.spyOn(file, 'stat').mockImplementation(async (...statArgs) =>
+          withModeledInode(await stat(...statArgs), modeledArchiveInode),
+        );
+      }
+      if (typeof args[1] === 'number') {
+        filesystemFailure.replayHandles.push(file);
+        vi.spyOn(file, 'sync');
+        vi.spyOn(file, 'close');
+      }
+      if (
         filesystemFailure.closeSuffix &&
         path.endsWith(filesystemFailure.closeSuffix) &&
-        (args[1] === 'wx' || args[1] === 'wx+')
+        (args[1] === 'wx' || args[1] === 'wx+' || typeof args[1] === 'number')
       ) {
         const close = file.close.bind(file);
         let firstClose = true;
@@ -85,6 +116,27 @@ vi.mock('node:fs/promises', async (original) => {
         };
       }
       return file;
+    },
+    lstat: async (...args: Parameters<typeof fs.lstat>) => {
+      const details = await fs.lstat(...args);
+      const path = String(args[0]);
+      if (
+        filesystemFailure.modelHighInodeIdentity &&
+        path.endsWith('.dump.partial')
+      ) {
+        let replaced = false;
+        try {
+          await fs.lstat(`${path}.held`);
+          replaced = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        return withModeledInode(
+          details,
+          modeledArchiveInode + (replaced ? 1n : 0n),
+        );
+      }
+      return details;
     },
     unlink: async (path: string) => {
       if (
@@ -139,8 +191,11 @@ afterEach(async () => {
   filesystemFailure.renameSuffix = null;
   filesystemFailure.closeSuffix = null;
   filesystemFailure.rejectCloseBeforeRelease = false;
+  filesystemFailure.modelHighInodeIdentity = false;
   for (const file of filesystemFailure.retainedHandles.splice(0))
     await file.close().catch(() => undefined);
+  for (const file of filesystemFailure.replayHandles.splice(0))
+    if (file.fd !== -1) await file.close().catch(() => undefined);
   await Promise.all(
     directories
       .splice(0)
@@ -324,6 +379,255 @@ async function fixture(
     },
   };
 }
+
+describe('review5 published replay publication integrity', () => {
+  const cases = (
+    ['archive-sync', 'sidecar-sync', 'directory-sync'] as const
+  ).flatMap((phase) =>
+    (
+      [
+        'archive-replace',
+        'archive-overwrite',
+        'sidecar-replace',
+        'sidecar-overwrite',
+      ] as const
+    ).map((mutation) => ({ phase, mutation })),
+  );
+
+  it.each(cases)(
+    'refuses a completion proof after $mutation during $phase',
+    async ({ phase, mutation }) => {
+      const f = await fixture();
+      const published = (await f.processor(f.job, 'lock')) as {
+        filename: string;
+      };
+      const output = join(f.directory, published.filename);
+      const sidecar = `${output}.meta.json`;
+      f.setState({ ...f.state(), status: 'failed', result: null });
+      f.store.mutate.mockClear();
+      dependencies.pool.mockClear();
+      let mutations = 0;
+      const mutateArtifact = async () => {
+        mutations++;
+        const path = mutation.startsWith('archive') ? output : sidecar;
+        const before = await lstat(path);
+        const replacement = mutation.startsWith('archive')
+          ? Buffer.from('PGDMPchanged')
+          : Buffer.from(
+              JSON.stringify({
+                ...JSON.parse(await readFile(sidecar, 'utf8')),
+                description: 'altered fixture',
+              }),
+            );
+        expect(replacement.length).toBe(before.size);
+        if (mutation.endsWith('replace')) {
+          await rename(path, `${path}.previous`);
+          await writeFile(path, replacement, { flag: 'wx', mode: 0o600 });
+          expect((await lstat(path)).ino).not.toBe(before.ino);
+        } else {
+          const file = await open(path, 'r+');
+          try {
+            await file.writeFile(replacement);
+          } finally {
+            await file.close();
+          }
+          const after = await lstat(path);
+          expect(after.ino).toBe(before.ino);
+          expect(after.dev).toBe(before.dev);
+          expect(after.size).toBe(before.size);
+        }
+      };
+      const syncFile = f.publicationSync.syncFile.getMockImplementation()!;
+      f.publicationSync.syncFile.mockImplementation(async (path) => {
+        if (
+          !mutations &&
+          ((phase === 'archive-sync' && path === output) ||
+            (phase === 'sidecar-sync' && path === sidecar))
+        )
+          await mutateArtifact();
+        await syncFile(path);
+      });
+      if (phase === 'directory-sync')
+        f.publicationSync.syncDirectory.mockImplementation(mutateArtifact);
+      const outcome = await f
+        .processor(f.job, 'lock')
+        .catch((error: unknown) => error);
+      expect(mutations).toBe(1);
+      expect(outcome).toBeInstanceOf(UnrecoverableError);
+      expect(f.state()).toMatchObject({ status: 'failed', result: null });
+      expect(
+        f.store.mutate.mock.calls.some(
+          ([, change]) => change.kind === 'backup-create-committed',
+        ),
+      ).toBe(false);
+      expect(dependencies.pool).not.toHaveBeenCalled();
+      expect(dependencies.spawn).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('healthy control recovers unchanged original bytes and proof after both file syncs and directory sync', async () => {
+    const f = await fixture();
+    const result = (await f.processor(f.job, 'lock')) as { filename: string };
+    const output = join(f.directory, result.filename);
+    const originalArchive = await readFile(output);
+    const originalSidecar = await readFile(`${output}.meta.json`);
+    f.setState({ ...f.state(), status: 'failed', result: null });
+    f.store.mutate.mockClear();
+    f.publicationSync.syncFile.mockClear();
+    f.publicationSync.syncDirectory.mockClear();
+    dependencies.pool.mockClear();
+    expect(await f.processor(f.job, 'lock')).toEqual(result);
+    expect(f.state().status).toBe('completed');
+    expect(await readFile(output)).toEqual(originalArchive);
+    expect(await readFile(`${output}.meta.json`)).toEqual(originalSidecar);
+    expect(f.publicationSync.syncFile.mock.calls.map(([path]) => path)).toEqual(
+      [output, `${output}.meta.json`],
+    );
+    expect(f.publicationSync.syncDirectory).toHaveBeenCalledOnce();
+    expect(dependencies.pool).not.toHaveBeenCalled();
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+  });
+});
+
+describe('review5 replay descriptor ownership', () => {
+  it('syncs the verified descriptors natively and retains both through the completion mutation', async () => {
+    const f = await fixture();
+    const originalResult = await f.processor(f.job, 'lock');
+    f.setState({ ...f.state(), status: 'failed', result: null });
+    const mutate = f.store.mutate.getMockImplementation()!;
+    const assertOpenVerifiedDescriptors = async () => {
+      expect(filesystemFailure.replayHandles).toHaveLength(2);
+      for (const file of filesystemFailure.replayHandles) {
+        expect((await file.stat()).isFile()).toBe(true);
+        expect(file.sync).toHaveBeenCalledOnce();
+      }
+    };
+    f.store.mutate.mockImplementation(async (id, change) => {
+      if (change.kind === 'backup-create-committed')
+        await assertOpenVerifiedDescriptors();
+      return mutate(id, change);
+    });
+    // Node cannot fsync a directory on Windows. Only that operation is
+    // injected; both file fsync calls and their descriptor closes are real.
+    const directorySync = vi
+      .spyOn(nativeBackupPublicationSync, 'syncDirectory')
+      .mockImplementation(assertOpenVerifiedDescriptors);
+    try {
+      const processor = createBackupProcessor(
+        f.store,
+        {
+          env: {
+            BACKUP_STORAGE_DIRECTORY: f.directory,
+            BACKUP_COMMAND_TIMEOUT_MS: 2000,
+            BACKUP_MAX_BYTES: 1024,
+            TASK_META_TTL_SECONDS: 604800,
+          } as never,
+          shutdownSignal: f.shutdown.signal,
+          ...f.execution,
+          publicationSync: nativeBackupPublicationSync,
+          updateProgress: vi.fn(async () => undefined),
+        },
+        f.log,
+      );
+      expect(await processor(f.job, 'lock')).toEqual(originalResult);
+      expect(f.state().status).toBe('completed');
+      expect(directorySync).toHaveBeenCalledOnce();
+      for (const file of filesystemFailure.replayHandles) {
+        expect(file.close).toHaveBeenCalledOnce();
+        await expect(file.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      }
+      expect(dependencies.spawn).toHaveBeenCalledOnce();
+    } finally {
+      directorySync.mockRestore();
+    }
+  });
+
+  it.each(['.dump', '.meta.json'])(
+    'retains and retries the actual replay %s descriptor after a rejected first close',
+    async (suffix) => {
+      const f = await fixture();
+      const originalResult = await f.processor(f.job, 'lock');
+      f.setState({ ...f.state(), status: 'failed', result: null });
+      filesystemFailure.closeSuffix = suffix;
+      filesystemFailure.rejectCloseBeforeRelease = true;
+      expect(await f.processor(f.job, 'lock')).toEqual(originalResult);
+      expect(f.state().status).toBe('completed');
+      expect(filesystemFailure.replayHandles).toHaveLength(2);
+      expect(filesystemFailure.retainedHandles).toHaveLength(1);
+      for (const file of filesystemFailure.replayHandles)
+        await expect(file.stat()).rejects.toMatchObject({ code: 'EBADF' });
+      expect(f.log.warn).toHaveBeenCalledWith(
+        '备份输出描述符关闭未确认，请按任务 ID 核对',
+        expect.objectContaining({
+          reason: 'backup_output_close_unconfirmed',
+          code: 'UNKNOWN',
+        }),
+      );
+      expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+        'private-close-token',
+      );
+      expect(JSON.stringify(f.log.warn.mock.calls)).not.toContain(
+        'ESECRET_TOKEN_VALUE',
+      );
+      expect(dependencies.spawn).toHaveBeenCalledOnce();
+    },
+  );
+});
+
+describe('review5 exact output file identity', () => {
+  it('rejects distinct exact inodes even when native Number metadata rounds them to the same value', async () => {
+    // This models the filesystem metadata port; the two files, rename, dump
+    // writes and descriptor lifetime remain real. It does not identify the
+    // cause of any earlier nondeterministic host filesystem observation.
+    expect(Number(modeledArchiveInode)).toBe(Number(modeledArchiveInode + 1n));
+    expect(Number.isSafeInteger(Number(modeledArchiveInode))).toBe(false);
+    const f = await fixture();
+    filesystemFailure.modelHighInodeIdentity = true;
+    const mutate = f.store.mutate.getMockImplementation()!;
+    let replacedPath: string | undefined;
+    f.store.mutate.mockImplementation(async (id, change) => {
+      const current = await mutate(id, change);
+      if (change.kind === 'progress' && change.progress === 1) {
+        replacedPath = (await artifactPaths(f.directory)).find((path) =>
+          path.endsWith('.dump.partial'),
+        )!;
+        await rename(replacedPath, `${replacedPath}.held`);
+        await writeFile(
+          replacedPath,
+          'replacement must not receive pg_dump bytes',
+        );
+      }
+      return current;
+    });
+    const result = await f
+      .processor(f.job, 'lock')
+      .catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect(replacedPath).toBeDefined();
+    expect(await readFile(`${replacedPath}.held`, 'utf8')).toBe('PGDMPfixture');
+    expect(f.state().status).not.toBe('completed');
+    expect(
+      f.store.mutate.mock.calls.some(
+        ([, change]) => change.kind === 'backup-create-committed',
+      ),
+    ).toBe(false);
+    expect(
+      (await artifactNames(f.directory)).some((name) => name.endsWith('.dump')),
+    ).toBe(false);
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+  });
+
+  it('healthy control publishes real bytes when the exact high inode is unchanged', async () => {
+    const f = await fixture();
+    filesystemFailure.modelHighInodeIdentity = true;
+    const result = (await f.processor(f.job, 'lock')) as { filename: string };
+    expect(f.state().status).toBe('completed');
+    expect(await readFile(join(f.directory, result.filename), 'utf8')).toBe(
+      'PGDMPfixture',
+    );
+    expect(dependencies.spawn).toHaveBeenCalledOnce();
+  });
+});
 
 describe('creation attempts and durable publication', () => {
   it.each(['.dump.partial', '.meta.json.partial'])(

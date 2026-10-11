@@ -175,11 +175,15 @@ describe('backup download capacity includes the live response stream', () => {
       expect(await outcome(f.download)).toMatchObject({ status: 429 });
     } finally {
       snapshotCleanup.failUnlink = '';
-      await f.cleanup();
-      // Reclaim only the exact owned residual left by the injected unlink error.
-      if (residual) {
-        await unlink(residual);
-        await rmdir(dirname(residual));
+      try {
+        // Reclaim the exact owned residual before removing its backup-volume
+        // parent. The fixture's recursive cleanup would otherwise remove it.
+        if (residual) {
+          await unlink(residual);
+          await rmdir(dirname(residual));
+        }
+      } finally {
+        await f.cleanup();
       }
     }
   });

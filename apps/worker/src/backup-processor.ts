@@ -40,7 +40,11 @@ import {
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import {
+  createReadStream,
+  constants as fsConstants,
+  type BigIntStats,
+} from 'node:fs';
 import {
   chmod,
   lstat,
@@ -372,8 +376,8 @@ async function assertOpenCustomDump(file: FileHandle, maxBytes: number) {
 
 async function assertOpenArtifactPath(file: FileHandle, path: string) {
   const [fdDetails, pathDetails] = await Promise.all([
-    file.stat(),
-    lstat(path),
+    file.stat({ bigint: true }),
+    lstat(path, { bigint: true }),
   ]);
   if (
     !pathDetails.isFile() ||
@@ -1394,6 +1398,34 @@ async function restoreTimescaleIsolated(input: {
   return database;
 }
 
+async function readOpenBackupMetadataBytes(file: FileHandle): Promise<Buffer> {
+  const details = await file.stat();
+  if (!details.isFile() || details.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES)
+    throw new Error('BACKUP_METADATA_INVALID');
+  const bytes = Buffer.alloc(details.size);
+  for (let offset = 0; offset < bytes.length; ) {
+    const { bytesRead } = await file.read(
+      bytes,
+      offset,
+      bytes.length - offset,
+      offset,
+    );
+    if (!bytesRead) throw new Error('BACKUP_METADATA_INVALID');
+    offset += bytesRead;
+  }
+  return bytes;
+}
+
+function sameArtifactVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
 export async function readBackupArtifactMetadataFile(path: string) {
   const details = await lstat(path);
   if (!details.isFile() || details.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES)
@@ -1658,44 +1690,102 @@ export function createBackupProcessor(
         throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
       const [{ filename: publishedFilename, output }] = existing;
       publishedCreationObserved = true;
-      const metadata = await readBackupArtifactMetadataFile(
-        `${output}.meta.json`,
-      );
-      if (
-        (metadata.version !== 3 && metadata.version !== 4) ||
-        metadata.creationIdentity !== creationIdentity ||
-        metadata.filename !== publishedFilename ||
-        metadata.target !== data.target
-      )
-        throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
-      const details = await assertCustomDump(
-        output,
-        options.env.BACKUP_MAX_BYTES,
-      );
-      // Recovery reads an already committed artifact and original identity. It
-      // neither needs the expired execution lease nor starts database work.
-      if (
-        (await archiveSha256(
+      let archive: FileHandle | undefined;
+      let sidecar: FileHandle | undefined;
+      const sidecarPath = `${output}.meta.json`;
+      try {
+        if (!(await lstat(output)).isFile())
+          throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
+        const sidecarEntryBeforeOpen = await lstat(sidecarPath);
+        if (
+          !sidecarEntryBeforeOpen.isFile() ||
+          sidecarEntryBeforeOpen.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES
+        )
+          throw new Error('BACKUP_METADATA_INVALID');
+        archive = await open(
           output,
-          async () => {
-            verify(await store.read(data.taskId));
-          },
+          fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0),
+        );
+        await assertOpenArtifactPath(archive, output);
+        sidecar = await open(
+          sidecarPath,
+          fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0),
+        );
+        await assertOpenArtifactPath(sidecar, sidecarPath);
+        const archiveVersion = await archive.stat({ bigint: true });
+        const sidecarVersion = await sidecar.stat({ bigint: true });
+        const sidecarBytes = await readOpenBackupMetadataBytes(sidecar);
+        const metadata = backupArtifactMetadataSchema.parse(
+          JSON.parse(sidecarBytes.toString('utf8')),
+        );
+        if (
+          (metadata.version !== 3 && metadata.version !== 4) ||
+          metadata.creationIdentity !== creationIdentity ||
+          metadata.filename !== publishedFilename ||
+          metadata.target !== data.target
+        )
+          throw new BackupCommandError('BACKUP_CREATION_IDENTITY_INVALID');
+        const details = await assertOpenCustomDump(
+          archive,
           options.env.BACKUP_MAX_BYTES,
-        )) !== metadata.archiveSha256
-      )
-        throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
-      // An observed rename is not a durability receipt. This also upgrades
-      // older valid sidecars by syncing their unchanged original files before
-      // emitting the existing proof; never changes identity or archive hash.
-      await syncPublication([output, `${output}.meta.json`], true);
-      verify(await store.read(data.taskId));
-      publishedCreation = resultFor(metadata, details, publishedFilename);
-      await mutate({
-        kind: 'backup-create-committed',
-        result: publishedCreation,
-        message: '备份完成（已恢复发布结果）',
-      });
-      return true;
+        );
+        // Recovery preserves the original proof without an execution lease or
+        // database work. Every read and native fsync uses these same owned FDs.
+        const checkpoint = async () => {
+          verify(await store.read(data.taskId));
+        };
+        const verifyDigest = async () => {
+          if (
+            (await archiveSha256(
+              output,
+              checkpoint,
+              options.env.BACKUP_MAX_BYTES,
+              undefined,
+              archive,
+            )) !== metadata.archiveSha256
+          )
+            throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+        };
+        await verifyDigest();
+        await syncPublication([output, sidecarPath], true, undefined, [
+          archive,
+          sidecar,
+        ]);
+        verify(await store.read(data.taskId));
+        // Shared paths or inodes may change while durability is awaited. Check
+        // exact final contents and directory entries again before any receipt.
+        await verifyDigest();
+        if (!(await readOpenBackupMetadataBytes(sidecar)).equals(sidecarBytes))
+          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+        const [archiveNow, sidecarNow, archiveEntry, sidecarEntry] =
+          await Promise.all([
+            archive.stat({ bigint: true }),
+            sidecar.stat({ bigint: true }),
+            lstat(output, { bigint: true }),
+            lstat(sidecarPath, { bigint: true }),
+          ]);
+        if (
+          !archiveEntry.isFile() ||
+          !sidecarEntry.isFile() ||
+          !sameArtifactVersion(archiveVersion, archiveNow) ||
+          !sameArtifactVersion(sidecarVersion, sidecarNow) ||
+          !sameArtifactVersion(archiveVersion, archiveEntry) ||
+          !sameArtifactVersion(sidecarVersion, sidecarEntry)
+        )
+          throw new BackupCommandError('BACKUP_METADATA_MISMATCH');
+        publishedCreation = resultFor(metadata, details, publishedFilename);
+        await mutate({
+          kind: 'backup-create-committed',
+          result: publishedCreation,
+          message: '备份完成（已恢复发布结果）',
+        });
+        return true;
+      } finally {
+        // Retain ownership across completion; a rejected close remains in the
+        // outer cleanup set for another actual descriptor-close attempt.
+        await closeCreationHandle(sidecar);
+        await closeCreationHandle(archive);
+      }
     };
     const finishIsolatedRestore = async (
       restoredDatabase: string,
