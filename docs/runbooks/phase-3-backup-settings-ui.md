@@ -1,6 +1,6 @@
 # P3：Neo 备份设置 UI
 
-关联 Issue #221、#161、#48。此分支从 `origin/main` 的 `cdfd47e` 开始；后端 PR #171 尚未正式合入时，只保存前端实现及隔离验证。生产切换、Legacy 退役和真实恢复演练仍需各自阶段门禁。
+关联 Issue #221、#161、#48，前端 PR #250。此分支从 `origin/main` 的 `cdfd47e` 开始，已正常 merge 正式 main `3df5a2a`；后端 PR #171 尚未正式合入，当前保留前端实现及隔离验证。生产切换、Legacy 退役和真实恢复演练仍需各自阶段门禁。
 
 ## 实际接口与权限
 
@@ -30,25 +30,43 @@ UI 对应 #171 实际存在的八个接口：`POST /api/v1/backup`、`POST /back
 
 任务详情及设置页呈现 `restoreMode`、隔离数据库名称、在线目标是否改变与 `verification`。隔离恢复成功不表示生产已切换；即使任务登记为失败或取消，只要回执记录已提交且验证未确认，仍明确显示在线目标可能已变更，要求运维核实。
 
-## 本轮实际验证
+## 当前实现与回归证据
 
-- `corepack pnpm install --frozen-lockfile --filter web... --ignore-scripts`：成功，根锁文件不变。
-- `corepack pnpm --filter contracts build`：成功，仅构建叶包。
-- 单 worker 四个 focused 文件：67/67 通过，其中真实 BackupPanel/TaskDetails 挂载 20 项、流下载 14 项。流测试使用实际 HttpClient、ReadableStream 与有背压的测试磁盘端口；10 GiB 场景只验证真实数值头部，不声称传输了 10 GiB。
-- 初轮发现两处回归：缺省模型字段断言及 peer GET 失败覆盖恢复提示，已修复并回归通过。严格类型检查发现的 UUID/ArrayBuffer 四处错误已修复。
-- `corepack pnpm --filter web exec tsc --noEmit --pretty false`：通过。`corepack pnpm --filter web lint`：通过，初次唯一 ref cleanup 警告已修并对对应文件重跑 ESLint 通过；Prettier 与 `git diff --check` 通过。`npm run test:api-url` 3/3、`npm run test:changed-format` 5/5 通过。
-- 完整 Web/full graph/build 尚未执行：与 #212/#171 的重型窗口串行协调，待 #171 正式合入后验收真实接口。
-- 实际浏览器 File System Access、本轮截图和真实备份 API/数据库恢复联调未执行。现有浏览器运行链路此前返回连接/附加失败；mounted 测试不能代替浏览器或生产恢复证据。
+截至 2026-10-11，前端已发布源码 head 为 `0dcd8379cc298b205f67ec7fcc1fae026bbfb1f6`，PR #250 保持 Draft、未合并。本节文档纠正发布后产生的新 head，需要重新等待对应 CI 和最新提交审查；以下结果明确绑定原 head，不预先算作新 head 通过。
 
-## 后续最小验证切片：已准备，未执行
+- 原 `b48ddfb` 正常 merge 正式 main `3df5a2a` 得到 `5fda806c`，原 15 文件 SHA256 不变。原检查的 67/67、strict/lint、URL 3/3 及格式 5/5 为该阶段历史证据。
+- 原实现只检查 owner 与本地 `SessionStore.revision`，遗漏服务端已验证的 `sessionId`。同 owner、同 revision、仅 sessionId 变化的三项 mounted 用例实际得到 2 RED、1 健康对照通过。修复 `53e2e67` 将 sessionId 纳入请求 `current()` 与 workspace key；格式提交 `0dcd837` 保留行为，原三项随后 3/3 通过。
+- `backup-panel-identity.test.tsx` 的 7 项使用实际 `IdentityStore`、`RouteGate`、`BackupPanel` 与认证 HTTP 层，实际验证 loading/error 后同会话恢复、sessionStorage 已知回执、anonymous、不同 owner、同 owner 的真实 sessionId 变化及 loading 中止 POST。与三项 sessionId 组件边界合跑 10/10 通过；新 snapshot、同会话健康控制和 GET-only 恢复断言保留。
+- 两 member ustar 下载夹具包含 dump 与对应 `<filename>.meta.json`、各自合法头部、摘要、padding 和两个终止块。磁盘端口与 Blob 保存字节解包检查，CI 下载文件 16/16 通过；7 项身份、3 项会话与 16 项下载合计 26 项在相同发布源码的 CI 中实际通过。
+- dump 是带 `PGDMP` 前缀的测试内容；10 GiB 用例只验证数值头部。缺少 metadata 与截断终止块由测试解包器识别，当前前端传输只检查首 tar 头与有界字节数，未新增前端 sidecar 全量校验。上述结果不证明实际 pg_dump、10 GiB 传输、真实磁盘或恢复通过。
 
-- 从原 `b48ddfb` 干净工作树正常 merge 正式 main `3df5a2a`，得到 `5fda806c`，无冲突；merge 前后的原 15 文件字节及 SHA256 一致。原清单与核验记录保存在本机临时证据目录 `neo-221-verification`，不提交临时日志或哈希文件。
-- `backup-download.test.ts` 的成功输入改为真实双 member ustar：dump 与对应 `<filename>.meta.json`，各有合法头部校验和、对齐填充及两个终止块。元数据的 `archiveSha256` 绑定测试 dump；保存后的磁盘端口与 Blob 字节均解包检查成员、正文、padding 和终止块。该 dump 是带 `PGDMP` 前缀的测试内容，不是实际 `pg_dump`，不能据此声称真实恢复通过。
-- 准备缺失 metadata 与字节数仍达到下载下限的截断终止块输入，仅在测试夹具解包检查中识别其不完整。当前下载传输只校验首 tar 头及有界字节数，metadata 的 schema 校验由 #171 服务端下载前执行；本切片不增加前端二次验证 sidecar 的产品契约，也不声称当前传输会拒绝这两种输入。真实完整归档仍需 #171 正式接口下载后解包与恢复演练。
-- 新增 `backup-panel-identity.test.tsx`，使用实际 `IdentityStore`、`RouteGate`、`BackupPanel`、认证 HTTP 层与原任务 GET。准备 7 项生命周期场景：loading/error 后相同 verified session 恢复、localStorage 保护加 sessionStorage 已知回执恢复、最终 anonymous、不同 owner、相同 owner 的真实 sessionId 变化退休旧 GET，以及 loading 期间取消 POST 后保留未知保护。不同身份隐藏原上下文；未核实操作的 owner 保护继续保留，不因 logout 自动删除。恢复查询只用原 taskId GET，不重发 POST。
-- 静态复核发现现有 workspace key 和请求 scope 只核 owner 与 `SessionStore.revision`，没有核服务端验证的 `sessionId`。上述 7 项显式等待 loading 画面，原页的 session 测试则改变本地 revision，因此两者不能代替 authenticated→authenticated 且同 owner、同 revision 的组件边界。另准备 `backup-panel-session-scope.test.tsx` 三项严格 mounted 测试：相同 session 的健康 ACK 控制、仅 sessionId 改变时退休旧 POST 并保留未知保护、仅 sessionId 改变时退休旧 GET 并允许原 taskId 的新 GET。它使用明确的认证 snapshot 测试端口和实际 BackupPanel/HTTP 层，不伪称真实 IdentityStore 跳过 loading，也不触发 runtime reset 来掩盖 scope 缺失。
-- 该补充目前只有静态源码与测试准备，尚无实际 RED/GREEN。原身份 7 项、下载 2 项及 9 个产品文件 SHA 保持；新的测试不是通过记录。当前 tree 没有 node_modules；与已安装 tree 的根锁文件 SHA 相同，后续可在串行窗口从根执行 frozen-lockfile 安装并复用现有 pnpm 内容存储，不直接引用另一 tree 的 workspace 源码或 dist 作为本分支验收。
-- 上述新增/更新用例、当前 head 的 strict/lint/full Web/build 与真实 FSA 浏览器检查尚未执行。上一节 67/67 是原 `b48ddfb` 夹具的历史结果，不能计作本切片通过。后续获串行验证窗口后先运行五个受影响 focused 文件，核实健康控制与实际身份生命周期，再执行 strict/lint/build、URL 与格式检查；真实浏览器仍需保存用户激活、慢盘背压、取消后原文件与解包证据。
+本机日志保留 `%TEMP%/neo221-session-scope-isolated-red.log`、`neo221-session-scope-isolated-green.log`、`neo221-session-scope-related.log`，原冻结清单保留于 `neo-221-verification`。一次非隔离 fixture 执行的 2 个失败也保留为 `neo221-session-scope-red.log`；它不能代替后续同会话健康对照与隔离的实际 RED。日志及临时哈希不提交仓库。
+
+## 已发布 head 的完整 CI
+
+[CI 38053489533](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/actions/runs/38053489533) 在 `0dcd837` 的 29 步全部成功，包括以下实际命令；原生 opt-in skip 不算通过：
+
+| 命令 | 结果 |
+| --- | --- |
+| `pnpm run test:contracts` | 40/40，包含请求与导出 URL `/api` 去重 3/3 |
+| `pnpm --filter amazon-asin-monitor-server run test:unit` | 55/55 |
+| `pnpm exec tsc --noEmit --pretty false`、`pnpm run build` | Legacy strict/build 成功 |
+| `pnpm --filter @asin-monitor/contracts test` | 213/213 |
+| `pnpm --filter @asin-monitor/config test` | 41/41 |
+| `pnpm --filter @asin-monitor/db test` | 907 passed、218 skipped |
+| `pnpm --filter @asin-monitor/api test` | 1710 passed、549 skipped |
+| `pnpm --filter @asin-monitor/worker test` | 250 passed、41 skipped |
+| `pnpm --filter @asin-monitor/web test` | 930/930，69 文件 |
+| `pnpm --filter @asin-monitor/web lint`、`pnpm --filter @asin-monitor/web build` | 成功，Web build 包含自身 TypeScript 检查 |
+| `pnpm --filter @asin-monitor/config --filter @asin-monitor/contracts --filter @asin-monitor/db --filter @asin-monitor/sp-api build` | 成功 |
+| `pnpm --filter @asin-monitor/api --filter @asin-monitor/worker build` | 成功 |
+| `pnpm run test:changed-format`、`pnpm run check:changed-format` | 5/5 与改动文件格式检查成功 |
+
+[Integration 38053489518](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/actions/runs/38053489518) 同样绑定 `0dcd837`，97 步成功，其中正式 main 的 task-query 24 项实际通过。该 workflow 没有 #171 的真实备份/恢复步骤，不能据此宣称本 UI 已与未合并备份后端联调。当前没有最新 head 的 Codex Review。
+
+## 尚未通过的阶段门禁
+
+真实浏览器 File System Access、保存对话框用户激活、慢盘背压、取消后原文件、网络/磁盘错误和下载归档解包仍未执行；浏览器连接此前失败，mounted 通过不能替代这些结果。#171 正式合入后还需以真实认证接口下载两种 target 的备份，核验 sidecar 并执行隔离 PostgreSQL/TimescaleDB 恢复。生产切换和 Legacy 退役继续暂缓。
 
 ## 回归与回滚
 
