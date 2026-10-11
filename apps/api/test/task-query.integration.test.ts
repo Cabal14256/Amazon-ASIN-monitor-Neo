@@ -532,6 +532,74 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect((await get(id)).json().data.status).toBe('cancelled');
       expect(await redis.get(metaKey(id))).toBe(before);
     });
+    it.each(['variant-check', 'batch-check'] as const)(
+      'keeps a historical %s queue target readable before and after failure',
+      async (type) => {
+        const id = randomUUID();
+        const taskSubType =
+          type === 'variant-check' ? 'asin-check' : 'variant-group';
+        const task = await store.create({
+          taskId: id,
+          userId: owner.userId,
+          taskType: type,
+          taskSubType,
+        });
+        const queue = await queueFor(type);
+        await queue.add(
+          type,
+          {
+            taskId: id,
+            userId: owner.userId,
+            taskType: type,
+            taskSubType,
+            createdAt: task.createdAt,
+            expiresAt: new Date(
+              Date.parse(task.createdAt) + 7 * 86400_000,
+            ).toISOString(),
+            params:
+              type === 'variant-check'
+                ? { asinId: 'x'.repeat(75), forceRefresh: true }
+                : { groupIds: ['x'.repeat(75)], forceRefresh: true },
+          },
+          { jobId: id, removeOnFail: false },
+        );
+        expect((await get(id)).json().data.status).toBe('pending');
+        expect((await list()).json().data).toEqual([
+          expect.objectContaining({ taskId: id, status: 'pending' }),
+        ]);
+        const worker = new Worker(queue.name, undefined, {
+          autorun: false,
+          prefix: getNeoQueuePrefix(env),
+          connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+        });
+        worker.on('error', () => undefined);
+        try {
+          await worker.waitUntilReady();
+          const active = await worker.getNextJob('fixture-old-check-lock', {
+            block: false,
+          });
+          expect(active?.id).toBe(id);
+          await active!.moveToFailed(
+            new Error('private historical target'),
+            'fixture-old-check-lock',
+            false,
+          );
+        } finally {
+          await worker.close(true);
+        }
+        const detail = await get(id);
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().data).toMatchObject({
+          taskId: id,
+          status: 'failed',
+        });
+        expect((await list()).json().data).toEqual([
+          expect.objectContaining({ taskId: id, status: 'failed' }),
+        ]);
+        expect(await store.read(id)).toMatchObject({ status: 'failed' });
+        expect(detail.body).not.toContain('private historical target');
+      },
+    );
     it('reconciles a real failed job with a fixed public error', async () => {
       await create('job-failed');
       await complete('job-failed', null, true);

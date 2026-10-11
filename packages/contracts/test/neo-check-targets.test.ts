@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { batchCheckRequestSchema, variantCheckJobSchema } from '../src';
+import {
+  batchCheckRequestSchema,
+  persistedVariantCheckJobSchema,
+  variantCheckJobSchema,
+} from '../src';
 
 const identity = {
   taskId: '10000000-0000-4000-8000-000000000227',
@@ -70,5 +74,37 @@ describe('frozen public contract and immutable private input', () => {
       ...value,
       userId: 'u'.repeat(200),
     });
+  });
+});
+
+describe('persisted private queue target compatibility', () => {
+  it.each(kinds)('reads the historical 100-UTF-16-unit %s payload', (kind) => {
+    for (const id of ['x'.repeat(51), 'x'.repeat(100)]) {
+      const value = job(kind, id);
+      expect(variantCheckJobSchema.safeParse(value).success).toBe(false);
+      expect(persistedVariantCheckJobSchema.parse(value)).toEqual(value);
+    }
+  });
+  it.each(['', 'x'.repeat(101), '😺'.repeat(51), 'a\u0000b', '\u007f'])(
+    'still rejects a target outside the historical schema %j',
+    (id) =>
+      expect(
+        persistedVariantCheckJobSchema.safeParse(job('asin-check', id)).success,
+      ).toBe(false),
+  );
+  it('retains the historical task-kind and strict payload identity', () => {
+    const value = job('variant-group', 'x'.repeat(75));
+    expect(
+      persistedVariantCheckJobSchema.safeParse({
+        ...value,
+        taskType: 'variant-check',
+      }).success,
+    ).toBe(false);
+    expect(
+      persistedVariantCheckJobSchema.safeParse({
+        ...value,
+        params: { ...value.params, extra: true },
+      }).success,
+    ).toBe(false);
   });
 });
