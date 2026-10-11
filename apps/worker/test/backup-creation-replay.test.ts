@@ -237,6 +237,7 @@ async function fixture(
         kill: vi.fn(),
       });
       void Promise.resolve().then(async () => {
+        child.emit('spawn');
         const output = args.find((arg) => arg.startsWith('--file='))?.slice(7);
         if (output) await writeFile(output, 'PGDMPfixture');
         else writeSync(childOptions.stdio[1] as number, 'PGDMPfixture');
@@ -486,6 +487,7 @@ describe('creation attempts and durable publication', () => {
         return error;
       });
       try {
+        child.emit('spawn');
         if (reason === 'cancel') stop.abort();
         await Promise.resolve();
         expect(child.kill).toHaveBeenCalledWith('SIGTERM');

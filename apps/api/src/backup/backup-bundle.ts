@@ -1,6 +1,17 @@
 import type { BackupArtifactMetadata } from '@asin-monitor/contracts';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, open, type FileHandle } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  open,
+  rmdir,
+  unlink,
+  type FileHandle,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 
 const BLOCK_SIZE = 512;
@@ -64,10 +75,38 @@ export async function backupBundle(
   path: string,
   filename: string,
   metadata: BackupArtifactMetadata,
+  options: { maxBytes?: number; deadline?: number } = {},
 ): Promise<Readable> {
   if (metadata.filename !== filename) throw new Error('BACKUP_BUNDLE_INVALID');
   let file: FileHandle | undefined;
+  let snapshot: FileHandle | undefined;
+  let snapshotDirectory: string | undefined;
+  let snapshotPath: string | undefined;
+  let closing: Promise<void> | undefined;
+  const checkDeadline = () => {
+    if (options.deadline !== undefined && Date.now() >= options.deadline)
+      throw new Error('BACKUP_BUNDLE_INVALID');
+  };
+  const closeFile = () =>
+    (closing ??= (async () => {
+      // Try every owned cleanup even if a previous operation fails. _destroy
+      // reports cleanup failures but still closes the stream and its lease.
+      const errors: unknown[] = [];
+      for (const cleanup of [
+        () => snapshot?.close(),
+        () => (snapshotPath ? unlink(snapshotPath) : undefined),
+        () => (snapshotDirectory ? rmdir(snapshotDirectory) : undefined),
+      ]) {
+        try {
+          await cleanup();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length) throw errors[0];
+    })());
   try {
+    checkDeadline();
     // Freeze the directory entry as well: Windows has no O_NOFOLLOW, so fstat
     // must reject a changed inode before any bytes are read from the handle.
     const entry = await lstat(path);
@@ -76,11 +115,11 @@ export async function backupBundle(
       path,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
     );
-    const handle = file;
     const details = await file.stat();
     if (
       !details.isFile() ||
       details.size < 5 ||
+      details.size > (options.maxBytes ?? 1_099_511_627_776) ||
       entry.dev !== details.dev ||
       entry.ino !== details.ino
     )
@@ -89,14 +128,62 @@ export async function backupBundle(
     const { bytesRead } = await file.read(header, 0, header.length, 0);
     if (bytesRead !== header.length || header.toString('ascii') !== 'PGDMP')
       throw new Error('BACKUP_BUNDLE_INVALID');
+    // A public inode can be overwritten through another descriptor. Copy it
+    // into a private, exclusively created file before validating any response.
+    snapshotDirectory = await mkdtemp(join(tmpdir(), 'neo-backup-download-'));
+    await chmod(snapshotDirectory, 0o700);
+    snapshotPath = join(snapshotDirectory, 'archive.dump');
+    snapshot = await open(snapshotPath, 'wx+', 0o600);
+    for (let offset = 0; offset < details.size; ) {
+      checkDeadline();
+      const chunk = Buffer.allocUnsafe(
+        Math.min(READ_SIZE, details.size - offset),
+      );
+      const read = await file.read(chunk, 0, chunk.length, offset);
+      if (!read.bytesRead) throw new Error('BACKUP_BUNDLE_INVALID');
+      for (let written = 0; written < read.bytesRead; ) {
+        checkDeadline();
+        const result = await snapshot.write(
+          chunk,
+          written,
+          read.bytesRead - written,
+          offset + written,
+        );
+        if (!result.bytesWritten) throw new Error('BACKUP_BUNDLE_INVALID');
+        written += result.bytesWritten;
+      }
+      offset += read.bytesRead;
+    }
+    await file.close();
+    file = undefined;
+    const handle = snapshot;
+    const hash = createHash('sha256');
+    // Read back the private descriptor: the digest must describe the exact
+    // copied bytes subsequently streamed, including writes racing the copy.
+    for (let offset = 0; offset < details.size; ) {
+      checkDeadline();
+      const chunk = Buffer.allocUnsafe(
+        Math.min(READ_SIZE, details.size - offset),
+      );
+      const read = await handle.read(chunk, 0, chunk.length, offset);
+      if (!read.bytesRead) throw new Error('BACKUP_BUNDLE_INVALID');
+      if (offset === 0 && chunk.subarray(0, 5).toString('ascii') !== 'PGDMP')
+        throw new Error('BACKUP_BUNDLE_INVALID');
+      hash.update(chunk.subarray(0, read.bytesRead));
+      offset += read.bytesRead;
+    }
+    if (
+      'archiveSha256' in metadata &&
+      hash.digest('hex') !== metadata.archiveSha256
+    )
+      throw new Error('BACKUP_BUNDLE_INVALID');
     const sidecar = Buffer.from(JSON.stringify(metadata), 'utf8');
-    let closing: Promise<void> | undefined;
-    const closeFile = () => (closing ??= handle.close());
     const sidecarName = `${filename}.meta.json`;
     async function* entries(): AsyncGenerator<Buffer> {
       try {
         yield tarHeader(filename, details.size, details.mtime);
         for (let offset = 0; offset < details.size; ) {
+          checkDeadline();
           const chunk = Buffer.allocUnsafe(
             Math.min(READ_SIZE, details.size - offset),
           );
@@ -136,6 +223,7 @@ export async function backupBundle(
     return stream;
   } catch (error) {
     await file?.close().catch(() => undefined);
+    await closeFile().catch(() => undefined);
     if (error instanceof Error && error.message === 'BACKUP_BUNDLE_INVALID')
       throw error;
     throw new Error('BACKUP_BUNDLE_INVALID');

@@ -80,6 +80,7 @@ const principal = {
 const createdAt = '2026-09-27T00:00:00.000Z';
 const filename = 'backup_20260927-020000-abcdef01-primary.dump';
 const directories: string[] = [];
+const services: BackupService[] = [];
 const archiveSha256 = createHash('sha256').update('PGDMPfixture').digest('hex');
 const databaseSettings = {
   encoding: 'UTF8',
@@ -130,6 +131,9 @@ afterEach(async () => {
   sidecarFailure.stat = null;
   sidecarFailure.read = null;
   sidecarFailure.remove = null;
+  await Promise.all(
+    services.splice(0).map((service) => service.onModuleDestroy()),
+  );
   await Promise.all(
     directories
       .splice(0)
@@ -216,6 +220,7 @@ async function fixture(maxBytes = 1024 * 1024) {
     pools as never,
     logger as never,
   );
+  services.push(service);
   return {
     directory,
     unit,

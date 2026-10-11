@@ -18,7 +18,6 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { AuthenticationGuard } from '../auth/authentication.guard';
 import { PermissionsGuard } from '../auth/permissions.guard';
 import { RequirePermissions } from '../auth/require-permissions.decorator';
-import { backupBundle } from './backup-bundle';
 import { BackupSubmissionFilter } from './backup-submission.exception';
 import { BackupService } from './backup.service';
 
@@ -81,17 +80,32 @@ export class BackupController {
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     const result = await this.backups.download(request.auth!, filename);
-    reply.header('Cache-Control', 'no-store');
-    reply.header('Content-Type', 'application/x-tar');
-    reply.header(
-      'Content-Disposition',
-      `attachment; filename="${encodeURIComponent(
-        result.filename.replace(/\.dump$/, '.tar'),
-      )}"`,
-    );
-    return new StreamableFile(
-      await backupBundle(result.path, result.filename, result.metadata),
-    );
+    const abort = () => result.stream.destroy();
+    request.raw?.once('aborted', abort);
+    reply.raw?.once('close', abort);
+    result.stream.once('close', () => {
+      request.raw?.removeListener('aborted', abort);
+      reply.raw?.removeListener('close', abort);
+    });
+    try {
+      if (request.raw?.aborted || reply.raw?.destroyed) abort();
+      reply.header('Cache-Control', 'no-store');
+      reply.header('Content-Type', 'application/x-tar');
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="${encodeURIComponent(
+          result.filename.replace(/\.dump$/, '.tar'),
+        )}"`,
+      );
+      return new StreamableFile(result.stream);
+    } catch (error) {
+      if (!result.stream.closed)
+        await new Promise<void>((resolve) => {
+          result.stream.once('close', resolve);
+          result.stream.destroy();
+        });
+      throw error;
+    }
   }
 
   @Get('scheduled-tasks')

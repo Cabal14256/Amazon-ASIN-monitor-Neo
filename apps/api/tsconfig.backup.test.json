@@ -6,6 +6,9 @@
   },
   "include": [
     "test/backup-bundle.test.ts",
+    "test/backup-bundle-snapshot.test.ts",
+    "test/backup-download-lease.test.ts",
+    "test/backup-service.test.ts",
     "test/task-query-backup-cancel-snapshot.test.ts",
     "test/task-query.integration.test.ts",
     "test/task-query.test.ts"

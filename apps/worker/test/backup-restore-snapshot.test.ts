@@ -313,6 +313,7 @@ describe('restore consumes the verified archive snapshot', () => {
             stderr: { resume: vi.fn() },
             kill: vi.fn(),
           });
+          queueMicrotask(() => child.emit('spawn'));
           // Exercise the actual path supplied to the CLI. Both attacks are valid
           // filesystem mutations, rather than mocked stat/hash answers.
           void readFile(restoreInput!).then(

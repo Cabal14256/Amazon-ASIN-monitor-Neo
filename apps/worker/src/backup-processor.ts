@@ -642,15 +642,19 @@ function executeBackupCommand(
           );
       })();
     });
-    try {
-      options.onStarted?.();
-    } catch (error) {
-      stop(
-        error instanceof Error
-          ? error
-          : new Error('BACKUP_COMMAND_START_CALLBACK_FAILED'),
-      );
-    }
+    // Returning ChildProcess does not mean an executable started: ENOENT and
+    // permission failures arrive asynchronously without a successful spawn.
+    child.once('spawn', () => {
+      try {
+        options.onStarted?.();
+      } catch (error) {
+        stop(
+          error instanceof Error
+            ? error
+            : new Error('BACKUP_COMMAND_START_CALLBACK_FAILED'),
+        );
+      }
+    });
     options.signal.addEventListener('abort', abort, { once: true });
     if (options.signal.aborted) abort();
     timer = setTimeout(() => {

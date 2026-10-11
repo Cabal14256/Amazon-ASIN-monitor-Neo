@@ -6,7 +6,11 @@ Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，
 
 `GET /api/v1/backup/:filename/download` 下载 `.tar`，其中包含原始 `.dump` 和经过校验的同名 `.meta.json`；缺失或无效的元数据会拒绝下载。跨实例恢复时先在受控环境解包，把两个文件以原文件名一起放入目标实例的 `BACKUP_STORAGE_DIRECTORY`，再执行恢复。备份创建时填写的描述会保存在元数据中，并出现在列表中。普通 PostgreSQL 新产物使用 v3 元数据；TimescaleDB 新产物使用 v4 元数据并同样强制保存和核对 SHA-256。旧 Timescale v2 元数据可保留及下载，但缺少绑定摘要，不能自动恢复。普通 PostgreSQL v3 元数据以 `scope: full` 或 `scope: selective` 明确完整/按表归档，并记录归档 SHA-256；恢复前 Worker 流式核对，错配时不运行 `pg_restore`。按表备份使用 PostgreSQL 16 的 `--table-and-children`，包括所选父表的分区与继承子表。新元数据也保存来源数据库的 TimeZone（优先数据库级配置，否则取来源连接有效值）、编码、`LC_COLLATE`、`LC_CTYPE`、locale provider 与 ICU locale/rules；旧元数据缺少可靠范围或字符集信息时 Neo 不自动恢复。
 
-下载 bundle 先拒绝非普通文件，以 `lstat` 与已打开描述符的 `fstat` 核对 inode，并在支持的平台使用 `O_NOFOLLOW`。`PGDMP` 头和后续 tar 正文始终从同一描述符读取，不在校验后重新打开共享路径；路径被替换不会让流改读新文件。流结束、读取异常或客户端在生成器启动前中止都会关闭该描述符。创建路径同样不让 `pg_dump` 重新打开 `--file` 路径：子进程 stdout 绑定已独占打开的文件，进度、文件头、哈希和发布前 inode 核对沿用该描述符，等待子进程 close 和描述符关闭后才进行失败清理。
+下载 bundle 先拒绝非普通文件，以 `lstat` 与已打开描述符的 `fstat` 核对 inode，并在支持的平台使用 `O_NOFOLLOW`。公共 FD 仍可能被另一个写入者原位改写，因此先把原 FD 有界复制到随机私有目录（0700）内独占创建的副本（0600），回读该副本的 `PGDMP` 头与实际 SHA-256，再用同一私有 FD 生成 tar；v3/v4 必须与 sidecar 摘要一致。旧 v1/v2 没有摘要绑定，保留原 sidecar 和历史下载兼容，不宣称补得来源完整性证明。校验后不重开公共路径；公共路径替换或公共 inode 写入不能改变已冻结的响应字节。流结束、读取异常或生成器启动前中止后，逐项关闭副本 FD、删除本任务确切文件和空目录，清理完成后才发出 close。
+
+备份 API 的八项共享容量包括正在准备及已返回的下载流，直到实际 stream close 才恰一次释放。失败鉴权、无效元数据或副本校验失败不保留容量；客户端断连、响应构造失败和服务停止会销毁流并等待清理。下载采用前端既有的 30 分钟总预算，私有副本复制、校验与慢/未读取响应共享该期限：准备在每次原生文件操作返回后检查期限，已返回的流使用计时器触发 destroy。准备期间断连当前完成副本准备后销毁；期限与断连均不取消正在等待的原生文件系统调用，清理和释放必须等待真实 I/O settle，不能保证卡住的系统调用在 30 分钟内完成。每条下载额外占用最多 `BACKUP_MAX_BYTES` 临时磁盘空间；容量全用于下载时上限为八份，默认最多约 80 GiB，另加 Worker 恢复副本。
+
+创建路径不让 `pg_dump` 重新打开 `--file` 路径：子进程 stdout 绑定已独占打开的文件，进度、文件头、哈希和发布前 inode 核对沿用该描述符。`spawn()` 返回对象不代表程序启动成功，缺失/不可执行路径可能随后异步 error；只有 ChildProcess 成功的 spawn 事件才记录原位恢复已启动。失败清理继续等待真实子进程 close 和描述符关闭。
 
 创建和恢复始终提交到 `backup-task-queue` 异步执行。任务元数据先写入 Redis task registry， Worker 再执行 `pg_dump`/`pg_restore`，每次检查 BullMQ lease、任务身份和取消状态。
 
@@ -129,7 +133,7 @@ API 使用真实 BackupController、Fastify、全局校验和审计生命周期�
 
 真实 PostgreSQL/TimescaleDB 集成文件新增至 29 项，本机以 `RUN_INTEGRATION_TESTS=false` 明确跳过全部 29 项；原有 22 项场景及新增七项真实权限模式保留原期限和成功/拒绝断言。首次新增 TimescaleDB 本机夹具误用普通 PostgreSQL 的单事务参数断言已按两种既有引擎流程纠正，该次失败不作为产品 RED。上述本机通过数只证明 mock 外部资源下的实际入口行为及类型闭包，不能替代隔离 CI 中实际数据库、pg_dump/pg_restore 与 TimescaleDB 的执行结果。
 
-## 最新审查修复的本机验证
+## 前一轮审查修复的本机验证
 
 本轮修复三个 P2：下载校验后重新打开路径、创建命令重新打开输出路径，以及未知 failedReason 被当作安全取消；另补原位恢复启动后的未知提交保护和 snapshot 清理先于取消判断。它保留旧验收记录及原生回归数字，不把 mock 文件/子进程端口当作真实 PostgreSQL 恢复证据。
 
@@ -142,3 +146,17 @@ API 使用真实 BackupController、Fastify、全局校验和审计生命周期�
 - 新提交必须执行独立 CI；不能沿用旧 head 的绿色检查。Linux symlink、原生 task-query、实际 PostgreSQL/TimescaleDB、pg_dump/pg_restore 及完整工作区基线由最新 head CI/Integration 收敛。
 
 证据位于 `%TEMP%/neo171-review3-*.log`、`neo171-timescale-cleanup-proof/` 与 `neo171-snapshot-close-final/`，保留故障实现、恢复 SHA 和健康对照。生产切换、Legacy 退役、真实恢复演练与未完成 CI 门禁继续保留。
+
+## 68fa6b3 最新三个 P2 的本机回归
+
+2026-10-11 Review 5481953256 覆盖实际 head `68fa6b3bdf0121ffc855c729bfbec5a8eea7ce66`，新增共享 inode 原位改写、异步启动失败误报已启动、下载流提前释放容量三个 P2。开始修补前冻结 18 个原文件及 git blob，并在全部原 RED 结束后复核 SHA 未变：API 新 13 项实际 8 失败/5 健康通过，Worker 使用真实 Node 子进程的 4 项实际 1 失败/3 健康通过，共 9 RED/8 健康。首次大 Buffer 失败 diff 渲染中止产生的 IPC 错误单独保留，不计行为 RED；随后用精确长度与真实 SHA-256 的同字节断言完成原 RED。
+
+第一串行窗口的单 worker focused 验证：API 四文件 91/91（snapshot 7、lease 11、既有 bundle 5、服务/真实 Controller-Fastify 68）；Worker 六文件 144 通过、1 个 Linux symlink 在 Windows 明确 skip，包含新增真实 spawn 4 项及原提交、取消、FD drain、恢复 snapshot 和 Timescale cleanup 断言。lease 的 11 项包含新增五项 shutdown、30 分钟超时、transport close、响应构造异常和副本摘要失败控制。旧 mock 子进程补充成功 spawn 事件顺序，未删减原 SIGTERM/close/FD 断言；首次遗漏该事件的一项 fixture 失败单独保留，最终六文件重跑通过。
+
+第二串行窗口补充构造 digest/copy-write 失败后实际两 FD 关闭、确切副本/空目录删除、延迟实际 FD 读取时先等待 I/O settle 再 close/清理，以及 unlink 清理拒绝后真实 FD 已关闭、容量仍恰一次释放和固定最小 warn。API 四文件 95/95（snapshot 7、lease 12、bundle 8、服务 68）。API/Worker 源码 build 和两份 `tsconfig.backup.test.json` 受影响 fixture strict 均通过；API 首轮 TS2366 失败已在泛型 run 的 catch 分支显式 `return fail(...)`，保留 500/throw 原行为后重跑通过，不放宽类型配置。
+
+本轮最终串行全套：API 1919 通过、555 个原生集成用例跳过（74 个通过文件、34 个跳过文件）；Worker 424 通过、74 跳过（73 个原生集成及 1 个 Windows 上的 Linux symlink）。显式 `RUN_INTEGRATION_TESTS=false`，跳过不计通过；复用既有依赖 build 后直接运行全套 Vitest，单 worker 且禁止文件并行。默认根 contracts 40/40、Legacy server unit 55/55 也通过；两源码 build 与两 fixture strict 通过，不宣称本机重新执行了默认 API/Worker package script 的完整依赖图 build。首次动态 npm 调用仅输出 usage，正常直接命令重跑 55/55，保留日志但不计产品故障。
+
+这些测试使用真实文件系统、实际流和真实 Node spawn，但 lease transport 事件控制不是网络/浏览器下载。`68fa6b3` 的 CI 38052550205 已成功，Integration 38052550342 已实际通过 task-query 30、PostgreSQL/TimescaleDB backup-pipeline 30、immutable archive snapshot 2 与配置 1 项；这只证明原 head，不能替代本轮尚未提交的修补。本轮最新提交的 CI、完整工作区剩余基线、原生 Integration 和 latest Codex Review 仍待执行。真实浏览器 FSA 和 UI/API/两目标原生备份联动尚未验收。
+
+本轮日志、原字节、manifest 位于 `%TEMP%/neo-171-review4-20261011/`，包括 `original-red-complete.json`、`original-api-red-sha.log`、`original-worker-red.log`、`api-cleanup-focused.log`、`api-full-suite.log`、`worker-full-suite.log`、`api-source-build-final.log`、`worker-source-build.log` 与两份 `*-fixture-strict.log`。四个产品文件在源码 build/strict 和最终全套测试期间保持冻结 SHA。保留前轮全部故障与原生证据，不累加不同范围的通过数字。

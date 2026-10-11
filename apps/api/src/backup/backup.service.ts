@@ -35,6 +35,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 import type { QueryConfig } from 'pg';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
@@ -45,6 +46,7 @@ import { backupCreationResult } from '../tasks/backup-creation-result';
 import type { QueueTaskSnapshot } from '../tasks/task-query-values';
 import { serializeTask } from '../tasks/task-query-values';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
+import { backupBundle } from './backup-bundle';
 import {
   backupFilenameTarget,
   deleteBackupFile,
@@ -57,6 +59,8 @@ import {
 import { BackupSubmissionException } from './backup-submission.exception';
 
 export const BACKUP_CONFIG_REPOSITORY = Symbol('BACKUP_CONFIG_REPOSITORY');
+// The web download transport already has this maximum overall time budget.
+const BACKUP_DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
 function fail(status: number, message: string): never {
   throw new HttpException(
@@ -91,6 +95,7 @@ function filesystemErrorCode(error: unknown): string | undefined {
 export class BackupService implements OnModuleDestroy {
   private active = 0;
   private closed = false;
+  private readonly downloads = new Set<Readable>();
 
   constructor(
     @Inject(ENV) private readonly env: Env,
@@ -181,15 +186,44 @@ export class BackupService implements OnModuleDestroy {
 
   private async run<T>(
     operation: string,
-    action: () => Promise<T>,
+    action: (
+      retain: (stream: Readable, deadline: number) => void,
+    ) => Promise<T>,
   ): Promise<T> {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有备份入口');
     if (this.closed) fail(503, '备份服务正在停止');
     if (this.active >= 8) fail(429, '备份服务繁忙，请稍后再试');
     this.active++;
+    let retained = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.active--;
+    };
+    const retain = (stream: Readable, deadline: number) => {
+      retained = true;
+      this.downloads.add(stream);
+      const timer = setTimeout(
+        () => stream.destroy(new Error('BACKUP_DOWNLOAD_TIMEOUT')),
+        Math.max(1, deadline - Date.now()),
+      );
+      timer.unref();
+      const onError = () =>
+        this.logger.warn('备份下载流未完成', 'BackupService', {
+          reason: 'backup_download_stream_failed',
+        });
+      stream.on('error', onError);
+      stream.once('close', () => {
+        clearTimeout(timer);
+        this.downloads.delete(stream);
+        stream.removeListener('error', onError);
+        release();
+      });
+    };
     try {
-      return await action();
+      return await action(retain);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       if (error instanceof BackupConfigError && error.reason === 'input')
@@ -199,9 +233,9 @@ export class BackupService implements OnModuleDestroy {
         reason: 'backup_operation_failed',
         code: filesystemErrorCode(error) ?? 'UNKNOWN',
       });
-      fail(500, '备份操作失败');
+      return fail(500, '备份操作失败');
     } finally {
-      this.active--;
+      if (!retained) release();
     }
   }
 
@@ -562,7 +596,8 @@ export class BackupService implements OnModuleDestroy {
   }
 
   async download(principal: AuthPrincipal, filename: string) {
-    return this.run('download', async () => {
+    const deadline = Date.now() + BACKUP_DOWNLOAD_TIMEOUT_MS;
+    return this.run('download', async (retain) => {
       await this.authorize(principal);
       this.validateFilename(filename, 'download');
       const path = resolveBackupPath(this.directory(), filename);
@@ -574,7 +609,19 @@ export class BackupService implements OnModuleDestroy {
       }
       const metadata = await readBackupMetadata(this.directory(), filename);
       if (!metadata) fail(409, '备份元数据未验证，无法下载可恢复归档');
-      return { path, filename, metadata };
+      const stream = await backupBundle(path, filename, metadata, {
+        maxBytes: this.env.BACKUP_MAX_BYTES,
+        deadline,
+      });
+      retain(stream, deadline);
+      if (this.closed) {
+        await new Promise<void>((resolve) => {
+          stream.once('close', resolve);
+          stream.destroy();
+        });
+        fail(503, '备份服务正在停止');
+      }
+      return { path, filename, metadata, stream };
     });
   }
 
@@ -621,5 +668,15 @@ export class BackupService implements OnModuleDestroy {
 
   async onModuleDestroy() {
     this.closed = true;
+    await Promise.all(
+      [...this.downloads].map(
+        (stream) =>
+          new Promise<void>((resolve) => {
+            if (stream.closed) return resolve();
+            stream.once('close', resolve);
+            stream.destroy();
+          }),
+      ),
+    );
   }
 }

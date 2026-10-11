@@ -1,8 +1,10 @@
 import { backupArtifactMetadataSchema } from '@asin-monitor/contracts';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createWriteStream, fstatSync } from 'node:fs';
 import {
+  access,
   mkdtemp,
   readFile,
   rename,
@@ -12,12 +14,16 @@ import {
   type FileHandle,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backupBundle } from '../src/backup/backup-bundle';
 
-const opened = vi.hoisted(() => ({ handles: [] as FileHandle[] }));
+const opened = vi.hoisted(() => ({
+  handles: [] as FileHandle[],
+  paths: new Map<FileHandle, string>(),
+  failSnapshotWrite: false,
+}));
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return {
@@ -26,6 +32,11 @@ vi.mock('node:fs/promises', async (original) => {
       const handle = await fs.open(...args);
       vi.spyOn(handle, 'close');
       opened.handles.push(handle);
+      opened.paths.set(handle, String(args[0]));
+      if (args[1] === 'wx+' && opened.failSnapshotWrite)
+        vi.spyOn(handle, 'write').mockRejectedValueOnce(
+          new Error('fixture copy write failed'),
+        );
       return handle;
     },
   };
@@ -36,6 +47,8 @@ afterEach(async () => {
     if (handle.fd !== -1) await handle.close();
   }
   vi.restoreAllMocks();
+  opened.paths.clear();
+  opened.failSnapshotWrite = false;
 });
 
 const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -54,6 +67,124 @@ async function consume(stream: Awaited<ReturnType<typeof backupBundle>>) {
 }
 
 describe('backup download bundle', () => {
+  it('closes both actual descriptors and removes a constructor snapshot on digest rejection', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-constructor-'));
+    try {
+      const dump = Buffer.from('PGDMPactual');
+      const path = join(directory, filename);
+      await writeFile(path, dump);
+      const sidecar = backupArtifactMetadataSchema.parse({
+        ...metadata,
+        version: 3,
+        scope: 'full',
+        archiveSha256: createHash('sha256')
+          .update('PGDMPdifferent')
+          .digest('hex'),
+        databaseSettings: {
+          encoding: 'UTF8',
+          lcCollate: 'C.UTF-8',
+          lcCtype: 'C.UTF-8',
+          localeProvider: 'libc',
+        },
+      });
+      await expect(backupBundle(path, filename, sidecar)).rejects.toThrow(
+        'BACKUP_BUNDLE_INVALID',
+      );
+      expect(opened.handles).toHaveLength(2);
+      expect(opened.handles.every((handle) => handle.fd === -1)).toBe(true);
+      const privatePath = opened.paths.get(opened.handles[1])!;
+      await expect(access(privatePath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(access(dirname(privatePath))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(await readFile(path)).toEqual(dump);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('closes actual constructor descriptors and removes its partial snapshot after copy write failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-copy-failure-'));
+    try {
+      const path = join(directory, filename);
+      await writeFile(path, 'PGDMPactual');
+      opened.failSnapshotWrite = true;
+      await expect(backupBundle(path, filename, metadata)).rejects.toThrow(
+        'BACKUP_BUNDLE_INVALID',
+      );
+      expect(opened.handles).toHaveLength(2);
+      expect(opened.handles.every((handle) => handle.fd === -1)).toBe(true);
+      const privatePath = opened.paths.get(opened.handles[1])!;
+      await expect(access(privatePath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(access(dirname(privatePath))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(await readFile(path, 'utf8')).toBe('PGDMPactual');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('waits for a real deferred snapshot read to settle before close and cleanup', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'neo-bundle-deferred-read-'),
+    );
+    let stream: Awaited<ReturnType<typeof backupBundle>> | undefined;
+    let release: (() => void) | undefined;
+    try {
+      const path = join(directory, filename);
+      await writeFile(path, 'PGDMPactual');
+      stream = await backupBundle(path, filename, metadata);
+      const handle = opened.handles.at(-1)!;
+      const descriptor = handle.fd;
+      const privatePath = opened.paths.get(handle)!;
+      const read = handle.read.bind(handle);
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered: (() => void) | undefined;
+      const reading = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      vi.spyOn(handle, 'read').mockImplementationOnce(async (...args) => {
+        entered!();
+        await gate;
+        return Reflect.apply(read, handle, args);
+      });
+      stream.on('error', () => undefined);
+      stream.resume();
+      await reading;
+      const closed = once(stream, 'close');
+      stream.destroy();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stream.closed).toBe(false);
+      expect(fstatSync(descriptor).isFile()).toBe(true);
+      await expect(access(privatePath)).resolves.toBeUndefined();
+      release!();
+      await closed;
+      expect(handle.close).toHaveBeenCalledOnce();
+      expect(() => fstatSync(descriptor)).toThrow(
+        expect.objectContaining({ code: 'EBADF' }),
+      );
+      await expect(access(dirname(privatePath))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      release?.();
+      if (stream && !stream.closed) {
+        const closed = new Promise<void>((resolve) =>
+          stream!.once('close', resolve),
+        );
+        stream.destroy();
+        await closed;
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('is a standard tar with the dump and restore sidecar', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-backup-bundle-'));
     try {

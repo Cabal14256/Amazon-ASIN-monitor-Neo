@@ -197,6 +197,7 @@ describe('committed restore recovery when the registry connection fails', () => 
           stderr: { resume: vi.fn() },
           kill: vi.fn(),
         });
+        queueMicrotask(() => child.emit('spawn'));
         const committed = () => {
           if (unknownClose) {
             state = transitionTask(

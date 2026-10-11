@@ -6,6 +6,7 @@
   },
   "include": [
     "test/backup-commit.test.ts",
+    "test/backup-command-spawn.test.ts",
     "test/backup-creation-replay.test.ts",
     "test/backup-pipeline.integration.test.ts",
     "test/backup-processor.test.ts",
