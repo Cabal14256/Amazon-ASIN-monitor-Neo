@@ -21,7 +21,7 @@ import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -190,6 +190,27 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         );
       const competitor = await f.pools.competitorPool.connect();
       try {
+        // LIKE does not copy the timestamp triggers or policy index comments.
+        // Install the real write policy in this private schema; the shared
+        // imported matching collation remains read-only in public.
+        let policy = readFileSync(
+          resolve(
+            __dirname,
+            '../../../packages/db/migrations/0011_competitor_write_policy.sql',
+          ),
+          'utf8',
+        );
+        for (const name of [
+          'competitor_variant_groups',
+          'competitor_asins',
+          'set_competitor_update_timestamp',
+          'idx_neo_competitor_write_asin_country',
+        ])
+          policy = policy.replaceAll(
+            `public.${name}`,
+            `${competitorSchema}.${name}`,
+          );
+        await competitor.query(policy);
         for (const name of [
           '0014_competitor_check_receipts.sql',
           '0015_competitor_monitor.sql',
@@ -493,7 +514,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                 !!m.isCompetitor === competitor,
             );
           await vi.waitFor(
-            () => {
+            async () => {
+              expect((await store.read(task.taskId))?.status, output).toBe(
+                'completed',
+              );
               for (const client of [a, b, foreign]) {
                 const messages = monitor(client);
                 expect(
@@ -757,9 +781,13 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       )}:${encodeURIComponent(task.createdAt)}`;
       expect(await redis.hlen(proofKey)).toBe(4); // progress+complete and their watermarks, no append.
       const raw = await redis.hget(proofKey, 'complete');
-      const hash = (value: unknown) =>
-        createHash('sha256').update(JSON.stringify(value)).digest('hex');
-      expect(hash(JSON.parse(raw!).message)).toBe(hash(completion));
+      const storedCompletion = JSON.parse(raw!).message;
+      // Zod reconstructs object keys in schema order. Check every field and
+      // array value without treating insertion order as payload corruption.
+      expect(storedCompletion).toStrictEqual(completion);
+      expect(
+        Buffer.byteLength(JSON.stringify(storedCompletion)),
+      ).toBeGreaterThan(256 * 1024);
       expect(await redis.ttl(proofKey)).toBeGreaterThan(0);
       await expect(
         repository.publish(finished, 7000, {
