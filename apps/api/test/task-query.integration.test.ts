@@ -66,6 +66,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             },
           }),
       });
+      // The task query fixture keeps its own schema and never falls back to public receipts.
+      await f.pools.primaryPool.query(
+        'CREATE TABLE variant_check_receipts (LIKE public.variant_check_receipts INCLUDING ALL)',
+      );
       runtime = f.app.get(TaskQueryRuntime);
       redis = new Redis(env.REDIS_URL, {
         lazyConnect: true,
