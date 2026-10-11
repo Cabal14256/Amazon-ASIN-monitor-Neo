@@ -32,6 +32,91 @@ export function monitorAggregateBucketHoursSql(
   )))) / 3600::numeric, 9)`;
 }
 
+/** Raw summaries clip only when BOTH bounds exist. Legacy subtracts integer
+ * Date milliseconds before binary64 division by 3600000: converting fractional
+ * seconds first changes display rounding at 180/540 ms boundaries. */
+export function monitorRawSummaryBucketHoursSql(
+  query: MonitorAnalyticsQuery,
+  granularity: MonitorSourceGranularity,
+  timeSlot: SQL,
+): SQL {
+  validateMonitorAnalyticsQuery(query);
+  if (!Object.hasOwn(intervals, granularity))
+    throw new MonitorAnalyticsQueryError('input');
+  const end = sql`${timeSlot} + ${intervals[granularity]}`;
+  const duration =
+    query.startTime && query.endTime
+      ? sql`least(${end}, ${query.endTime}::timestamp) - greatest(${timeSlot}, ${query.startTime}::timestamp)`
+      : sql`${end} - ${timeSlot}`;
+  return sql`greatest(0::double precision, (extract(epoch FROM (${duration})) * 1000)::double precision / 3600000::double precision)`;
+}
+
+/** Sufficient statistics for the frozen Legacy raw summary finalizer. Use the
+ * dimension projection: each site/brand/ASIN bucket contributes its own hours.
+ * No bucket, fraction or intermediate accumulator is rounded. Ordered float8
+ * sums avoid parallel partial aggregation changing the binary64 accumulation
+ * order. Global normal hours are summed independently, as in Legacy raw JS.
+ * Only bounded group rows cross the wire; coverage and source stay one SELECT. */
+export function monitorRawSummaryMetricsSelect(base: SQL): SQL {
+  const order = sql`time_slot, country, asin_key, site, brand`;
+  const sum = (value: SQL) => sql`sum(${value} ORDER BY contribution_order)`;
+  // JS Map keys use String.trim() and exact string equality AFTER source SQL
+  // grouping. Do not let the legacy case-insensitive column collation merge
+  // differently cased keys coming from separate countries/dimensions.
+  const whitespace =
+    '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+  const asinKey = sql`btrim(base.asin_key, ${whitespace}) COLLATE "C"`;
+  const fraction = sql`CASE WHEN base.check_count>0 THEN
+    least(1::double precision, greatest(0::double precision,
+      base.broken_count::double precision / base.check_count::double precision))
+    ELSE 0::double precision END`;
+  const abnormal = sql`least(base.bucket_hours, greatest(0::double precision,
+    base.bucket_hours * (${fraction})))`;
+  return sql`WITH base AS (${base}), contributions AS MATERIALIZED (
+    SELECT base.*, ${asinKey} AS normalized_asin_key,
+      row_number() OVER (PARTITION BY group_key, group_label ORDER BY ${order}) AS contribution_order,
+      ${abnormal} AS abnormal_hours,
+      greatest(0::double precision, base.bucket_hours - (${abnormal})) AS normal_hours
+    FROM base WHERE base.bucket_hours>0
+  ), global_metrics AS (
+    SELECT group_key, group_label,
+      ${sum(sql`bucket_hours`)} AS "totalDurationHours",
+      ${sum(sql`abnormal_hours`)} AS "abnormalDurationHours",
+      ${sum(sql`normal_hours`)} AS "normalDurationHours",
+      ${sum(
+        sql`CASE WHEN has_peak=1 THEN bucket_hours ELSE 0::double precision END`,
+      )} AS "peakDurationHours",
+      ${sum(
+        sql`CASE WHEN has_peak=1 THEN abnormal_hours ELSE 0::double precision END`,
+      )} AS "peakAbnormalDurationHours",
+      ${sum(
+        sql`CASE WHEN has_peak=0 THEN bucket_hours ELSE 0::double precision END`,
+      )} AS "lowDurationHours",
+      ${sum(
+        sql`CASE WHEN has_peak=0 THEN abnormal_hours ELSE 0::double precision END`,
+      )} AS "lowAbnormalDurationHours",
+      sum(check_count) AS "totalChecks", sum(broken_count) AS "brokenCount"
+    FROM contributions GROUP BY group_key, group_label
+  ), asin_metrics AS (
+    SELECT group_key, group_label, normalized_asin_key AS asin_key,
+      min(contribution_order) AS first_contribution_order,
+      ${sum(sql`bucket_hours`)} AS total_hours,
+      ${sum(sql`abnormal_hours`)} AS abnormal_hours
+    FROM contributions WHERE nullif(normalized_asin_key,'') IS NOT NULL
+    GROUP BY group_key, group_label, normalized_asin_key
+  ), asin_groups AS (
+    SELECT group_key, group_label,
+      sum(least(1::double precision,greatest(0::double precision,abnormal_hours/total_hours)) ORDER BY first_contribution_order) AS "sumAsinDurationRate",
+      count(*) AS "totalAsinsDedup",
+      count(*) FILTER (WHERE abnormal_hours>0) AS "brokenAsinsDedup"
+    FROM asin_metrics WHERE total_hours>0 GROUP BY group_key,group_label
+  ) SELECT global_metrics.*, coalesce(asin_groups."sumAsinDurationRate",0) AS "sumAsinDurationRate",
+    coalesce(asin_groups."totalAsinsDedup",0) AS "totalAsinsDedup",
+    coalesce(asin_groups."brokenAsinsDedup",0) AS "brokenAsinsDedup"
+    FROM global_metrics LEFT JOIN asin_groups USING(group_key,group_label)
+    ORDER BY group_key ASC,group_label ASC`;
+}
+
 /** Complete SQL metric aggregation. Base provides group_key, group_label,
  * asin_key, integer check_count/broken_count/has_peak and bucket_hours from the
  * helper above. It must remain a composable SELECT so coverage and consumption
