@@ -10,6 +10,7 @@ import {
   PgPrimaryMonitorRepository,
   PgSpApiConfigurationRepository,
   PgVariantCheckRepository,
+  RedisMonitorEventRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import {
@@ -293,6 +294,7 @@ export async function startVariantCheckRuntime(
         const processor =
           name === 'competitor-monitor'
             ? createCompetitorMonitorProcessor({
+                monitorEvents: new RedisMonitorEventRepository(control, env),
                 pipeline: competitorRuntime!.pipeline,
                 repository: competitorMonitorRepository!,
                 store,
@@ -304,6 +306,7 @@ export async function startVariantCheckRuntime(
               })
             : name === 'monitor'
             ? createPrimaryMonitorProcessor({
+                monitorEvents: new RedisMonitorEventRepository(control, env),
                 pipeline: business.pipeline,
                 repository: monitorRepository!,
                 store,

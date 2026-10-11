@@ -13,6 +13,7 @@ import {
   type CompetitorMonitorGroup,
   type CompetitorMonitorNotificationCandidate,
   type PgCompetitorMonitorRepository,
+  type RedisMonitorEventRepository,
   type RedisTaskRepository,
   type TaskState,
 } from '@asin-monitor/db';
@@ -32,6 +33,7 @@ import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { logger } from './logger';
+import { MonitorRunEvents } from './monitor-live-events';
 
 export function competitorMonitorGroupOperation(
   job: CompetitorMonitorJob,
@@ -60,6 +62,7 @@ export function competitorMonitorGroupOperation(
   );
 }
 interface Options {
+  monitorEvents?: Pick<RedisMonitorEventRepository, 'publish'>;
   pipeline: Pick<CompetitorCheckPipeline, 'checkGroup'>;
   repository: Pick<
     PgCompetitorMonitorRepository,
@@ -208,6 +211,7 @@ export function createCompetitorMonitorProcessor(
     )
       throw new UnrecoverableError('竞品监控任务数据无效');
     const data = parsed.data;
+    const events = new MonitorRunEvents(data, options.monitorEvents);
     const identity = {
       userId: data.userId,
       taskType: data.taskType,
@@ -300,10 +304,19 @@ export function createCompetitorMonitorProcessor(
       const countryResults = Object.fromEntries(
         data.countries.map((country) => [country, empty(data)]),
       ) as Record<string, Summary>;
+      await events.started(await check());
       let complete = 0;
       for (const country of data.countries) {
-        for (const group of groups.filter((item) => item.country === country)) {
+        const countryGroups = groups.filter((item) => item.country === country);
+        let current = 0;
+        for (const group of countryGroups) {
           await check();
+          await events.progress(
+            await check(),
+            country,
+            ++current,
+            countryGroups.length,
+          );
           const result = await options.pipeline.checkGroup(group.groupId, {
             forceRefresh: false,
             snapshotDigest: group.snapshotDigest,
@@ -324,6 +337,7 @@ export function createCompetitorMonitorProcessor(
           });
           committed = true;
           addGroup(countryResults[country], result, group);
+          events.addGroup(country, result);
           complete++;
           try {
             validateCountryNotification(
@@ -474,6 +488,7 @@ export function createCompetitorMonitorProcessor(
         throw cancelled;
       if (finished.status !== 'completed')
         throw new Error('COMPETITOR_MONITOR_ACK_UNCONFIRMED');
+      await events.complete(finished);
       logger.info('竞品监控任务完成', { totalChecked, totalBroken });
       return finalResult;
     } catch (error) {
