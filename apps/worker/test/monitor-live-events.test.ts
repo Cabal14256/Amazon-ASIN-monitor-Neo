@@ -9,6 +9,30 @@ import { MonitorRunEvents, monitorTimestamp } from '../src/monitor-live-events';
 
 const nativeRequire = createRequire(__filename);
 const legacyDate = nativeRequire('../../../server/src/utils/dateTime.js');
+const utc8Cycle = (date: Date, hourCycle: 'h23' | 'h24') => {
+  // Omitting hour12 is deliberate: hour12:false overrides explicit hourCycle
+  // and may select the locale's h24, which caused the Linux CI discrepancy.
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle,
+  });
+  expect(formatter.resolvedOptions().hourCycle).toBe(hourCycle);
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date).map((part) => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${
+    parts.minute
+  }:${parts.second}.${String(date.getUTCMilliseconds()).padStart(
+    3,
+    '0',
+  )}+08:00`;
+};
 const legacyModule = {
   exports: {} as {
     getASINCheckOutcome(
@@ -122,13 +146,46 @@ describe('Legacy monitor public field parity', () => {
     expect(publish).not.toHaveBeenCalled();
   });
   it.each([
-    '2026-10-11T16:00:00.000Z',
-    '2026-12-31T23:59:59.999Z',
-    '2026-10-11T00:00:00.001Z',
-  ])('matches actual Legacy UTC8 formatter at %s', (date) => {
-    expect(monitorTimestamp(new Date(date))).toBe(
-      legacyDate.toUTC8ISOString(new Date(date)),
-    );
+    ['2026-10-11T16:00:00.000Z', '2026-10-12T00:00:00.000+08:00'],
+    ['2026-12-31T23:59:59.999Z', '2027-01-01T07:59:59.999+08:00'],
+    ['2026-10-11T00:00:00.001Z', '2026-10-11T08:00:00.001+08:00'],
+  ])(
+    'keeps exact canonical UTC8 instant and actual Legacy date/time fields at %s',
+    (input, expected) => {
+      const date = new Date(input),
+        canonical = monitorTimestamp(date),
+        rawLegacy = legacyDate.toUTC8ISOString(date);
+      expect(canonical).toBe(expected);
+      expect(utc8Cycle(date, 'h23')).toBe(expected);
+      expect(Date.parse(canonical)).toBe(date.getTime());
+      expect(canonical).not.toContain('T24:');
+      // Do not normalize and silently assert byte parity: preserve raw Legacy
+      // date/minute/second/ms/offset and explicitly allow only its zero-hour form.
+      expect(rawLegacy.slice(0, 11)).toBe(expected.slice(0, 11));
+      expect(rawLegacy.slice(13)).toBe(expected.slice(13));
+      expect(
+        expected.slice(11, 13) === '00'
+          ? ['00', '24']
+          : [expected.slice(11, 13)],
+      ).toContain(rawLegacy.slice(11, 13));
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(date);
+        expect(legacyDate.getUTC8ISOString()).toBe(rawLegacy);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it('preserves the observed Linux Legacy h24 midnight boundary without moving the Neo instant to the next day', () => {
+    const date = new Date('2026-10-11T16:00:00.000Z');
+    // Frozen actual CI 38115153482 / c11a432, not a claim this Windows helper
+    // returned h24: its original raw failure remains in the CI evidence log.
+    const linuxRawLegacy = '2026-10-12T24:00:00.000+08:00';
+    expect(utc8Cycle(date, 'h24')).toBe(linuxRawLegacy);
+    expect(monitorTimestamp(date)).toBe('2026-10-12T00:00:00.000+08:00');
+    expect(Date.parse(monitorTimestamp(date))).toBe(date.getTime());
+    expect(Date.parse(linuxRawLegacy) - date.getTime()).toBe(24 * 3600_000);
   });
   it.each([0, 1])(
     'keeps exact manual fields and actual Legacy classifications with group notification=%i',

@@ -18,7 +18,8 @@ const record = (value: unknown): Record<string, unknown> =>
 const text = (value: unknown, fallback = '') =>
   typeof value === 'string' ? value : fallback;
 const nullable = (value: unknown) => (typeof value === 'string' ? value : null);
-/** Same wall-clock representation as Legacy getUTC8ISOString/toUTC8ISOString. */
+/** Canonical UTC+8 ISO, hours 00..23. Legacy Intl h24 can display the same
+ * local day's zero hour as 24; that platform-dependent byte form is not sent. */
 export const monitorTimestamp = (date = new Date()) =>
   new Date(date.getTime() + 8 * 3600_000).toISOString().replace('Z', '+08:00');
 const manualFields = (row: Record<string, unknown>) => ({

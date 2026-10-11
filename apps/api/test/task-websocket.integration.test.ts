@@ -386,9 +386,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           foreign = await connect(1, await login());
         const revokedAccount = await login(),
           revoked = await connect(1, revokedAccount);
-        await f.pools.primaryPool.query('DELETE FROM sessions WHERE id=$1', [
-          revokedAccount.sessionId,
-        ]);
+        await f.pools.primaryPool.query(
+          "UPDATE sessions SET status='REVOKED' WHERE id=$1",
+          [revokedAccount.sessionId],
+        );
         const competitor = domain === 'competitor',
           queueName = competitor ? 'competitor-monitor' : 'monitor';
         const table = competitor
@@ -401,7 +402,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         ).sort();
         for (const id of groupIds)
           await pool.query(
-            `INSERT INTO ${table}(id,name,country,site,brand,feishu_notify_enabled) VALUES($1,$1,'US','amazon.com','fixture',false)`,
+            competitor
+              ? "INSERT INTO competitor_variant_groups(id,name,country,brand,feishu_notify_enabled) VALUES($1,$1,'US','fixture',false)"
+              : "INSERT INTO variant_groups(id,name,country,site,brand,feishu_notify_enabled) VALUES($1,$1,'US','amazon.com','fixture',false)",
             [id],
           );
         const monitorQueue = new Queue(getPhysicalQueueName(queueName), {
@@ -692,6 +695,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       const timestamp = new Date(Date.now() + 8 * 3600_000)
         .toISOString()
         .replace('Z', '+08:00');
+      // Preserve the Worker operation order at half boundaries (145 => 14).
       for (let current = 1; current <= 1000; current++)
         await repository.publish(active, current, {
           type: 'monitor_progress',
@@ -699,7 +703,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           country: 'US',
           current,
           total: 1000,
-          progress: Math.round(current / 10),
+          progress: Math.round((current / 1000) * 100),
           timestamp,
         });
       const result = {

@@ -21,7 +21,11 @@
 
 国家摘要包含 `country`、`totalGroups`、`brokenGroups`、`brokenGroupNames`、`brokenGroupDetails`、`brokenASINs`、`brokenByType`、`asinClassifications`、`checkedGroupKeys`、`checkTime`。主营保留组与 ASIN 人工异常来源、原因和更新字段；竞品保留 Legacy 相应字段。分类按当前结果与 `MANUAL` / `AUTO+MANUAL` 来源计算；自动分类与人工分类不混计。
 
-飞书开关只影响摘要内 Legacy 已经按开关选择的 `brokenASINs`，不会清除 brokenGroups、brokenGroupNames/details、分类或检查组列表。该公开摘要与现有通知候选、通知认领和任务结果分开构造；现有任务结果和飞书发送逻辑不变。外层时间为 `+08:00`，`checkTime` 保留 Legacy Date 经 JSON 序列化后的 UTC ISO 字符串。
+飞书开关只影响摘要内 Legacy 已经按开关选择的 `brokenASINs`，不会清除 brokenGroups、brokenGroupNames/details、分类或检查组列表。该公开摘要与现有通知候选、通知认领和任务结果分开构造；现有任务结果和飞书发送逻辑不变。外层时间使用小时 00..23 的规范 `+08:00` ISO，`checkTime` 保留 Legacy Date 经 JSON 序列化后的 UTC ISO 字符串。
+
+时间存在明确的平台字节差异：Legacy 同时指定 `hour12: false` 和 `hourCycle: 'h23'`，前者会覆盖后者并采用 locale 的 24 小时周期。Linux Node/ICU 的实际 CI 在 UTC `2026-10-11T16:00:00.000Z` 返回 `2026-10-12T24:00:00.000+08:00`，本机 helper 返回同日期的 `00:00`。Intl h24 只把当地小时 0 显示成 24，不把日期加一天；若再把该拼接字符串当 ISO 解析，则会被解释为次日并多 24 小时。Neo 保持同一真实瞬间的 `2026-10-12T00:00:00.000+08:00`，不复制 h24 字节。该午夜边界不声明与全部平台的 Legacy 完全字节等价。[ECMA-402](https://tc39.es/ecma402/#sec-createdatetimeformat) 和 [h24 格式规则](https://tc39.es/ecma402/#sec-formatdatetimepattern) 说明此优先级及仅小时替换行为。
+
+回归保留原三种输入和精确规范输出（午夜、跨年、普通时刻），核对实际 Legacy 原始日期/分钟秒毫秒/offset、get/to 两调用，以及不设置 hour12 的明确 h23 参考；另冻结第一次 Linux h24 原始值并证明把它当 ISO 解析会偏移一天。这里只修复跨平台 oracle 和记录边界，Neo 时间运行算法未改变。
 
 ## 发布与恢复
 
