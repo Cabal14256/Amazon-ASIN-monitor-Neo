@@ -329,6 +329,17 @@ describe('scheduled US follow-up identity boundary', () => {
       createScheduledMonitorFollowUp(scheduledJob('competitor'), at),
     ).toThrow();
   });
+  it('classifies a stored child with a non-deterministic canonical task ID as an identity failure', () => {
+    const parent = scheduledJob();
+    const at = '2026-10-07T00:24:59.999Z';
+    const child = createScheduledMonitorFollowUp(parent, at);
+    expect(() =>
+      assertScheduledMonitorFollowUp(parent, at, {
+        ...child,
+        taskId: '123e4567-e89b-42d3-a456-426614174000',
+      }),
+    ).toThrowError('Scheduled monitor run identity');
+  });
   it.each([
     {
       requestedAt: '2026-10-07T00:25:00.000Z',

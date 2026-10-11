@@ -2,7 +2,10 @@ import { EventEmitter } from 'node:events';
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import { scheduledMonitorJobDigest } from '../src/domain/scheduled-monitor-policy';
-import { scheduledMonitorSnapshotDigest } from '../src/domain/scheduled-monitor-run';
+import {
+  createScheduledMonitorFollowUp,
+  scheduledMonitorSnapshotDigest,
+} from '../src/domain/scheduled-monitor-run';
 import { PgScheduledMonitorRunRepository } from '../src/repositories/scheduled-monitor-run-repository';
 import { scheduledJob } from './helpers/scheduled-monitor-fixtures';
 
@@ -239,3 +242,47 @@ describe.each(['primary', 'competitor'] as const)(
     );
   },
 );
+
+describe('stored scheduled follow-up identity', () => {
+  it.each(['read', 'complete'] as const)(
+    'reports a non-deterministic child task ID as identity during %s without retrying',
+    async (operation) => {
+      const { repository, job, row, connect, clients } = fixture('primary');
+      const completedAt = new Date(Date.parse(job.createdAt) + 1000);
+      const child = createScheduledMonitorFollowUp(
+        job,
+        completedAt.toISOString(),
+      );
+      Object.assign(row, {
+        state: 'business-completed',
+        business_completed_at: completedAt,
+        result: {
+          version: 1,
+          totalGroups: 0,
+          totalMembers: 0,
+          brokenGroups: 0,
+          brokenMembers: 0,
+        },
+        follow_up_job: {
+          ...child,
+          taskId: '123e4567-e89b-42d3-a456-426614174000',
+        },
+        follow_up_digest: scheduledMonitorJobDigest(child),
+        follow_up_requested_at: completedAt,
+      });
+      try {
+        await expect(repository[operation](job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        expect(connect).toHaveBeenCalledTimes(1);
+        expect(
+          clients[0].query.mock.calls.some(([text]) =>
+            /^(INSERT|UPDATE|DELETE)\b/.test(text),
+          ),
+        ).toBe(false);
+      } finally {
+        repository.close();
+      }
+    },
+  );
+});

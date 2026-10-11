@@ -374,7 +374,12 @@ export function assertScheduledMonitorFollowUp(
   expectedDigest?: string,
 ): ScheduledMonitorJob {
   parent = parseScheduledMonitorJob(parent);
-  const child = parseScheduledMonitorJob(rawChild);
+  let child: ScheduledMonitorJob;
+  try {
+    child = parseScheduledMonitorJob(rawChild);
+  } catch {
+    throw new ScheduledMonitorRunError('identity');
+  }
   if (
     !instant.safeParse(businessCompletedAt).success ||
     parent.domain !== 'primary' ||

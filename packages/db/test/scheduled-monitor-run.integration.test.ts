@@ -1071,6 +1071,41 @@ suite.each(['primary', 'competitor'] as const)(
       }
     }, 10_000);
     if (domain === 'primary')
+      it('classifies a persisted child with a non-deterministic canonical task ID as identity', async () => {
+        const job = await nowJob();
+        await insertRows(groupTable, [scheduledGroup(domain)]);
+        await insertRows(memberTable, [scheduledMember(domain)]);
+        const run = await storage().accept(job);
+        await storage().start(job);
+        await insertReceipt(run);
+        const business = await storage().completeBusiness(
+          job,
+          summary(run),
+          true,
+        );
+        const original = business.followUpJob;
+        if (!original) throw new Error('Fixture child was not persisted');
+        const forged = { ...original, taskId: randomUUID() };
+        expect(forged.taskId).not.toBe(original.taskId);
+        const updated = await connection().query<{ follow_up_job: unknown }>(
+          `UPDATE ${qualified}."${runTable}" SET follow_up_job=$2::jsonb WHERE task_id=$1 RETURNING follow_up_job`,
+          [job.taskId, JSON.stringify(forged)],
+        );
+        expect(updated.rows[0].follow_up_job).toEqual(forged);
+        await expect(storage().read(job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        await expect(storage().complete(job)).rejects.toMatchObject({
+          code: 'identity',
+        });
+        await connection().query(
+          `UPDATE ${qualified}."${runTable}" SET follow_up_job=$2::jsonb WHERE task_id=$1`,
+          [job.taskId, JSON.stringify(original)],
+        );
+        expect(await storage().read(job)).toEqual(business);
+        expect((await storage().complete(job)).followUpJob).toEqual(original);
+      });
+    if (domain === 'primary')
       it('rejects replaced US child clocks in SQL and a forged digest on read without losing the original child', async () => {
         const job = await nowJob();
         await insertRows(groupTable, [scheduledGroup(domain)]);
