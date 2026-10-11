@@ -76,7 +76,15 @@ UI 对应 #171 实际存在的八个接口：`POST /api/v1/backup`、`POST /back
 
 ## 尚未通过的阶段门禁
 
-真实浏览器 File System Access、保存对话框用户激活、慢盘背压、取消后原文件、网络/磁盘错误和下载归档解包仍未执行；浏览器连接此前失败，mounted 通过不能替代这些结果。#171 正式合入后还需以真实认证接口下载两种 target 的备份，核验 sidecar 并执行隔离 PostgreSQL/TimescaleDB 恢复。生产切换和 Legacy 退役继续暂缓。
+真实浏览器已在独立测试页面挂载 Settings，并观察同步原生保存对话框调用、用户激活和选择前 GET 为零；随后 Computer Use 因无法可信确认 Windows 当前浏览器 URL 而停止，未选择文件或写盘。真实 File System Access 保存、慢盘背压、取消后原文件、网络/磁盘错误和下载归档解包仍未通过；mounted 通过不能替代这些结果。#171 正式合入后还需以真实认证接口下载两种 target 的备份，核验 sidecar 并执行隔离 PostgreSQL/TimescaleDB 恢复。生产切换和 Legacy 退役继续暂缓。
+
+## HTTP 200 业务拒绝
+
+提交 `1b0693d` 的 CI 和 Integration 已通过，最新 Review 新增一项 P2：HTTP 200 的 `success: false, errorCode: 409` 会由 HttpClient 包装为 BUSINESS 错误，但原分类只取 HTTP 状态，遗漏明确的业务拒绝。
+
+- HTTP 状态和业务错误码独立判断明确拒绝，任一为 5xx 时仍优先保留未知操作保护。不得因 HTTP 200 直接认为提交成功，也不能释放未知业务错误。
+- 精确原提交源码下，七种明确业务拒绝码的创建/恢复共 14 项实际 RED；已有 5xx 未知保护与发送前拒绝 17 项健康控制通过。回归检查持久保护解除、sessionStorage 清空及下一次操作仅发送一次。
+- 原始源码、RED 和健康日志保留于 `%TEMP%/neo-250-review2-1b0693d`。新提交的页面回归、CI、Review 和线程门禁需重新验证；本节不把父提交绿色证据计作新提交通过。
 
 ## 回归与回滚
 

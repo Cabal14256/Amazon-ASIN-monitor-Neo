@@ -313,8 +313,8 @@ export function definiteBackupRejection(error: unknown): boolean {
   return (
     error.kind === 'AUTH' ||
     (['HTTP', 'BUSINESS'].includes(error.kind) &&
-      [400, 401, 403, 404, 409, 413, 429].includes(
-        error.status ?? error.errorCode ?? 0,
+      [error.status, error.errorCode].some((code) =>
+        [400, 401, 403, 404, 409, 413, 429].includes(code ?? 0),
       ))
   );
 }

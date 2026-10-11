@@ -65,6 +65,38 @@ const accepted = async () => ({ taskId, status: 'pending' as const });
 const current = () => true;
 
 describe('backup durable submission and GET-only recovery', () => {
+  it.each(
+    [400, 401, 403, 404, 409, 413, 429].flatMap((code) =>
+      ['create', 'restore'].map((kind) => ({ code, kind })),
+    ),
+  )(
+    'releases a $kind reservation for HTTP 200 business rejection $code',
+    async ({ code, kind }) => {
+      const f = fixture(true);
+      const request =
+        kind === 'restore'
+          ? {
+              operation: 'restore' as const,
+              target: 'primary' as const,
+              filename: 'backup_20261007-080000-01234567-primary.dump',
+            }
+          : operation;
+      const denied = vi.fn(async () => {
+        throw new ApiError('BUSINESS', 'not accepted', 200, code);
+      });
+      expect((await f.recovery.submit(request, denied, current)).kind).toBe(
+        'rejected',
+      );
+      expect(f.create().read()).toBeNull();
+      expect(f.sessionValues.size).toBe(0);
+      const retry = vi.fn(accepted);
+      expect((await f.create().submit(request, retry, current)).kind).toBe(
+        'task',
+      );
+      expect(denied).toHaveBeenCalledOnce();
+      expect(retry).toHaveBeenCalledOnce();
+    },
+  );
   it.each([
     new ApiError('HTTP', 'proxy unavailable', 503),
     new ApiError('HTTP', 'gateway failed', 502, 403),
