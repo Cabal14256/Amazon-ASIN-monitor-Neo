@@ -221,7 +221,9 @@ function fixture() {
     ),
   };
   const assertJobLock = vi.fn(async () => {});
+  const metrics = { recordGroup: vi.fn(), recordRun: vi.fn() };
   const processor = createCompetitorMonitorProcessor({
+    metrics,
     pipeline: { checkGroup },
     repository: {
       groups,
@@ -251,6 +253,7 @@ function fixture() {
     group,
     result,
     processor,
+    metrics,
     groups,
     checkGroup,
     authorization,
@@ -279,6 +282,67 @@ function fixture() {
   };
 }
 describe('competitor manual monitor consumer and real notification service', () => {
+  it('records normal broken groups and valid finally metrics, including completed replay attempts', async () => {
+    const f = fixture();
+    try {
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+        totalChecked: 1,
+        totalBroken: 1,
+      });
+      expect(f.metrics.recordGroup).toHaveBeenCalledWith({
+        region: 'US',
+        isBroken: true,
+        durationSec: expect.any(Number),
+      });
+      expect(f.metrics.recordRun).toHaveBeenCalledWith({
+        type: 'competitor_monitor_task',
+        durationSec: expect.any(Number),
+      });
+      await f.processor(f.job, 'fixture-lock');
+      expect(f.metrics.recordGroup).toHaveBeenCalledOnce();
+      expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+    } finally {
+      f.notifications.close();
+    }
+  });
+  it('counts failed and cancelled attempts without inventing normal group results', async () => {
+    const f = fixture();
+    try {
+      f.checkGroup.mockRejectedValueOnce(new Error('dependency unavailable'));
+      await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+      expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+      f.cancel();
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toEqual({
+        cancelled: true,
+      });
+      expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+      expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+      f.job.name = 'substituted';
+      await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+      expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+    } finally {
+      f.notifications.close();
+    }
+  });
+  it('keeps completed business results when both metric observers throw', async () => {
+    const f = fixture();
+    try {
+      f.metrics.recordGroup.mockImplementation(() => {
+        throw new Error('observer failed');
+      });
+      f.metrics.recordRun.mockImplementation(() => {
+        throw new Error('observer failed');
+      });
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+        totalChecked: 1,
+        totalBroken: 1,
+      });
+      expect(f.state.status).toBe('completed');
+    } finally {
+      f.notifications.close();
+    }
+  });
+
   it.each([
     { localCountry: 'US', localBroken: true },
     { localCountry: 'us  ', localBroken: true },

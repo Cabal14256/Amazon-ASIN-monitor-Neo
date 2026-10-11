@@ -32,6 +32,7 @@ import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { logger } from './logger';
+import { observeMonitorMetrics, type MonitorMetrics } from './metrics';
 
 export function competitorMonitorGroupOperation(
   job: CompetitorMonitorJob,
@@ -74,6 +75,7 @@ interface Options {
   notifications: Pick<FeishuNotifications, 'withCompetitorCountryDelivery'>;
   defaultEnabled: boolean;
   shutdownSignal: AbortSignal;
+  metrics?: MonitorMetrics;
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
 }
@@ -208,6 +210,7 @@ export function createCompetitorMonitorProcessor(
     )
       throw new UnrecoverableError('竞品监控任务数据无效');
     const data = parsed.data;
+    const attemptStarted = process.hrtime.bigint();
     const identity = {
       userId: data.userId,
       taskType: data.taskType,
@@ -304,6 +307,7 @@ export function createCompetitorMonitorProcessor(
       for (const country of data.countries) {
         for (const group of groups.filter((item) => item.country === country)) {
           await check();
+          const groupStarted = process.hrtime.bigint();
           const result = await options.pipeline.checkGroup(group.groupId, {
             forceRefresh: false,
             snapshotDigest: group.snapshotDigest,
@@ -322,6 +326,13 @@ export function createCompetitorMonitorProcessor(
               await check();
             },
           });
+          observeMonitorMetrics(options.metrics, (metrics) =>
+            metrics.recordGroup({
+              region: country,
+              isBroken: Boolean(result.isBroken),
+              durationSec: Number(process.hrtime.bigint() - groupStarted) / 1e9,
+            }),
+          );
           committed = true;
           addGroup(countryResults[country], result, group);
           complete++;
@@ -534,6 +545,12 @@ export function createCompetitorMonitorProcessor(
         throw new UnrecoverableError('竞品通知摘要超出容量，请核实已提交结果');
       throw new Error('竞品监控任务未完成');
     } finally {
+      observeMonitorMetrics(options.metrics, (metrics) =>
+        metrics.recordRun({
+          type: 'competitor_monitor_task',
+          durationSec: Number(process.hrtime.bigint() - attemptStarted) / 1e9,
+        }),
+      );
       stopped = true;
       if (heartbeat) clearTimeout(heartbeat);
       await checking;

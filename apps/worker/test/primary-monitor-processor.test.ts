@@ -110,7 +110,9 @@ function fixture(
       },
     ),
   };
+  const metrics = { recordGroup: vi.fn(), recordRun: vi.fn() };
   const processor = createPrimaryMonitorProcessor({
+    metrics,
     pipeline: { checkGroup },
     repository: { groups, claimNotification, completeNotification },
     store,
@@ -133,6 +135,7 @@ function fixture(
     data,
     job,
     processor,
+    metrics,
     order,
     groups,
     checkGroup,
@@ -157,6 +160,69 @@ describe('primary monitor BullMQ processor', () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+  it('records only normal group returns and counts a failed attempt before retry', async () => {
+    const f = fixture();
+    f.checkGroup.mockRejectedValueOnce(new Error('dependency unavailable'));
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+    expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+    expect(f.metrics.recordRun).toHaveBeenCalledWith({
+      type: 'monitor_task',
+      durationSec: expect.any(Number),
+    });
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+      totalChecked: 2,
+    });
+    expect(
+      f.metrics.recordGroup.mock.calls.map(([input]) => [
+        input.region,
+        input.isBroken,
+      ]),
+    ).toEqual([
+      ['US', false],
+      ['DE', true],
+    ]);
+    expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+  });
+  it('retains the previous normal group metric when a later group fails, and counts replay calls on retry', async () => {
+    const f = fixture();
+    f.checkGroup
+      .mockResolvedValueOnce(result('g1', false))
+      .mockRejectedValueOnce(new Error('dependency unavailable'));
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+    expect(f.metrics.recordGroup).toHaveBeenCalledTimes(1);
+    await f.processor(f.job, 'fixture-lock');
+    expect(
+      f.metrics.recordGroup.mock.calls.map(([input]) => input.region),
+    ).toEqual(['US', 'US', 'DE']);
+    expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+  });
+  it('counts cancelled valid attempts without inventing a normal group, and skips invalid jobs', async () => {
+    const f = fixture();
+    f.requestCancellation();
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toEqual({
+      cancelled: true,
+    });
+    expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+    f.job.name = 'substituted';
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+  });
+  it('isolates throwing observers from business completion and later attempts', async () => {
+    const f = fixture();
+    f.metrics.recordGroup.mockImplementation(() => {
+      throw new Error('observer failed');
+    });
+    f.metrics.recordRun.mockImplementation(() => {
+      throw new Error('observer failed');
+    });
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+      totalChecked: 2,
+      totalBroken: 1,
+    });
+    expect(f.state.status).toBe('completed');
+    expect(f.sendCountry).toHaveBeenCalledTimes(2);
   });
   it('accepts a job one millisecond before its expiry', async () => {
     const f = fixture();

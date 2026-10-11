@@ -28,6 +28,12 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import {
+  assertMetricsFixtureTargets,
+  availableMetricsPort,
+  metricValue,
+  scrapeWorker,
+} from './helpers/metrics-fixture';
 
 /** Real compiled entry, private primary/competitor schemas and BullMQ/Redis.
  * Fixed Catalog responses are prewarmed; US/DE deferred tests inject only the
@@ -83,7 +89,10 @@ describe.skipIf(
       'utf8',
     );
 
+  let metricsPort = 0;
   beforeEach(async () => {
+    assertMetricsFixtureTargets();
+    metricsPort = await availableMetricsPort();
     directory = mkdtempSync(join(tmpdir(), 'neo-competitor-monitor-entry-'));
     cards.length = 0;
     f = await maintenanceFixture();
@@ -471,6 +480,9 @@ ${extra}
           WORKER_ENABLED_QUEUES: 'competitor-monitor',
           COMPETITOR_MONITOR_ENABLED: 'true',
           SCHEDULER_ENABLED: 'false',
+          WORKER_METRICS_ENABLED: 'true',
+          WORKER_METRICS_HOST: '127.0.0.1',
+          WORKER_METRICS_PORT: String(metricsPort),
           LOG_LEVEL: 'INFO',
           ...(certificate ? { NODE_EXTRA_CA_CERTS: certificate } : {}),
         },
@@ -555,6 +567,7 @@ ${extra}
 
   it('runs the real competitor consumer, commits one timestamped history/receipt and defaults notifications off', async () => {
     await start();
+    const before = await scrapeWorker(metricsPort);
     const data = await job();
     expect(await finish(await enqueue(data))).toMatchObject({
       success: true,
@@ -569,6 +582,58 @@ ${extra}
       },
     });
     expect((await store.read(data.taskId))?.status).toBe('completed');
+    const after = await scrapeWorker(metricsPort);
+    expect(
+      metricValue(after, 'variant_group_checks_total', {
+        region: 'US',
+        result: 'broken',
+      }) -
+        metricValue(before, 'variant_group_checks_total', {
+          region: 'US',
+          result: 'broken',
+        }),
+    ).toBe(1);
+    expect(
+      metricValue(after, 'variant_group_check_duration_seconds_count', {
+        region: 'US',
+      }),
+    ).toBe(1);
+    expect(
+      metricValue(after, 'variant_group_check_duration_seconds_sum', {
+        region: 'US',
+      }),
+    ).toBeGreaterThan(0);
+    expect(
+      metricValue(after, 'scheduler_runs_total', {
+        type: 'competitor_monitor_task',
+      }),
+    ).toBe(1);
+    const failed = await job();
+    failed.expiresAt = new Date(Date.parse(failed.createdAt) + 1).toISOString();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(finish(await enqueue(failed, 1))).rejects.toThrow();
+    const cancelled = await job();
+    await store.mutate(cancelled.taskId, { kind: 'cancel-request' });
+    expect(await finish(await enqueue(cancelled, 1))).toEqual({
+      cancelled: true,
+    });
+    const ended = await scrapeWorker(metricsPort);
+    expect(
+      metricValue(ended, 'scheduler_runs_total', {
+        type: 'competitor_monitor_task',
+      }),
+    ).toBe(3);
+    expect(
+      metricValue(ended, 'scheduler_run_duration_seconds_count', {
+        type: 'competitor_monitor_task',
+      }),
+    ).toBe(3);
+    expect(
+      metricValue(ended, 'variant_group_check_duration_seconds_count', {
+        region: 'US',
+      }),
+    ).toBe(1);
+
     expect(await counts(data.taskId)).toEqual({
       runs: 1,
       receipts: 1,
