@@ -414,7 +414,7 @@ describe.skipIf(
     expect(
       metricValue(after, 'scheduler_runs_total', { type: 'monitor_task' }),
     ).toBe(1);
-    const failed = await store.create({
+    const failed = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
@@ -435,7 +435,7 @@ describe.skipIf(
       { jobId: failed.taskId, attempts: 1 },
     );
     await expect(failedJob.waitUntilFinished(events, 10_000)).rejects.toThrow();
-    const cancelled = await store.create({
+    const cancelled = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
