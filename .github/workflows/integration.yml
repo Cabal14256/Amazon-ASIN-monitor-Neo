@@ -284,6 +284,18 @@ jobs:
       - name: Compare competitor query HTTP with Legacy MySQL and verify actual dual-database authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-query.integration.test.ts
 
+      - name: Verify literal catalog detail through actual HTTP, both PostgreSQL databases and Redis
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-literal-detail.integration.test.ts --maxWorkers=1
+
+      - name: Upload synthetic literal catalog index plans
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: catalog-literal-index-${{ github.run_id }}
+          path: artifacts/refactor-audit/catalog-literal-index-242-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upgrade competitor write policy twice
         run: |
           docker cp packages/db/docker/apply-competitor-write-policy.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-write-policy.sh"
