@@ -10,6 +10,7 @@ import {
 import { normalizeCountry } from './request';
 import { NodeHttpTransport } from './transport';
 import type { HttpResponse, Logger, Transport } from './types';
+import { inheritWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 export interface HtmlVariantClientOptions {
   logger: Logger;
@@ -125,6 +126,7 @@ export class HtmlVariantClient {
       throw new SpApiError('CAPACITY');
     const started = performance.now();
     const controller = new AbortController();
+    inheritWorkSettlement(signal, controller.signal);
     const abort = () => controller.abort(new SpApiError('CANCELLED'));
     signal.addEventListener('abort', abort, { once: true });
     this.controllers.add(controller);
@@ -210,6 +212,7 @@ export class HtmlVariantClient {
         this.controllers.delete(controller);
       });
     try {
+      trackWorkSettlement(controller.signal, work);
       return await waitFor(work, controller.signal);
     } catch (error: unknown) {
       const failure = safeError(error);

@@ -273,15 +273,20 @@ export class PgAsinQueryRepository implements AsinQueryRepositoryPort {
 export function withAsinDatabaseTransaction<T>(
   pool: Pool,
   operation: Parameters<typeof withAuthDatabaseDeadline<T>>[1],
+  onActualWork?: (work: Promise<unknown>) => void,
 ): Promise<T> {
-  return withAuthDatabaseDeadline(pool, async (db, ensureOpen) => {
-    ensureOpen();
-    await db.execute(sql`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
-    ensureOpen();
-    await db.execute(
-      sql`SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)`,
-    );
-    ensureOpen();
-    return operation(db, ensureOpen);
-  });
+  return withAuthDatabaseDeadline(
+    pool,
+    async (db, ensureOpen) => {
+      ensureOpen();
+      await db.execute(sql`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);
+      ensureOpen();
+      await db.execute(
+        sql`SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)`,
+      );
+      ensureOpen();
+      return operation(db, ensureOpen);
+    },
+    onActualWork,
+  );
 }
