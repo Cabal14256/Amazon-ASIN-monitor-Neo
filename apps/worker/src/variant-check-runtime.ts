@@ -10,6 +10,7 @@ import {
   PgPrimaryMonitorRepository,
   PgSpApiConfigurationRepository,
   PgVariantCheckRepository,
+  RedisMonitorEventRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import {
@@ -17,9 +18,11 @@ import {
   type FeishuNotifications,
 } from '@asin-monitor/notify';
 import {
+  createWorkSettlement,
   DatabaseConfigSource,
   NodeHttpTransport,
   SpApiRuntime,
+  trackWorkSettlement,
 } from '@asin-monitor/sp-api';
 import {
   CompetitorCheckRuntime,
@@ -32,6 +35,7 @@ import { createCompetitorMonitorProcessor } from './competitor-monitor-processor
 import { logger } from './logger';
 import type { MonitorMetrics } from './metrics';
 import { MonitorConsumerHeartbeat } from './monitor-consumer-heartbeat';
+import { MonitorGroupAdmission } from './monitor-group-admission';
 import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -128,6 +132,7 @@ export async function startVariantCheckRuntime(
     runtime: VariantCheckRuntime | undefined,
     competitorRuntime: CompetitorCheckRuntime | undefined;
   let notifications: FeishuNotifications | undefined;
+  let monitorGroupAdmission: MonitorGroupAdmission | undefined;
   let monitorHeartbeat: MonitorConsumerHeartbeat | undefined;
   let competitorMonitorHeartbeat: MonitorConsumerHeartbeat | undefined;
   let competitorMonitorRepository: PgCompetitorMonitorRepository | undefined;
@@ -143,6 +148,7 @@ export async function startVariantCheckRuntime(
   const stopBusiness = () => {
     closing = true;
     shutdown.abort();
+    monitorGroupAdmission?.close();
     if (cleanupTimer) clearInterval(cleanupTimer);
     void monitorHeartbeat?.stop();
     void competitorMonitorHeartbeat?.stop();
@@ -179,10 +185,11 @@ export async function startVariantCheckRuntime(
     const configRepository = new PgSpApiConfigurationRepository(pool);
     source = new DatabaseConfigSource(environment, async (signal) =>
       Object.fromEntries(
-        (await configRepository.readConfiguration(signal)).map((row) => [
-          row.configKey.toUpperCase(),
-          row.configValue,
-        ]),
+        (
+          await configRepository.readConfiguration(signal, (work) =>
+            trackWorkSettlement(signal, work),
+          )
+        ).map((row) => [row.configKey.toUpperCase(), row.configValue]),
       ),
     );
     transport = new NodeHttpTransport({
@@ -214,6 +221,17 @@ export async function startVariantCheckRuntime(
         },
       },
     });
+    if (selected.includes('monitor') || selected.includes('competitor-monitor'))
+      monitorGroupAdmission = new MonitorGroupAdmission(
+        env,
+        (signal) => {
+          const settlement = createWorkSettlement(signal);
+          return configRepository
+            .readConfiguration(signal, (work) => settlement.track(work))
+            .finally(() => settlement.drain());
+        },
+        spApi.risk,
+      );
     runtime = new VariantCheckRuntime({
       spApi,
       redis: control,
@@ -246,6 +264,8 @@ export async function startVariantCheckRuntime(
       await control.connect();
       ensureOpen();
       await spApi!.initialize();
+      ensureOpen();
+      await monitorGroupAdmission?.start();
       ensureOpen();
       // Require the primary completion-table upgrade before registering consumers.
       await repository.transaction((unit) => unit.purgeExpiredReceipts());
@@ -295,7 +315,9 @@ export async function startVariantCheckRuntime(
         const processor =
           name === 'competitor-monitor'
             ? createCompetitorMonitorProcessor({
+                monitorEvents: new RedisMonitorEventRepository(control, env),
                 pipeline: competitorRuntime!.pipeline,
+                groupAdmission: monitorGroupAdmission,
                 repository: competitorMonitorRepository!,
                 store,
                 notifications: notifications!,
@@ -307,7 +329,9 @@ export async function startVariantCheckRuntime(
               })
             : name === 'monitor'
             ? createPrimaryMonitorProcessor({
+                monitorEvents: new RedisMonitorEventRepository(control, env),
                 pipeline: business.pipeline,
+                groupAdmission: monitorGroupAdmission,
                 repository: monitorRepository!,
                 store,
                 notifications: notifications!,

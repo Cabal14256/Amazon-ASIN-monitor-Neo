@@ -8,6 +8,7 @@ import type { FastifyReply } from 'fastify';
 
 import type { HealthErrorStatsService } from '../health/health.service';
 import type { AppLogger } from '../logger/app-logger.service';
+import { ExportSubmissionRejectedException } from './export-submission-rejected.exception';
 import { RecoverableQueryException } from './recoverable-query.exception';
 
 interface ErrorEnvelope {
@@ -117,6 +118,11 @@ export class ApiExceptionFilter implements ExceptionFilter {
         status,
         reason: exception.reason,
       });
+    } else if (exception instanceof ExportSubmissionRejectedException) {
+      this.logger.warn('导出提交已拒绝', 'ApiExceptionFilter', {
+        status,
+        reason: 'export_enqueue_rejected',
+      });
     } else if (status >= 500) {
       this.logger.error(
         'API 请求处理失败',
@@ -129,7 +135,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
       .getResponse<FastifyReply>()
       .status(status)
       .send(
-        exception instanceof RecoverableQueryException
+        exception instanceof RecoverableQueryException ||
+          exception instanceof ExportSubmissionRejectedException
           ? exception.getResponse()
           : toEnvelope(getExceptionResponse(exception), status),
       );

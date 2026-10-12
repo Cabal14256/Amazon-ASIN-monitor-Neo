@@ -333,6 +333,9 @@ jobs:
       - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
 
+      - name: Verify abnormal duration raw identifier query through HTTP and PostgreSQL
+        run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-abnormal-wire.integration.test.ts --maxWorkers=1
+
       - name: Verify monitor continuous aggregate freshness after late writes and historical corrections
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
 
@@ -346,7 +349,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: monitor-sql-decimal-${{ github.run_id }}
-          path: artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+          path: |
+            artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+            artifacts/refactor-audit/monitor-analytics-226-identity-failure.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -405,6 +410,12 @@ jobs:
 
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
+
+      - name: Run ASIN export from HTTP through PostgreSQL, Redis and the compiled BullMQ Worker
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-export.integration.test.ts
+
+      - name: Verify ASIN export group status and keyset queries against PostgreSQL
+        run: pnpm --filter @asin-monitor/db exec vitest run test/asin-export-query.integration.test.ts
 
       - name: Compare competitor imports with Legacy MySQL and verify shared compiled import Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-import.integration.test.ts

@@ -25,7 +25,10 @@ export interface SpApiConfigurationRepositoryPort {
   transaction<T>(
     operation: (unit: SpApiConfigurationUnit) => Promise<T>,
   ): Promise<T>;
-  readConfiguration(signal?: AbortSignal): Promise<SpApiConfigurationRow[]>;
+  readConfiguration(
+    signal?: AbortSignal,
+    onActualWork?: (work: Promise<unknown>) => void,
+  ): Promise<SpApiConfigurationRow[]>;
 }
 export class SpApiConfigurationRepositoryError extends Error {
   constructor(
@@ -175,22 +178,29 @@ export class PgSpApiConfigurationRepository
       }),
     );
   }
-  readConfiguration(signal?: AbortSignal) {
+  readConfiguration(
+    signal?: AbortSignal,
+    onActualWork?: (work: Promise<unknown>) => void,
+  ) {
     const ensureActive = () => {
       if (signal?.aborted)
         throw new SpApiConfigurationRepositoryError('cancelled');
     };
     return this.run(async () => {
       ensureActive();
-      return withAuthDatabaseDeadline(this.pool, async (db, ensureOpen) => {
-        ensureActive();
-        const rows = await new DrizzleSpApiConfigurationUnit(
-          db,
-          ensureOpen,
-        ).listConfiguration();
-        ensureActive();
-        return rows;
-      });
+      return withAuthDatabaseDeadline(
+        this.pool,
+        async (db, ensureOpen) => {
+          ensureActive();
+          const rows = await new DrizzleSpApiConfigurationUnit(
+            db,
+            ensureOpen,
+          ).listConfiguration();
+          ensureActive();
+          return rows;
+        },
+        onActualWork,
+      );
     });
   }
 }

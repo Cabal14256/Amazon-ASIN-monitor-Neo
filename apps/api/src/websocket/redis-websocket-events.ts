@@ -1,9 +1,15 @@
 import type { Env } from '@asin-monitor/config';
-import { RedisTaskRepository, taskNotificationChannel } from '@asin-monitor/db';
+import {
+  RedisMonitorEventRepository,
+  RedisTaskRepository,
+  monitorEventChannel,
+  taskNotificationChannel,
+} from '@asin-monitor/db';
 import { Inject, Injectable, type OnModuleDestroy } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { MonitorNotificationConsumer } from './monitor-notification-consumer';
 import { TaskNotificationConsumer } from './task-notification-consumer';
 import {
   LocalWebSocketEventBus,
@@ -19,6 +25,7 @@ export class RedisWebSocketEventBus
   private subscriber?: Redis;
   private reader?: Redis;
   private consumer?: TaskNotificationConsumer;
+  private monitorConsumer?: MonitorNotificationConsumer;
   private closed = false;
   private lastWarning = -Infinity;
   private heartbeat?: ReturnType<typeof setInterval>;
@@ -82,6 +89,22 @@ export class RedisWebSocketEventBus
       this.warn,
     ));
     const channel = taskNotificationChannel(this.env.BULL_PREFIX);
+    const monitorChannel = monitorEventChannel(this.env.BULL_PREFIX);
+    const monitorStore = new RedisMonitorEventRepository(reader, this.env);
+    const monitorConsumer = (this.monitorConsumer =
+      new MonitorNotificationConsumer(
+        async (notice) => {
+          try {
+            return await monitorStore.read(notice);
+          } catch (error) {
+            if (!this.closed && reader.status === 'ready')
+              reader.disconnect(true);
+            throw error;
+          }
+        },
+        (event) => super.publish(event),
+        this.warn,
+      ));
     for (const connection of [reader, subscriber]) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const clearReadyDeadline = () => {
@@ -110,12 +133,13 @@ export class RedisWebSocketEventBus
       connection.on('close', () => {
         clearReadyDeadline();
         consumer.disconnected();
+        monitorConsumer.disconnected();
       });
     }
     subscriber.on('ready', () => {
       if (this.closed) return;
       void subscriber
-        .subscribe(channel)
+        .subscribe(channel, monitorChannel)
         .then(() => {
           if (!this.closed)
             this.logger.info(
@@ -130,6 +154,8 @@ export class RedisWebSocketEventBus
     });
     subscriber.on('message', (received: string, raw: string) => {
       if (!this.closed && received === channel) consumer.receive(raw);
+      if (!this.closed && received === monitorChannel)
+        monitorConsumer.receive(raw);
     });
     this.heartbeat = setInterval(() => {
       for (const connection of [reader, subscriber]) {
@@ -154,6 +180,7 @@ export class RedisWebSocketEventBus
     for (const timer of this.readyTimers) clearTimeout(timer);
     this.readyTimers.clear();
     this.consumer?.stop();
+    this.monitorConsumer?.stop();
     this.subscriber?.disconnect(false);
     this.reader?.disconnect(false);
   }

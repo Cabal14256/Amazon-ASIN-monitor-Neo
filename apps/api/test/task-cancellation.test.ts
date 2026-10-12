@@ -4,8 +4,16 @@ import {
   transitionTask,
   type TaskState,
 } from '@asin-monitor/db';
+import { ExportArtifactStore } from '@asin-monitor/export';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { finished } from 'node:stream/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppLogger } from '../src/logger/app-logger.service';
+import { ApplicationExportArtifacts } from '../src/tasks/export-storage.module';
 import {
   CANCELLABLE_TASK_TYPES,
   type CancellationOutcome,
@@ -30,9 +38,15 @@ describe('owned task cancellation HTTP', () => {
   let task: TaskState | null,
     outcome: CancellationOutcome,
     port: TaskCancellationPort;
-  let runtime: { openCancellation: ReturnType<typeof vi.fn> },
+  let runtime: {
+      openCancellation: ReturnType<typeof vi.fn>;
+      discardExport: ReturnType<typeof vi.fn>;
+    },
     ws: { sendTaskCancelled: ReturnType<typeof vi.fn> };
   let headers: { authorization: string };
+  let artifacts: { discardFinal: ReturnType<typeof vi.fn> };
+  let directory: string | undefined;
+  let fileRuntime: TaskQueryRuntime;
   beforeEach(async () => {
     auth = taskAuthFixture();
     task = taskFixture();
@@ -46,7 +60,13 @@ describe('owned task cancellation HTTP', () => {
       },
       cancelJob: vi.fn(async () => outcome),
     };
-    runtime = { openCancellation: vi.fn(() => port) };
+    runtime = {
+      openCancellation: vi.fn(() => port),
+      discardExport: vi.fn((id, deadline, operation) =>
+        fileRuntime.discardExport(id, deadline, operation),
+      ),
+    };
+    artifacts = { discardFinal: vi.fn(async () => undefined) };
     ws = { sendTaskCancelled: vi.fn() };
     app = await sessionApp(
       auth.repository,
@@ -56,8 +76,14 @@ describe('owned task cancellation HTTP', () => {
           .overrideProvider(TaskQueryRuntime)
           .useValue(runtime)
           .overrideProvider(WebSocketService)
-          .useValue(ws),
+          .useValue(ws)
+          .overrideProvider(ApplicationExportArtifacts)
+          .useValue(artifacts),
       [TaskQueryModule],
+    );
+    fileRuntime = new TaskQueryRuntime(
+      app.env,
+      app.logger as unknown as AppLogger,
     );
     headers = {
       authorization: `Bearer ${jwt.sign(
@@ -68,7 +94,10 @@ describe('owned task cancellation HTTP', () => {
     };
   });
   afterEach(async () => {
+    await fileRuntime.onModuleDestroy();
     await app.app.close();
+    if (directory) await rm(directory, { recursive: true, force: true });
+    directory = undefined;
     vi.restoreAllMocks();
   });
   const cancel = (requestHeaders = headers, id = 'task-95') =>
@@ -77,6 +106,149 @@ describe('owned task cancellation HTTP', () => {
       url: `/api/v1/tasks/${id}/cancel`,
       headers: requestHeaders,
     });
+  async function priorPublishedArtifact() {
+    directory = await mkdtemp(join(tmpdir(), 'neo-cancel-export-'));
+    const storage = new ExportArtifactStore(directory);
+    task = taskFixture({ taskId: randomUUID(), status: 'processing' });
+    artifacts.discardFinal.mockImplementation((id: string) =>
+      storage.discardFinal(id),
+    );
+    const publish = async (id: string) => {
+      const temporary = await storage.temporary(id);
+      temporary.stream.end(Buffer.from([0x50, 0x4b, 0x03, 0x04, 1]));
+      await finished(temporary.stream);
+      const artifact = await storage.publish(
+        id,
+        temporary.path,
+        new AbortController().signal,
+      );
+      await storage.discard(temporary.path);
+      return artifact;
+    };
+    const artifact = await publish(task.taskId);
+    const neighbour = randomUUID();
+    await publish(neighbour);
+    // The previous attempt published its hard link but could not acknowledge
+    // completion in the registry; a delayed retry still owns this file.
+    vi.mocked(port.store.mutate).mockRejectedValueOnce(
+      new Error('private-completion-ack-fixture'),
+    );
+    await expect(
+      port.store.mutate(task.taskId, {
+        kind: 'completed',
+        result: { artifact },
+      }),
+    ).rejects.toThrow('private-completion-ack-fixture');
+    expect(await storage.read(task.taskId)).not.toBeNull();
+    return { storage, neighbour, id: task.taskId };
+  }
+  it.each(['removed', 'absent'] as const)(
+    'deletes a prior published ASIN artifact after %s cancellation, preserving its neighbour',
+    async (state) => {
+      const { storage, neighbour, id } = await priorPublishedArtifact();
+      outcome = state;
+      const response = await cancel(headers, id);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.status).toBe('cancelled');
+      expect(await storage.read(id)).toBeNull();
+      expect(await storage.read(neighbour)).not.toBeNull();
+      expect(artifacts.discardFinal).toHaveBeenCalledExactlyOnceWith(id);
+    },
+  );
+  it('leaves a running export artifact for the Worker to finalize cancellation', async () => {
+    const { storage, id } = await priorPublishedArtifact();
+    outcome = 'running';
+    expect((await cancel(headers, id)).json().data.status).toBe('cancelling');
+    expect(await storage.read(id)).not.toBeNull();
+    expect(artifacts.discardFinal).not.toHaveBeenCalled();
+  });
+  it('does not apply ASIN artifact cleanup to another export family', async () => {
+    const { storage, id } = await priorPublishedArtifact();
+    task!.taskSubType = 'monitor-history';
+    expect((await cancel(headers, id)).json().data.status).toBe('cancelled');
+    expect(await storage.read(id)).not.toBeNull();
+    expect(artifacts.discardFinal).not.toHaveBeenCalled();
+  });
+  it.each(['completed', 'failed', 'foreign', 'replaced', 'subtype'] as const)(
+    'preserves the prior artifact when %s wins the cancellation boundary',
+    async (state) => {
+      const { storage, id } = await priorPublishedArtifact();
+      if (state === 'foreign') task!.userId = 'another-user';
+      else
+        vi.mocked(port.store.mutate).mockResolvedValue({
+          ...task!,
+          status:
+            state === 'completed' || state === 'failed' ? state : 'cancelled',
+          ...(state === 'replaced'
+            ? { createdAt: '2026-09-02T00:00:00.000Z' }
+            : {}),
+          ...(state === 'subtype' ? { taskSubType: 'monitor-history' } : {}),
+        });
+      expect((await cancel(headers, id)).statusCode).toBe(
+        state === 'foreign'
+          ? 403
+          : state === 'replaced' || state === 'subtype'
+          ? 409
+          : 400,
+      );
+      expect(await storage.read(id)).not.toBeNull();
+      expect(artifacts.discardFinal).not.toHaveBeenCalled();
+    },
+  );
+  it('logs a fixed cleanup warning without reversing an acknowledged cancellation', async () => {
+    const { storage, id } = await priorPublishedArtifact();
+    artifacts.discardFinal.mockRejectedValue(
+      new Error('private-delete-fixture'),
+    );
+    const response = await cancel(headers, id);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.status).toBe('cancelled');
+    expect(await storage.read(id)).not.toBeNull();
+    expect(app.logger.warn).toHaveBeenCalledWith(
+      '已取消导出文件清理未完成',
+      'TaskCancellationService',
+      { reason: 'cancelled_export_cleanup_failed' },
+    );
+    expect(JSON.stringify(app.logger.warn.mock.calls)).not.toContain(
+      'private-delete-fixture',
+    );
+  });
+  it('bounds cleanup by the existing deadline while permitting a safe late deletion', async () => {
+    const { storage, neighbour, id } = await priorPublishedArtifact();
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const mutation = vi.mocked(port.store.mutate).getMockImplementation()!;
+    vi.mocked(port.store.mutate).mockImplementation(async (...args) => {
+      const next = await mutation(...args);
+      clock = 2990;
+      return next;
+    });
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    artifacts.discardFinal.mockImplementation(async (value: string) => {
+      await wait;
+      await storage.discardFinal(value);
+    });
+    try {
+      const before = Date.now();
+      const response = await cancel(headers, id);
+      expect(Date.now() - before).toBeLessThan(1000);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.status).toBe('cancelled');
+      expect(app.logger.warn).toHaveBeenCalledWith(
+        '已取消导出文件清理未完成',
+        'TaskCancellationService',
+        { reason: 'cancelled_export_cleanup_failed' },
+      );
+      expect(await storage.read(id)).not.toBeNull();
+    } finally {
+      release();
+    }
+    await vi.waitFor(async () => expect(await storage.read(id)).toBeNull());
+    expect(await storage.read(neighbour)).not.toBeNull();
+  });
   it('requires login before opening the runtime', async () => {
     expect((await cancel({} as never)).statusCode).toBe(401);
     expect(runtime.openCancellation).not.toHaveBeenCalled();

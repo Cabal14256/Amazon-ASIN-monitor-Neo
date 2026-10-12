@@ -222,8 +222,12 @@ function fixture() {
   };
   const assertJobLock = vi.fn(async () => {});
   const metrics = { recordGroup: vi.fn(), recordRun: vi.fn() };
+  const publishMonitor = vi.fn(
+    async (_task: TaskState, _sequence: number, _message: unknown) => {},
+  );
   const processor = createCompetitorMonitorProcessor({
     metrics,
+    ...{ monitorEvents: { publish: publishMonitor } },
     pipeline: { checkGroup },
     repository: {
       groups,
@@ -267,6 +271,7 @@ function fixture() {
     claimNotification,
     completeNotification,
     assertJobLock,
+    publishMonitor,
     cancel: () => {
       state = transitionTask(state, { kind: 'cancel-request' }, new Date());
     },
@@ -338,11 +343,83 @@ describe('competitor manual monitor consumer and real notification service', () 
         totalBroken: 1,
       });
       expect(f.state.status).toBe('completed');
+      expect(f.publishMonitor).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+        7000,
+        expect.objectContaining({ type: 'monitor_complete', success: true }),
+      );
     } finally {
       f.notifications.close();
     }
   });
 
+  it('publishes independent Legacy country fields even with country notifications disabled', async () => {
+    const f = fixture();
+    f.result.groupSnapshot.feishuNotifyEnabled = 0;
+    f.current.groupNotify = false;
+    await f.processor(f.job, 'fixture-lock');
+    expect(f.publishMonitor.mock.calls).toHaveLength(3);
+    expect(f.publishMonitor.mock.calls[0]).toEqual([
+      expect.objectContaining({ status: 'processing' }),
+      0,
+      expect.objectContaining({
+        type: 'monitor_progress',
+        status: 'started',
+        isCompetitor: true,
+        batchInfo: null,
+      }),
+    ]);
+    expect(f.publishMonitor.mock.calls[1]).toEqual([
+      expect.objectContaining({ status: 'processing' }),
+      1,
+      expect.objectContaining({
+        type: 'monitor_progress',
+        country: 'US',
+        current: 1,
+        total: 1,
+        progress: 100,
+        isCompetitor: true,
+      }),
+    ]);
+    expect(f.publishMonitor.mock.calls[2]).toEqual([
+      expect.objectContaining({ status: 'completed' }),
+      7000,
+      expect.objectContaining({
+        type: 'monitor_complete',
+        isCompetitor: true,
+        countryResults: {
+          US: expect.objectContaining({
+            country: 'US',
+            totalGroups: 1,
+            brokenGroups: 1,
+            brokenGroupNames: ['Canonical group'],
+            brokenGroupDetails: [
+              { variantGroupId: f.group.groupId, groupName: 'Canonical group' },
+            ],
+            brokenASINs: [],
+            checkedGroupKeys: [`group:${f.group.groupId}`],
+            asinClassifications: expect.any(Object),
+          }),
+        },
+      }),
+    ]);
+  });
+  it('does not broadcast a successful completion after cancellation or partial failure', async () => {
+    const cancelled = fixture();
+    cancelled.cancel();
+    await cancelled.processor(cancelled.job, 'fixture-lock');
+    expect(cancelled.publishMonitor).not.toHaveBeenCalled();
+    const partial = fixture();
+    partial.checkGroup.mockRejectedValueOnce(new Error('private failure'));
+    await expect(
+      partial.processor(partial.job, 'fixture-lock'),
+    ).rejects.toThrow('竞品监控任务未完成');
+    expect(
+      partial.publishMonitor.mock.calls.some(
+        ([, , m]) => (m as { type: string }).type === 'monitor_complete',
+      ),
+    ).toBe(false);
+  });
   it.each([
     { localCountry: 'US', localBroken: true },
     { localCountry: 'us  ', localBroken: true },
@@ -645,6 +722,14 @@ describe('competitor manual monitor consumer and real notification service', () 
     expect(f.checkGroup).toHaveBeenCalledOnce();
     expect(f.claimNotification).not.toHaveBeenCalled();
     expect(f.state.status).toBe('cancelled');
+    expect(f.metrics.recordGroup).toHaveBeenCalledOnce();
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+    expect(
+      f.publishMonitor.mock.calls.some(
+        ([, , message]) =>
+          (message as { type: string }).type === 'monitor_complete',
+      ),
+    ).toBe(false);
     f.notifications.close();
   });
   it('separates competitor group operation digests across task owner/incarnation/input', () => {

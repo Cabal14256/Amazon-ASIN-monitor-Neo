@@ -8,6 +8,7 @@ import {
   isTerminalTaskStatus,
   VariantCheckError,
   type PgPrimaryMonitorRepository,
+  type RedisMonitorEventRepository,
   type RedisTaskRepository,
   type TaskState,
 } from '@asin-monitor/db';
@@ -20,12 +21,16 @@ import {
   type FeishuNotifications,
   type NotificationData,
 } from '@asin-monitor/notify';
-import type { VariantCheckPipeline } from '@asin-monitor/variant-check';
+import type {
+  VariantCheckPipeline,
+  VariantGroupAdmission,
+} from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { logger } from './logger';
 import { observeMonitorMetrics, type MonitorMetrics } from './metrics';
+import { MonitorRunEvents } from './monitor-live-events';
 
 export function monitorGroupOperation(job: PrimaryMonitorJob, groupId: string) {
   const digest = createHash('sha256')
@@ -48,7 +53,9 @@ export function monitorGroupOperation(job: PrimaryMonitorJob, groupId: string) {
 }
 
 interface MonitorProcessorOptions {
+  monitorEvents?: Pick<RedisMonitorEventRepository, 'publish'>;
   pipeline: Pick<VariantCheckPipeline, 'checkGroup'>;
+  groupAdmission?: VariantGroupAdmission;
   repository: Pick<
     PgPrimaryMonitorRepository,
     'groups' | 'claimNotification' | 'completeNotification'
@@ -245,6 +252,7 @@ export function createPrimaryMonitorProcessor(
     let committed = false;
     let finalResult: Record<string, unknown> | undefined;
     let cancellationAccepted = false;
+    const events = new MonitorRunEvents(data, options.monitorEvents);
     try {
       await check();
       await options.store.mutate(
@@ -253,17 +261,29 @@ export function createPrimaryMonitorProcessor(
         identity,
       );
       const groups = await options.repository.groups(data);
+      await events.started(await check());
       const countryResults = Object.fromEntries(
         data.countries.map((country) => [country, emptyCountry()]),
       ) as Record<string, CountrySummary>;
       let completed = 0;
       let failedGroups = 0;
       for (const country of data.countries) {
-        for (const group of groups.filter((item) => item.country === country)) {
+        const countryGroups = groups.filter((item) => item.country === country);
+        let current = 0;
+        for (const group of countryGroups) {
           await check();
+          current++;
+          if (current % 10 === 0 || current === countryGroups.length)
+            await events.progress(
+              await check(),
+              country,
+              current,
+              countryGroups.length,
+            );
           try {
             const groupStarted = process.hrtime.bigint();
             const result = await options.pipeline.checkGroup(group.groupId, {
+              groupAdmission: options.groupAdmission,
               signal: controller.signal,
               operation: monitorGroupOperation(data, group.groupId),
               validateResult: (value) => {
@@ -291,6 +311,7 @@ export function createPrimaryMonitorProcessor(
             );
             committed = true;
             addGroup(countryResults[country], result);
+            events.addGroup(country, result);
             // Stop before the next history commit when a country can no
             // longer fit the exact untruncated notification contract.
             validateNotificationSummary(countryResults[country], country);
@@ -417,6 +438,7 @@ export function createPrimaryMonitorProcessor(
       }
       if (state?.status !== 'completed')
         throw new Error('MONITOR_FINAL_STATUS_UNCONFIRMED');
+      await events.complete(state);
       logger.info('主营监控任务完成', { totalChecked, totalBroken });
       return result;
     } catch (error) {
