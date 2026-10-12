@@ -221,10 +221,12 @@ function fixture() {
     ),
   };
   const assertJobLock = vi.fn(async () => {});
+  const metrics = { recordGroup: vi.fn(), recordRun: vi.fn() };
   const publishMonitor = vi.fn(
     async (_task: TaskState, _sequence: number, _message: unknown) => {},
   );
   const processor = createCompetitorMonitorProcessor({
+    metrics,
     ...{ monitorEvents: { publish: publishMonitor } },
     pipeline: { checkGroup },
     repository: {
@@ -255,6 +257,7 @@ function fixture() {
     group,
     result,
     processor,
+    metrics,
     groups,
     checkGroup,
     authorization,
@@ -284,6 +287,72 @@ function fixture() {
   };
 }
 describe('competitor manual monitor consumer and real notification service', () => {
+  it('records normal broken groups and valid finally metrics, including completed replay attempts', async () => {
+    const f = fixture();
+    try {
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+        totalChecked: 1,
+        totalBroken: 1,
+      });
+      expect(f.metrics.recordGroup).toHaveBeenCalledWith({
+        region: 'US',
+        isBroken: true,
+        durationSec: expect.any(Number),
+      });
+      expect(f.metrics.recordRun).toHaveBeenCalledWith({
+        type: 'competitor_monitor_task',
+        durationSec: expect.any(Number),
+      });
+      await f.processor(f.job, 'fixture-lock');
+      expect(f.metrics.recordGroup).toHaveBeenCalledOnce();
+      expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+    } finally {
+      f.notifications.close();
+    }
+  });
+  it('counts failed and cancelled attempts without inventing normal group results', async () => {
+    const f = fixture();
+    try {
+      f.checkGroup.mockRejectedValueOnce(new Error('dependency unavailable'));
+      await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+      expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+      f.cancel();
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toEqual({
+        cancelled: true,
+      });
+      expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+      expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+      f.job.name = 'substituted';
+      await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+      expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+    } finally {
+      f.notifications.close();
+    }
+  });
+  it('keeps completed business results when both metric observers throw', async () => {
+    const f = fixture();
+    try {
+      f.metrics.recordGroup.mockImplementation(() => {
+        throw new Error('observer failed');
+      });
+      f.metrics.recordRun.mockImplementation(() => {
+        throw new Error('observer failed');
+      });
+      await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+        totalChecked: 1,
+        totalBroken: 1,
+      });
+      expect(f.state.status).toBe('completed');
+      expect(f.publishMonitor).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+        7000,
+        expect.objectContaining({ type: 'monitor_complete', success: true }),
+      );
+    } finally {
+      f.notifications.close();
+    }
+  });
+
   it('publishes independent Legacy country fields even with country notifications disabled', async () => {
     const f = fixture();
     f.result.groupSnapshot.feishuNotifyEnabled = 0;
@@ -653,6 +722,14 @@ describe('competitor manual monitor consumer and real notification service', () 
     expect(f.checkGroup).toHaveBeenCalledOnce();
     expect(f.claimNotification).not.toHaveBeenCalled();
     expect(f.state.status).toBe('cancelled');
+    expect(f.metrics.recordGroup).toHaveBeenCalledOnce();
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+    expect(
+      f.publishMonitor.mock.calls.some(
+        ([, , message]) =>
+          (message as { type: string }).type === 'monitor_complete',
+      ),
+    ).toBe(false);
     f.notifications.close();
   });
   it('separates competitor group operation digests across task owner/incarnation/input', () => {
