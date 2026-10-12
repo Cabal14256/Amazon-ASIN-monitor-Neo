@@ -19,15 +19,25 @@ export class AuthQueryTimeoutError extends Error {
 export async function withAuthDatabaseDeadline<T>(
   pool: Pool,
   operation: (db: Db, ensureOpen: () => void) => Promise<T>,
+  onActualWork?: (work: Promise<unknown>) => void,
   onPhysicalSettled?: (outcome: CatalogPhysicalOutcome) => Promise<void>,
 ): Promise<T> {
   // 获取连接由应用池的 connectionTimeoutMillis 约束。
+  let completeActual!: () => void;
+  const actualDone = new Promise<void>((resolve) => {
+    completeActual = resolve;
+  });
+  onActualWork?.(actualDone);
   let client: PoolClient;
   try {
     client = await pool.connect();
   } catch (error) {
     // No business callback or SQL was started on this failed acquisition.
-    await onPhysicalSettled?.('rolled-back');
+    try {
+      await onPhysicalSettled?.('rolled-back');
+    } finally {
+      completeActual();
+    }
     throw error;
   }
   let destroyed = false;
@@ -91,7 +101,7 @@ export async function withAuthDatabaseDeadline<T>(
           // This belongs to the ACTUAL work promise, never Promise.race/finally.
           await onPhysicalSettled?.(outcome);
         }
-      })(),
+      })().finally(completeActual),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           // 销毁独占连接以中止未决 I/O，而不是仅丢弃 Promise 的结果。

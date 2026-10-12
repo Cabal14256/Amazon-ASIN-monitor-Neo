@@ -69,6 +69,7 @@ export class PgCompetitorTransactions {
     readOnly: boolean,
     operation: (context: Context) => Promise<T>,
     signal?: AbortSignal,
+    onActualWork?: (work: Promise<unknown>) => void,
   ): Promise<T> {
     if (this.closed) throw new CompetitorTransactionError('closed');
     if (signal?.aborted) throw new CompetitorTransactionError('cancelled');
@@ -250,6 +251,7 @@ export class PgCompetitorTransactions {
         }
       }
     })();
+    onActualWork?.(work);
     try {
       return await Promise.race([work, interrupted]);
     } finally {

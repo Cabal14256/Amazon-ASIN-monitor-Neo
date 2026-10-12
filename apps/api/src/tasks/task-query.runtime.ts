@@ -1,4 +1,5 @@
 import {
+  getExportStorageDirectory,
   getNeoQueuePrefix,
   getPhysicalQueueName,
   getQueuePolicy,
@@ -6,8 +7,10 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  asinExportJobDataSchema,
   competitorMonitorJobSchema,
   primaryMonitorJobSchema,
+  type AsinExportJobData,
   type CompetitorMonitorJob,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
@@ -20,6 +23,10 @@ import {
   type TaskRedisPort,
   type TaskState,
 } from '@asin-monitor/db';
+import {
+  ExportArtifactStore,
+  type ExportRejectionIdentity,
+} from '@asin-monitor/export';
 import { isImportTaskData, type ImportTaskData } from '@asin-monitor/import';
 import {
   parseVariantCheckJob,
@@ -48,9 +55,11 @@ export const TASK_QUERY_QUEUES = [
   'variant-check',
 ] as const satisfies readonly QueueName[];
 const MONITOR_QUEUE_MAX_IN_FLIGHT = 50;
+class TaskQueryFileError extends Error {}
 export interface TaskQueryPort {
   store: Pick<RedisTaskRepository, 'read' | 'listUser' | 'mutate'>;
   findJob(taskId: string, taskType?: string): Promise<QueueTaskSnapshot | null>;
+  reconcileRejectedExport?(task: TaskState): Promise<TaskState | null>;
 }
 export interface TaskCancellationPort {
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>;
@@ -67,6 +76,19 @@ export interface ImportProducerPort {
 export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
+}
+export interface ExportProducerPort {
+  store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
+  enqueue(data: AsinExportJobData): Promise<void>;
+  recordRejected?(
+    identity: ExportRejectionIdentity,
+    deadline?: number,
+  ): Promise<void>;
+}
+export class ExportEnqueueRejected extends Error {
+  constructor(readonly reason: 'unavailable' | 'invalid') {
+    super(`EXPORT_ENQUEUE_${reason.toUpperCase().replace('-', '_')}`);
+  }
 }
 export interface MonitorProducerPort {
   store: Pick<RedisTaskRepository, 'create' | 'mutate'>;
@@ -87,9 +109,10 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       : {};
   const status =
     state === 'completed' &&
-    ['variant-check', 'batch-check', 'monitor', 'competitor-monitor'].includes(
+    (['variant-check', 'batch-check', 'monitor', 'competitor-monitor'].includes(
       type,
-    ) &&
+    ) ||
+      (type === 'export' && job.name === 'asin')) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
@@ -105,6 +128,11 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);
+  }
+  if (type === 'export' && job.name === 'asin') {
+    const data = asinExportJobDataSchema.parse(job.data);
+    if (data.taskId !== job.id || data.taskType !== type)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
   }
   if (type === 'monitor') {
     const parsed = primaryMonitorJobSchema.safeParse(job.data);
@@ -161,10 +189,12 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
 /** Dedicated request connection: no Worker blocking/retry policy or Legacy Bull4 keys. */
 @Injectable()
 export class TaskQueryRuntime implements OnModuleDestroy {
+  private readonly exportArtifacts: ExportArtifactStore;
   private readonly redis: Redis;
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private exportQueue?: Queue;
   private monitorQueue?: Queue;
   private competitorMonitorQueue?: Queue;
   private readonly checkQueues = new Map<
@@ -174,10 +204,14 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private connecting?: Promise<void>;
   private closed = false;
   private lastNotificationWarning = -Infinity;
+  private readonly exportFileOperations = new Map<string, Promise<unknown>>();
   constructor(
     @Inject(ENV) private readonly env: Env,
     @Inject(AppLogger) private readonly logger: AppLogger,
   ) {
+    this.exportArtifacts = new ExportArtifactStore(
+      getExportStorageDirectory(env),
+    );
     this.redis = new Redis(env.REDIS_URL, {
       lazyConnect: true,
       connectTimeout: 1000,
@@ -236,13 +270,19 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         command(() => cancelQueuedTask(this.redis, this.env, task)),
     };
   }
-  private createStore(ensureOpen: () => void): RedisTaskRepository {
+  private createStore(
+    ensureOpen: () => void,
+    beforeEval?: () => void,
+  ): RedisTaskRepository {
     const command = this.command(ensureOpen);
     // This is the exact four-command subset used by RedisTaskRepository, never an unrestricted client.
     const redis: TaskRedisPort = {
       get: (key: string) => command(() => this.redis.get(key)),
       eval: (script: string, keyCount: number, ...args: (string | number)[]) =>
-        command(() => this.redis.eval(script, keyCount, ...args)),
+        command(() => {
+          beforeEval?.();
+          return this.redis.eval(script, keyCount, ...args);
+        }),
       zrevrange: (key: string, start: number, end: number) =>
         command(() => this.redis.zrevrange(key, start, end)),
       mget: (...keys: string[]) => command(() => this.redis.mget(...keys)),
@@ -292,10 +332,109 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         }),
     };
   }
-  open(ensureOpen: () => void): TaskQueryPort {
+  private async exportFile<T>(
+    key: string,
+    operation: () => Promise<T>,
+    deadline: number,
+    retainAfterDeadline = false,
+  ): Promise<T> {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0 && !retainAfterDeadline)
+      throw new TaskQueryFileError('TASK_QUERY_FILE_DEADLINE');
+    let pending = this.exportFileOperations.get(key) as Promise<T> | undefined;
+    if (!pending) {
+      if (this.exportFileOperations.size >= 8)
+        throw new TaskQueryFileError('TASK_QUERY_FILE_CAPACITY');
+      // Request expiry cannot cancel lstat/open/unlink in the kernel. Retain
+      // their budget until actual settlement, and share an in-flight same-key
+      // read so repeated requests cannot accumulate orphaned filesystem work.
+      const actual = Promise.resolve().then(() => operation());
+      pending = actual.finally(() => {
+        if (this.exportFileOperations.get(key) === pending)
+          this.exportFileOperations.delete(key);
+      });
+      this.exportFileOperations.set(key, pending);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new TaskQueryFileError('TASK_QUERY_FILE_DEADLINE')),
+            Math.max(0, remaining),
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  /** Cancellation shares query/journal capacity until the native unlink ends. */
+  async discardExport(
+    taskId: string,
+    deadline: number,
+    operation: () => Promise<void> = () =>
+      this.exportArtifacts.discardFinal(taskId),
+  ): Promise<void> {
+    await this.exportFile(`discard-final:${taskId}`, operation, deadline);
+  }
+  open(
+    ensureOpen: () => void,
+    deadline = performance.now() + 3000,
+  ): TaskQueryPort {
     const command = this.command(ensureOpen);
     return {
       store: this.createStore(ensureOpen),
+      reconcileRejectedExport: async (task) => {
+        if (
+          task.taskType !== 'export' ||
+          task.taskSubType !== 'asin' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+            task.taskId,
+          )
+        )
+          return null;
+        ensureOpen();
+        let proof: ExportRejectionIdentity | null;
+        try {
+          proof = await this.exportFile(
+            `read:${task.taskId}`,
+            () => this.exportArtifacts.readRejectedSubmission(task.taskId),
+            deadline,
+          );
+        } catch (error) {
+          if (error instanceof TaskQueryFileError) throw error;
+          this.logger.warn('导出拒绝回执读取暂不可用', 'TaskQueryRuntime', {
+            reason: 'export_rejection_read_failed',
+          });
+          return null;
+        }
+        ensureOpen();
+        if (
+          !proof ||
+          Object.entries(proof).some(
+            ([key, value]) => task[key as keyof TaskState] !== value,
+          )
+        )
+          return null;
+        const next = await this.createStore(ensureOpen).mutate(
+          task.taskId,
+          { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+          proof,
+        );
+        if (next && ['failed', 'cancelled', 'completed'].includes(next.status))
+          await this.exportFile(
+            `discard-rejection:${task.taskId}`,
+            () => this.exportArtifacts.discardRejectedSubmission(task.taskId),
+            deadline,
+          ).catch(() =>
+            this.logger.warn('导出拒绝回执清理暂不可用', 'TaskQueryRuntime', {
+              reason: 'export_rejection_cleanup_failed',
+            }),
+          );
+        return next;
+      },
       findJob: async (id, type) => {
         const names = TASK_QUERY_QUEUES.filter(
           (name) => type === undefined || name === type,
@@ -418,6 +557,64 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openExport(
+    ensureOpen: () => void,
+    onCreateWriteStarted?: () => void,
+  ): ExportProducerPort {
+    return {
+      store: this.createStore(ensureOpen, onCreateWriteStarted),
+      recordRejected: (identity, deadline = performance.now() + 3000) =>
+        this.exportFile(
+          `reject:${identity.taskId}:${identity.createdAt}`,
+          () => this.exportArtifacts.recordRejectedSubmission(identity),
+          deadline,
+          // The known pre-enqueue rejection must survive a Redis deadline.
+          // Start only within the shared budget; expiry ends the caller's wait,
+          // while the same identity's one native journal operation is retained.
+          true,
+        ),
+      enqueue: async (input) => {
+        const parsed = asinExportJobDataSchema.safeParse(input);
+        if (!parsed.success) throw new ExportEnqueueRejected('invalid');
+        let queue: Queue;
+        try {
+          ensureOpen();
+          await this.ready();
+          ensureOpen();
+          queue = this.exportQueue ??= new Queue(
+            getPhysicalQueueName('export'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('export', this.env)
+                .defaultJobOptions,
+            },
+          );
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('导出队列连接异常', 'TaskQueryRuntime', {
+                reason: 'export_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.exportQueue === queue) this.exportQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+        } catch (error) {
+          if (error instanceof ExportEnqueueRejected) throw error;
+          throw new ExportEnqueueRejected('unavailable');
+        }
+        // An error from add may follow a committed Redis write. Keep its task
+        // ID for reconciliation instead of claiming the request was rejected.
+        await queue.add('asin', parsed.data, { jobId: parsed.data.taskId });
+        ensureOpen();
+      },
+    };
+  }
   openMonitor(ensureOpen: () => void): MonitorProducerPort {
     return this.openMonitoring(ensureOpen, false);
   }
@@ -523,6 +720,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.exportQueue ? [this.exportQueue] : []),
         ...(this.monitorQueue ? [this.monitorQueue] : []),
         ...(this.competitorMonitorQueue ? [this.competitorMonitorQueue] : []),
         ...this.checkQueues.values(),

@@ -49,6 +49,7 @@ export * from './repositories/feishu-configuration-repository';
 export * from './repositories/feishu-notification-config-reader';
 export * from './repositories/legacy-mysql-auth-repository';
 export * from './repositories/monitor-analytics-query-repository';
+export * from './repositories/monitor-events';
 export * from './repositories/monitor-history-query-repository';
 export * from './repositories/monitor-interval-maintenance-repository';
 export * from './repositories/monitor-status-interval-query-repository';

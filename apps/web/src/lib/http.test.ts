@@ -72,6 +72,32 @@ describe('fetch and download transport boundary', () => {
     expect(f.unauthorized).toHaveBeenCalledOnce();
   });
 
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 30 * 60_000 + 1])(
+    'rejects invalid download deadline %s before fetching credentials',
+    async (timeoutMs) => {
+      const f = setup();
+      await expect(
+        f.client.download('/v1/tasks/job-1/download', undefined, { timeoutMs }),
+      ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+      expect(f.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains the 256 MiB download bound with the longer export deadline', async () => {
+    const f = setup();
+    f.fetcher.mockResolvedValueOnce(
+      new Response('too large', {
+        headers: { 'content-length': String(256 * 1024 * 1024 + 1) },
+      }),
+    );
+    await expect(
+      f.client.download('/v1/tasks/job-1/download', undefined, {
+        timeoutMs: 30 * 60_000,
+      }),
+    ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  });
+
   it('shares request/download normalization and merges existing query before fragments', async () => {
     const f = setup('https://api.test/gateway/api/v1/');
     const expected =
@@ -348,6 +374,59 @@ describe('fetch and download transport boundary', () => {
       kind: 'CLOSED',
     });
   });
+  it.each(['cancel', 'timeout'] as const)(
+    'retains opt-in settlement ownership after %s until a non-cooperating fetch finishes',
+    async (kind) => {
+      vi.useFakeTimers();
+      const f = setup();
+      const response = deferred<Response>();
+      const bodyCancelled = deferred<void>();
+      const cancelBody = vi.fn(() => bodyCancelled.promise);
+      const controller = new AbortController();
+      f.fetcher.mockReturnValueOnce(response.promise);
+      let settled = false;
+      const outcome = f.client
+        .request('/v1/example', {
+          signal: controller.signal,
+          timeoutMs: 10,
+          waitForSettlement: true,
+        })
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      if (kind === 'cancel') controller.abort();
+      else await vi.advanceTimersByTimeAsync(10);
+      await Promise.resolve();
+      expect(f.fetcher.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(settled).toBe(false);
+      response.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(stream) {
+              stream.enqueue(
+                new TextEncoder().encode(
+                  '{"success":true,"data":"late-private"}',
+                ),
+              );
+            },
+            cancel: cancelBody,
+          }),
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cancelBody).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      bodyCancelled.resolve();
+      expect(await outcome).toMatchObject({
+        kind: kind === 'cancel' ? 'CANCELLED' : 'TIMEOUT',
+      });
+      expect(settled).toBe(true);
+      await expect(
+        f.client.request('/v1/example', { waitForSettlement: true }),
+      ).resolves.toMatchObject({ success: true });
+    },
+  );
   it('only retries a Query once for network/deadline/5xx and never business/auth errors', () => {
     for (const kind of ['NETWORK', 'TIMEOUT'] as const)
       expect(shouldRetryQuery(0, new ApiError(kind, 'fixture'))).toBe(true);

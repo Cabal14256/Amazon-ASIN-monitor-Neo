@@ -490,6 +490,7 @@ export class PgCompetitorCheckRepository
   transaction<T>(
     action: (unit: CompetitorCheckUnit) => Promise<T>,
     signal?: AbortSignal,
+    onActualWork?: (work: Promise<unknown>) => void,
   ): Promise<T> {
     return this.transactions.run(
       false,
@@ -520,6 +521,7 @@ export class PgCompetitorCheckRepository
         });
       },
       signal,
+      onActualWork,
     );
   }
   close() {

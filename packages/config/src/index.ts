@@ -173,6 +173,13 @@ const envObjectSchema = z.object({
     (value) => Number(value) || 10,
     z.number().int().positive(),
   ),
+  MONITOR_MAX_CONCURRENT_GROUP_CHECKS: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0
+      ? Math.min(8, Math.max(1, Math.floor(number)))
+      : 3;
+  }, z.number().int().min(1).max(8)),
+  AUTO_ADJUST_CONCURRENCY: booleanFlagSchema(true),
 
   // PostgreSQL（主库，平移旧 MySQL amazon_asin_monitor）
   DATABASE_URL: z.string().min(1, '缺少 DATABASE_URL'),
@@ -240,6 +247,11 @@ const envObjectSchema = z.object({
     (value) =>
       value === undefined || (isAbsolute(value) && !value.includes('\0')),
     'IMPORT_STORAGE_DIRECTORY 必须是共享存储的绝对路径',
+  ),
+  EXPORT_STORAGE_DIRECTORY: optionalNonEmptyStringSchema.refine(
+    (value) =>
+      value === undefined || (isAbsolute(value) && !value.includes('\0')),
+    'EXPORT_STORAGE_DIRECTORY 必须是共享存储的绝对路径',
   ),
   JWT_EXPIRES_IN: jwtDurationSchema.default('7d'),
   JWT_REMEMBER_EXPIRES_IN: jwtDurationSchema.default('30d'),
@@ -501,6 +513,17 @@ export function getImportStorageDirectory(
   const workspaceRoot = findWorkspaceRoot(cwd);
   if (!workspaceRoot) throw new Error('IMPORT_STORAGE_DIRECTORY_REQUIRED');
   return join(workspaceRoot, 'var', 'neo', 'imports');
+}
+
+/** Export API and Worker must see one private persistent directory. */
+export function getExportStorageDirectory(
+  env: Pick<Env, 'EXPORT_STORAGE_DIRECTORY'>,
+  cwd = process.cwd(),
+): string {
+  if (env.EXPORT_STORAGE_DIRECTORY) return env.EXPORT_STORAGE_DIRECTORY;
+  const workspaceRoot = findWorkspaceRoot(cwd);
+  if (!workspaceRoot) throw new Error('EXPORT_STORAGE_DIRECTORY_REQUIRED');
+  return join(workspaceRoot, 'var', 'neo', 'exports');
 }
 
 /** Neo 专用配置优先，根前端配置作为补充；已有进程环境变量始终优先。 */

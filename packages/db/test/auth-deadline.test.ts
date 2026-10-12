@@ -29,7 +29,7 @@ describe('bounded PostgreSQL authentication operations', () => {
       expect(client.query).toHaveBeenCalledWith('COMMIT');
       expect(client.release).toHaveBeenCalledExactlyOnceWith();
     });
-    await withAuthDatabaseDeadline(pool, async () => 'ok', settled);
+    await withAuthDatabaseDeadline(pool, async () => 'ok', undefined, settled);
     expect(settled).toHaveBeenCalledTimes(1);
   });
   it('keeps an in-flight COMMIT pin pending past the outer deadline, then records uncertainty only after it settles', async () => {
@@ -44,16 +44,37 @@ describe('bounded PostgreSQL authentication operations', () => {
           })
         : original(...args),
     );
-    const settled = vi.fn(async () => undefined);
-    const task = withAuthDatabaseDeadline(pool, async () => 'ok', settled);
+    let finishSettlement!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      finishSettlement = resolve;
+    });
+    const settled = vi.fn(async () => settlement);
+    let actualSettled = false;
+    const onActualWork = vi.fn((work: Promise<unknown>) => {
+      void work.then(() => {
+        actualSettled = true;
+      });
+    });
+    const task = withAuthDatabaseDeadline(
+      pool,
+      async () => 'ok',
+      onActualWork,
+      settled,
+    );
     const rejected = expect(task).rejects.toBeInstanceOf(AuthQueryTimeoutError);
     await vi.advanceTimersByTimeAsync(2000);
     await rejected;
     expect(settled).not.toHaveBeenCalled();
+    expect(onActualWork).toHaveBeenCalledTimes(1);
+    expect(actualSettled).toBe(false);
     expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
     commitAck();
     await vi.advanceTimersByTimeAsync(0);
     expect(settled).toHaveBeenCalledExactlyOnceWith('uncertain');
+    expect(actualSettled).toBe(false);
+    finishSettlement();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(actualSettled).toBe(true);
     expect(client.query).not.toHaveBeenCalledWith('ROLLBACK');
   });
   it('requires a real ROLLBACK acknowledgement for definite business failure', async () => {
@@ -65,6 +86,7 @@ describe('bounded PostgreSQL authentication operations', () => {
         async () => {
           throw new Error('known failure');
         },
+        undefined,
         settled,
       ),
     ).rejects.toThrow('known failure');
