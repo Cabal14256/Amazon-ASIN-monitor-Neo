@@ -1,3 +1,4 @@
+import { isNeoCatalogId } from '@asin-monitor/contracts';
 import {
   decodeCatalogVariantResult,
   normalizeCountry,
@@ -42,13 +43,7 @@ const MAX_CHILDREN = 5000;
 const sameTime = (a: Date | null, b: Date | null) =>
   a === null ? b === null : b !== null && a.getTime() === b.getTime();
 const validId = (id: string) => {
-  if (
-    typeof id !== 'string' ||
-    !id.trim() ||
-    id.length > 50 ||
-    /[\x00-\x1f\x7f]/.test(id)
-  )
-    throw new VariantCheckError('invalid-input');
+  if (!isNeoCatalogId(id)) throw new VariantCheckError('invalid-input');
 };
 function sameGroup(a: CompetitorVariantGroup, b: CompetitorVariantGroup) {
   return (
@@ -123,9 +118,7 @@ class DrizzleCompetitorCheckUnit {
       this.db
         .select()
         .from(competitorVariantGroups)
-        .where(
-          sql`rtrim(${competitorVariantGroups.id}) COLLATE public.neo_competitor_query_ci = rtrim(${groupId})`,
-        )
+        .where(eq(competitorVariantGroups.id, groupId))
         .limit(2),
     );
     if (!groups.length) throw new VariantCheckError('group-not-found');
@@ -147,9 +140,7 @@ class DrizzleCompetitorCheckUnit {
       this.db
         .select()
         .from(competitorAsins)
-        .where(
-          sql`rtrim(${competitorAsins.id}) COLLATE public.neo_competitor_query_ci = rtrim(${asinId})`,
-        )
+        .where(eq(competitorAsins.id, asinId))
         .limit(2),
     );
     if (!rows.length) throw new VariantCheckError('asin-not-found');
@@ -164,6 +155,7 @@ class DrizzleCompetitorCheckUnit {
     return { group, asin: rows[0] };
   }
   private async lockGroup(expected: CompetitorVariantGroup) {
+    validId(expected.id);
     const [current] = await this.query(() =>
       this.db
         .select()
@@ -203,6 +195,7 @@ class DrizzleCompetitorCheckUnit {
     );
     await prepareCompetitorWrites(this.db, this.ensureOpen);
     const group = await this.lockGroup(expected.group);
+    validId(expected.asin.id);
     const [current] = await this.query(() =>
       this.db
         .select()
