@@ -29,6 +29,7 @@ import {
 } from '@asin-monitor/export';
 import { isImportTaskData, type ImportTaskData } from '@asin-monitor/import';
 import {
+  parsePersistedVariantCheckJob,
   parseVariantCheckJob,
   variantCheckJobOperation,
 } from '@asin-monitor/variant-check';
@@ -124,7 +125,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   const owner = job.data?.userId;
   let checkOperation: QueueTaskSnapshot['checkOperation'];
   if (['variant-check', 'batch-check'].includes(type)) {
-    const data = parseVariantCheckJob(job.data);
+    const data = parsePersistedVariantCheckJob(job.data);
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);

@@ -6,6 +6,7 @@ import {
   type TaskState,
 } from '@asin-monitor/db';
 import {
+  parsePersistedVariantCheckJob,
   parseVariantCheckJob,
   variantCheckJobOperation,
   variantCheckResultOperation,
@@ -42,7 +43,7 @@ export function createVariantCheckProcessor(
   return async (job, token) => {
     let data: ReturnType<typeof parseVariantCheckJob>;
     try {
-      data = parseVariantCheckJob(job.data);
+      data = parsePersistedVariantCheckJob(job.data);
       if (
         job.id !== data.taskId ||
         job.name !== data.taskType ||
@@ -116,6 +117,9 @@ export function createVariantCheckProcessor(
     };
     try {
       await check();
+      // Fail legacy targets under the current catalog gate while metadata is
+      // still eligible for the terminal failure transition below.
+      parseVariantCheckJob(data);
       scheduleHeartbeat();
       await inspect(
         await mutate({ kind: 'processing', message: '检查任务开始处理' }),
