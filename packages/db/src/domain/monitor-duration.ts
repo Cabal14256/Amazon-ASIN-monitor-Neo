@@ -146,6 +146,33 @@ export function finalizeDurationMetrics(
     brokenAsinsDedup,
   };
 }
+
+/** Finalize bounded CAGG raw-summary sufficient statistics using the same
+ * binary64/display rounding as the frozen Legacy raw path. The SQL query has
+ * already grouped per-ASIN unrounded sums; only their ratio sum and counts
+ * cross the wire. Global rates use the displayed totals, while the ASIN
+ * average uses those unrounded per-ASIN ratios. */
+export function finalizeSqlRawDurationSummary(
+  row: Partial<Record<keyof DurationTotals, SqlMetricValue>> & {
+    sumAsinDurationRate?: SqlMetricValue;
+    totalAsinsDedup?: SqlMetricValue;
+    brokenAsinsDedup?: SqlMetricValue;
+  },
+): DurationMetrics {
+  const accumulator = createDurationMetricsAccumulator();
+  for (const key of Object.keys(
+    accumulator,
+  ) as (keyof DurationMetricsAccumulator)[]) {
+    if (key !== 'asinMetrics') accumulator[key] = Number(row[key] || 0);
+  }
+  const totalAsinsDedup = Number(row.totalAsinsDedup || 0);
+  return {
+    ...finalizeDurationMetrics(accumulator),
+    ratioAllAsin: rate(Number(row.sumAsinDurationRate || 0), totalAsinsDedup),
+    totalAsinsDedup,
+    brokenAsinsDedup: Number(row.brokenAsinsDedup || 0),
+  };
+}
 const metricFields = [
   'totalDurationHours',
   'abnormalDurationHours',

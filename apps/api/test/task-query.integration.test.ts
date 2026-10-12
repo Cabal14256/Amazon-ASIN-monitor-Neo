@@ -5,6 +5,7 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  asinExportJobDataSchema,
   competitorMonitorJobSchema,
   taskInfoResultSchema,
   taskListResultSchema,
@@ -356,6 +357,62 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         [owner.userId],
       );
       expect((await get('suspended')).statusCode).toBe(403);
+    });
+    it('reports an accepted completed ASIN export cancellation without missing metadata recreation', async () => {
+      const id = randomUUID();
+      const queue = await queueFor('export');
+      const data = asinExportJobDataSchema.parse({
+        taskId: id,
+        taskType: 'export',
+        taskSubType: 'asin',
+        exportType: 'asin',
+        userId: owner.userId,
+        createdAt: new Date().toISOString(),
+        params: {},
+      });
+      await queue.add('asin', data, {
+        jobId: id,
+        removeOnComplete: false,
+        removeOnFail: false,
+      });
+      const worker = new Worker(queue.name, undefined, {
+        autorun: false,
+        prefix: getNeoQueuePrefix(env),
+        connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+      });
+      worker.on('error', () => undefined);
+      try {
+        await worker.waitUntilReady();
+        const job = await worker.getNextJob('fixture-export-cancel-lock-166', {
+          block: false,
+        });
+        expect(job?.id).toBe(id);
+        await job!.moveToCompleted(
+          { cancelled: true },
+          'fixture-export-cancel-lock-166',
+          false,
+        );
+      } finally {
+        await worker.close(true);
+      }
+      expect(await store.read(id)).toBeNull();
+      const response = await get(id);
+      expect(response.statusCode).toBe(200);
+      taskInfoResultSchema.parse(response.json());
+      expect(response.json().data).toMatchObject({
+        taskId: id,
+        taskType: 'export',
+        taskSubType: 'asin',
+        status: 'cancelled',
+        downloadUrl: null,
+        filename: null,
+        canCancel: false,
+      });
+      expect(await store.read(id)).toBeNull();
+      const retained = await queue.getJob(id);
+      expect(await retained!.getState()).toBe('completed');
+      expect(retained!.data).toEqual(data);
+      expect(retained!.returnvalue).toEqual({ cancelled: true });
     });
     it.each(TASK_QUERY_QUEUES)(
       'reads an owned %s job when registry is absent without recreating metadata',

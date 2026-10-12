@@ -39,3 +39,39 @@ describe.each(['primary', 'competitor'] as const)(
     });
   },
 );
+
+describe('primary literal detail and export query coexistence', () => {
+  it('keeps export pages bounded after a literal detail read and counts only the first page', async () => {
+    const dialect = new PgDialect();
+    const execute = vi.fn(async (_statement: SQL) => ({
+      rows: [{ groups: [], asins: [], total: '0', total_asins: '0' }],
+    }));
+    const unit = new DrizzleAsinQueryUnit(
+      { execute } as unknown as Db,
+      () => {},
+    );
+    await unit.detail(' Raw /?# ', 'literal');
+    const query = { current: 1, pageSize: 2 };
+    await unit.listExportGroups(query);
+    const cursor = {
+      id: ' Raw /?# ',
+      createTime: '2026-09-27 04:00:00.123456',
+    };
+    await unit.listExportGroups(query, cursor, false);
+
+    const first = dialect.sqlToQuery(execute.mock.calls[1][0]);
+    const next = dialect.sqlToQuery(execute.mock.calls[2][0]);
+    expect(first.sql.match(/count\(\*\)/g)).toHaveLength(1);
+    expect(next.sql).not.toContain('count(*)');
+    for (const page of [first, next]) {
+      expect(page.sql).not.toContain('child_page');
+      expect(page.sql).not.toContain('COLLATE "C"');
+      expect(page.sql).toContain('AS export_group_broken');
+      expect(page.sql).toContain('AS export_cursor_time');
+      expect(page.params.slice(-2)).toEqual([2, 0]);
+    }
+    expect(next.params).toContain(cursor.id);
+    expect(next.params).toContain(cursor.createTime);
+    expect(next.sql).toMatch(/"g"\."id" < \$\d+/);
+  });
+});

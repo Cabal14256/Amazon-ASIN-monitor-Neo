@@ -1,6 +1,10 @@
 import { wsClient } from '@/services/websocket';
 import { history, request } from '@umijs/max';
 import { debugError } from './debug';
+import {
+  retryUnknownTaskLookup,
+  UnknownTaskLookupTimeoutError,
+} from './unknown-task-lookup';
 
 export interface AsyncTaskPayload {
   taskId: string;
@@ -47,7 +51,15 @@ export interface AsyncImportResult {
 interface WaitForTaskOptions {
   intervalMs?: number;
   timeoutMs?: number;
+  initialLookupGraceMs?: number;
   onProgress?: (task: AsyncTaskStatus) => void;
+}
+
+export class TaskWaitTimeoutError extends Error {
+  constructor(readonly kind: 'elapsed' | 'initial-unconfirmed' = 'elapsed') {
+    super(kind === 'initial-unconfirmed' ? '任务状态尚未确认' : '任务执行超时');
+    this.name = 'TaskWaitTimeoutError';
+  }
 }
 
 const TASK_STATUS_SET = new Set<AsyncTaskStatusValue>([
@@ -216,7 +228,12 @@ export async function waitForTaskResult(
   taskId: string,
   options: WaitForTaskOptions = {},
 ): Promise<AsyncTaskStatus> {
-  const { intervalMs = 1500, timeoutMs = 10 * 60 * 1000, onProgress } = options;
+  const {
+    intervalMs = 1500,
+    timeoutMs = 10 * 60 * 1000,
+    initialLookupGraceMs = 0,
+    onProgress,
+  } = options;
   const startedAt = Date.now();
   let settled = false;
   let lastProgressSignature = '';
@@ -281,7 +298,11 @@ export async function waitForTaskResult(
   };
 
   try {
-    const initialTask = await fetchTaskStatus(taskId);
+    const initialTask = await retryUnknownTaskLookup(
+      () => fetchTaskStatus(taskId),
+      initialLookupGraceMs,
+      intervalMs,
+    );
     const initialTerminalTask = settleWithTask(initialTask);
     if (initialTerminalTask) {
       cleanup();
@@ -289,6 +310,8 @@ export async function waitForTaskResult(
     }
   } catch (error) {
     cleanup();
+    if (error instanceof UnknownTaskLookupTimeoutError)
+      throw new TaskWaitTimeoutError('initial-unconfirmed');
     throw error;
   }
 
@@ -365,5 +388,5 @@ export async function waitForTaskResult(
   }
 
   cleanup();
-  throw new Error('任务执行超时');
+  throw new TaskWaitTimeoutError();
 }

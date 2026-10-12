@@ -184,6 +184,27 @@ describe('loadEnv', () => {
       loadEnv({ ...validEnv, MAX_ALLOWED_CONCURRENT_GROUP_CHECKS: '2.5' }),
     ).toThrow(EnvValidationError);
   });
+  it('loads monitor group admission defaults and preserves bounded Legacy numeric settings', () => {
+    expect(loadEnv(validEnv)).toMatchObject({
+      MONITOR_MAX_CONCURRENT_GROUP_CHECKS: 3,
+      AUTO_ADJUST_CONCURRENCY: true,
+    });
+    for (const value of ['', '0', '-1', 'NaN', 'Infinity'])
+      expect(
+        loadEnv({ ...validEnv, MONITOR_MAX_CONCURRENT_GROUP_CHECKS: value })
+          .MONITOR_MAX_CONCURRENT_GROUP_CHECKS,
+      ).toBe(3);
+    expect(
+      loadEnv({
+        ...validEnv,
+        MONITOR_MAX_CONCURRENT_GROUP_CHECKS: '3.9',
+        AUTO_ADJUST_CONCURRENCY: 'false',
+      }),
+    ).toMatchObject({
+      MONITOR_MAX_CONCURRENT_GROUP_CHECKS: 3,
+      AUTO_ADJUST_CONCURRENCY: false,
+    });
+  });
   it('uses one persistent import directory for API/Worker and rejects relative configuration', () => {
     const env = loadEnv(validEnv);
     const root = resolve(__dirname, '../../..');
