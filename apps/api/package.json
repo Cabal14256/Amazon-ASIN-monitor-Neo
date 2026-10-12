@@ -14,6 +14,7 @@
     "@asin-monitor/config": "workspace:*",
     "@asin-monitor/contracts": "workspace:*",
     "@asin-monitor/db": "workspace:*",
+    "@asin-monitor/export": "workspace:*",
     "@asin-monitor/import": "workspace:*",
     "@asin-monitor/sp-api": "workspace:*",
     "@asin-monitor/variant-check": "workspace:*",

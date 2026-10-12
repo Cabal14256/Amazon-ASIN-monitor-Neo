@@ -80,8 +80,12 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(saved?.opts).toMatchObject({
         attempts: 2,
         backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: { age: 86400 },
-        removeOnFail: { age: 604800 },
+        removeOnComplete: {
+          age: Math.max(86400, env.TASK_META_TTL_SECONDS),
+        },
+        removeOnFail: {
+          age: Math.max(604800, env.TASK_META_TTL_SECONDS),
+        },
       });
       expect(await redis.lrange(legacyKey, 0, -1)).toEqual(['legacy-fixture']);
       expect(errors).toEqual([]);
@@ -99,14 +103,18 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
   20_000,
 );
 
-it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
-  { ttl: '604800', status: 'completed' },
-  { ttl: '1209600', status: 'completed' },
-  { ttl: '604800', status: 'failed' },
-  { ttl: '1209600', status: 'failed' },
-] as const)(
-  'real monitor cleanup retains the $status receipt through metadata TTL $ttl and then expires it',
-  async ({ ttl, status }) => {
+const retentionCases = (['monitor', 'export'] as const).flatMap((queueType) =>
+  (['604800', '1209600'] as const).flatMap((ttl) =>
+    (['completed', 'failed'] as const).map((status) => ({
+      queueType,
+      ttl,
+      status,
+    })),
+  ),
+);
+it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each(retentionCases)(
+  'real $queueType cleanup retains the $status receipt through metadata TTL $ttl and then expires it',
+  async ({ queueType, ttl, status }) => {
     const env = loadEnv({
       ...process.env,
       BULL_PREFIX: `fixture-${randomUUID()}`,
@@ -114,9 +122,9 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
     });
     const connection = parseRedisUrl(env.REDIS_URL);
     const [plan] = buildWorkerPlans(
-      ['monitor'],
+      [queueType],
       {
-        monitor: async () => {
+        [queueType]: async () => {
           if (status === 'failed')
             throw new UnrecoverableError('fixture terminal failure');
           return { totalChecked: 1, success: true };
@@ -127,7 +135,7 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
     );
     const queue = new Queue(
       plan!.physicalName,
-      getQueueOptions('monitor', env, connection),
+      getQueueOptions(queueType, env, connection),
     );
     const events = new QueueEvents(queue.name, {
       connection,
@@ -136,8 +144,13 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
     const worker = new Worker(queue.name, plan!.processor, plan!.options);
     const redis = new Redis(connection);
     const errors: string[] = [];
-    for (const resource of [queue, events, worker, redis])
-      resource.on('error', () => errors.push('fixture connection error'));
+    const onError = () => {
+      errors.push('fixture connection error');
+    };
+    queue.on('error', onError);
+    events.on('error', onError);
+    worker.on('error', onError);
+    redis.on('error', onError);
     const finish = async (job: Job) => {
       if (status === 'failed')
         await expect(job.waitUntilFinished(events, 5000)).rejects.toThrow(
@@ -151,22 +164,26 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
     };
     try {
       await events.waitUntilReady();
-      const receipt = await queue.add('primary-monitor', {});
+      const jobName = queueType === 'monitor' ? 'primary-monitor' : 'asin';
+      const identity = { fixtureTaskId: randomUUID() };
+      const receipt = await queue.add(jobName, identity);
       await finish(receipt);
-      const policy = getQueuePolicy('monitor', env).defaultJobOptions;
+      const policy = getQueuePolicy(queueType, env).defaultJobOptions;
       const age = (
         status === 'completed' ? policy.removeOnComplete : policy.removeOnFail
       ).age;
+      expect(age).toBeGreaterThanOrEqual(env.TASK_META_TTL_SECONDS);
       // Age only this isolated fixture's terminal index; no wall-clock wait.
       await redis.zadd(
         queue.toKey(status),
         Date.now() - (age - 60) * 1000,
         receipt.id!,
       );
-      const cleanup = await queue.add('primary-monitor', {});
+      const cleanup = await queue.add(jobName, {});
       await finish(cleanup);
       const saved = await queue.getJob(receipt.id!);
       expect(await saved?.getState()).toBe(status);
+      expect(saved?.data).toEqual(identity);
       if (status === 'completed')
         expect(saved?.returnvalue).toEqual({ totalChecked: 1, success: true });
       else expect(saved?.failedReason).toBe('fixture terminal failure');
@@ -175,7 +192,7 @@ it.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true').each([
         Date.now() - (age + 60) * 1000,
         receipt.id!,
       );
-      const expiredCleanup = await queue.add('primary-monitor', {});
+      const expiredCleanup = await queue.add(jobName, {});
       await finish(expiredCleanup);
       expect(await queue.getJob(receipt.id!)).toBeUndefined();
       expect(errors).toEqual([]);

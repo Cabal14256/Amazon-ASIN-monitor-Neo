@@ -72,6 +72,32 @@ describe('fetch and download transport boundary', () => {
     expect(f.unauthorized).toHaveBeenCalledOnce();
   });
 
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 30 * 60_000 + 1])(
+    'rejects invalid download deadline %s before fetching credentials',
+    async (timeoutMs) => {
+      const f = setup();
+      await expect(
+        f.client.download('/v1/tasks/job-1/download', undefined, { timeoutMs }),
+      ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+      expect(f.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains the 256 MiB download bound with the longer export deadline', async () => {
+    const f = setup();
+    f.fetcher.mockResolvedValueOnce(
+      new Response('too large', {
+        headers: { 'content-length': String(256 * 1024 * 1024 + 1) },
+      }),
+    );
+    await expect(
+      f.client.download('/v1/tasks/job-1/download', undefined, {
+        timeoutMs: 30 * 60_000,
+      }),
+    ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  });
+
   it('shares request/download normalization and merges existing query before fragments', async () => {
     const f = setup('https://api.test/gateway/api/v1/');
     const expected =
