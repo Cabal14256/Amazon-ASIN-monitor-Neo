@@ -27,7 +27,10 @@ import {
   COMPETITOR_IMPORT_REPOSITORY,
   CompetitorImportService,
 } from './competitor-import.service';
-import { CompetitorQueryController } from './competitor-query.controller';
+import {
+  CompetitorLiteralDetailController,
+  CompetitorQueryController,
+} from './competitor-query.controller';
 import {
   COMPETITOR_QUERY_REPOSITORY,
   CompetitorQueryService,
@@ -48,6 +51,7 @@ import {
   ],
   controllers: [
     CompetitorQueryController,
+    CompetitorLiteralDetailController,
     CompetitorWriteController,
     CompetitorBatchDeleteController,
     CompetitorImportController,

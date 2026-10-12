@@ -317,6 +317,14 @@ const envObjectSchema = z.object({
     .pipe(z.enum(['api', 'worker', 'all']))
     .default('api'),
   SCHEDULER_ENABLED: booleanFlagSchema(false),
+  WORKER_METRICS_ENABLED: booleanFlagSchema(false),
+  WORKER_METRICS_HOST: z
+    .string()
+    .trim()
+    .min(1)
+    .regex(/^[a-zA-Z0-9.:-]+$/)
+    .default('127.0.0.1'),
+  WORKER_METRICS_PORT: z.coerce.number().int().min(1).max(65_535).default(3101),
   ANALYTICS_STATUS_INTERVAL_ENABLED: booleanFlagSchema(true),
   ANALYTICS_AGG_ENABLED: booleanFlagSchema(true),
   ANALYTICS_BENCHMARK_CACHE_BYPASS_ENABLED: booleanFlagSchema(false),

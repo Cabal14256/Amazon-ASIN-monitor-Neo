@@ -35,6 +35,7 @@ import { Redis } from 'ioredis';
 import { createCatalogFencedProcessor } from './catalog-operation-processor';
 import { createCompetitorMonitorProcessor } from './competitor-monitor-processor';
 import { logger } from './logger';
+import type { MonitorMetrics } from './metrics';
 import { MonitorConsumerHeartbeat } from './monitor-consumer-heartbeat';
 import { MonitorGroupAdmission } from './monitor-group-admission';
 import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
@@ -55,6 +56,7 @@ export async function startVariantCheckRuntime(
   selected: readonly CheckQueue[],
   onFatal: () => void,
   environment: Readonly<Record<string, unknown>> = process.env,
+  metrics?: MonitorMetrics,
 ) {
   if (
     env.AUTH_DATA_AUTHORITY !== 'postgresql' ||
@@ -323,6 +325,7 @@ export async function startVariantCheckRuntime(
                 notifications: notifications!,
                 defaultEnabled: env.COMPETITOR_MONITOR_ENABLED,
                 shutdownSignal: shutdown.signal,
+                metrics,
                 assertJobLock,
                 updateProgress,
               })
@@ -335,6 +338,7 @@ export async function startVariantCheckRuntime(
                 store,
                 notifications: notifications!,
                 shutdownSignal: shutdown.signal,
+                metrics,
                 assertJobLock,
                 updateProgress,
               })

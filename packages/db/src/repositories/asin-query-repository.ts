@@ -1,3 +1,4 @@
+import { isNeoBatchDeleteId } from '@asin-monitor/contracts';
 import {
   and,
   asc,
@@ -61,7 +62,7 @@ export interface AsinExportChildrenCursor extends AsinExportCursor {
 }
 export interface AsinQueryUnit extends RoleWriteUnit {
   list(query: AsinGroupQuery): Promise<AsinGroupReadResult>;
-  detail(groupId: string): Promise<AsinGroupReadResult>;
+  detail(groupId: string, mode?: 'literal'): Promise<AsinGroupReadResult>;
 }
 export interface AsinQueryRepositoryPort {
   read<T>(operation: (unit: AsinQueryUnit) => Promise<T>): Promise<T>;
@@ -363,7 +364,19 @@ export class DrizzleAsinQueryUnit
       return { ...hydrate(asins, row), exportCursorTime: next.createTime };
     });
   }
-  detail(groupId: string) {
+  detail(groupId: string, mode?: 'literal') {
+    if (mode === 'literal') {
+      if (!isNeoBatchDeleteId(groupId))
+        throw new AsinQueryRepositoryError('input');
+      return this.query(
+        { current: 1, pageSize: 1 },
+        groupId,
+        true,
+        undefined,
+        true,
+        mode,
+      );
+    }
     validateGroupId(groupId);
     return this.query({ current: 1, pageSize: 1 }, groupId);
   }
@@ -373,12 +386,19 @@ export class DrizzleAsinQueryUnit
     includeChildren = true,
     exportCursor?: AsinExportCursor,
     includeTotal = true,
+    mode?: 'literal',
   ): Promise<AsinGroupReadResult> {
     validateQuery(query);
+    // Literal native equality keeps existing default-collation indexes eligible;
+    // the C filter still requires the original exact bytes.
+    const equal = (left: unknown, right: unknown) =>
+      mode === 'literal'
+        ? sql`(${left} = ${right} AND ${left} COLLATE "C" = ${right} COLLATE "C")`
+        : sql`${left} = ${right}`;
     const keyword = textFilter(query.keyword);
     const groupWhere =
       and(
-        groupId === undefined ? undefined : eq(g.id, groupId),
+        groupId === undefined ? undefined : equal(g.id, groupId),
         exportCursor
           ? exportCursor.createTime === null
             ? and(sql`${g.createTime} IS NULL`, lt(g.id, exportCursor.id))
@@ -420,15 +440,17 @@ export class DrizzleAsinQueryUnit
         ? sql`(SELECT count(*)::text FROM ${asins} AS a LEFT JOIN ${variantGroups} AS g ON ${g.id}=${a.variantGroupId} WHERE ${asinWhere})`
         : sql`'0'`;
     const asinCount = includeChildren
-      ? sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${
-          a.variantGroupId
-        }=${g.id} AND ${keyword ?? sql`true`})`
+      ? sql`(SELECT count(*)::text FROM ${asins} AS a WHERE ${equal(
+          a.variantGroupId,
+          g.id,
+        )} AND ${keyword ?? sql`true`})`
       : sql`NULL::text`;
     const childPage = includeChildren
       ? sql`, child_page AS MATERIALIZED (
-        SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON p.id=${
-          a.variantGroupId
-        }
+        SELECT a.* FROM ${asins} AS a INNER JOIN selected p ON ${equal(
+          sql`p.id`,
+          a.variantGroupId,
+        )}
         ORDER BY ${a.variantGroupId}, ${a.createTime} ASC NULLS FIRST, ${a.id}
         LIMIT ${MAX_ASIN_QUERY_CHILDREN + 1}
       )`

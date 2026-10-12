@@ -22,6 +22,36 @@ const validEnv = {
 };
 
 describe('loadEnv', () => {
+  it('keeps Worker metrics opt-in with an independent bounded port', () => {
+    const env = loadEnv(validEnv);
+    expect(env.WORKER_METRICS_ENABLED).toBe(false);
+    expect(env.WORKER_METRICS_HOST).toBe('127.0.0.1');
+    expect(env.WORKER_METRICS_PORT).toBe(3101);
+    expect(
+      loadEnv({
+        ...validEnv,
+        WORKER_METRICS_ENABLED: 'true',
+        WORKER_METRICS_HOST: '0.0.0.0',
+        WORKER_METRICS_PORT: '3201',
+      }),
+    ).toMatchObject({
+      WORKER_METRICS_ENABLED: true,
+      WORKER_METRICS_HOST: '0.0.0.0',
+      WORKER_METRICS_PORT: 3201,
+    });
+    for (const port of ['0', '-1', '65536', '3101.5', 'invalid'])
+      expect(() => loadEnv({ ...validEnv, WORKER_METRICS_PORT: port })).toThrow(
+        EnvValidationError,
+      );
+    for (const host of ['', 'http://localhost', '127.0.0.1/path'])
+      expect(() => loadEnv({ ...validEnv, WORKER_METRICS_HOST: host })).toThrow(
+        EnvValidationError,
+      );
+    expect(() =>
+      loadEnv({ ...validEnv, WORKER_METRICS_ENABLED: 'invalid' }),
+    ).toThrow(EnvValidationError);
+  });
+
   it('keeps competitor manual monitoring default compatible while retaining terminal jobs for metadata lifetime', () => {
     const env = loadEnv({
       ...validEnv,
