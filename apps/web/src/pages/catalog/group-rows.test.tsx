@@ -139,7 +139,7 @@ describe('ASIN table', () => {
     expect(html).not.toContain('人工标记');
   });
 
-  it('does not offer the primary immediate check on competitor rows', () => {
+  it('offers competitor single checks without a primary batch control', () => {
     const group = {
       id: 'competitor-1',
       name: 'Rival group',
@@ -172,6 +172,7 @@ describe('ASIN table', () => {
       </AuthContext.Provider>,
     );
     expect(html).toContain('Rival group');
-    expect(html).not.toContain('立即检查');
+    expect(html.match(/立即检查/g)).toHaveLength(4);
+    expect(html).not.toContain('检查所选组');
   });
 });

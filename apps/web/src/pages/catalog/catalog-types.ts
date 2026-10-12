@@ -120,6 +120,12 @@ interface CatalogConfigBase {
     signal?: AbortSignal,
   ) => Promise<CatalogGroup>;
   checks?: {
+    batch?: (
+      http: Pick<HttpClient, 'request'>,
+      ids: string[],
+      options: { forceRefresh: boolean },
+      signal?: AbortSignal,
+    ) => Promise<CatalogCheckResult>;
     group: (
       http: Pick<HttpClient, 'request'>,
       id: string,
