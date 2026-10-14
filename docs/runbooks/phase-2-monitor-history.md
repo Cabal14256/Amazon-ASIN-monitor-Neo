@@ -16,7 +16,9 @@ ASIN 按逗号或空白拆分并去重，最多 1,000 项；一项使用子串�
 
 历史关联对象删除后，保留记录和当时的名称/代码；没有快照且对象已删除时返回 NULL，asin_type 来自当前对象。列表和总数在同一条 SQL 的 MVCC 快照内读取，按 check_time、id 倒序稳定分页，不使用可能过期的旧总数缓存。
 
-先选取页内主键，再在数据库内计算完整 JSON 字符串响应的字节上界（两个别名各一份，加每行 16 KiB 元数据余量）。超过 64 MiB 时整体返回 413，最终 JSON 聚合位于 CASE 保护分支，避免在应用内先构造超量列表。没有截断、摘要或伪装成功的部分结果。
+先选取页内主键，再在数据库内计算完整 JSON 字符串响应的字节上界（两个别名各一份，加每行 16 KiB 元数据余量）。Issue #225 将全页 SUM 改为按页内顺序递归累计：先执行 LIMIT/OFFSET，再从 1 编号，每一步只对下一条记录执行原来的 `16384 + 2 * COALESCE(octet_length(to_json(check_result::text)::text), 4)` 费用计算。第一个超限前缀出现后，不再读取或转义后续记录的结果文本；避免已经注定超限的页仍完成全部 JSON 转义，先触发 SQL 超时。NULL 和多字节、引号、反斜杠继续采用原公式。
+
+超过 64 MiB 时整体返回 413，最终 JSON 聚合和无须返回的 COUNT 都位于 CASE 保护分支。允许页仍返回全部选中记录和准确总数；空页返回空数组和完整总数，后续页的编号从 1 开始。主键、累计费用、COUNT 和完整结果仍由同一条 SQL 的 MVCC 快照读取。没有截断、摘要或伪装成功的部分结果，也没有调整 1,500 ms SQL／2 秒事务期限。
 
 ## 比较规则与迁移边界
 
@@ -45,3 +47,9 @@ docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh -c 
 本地覆盖真实 Legacy 模型字段对照、原 controller 的多 ASIN 规则、SQL 参数绑定/容量预检、HTTP 当前授权以及响应结束前的并发控制。Integration 使用随机私有 MySQL database、PG schema 和自有 Redis 权限缓存；业务查询无 public 表回退。完整比较列表/详情/筛选结果，验证删除快照、NULL、时间、LIKE 转义、同一 MVCC 快照、撤权、锁超时、大结果及迁移重复执行/回滚。
 
 合并前执行仓库 17 项基线、db/API 测试类型检查和 URL 合并检查。没有本地隔离 PG/MySQL/Redis 时，集成用例仅能在 CI 验证，跳过不是通过。生产规模性能、源数据对账、灰度及 Legacy 退役门禁仍须单独完成。
+
+### Issue #225 验证边界
+
+`monitor-history-preflight.integration.test.ts` 仅在显式隔离 CI database `amazon_asin_monitor_ci` 下创建随机私有 schema，业务表不存在时不会回退 public。它执行真实仓库生成的 SQL，只将原 `octet_length` 包装成返回相同长度的计数函数，验证原 31 条巨大多字节／转义 JSON 的首个超限前缀之后没有继续计算；并验证空页、分页 OFFSET、NULL 和并发更新期间费用／总数／完整结果仍属同一快照。原 HTTP 集成仍使用 `150_000` 次重复内容加 30 条拷贝，断言 31 条页在 2 秒内返回 413、缩小为一条后仍返回完整结果。
+
+本地先在旧 SQL 上得到新增单元断言失败，再改为递归实现；当前历史 repository／mapping／filter 单元共 110 项、API 历史 focused 36 项通过，db leaf build／严格类型检查和 6 文件格式检查通过。4 项新 PostgreSQL 场景及原 10 项 HTTP 集成未连接本机数据库，须由 Integration CI 给出实际结果；不能把 opt-in 跳过记为真实 PostgreSQL 通过。本次没有更改 Issue #219 的性能夹具、阈值或测量工具。完整仓库基线尚待共享重检查窗口，未在其他代理的重图构建期间并行运行。

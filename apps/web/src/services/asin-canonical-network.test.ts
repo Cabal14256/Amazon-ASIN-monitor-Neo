@@ -93,7 +93,12 @@ describe('canonical record IDs over actual loopback HTTP', () => {
       await moveAsin(client, childId, { targetGroupId: targetId });
       await deleteAsin(client, childId);
       expect(received.map(({ method, url }) => [method, url])).toEqual([
-        ['GET', `${prefix}/variant-groups/${encodeURIComponent(groupId)}`],
+        [
+          'GET',
+          `${prefix}/catalog/variant-groups/detail?${new URLSearchParams({
+            groupId,
+          })}`,
+        ],
         ['PUT', `${prefix}/variant-groups/${encodeURIComponent(groupId)}`],
         ['POST', `${prefix}/asins`],
         ['POST', `${prefix}/asins/${encodeURIComponent(childId)}/move`],

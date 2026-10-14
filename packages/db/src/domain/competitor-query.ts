@@ -20,7 +20,7 @@ export interface CompetitorQueryUnit
     'lockOperator' | 'lockSession' | 'operatorPermissionCodes'
   > {
   list(query: CompetitorGroupQuery): Promise<CompetitorGroupReadResult>;
-  detail(groupId: string): Promise<CompetitorGroupReadResult>;
+  detail(groupId: string, mode?: 'literal'): Promise<CompetitorGroupReadResult>;
 }
 export interface CompetitorQueryRepositoryPort {
   read<T>(

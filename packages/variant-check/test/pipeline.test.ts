@@ -1,10 +1,20 @@
-import { createVariantCheckOperation } from '@asin-monitor/db';
+import {
+  createVariantCheckOperation,
+  PgVariantCheckRepository,
+} from '@asin-monitor/db';
 import {
   CatalogDeferredError,
-  SpApiError,
   catalogNotFoundResult,
-  type CatalogVariantChecker,
+  CatalogVariantChecker,
+  RedisCatalogCheckStore,
+  SpApiClient,
+  SpApiError,
+  WorkSettlement,
+  type CatalogCheckerOptions,
+  type HttpResponse,
 } from '@asin-monitor/sp-api';
+import { EventEmitter } from 'node:events';
+import type { Pool } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogHybridOptions } from '../src/hybrid';
 import {
@@ -185,6 +195,436 @@ afterEach(() => {
 });
 
 describe('Primary variant business pipeline', () => {
+  it('retains the primary group permit after the real PostgreSQL helper deadline until its pending query settles', async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    const wire = deferred<{ rows: never[] }>();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(() => wire.promise),
+      release: vi.fn(),
+    });
+    const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
+    const pipeline = new VariantCheckPipeline(
+      new PgVariantCheckRepository(pool),
+      { check: f.check },
+      f.cache,
+      f.logger,
+    );
+    live.push(pipeline);
+    const release = vi.fn();
+    const work = pipeline.checkGroup('g1', {
+      ...f.context,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    try {
+      await flush();
+      expect(client.query).toHaveBeenCalledExactlyOnceWith('BEGIN');
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(work).rejects.toMatchObject({ code: 'AUTH_QUERY_TIMEOUT' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      wire.resolve({ rows: [] });
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(f.check).not.toHaveBeenCalled();
+    } finally {
+      wire.resolve({ rows: [] });
+      await flush();
+    }
+  });
+  const realChecker = (
+    store: CatalogCheckerOptions['store'],
+    standard?: CatalogCheckerOptions['standard'],
+  ) =>
+    new CatalogVariantChecker({
+      store,
+      standard: standard ?? {
+        call: vi.fn(async () => {
+          throw new Error('unexpected upstream');
+        }),
+      },
+      legacy: {
+        call: vi.fn(async () => {
+          throw new Error('unexpected fallback');
+        }),
+      },
+      html: {
+        checkVariants: vi.fn(async () => {
+          throw new Error('unexpected HTML');
+        }),
+      },
+      isEnabled: async () => false,
+      risk: { recordCheck: vi.fn() },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+  it('retains group admission through the real scheduler and Redis command after cancellation', async () => {
+    const f = setup();
+    const wire = deferred<null>();
+    const evalCommand = vi.fn(() => wire.promise);
+    const store = new RedisCatalogCheckStore(
+      { status: 'ready', eval: evalCommand },
+      'settlement-fixture',
+    );
+    const checker = realChecker(store);
+    f.check.mockImplementation((...args) => checker.check(...args));
+    const release = vi.fn();
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    try {
+      await flush();
+      expect(evalCommand).toHaveBeenCalledOnce();
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      wire.resolve(null);
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      wire.resolve(null);
+      await flush();
+      checker.close();
+      store.close();
+    }
+  });
+  it('retains group admission through the real scheduler and SP-API catalog transport after cancellation', async () => {
+    const f = setup();
+    const wire = deferred<HttpResponse>();
+    const credentials = {
+      lwaClientId: 'fixture-client',
+      lwaClientSecret: 'fixture-secret',
+      refreshToken: 'fixture-refresh',
+    };
+    const config = {
+      useAwsSignature: false,
+      regions: { US: credentials, EU: credentials },
+    };
+    const request = vi.fn(async (input: { url: URL }) =>
+      input.url.hostname === 'api.amazon.com'
+        ? {
+            statusCode: 200,
+            headers: {},
+            body: JSON.stringify({
+              access_token: 'fixture-token',
+              expires_in: 3600,
+            }),
+          }
+        : wire.promise,
+    );
+    const client = new SpApiClient({
+      config: { get: async () => config, reload: async () => config },
+      transport: { request },
+      quota: { execute: async (_context, task) => task(), observe: () => {} },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const store = {
+      read: async () => undefined,
+      claim: async () => 'fixture-claim',
+      write: vi.fn(async () => {}),
+      defer: async () => {},
+    };
+    const checker = realChecker(store, client);
+    f.check.mockImplementation((...args) => checker.check(...args));
+    const release = vi.fn();
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    try {
+      await flush();
+      expect(request).toHaveBeenCalledTimes(2);
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      wire.resolve({ statusCode: 200, headers: {}, body: '{}' });
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(store.write).not.toHaveBeenCalled();
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      wire.resolve({ statusCode: 200, headers: {}, body: '{}' });
+      await flush();
+      checker.close();
+      client.close();
+    }
+  });
+  it('keeps the default real catalog subscriber deadline prompt while its cache I/O remains pending', async () => {
+    vi.useFakeTimers();
+    const wire = deferred<undefined>();
+    const store = {
+      read: () => wire.promise,
+      claim: async () => 'fixture-claim',
+      write: async () => {},
+      defer: async () => {},
+    };
+    const checker = realChecker(store);
+    const work = checker
+      .check('B000000001', 'US')
+      .catch((error: unknown) => error);
+    try {
+      await flush();
+      await vi.advanceTimersByTimeAsync(300000);
+      expect(await work).toMatchObject({ code: 'TIMEOUT' });
+    } finally {
+      wire.resolve(undefined);
+      await flush();
+      checker.close();
+    }
+  });
+  it('keeps the group permit when joining cache work created by a default subscriber', async () => {
+    const f = setup();
+    const wire = deferred<string>();
+    const evalCommand = vi.fn(() => wire.promise);
+    const store = new RedisCatalogCheckStore(
+      { status: 'ready', eval: evalCommand },
+      'late-join-fixture',
+    );
+    const checker = realChecker(store);
+    f.check.mockImplementation((...args) => checker.check(...args));
+    const first = checker.check('B000000001', 'US');
+    const release = vi.fn();
+    const stop = new AbortController();
+    let work: Promise<unknown> | undefined;
+    try {
+      await flush();
+      expect(evalCommand).toHaveBeenCalledOnce();
+      work = f.pipeline.checkGroup('g1', {
+        ...f.context,
+        signal: stop.signal,
+        groupAdmission: { acquire: async () => release },
+      });
+      void work.catch(() => {});
+      await flush();
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      expect(evalCommand).toHaveBeenCalledOnce();
+      wire.resolve(JSON.stringify(product()));
+      await expect(first).resolves.toMatchObject({ hasVariants: true });
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      wire.resolve(JSON.stringify(product()));
+      await first.catch(() => {});
+      await work?.catch(() => {});
+      await flush();
+      checker.close();
+      store.close();
+    }
+  });
+  it('retains the group permit through a shared real LWA token flight created by a default caller', async () => {
+    const f = setup();
+    const wire = deferred<HttpResponse>();
+    const credentials = {
+      lwaClientId: 'fixture-client',
+      lwaClientSecret: 'fixture-secret',
+      refreshToken: 'fixture-refresh',
+    };
+    const config = {
+      useAwsSignature: false,
+      regions: { US: credentials, EU: credentials },
+    };
+    const request = vi.fn(async (input: { url: URL }) =>
+      input.url.hostname === 'api.amazon.com'
+        ? wire.promise
+        : { statusCode: 200, headers: {}, body: '{}' },
+    );
+    const client = new SpApiClient({
+      config: { get: async () => config, reload: async () => config },
+      transport: { request },
+      quota: { execute: async (_context, task) => task(), observe: () => {} },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const checker = realChecker(
+      {
+        read: async () => undefined,
+        claim: async () => 'fixture-claim',
+        write: async () => {},
+        defer: async () => {},
+      },
+      client,
+    );
+    f.check.mockImplementation((...args) => checker.check(...args));
+    const defaultStop = new AbortController();
+    const first = client
+      .call(
+        'GET',
+        '/catalog/2022-04-01/items/B000000002',
+        'US',
+        {},
+        undefined,
+        { signal: defaultStop.signal },
+      )
+      .catch((error: unknown) => error);
+    const stop = new AbortController();
+    const release = vi.fn();
+    let work: Promise<unknown> | undefined;
+    try {
+      await flush();
+      expect(request).toHaveBeenCalledOnce();
+      work = f.pipeline.checkGroup('g1', {
+        ...f.context,
+        signal: stop.signal,
+        groupAdmission: { acquire: async () => release },
+      });
+      void work.catch(() => {});
+      await flush();
+      expect(request).toHaveBeenCalledOnce();
+      stop.abort();
+      defaultStop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      expect(await first).toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      wire.resolve({
+        statusCode: 200,
+        headers: {},
+        body: JSON.stringify({
+          access_token: 'fixture-token',
+          expires_in: 3600,
+        }),
+      });
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(request).toHaveBeenCalledOnce();
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      defaultStop.abort();
+      wire.resolve({
+        statusCode: 200,
+        headers: {},
+        body: JSON.stringify({
+          access_token: 'fixture-token',
+          expires_in: 3600,
+        }),
+      });
+      await first;
+      await work?.catch(() => {});
+      await flush();
+      checker.close();
+      client.close();
+    }
+  });
+  it('returns confirmed group success at the cleanup deadline but retains its permit through the real Redis cleanup', async () => {
+    vi.useFakeTimers();
+    const f = setup();
+    const wire = deferred<null>();
+    const evalCommand = vi.fn(() => wire.promise);
+    const store = new RedisCatalogCheckStore(
+      { status: 'ready', eval: evalCommand },
+      'cleanup-settlement-fixture',
+    );
+    f.cache.invalidate.mockImplementation((identity, signal) =>
+      store.invalidate(
+        identity as Parameters<RedisCatalogCheckStore['invalidate']>[0],
+        signal,
+      ),
+    );
+    const release = vi.fn();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      groupAdmission: { acquire: async () => release },
+    });
+    try {
+      await flush();
+      expect(f.unit.commitGroup).toHaveBeenCalledOnce();
+      expect(evalCommand).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(work).resolves.toMatchObject({ isBroken: false });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      wire.resolve(null);
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+    } finally {
+      wire.resolve(null);
+      await work.catch(() => {});
+      await flush();
+      store.close();
+    }
+  });
+  it('drains work registered by a settling operation and tolerates physical failures', async () => {
+    const settlement = new WorkSettlement();
+    const first = deferred<void>();
+    const second = deferred<void>();
+    settlement.track(
+      first.promise.then(() => {
+        settlement.track(second.promise);
+      }),
+    );
+    let drained = false;
+    const completion = settlement.drain().then(() => {
+      drained = true;
+    });
+    first.resolve();
+    await flush();
+    expect(drained).toBe(false);
+    second.reject(new Error('fixture physical failure'));
+    await completion;
+    expect(drained).toBe(true);
+  });
+  it('retains shared group admission until cancelled noncooperative work actually settles', async () => {
+    const f = setup();
+    const blocked = deferred<ReturnType<typeof product>>();
+    f.check.mockImplementationOnce(async () => blocked.promise);
+    const release = vi.fn();
+    const acquire = vi.fn(async () => release);
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire },
+    } as VariantCheckContext);
+    void work.catch(() => {});
+    try {
+      await flush();
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(f.check).toHaveBeenCalledTimes(1);
+      stop.abort();
+      await expect(work).rejects.toThrow('CANCELLED');
+      expect(release).not.toHaveBeenCalled();
+      blocked.resolve(product(1));
+      await flush();
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      blocked.resolve(product(1));
+      await work.catch(() => {});
+    }
+  });
+  it('does not read business records while shared group admission is pending', async () => {
+    const f = setup();
+    const admitted = deferred<() => void>();
+    const release = vi.fn();
+    const work = f.pipeline.checkGroup('g1', {
+      ...f.context,
+      groupAdmission: { acquire: async () => admitted.promise },
+    } as VariantCheckContext);
+    await flush();
+    expect(f.unit.loadGroup).not.toHaveBeenCalled();
+    expect(f.check).not.toHaveBeenCalled();
+    admitted.resolve(release);
+    await work;
+    expect(release).toHaveBeenCalledTimes(1);
+  });
   const operation = () =>
     createVariantCheckOperation(
       {

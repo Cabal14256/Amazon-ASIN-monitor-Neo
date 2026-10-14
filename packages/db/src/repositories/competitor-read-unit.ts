@@ -1,3 +1,4 @@
+import { isNeoBatchDeleteId } from '@asin-monitor/contracts';
 import { and, getTableColumns, or, sql, type SQL } from 'drizzle-orm';
 import { alias, type PgTable } from 'drizzle-orm/pg-core';
 import type { Db } from '../client';
@@ -80,7 +81,11 @@ export class DrizzleCompetitorReadUnit {
   list(query: CompetitorGroupQuery) {
     return this.query(query);
   }
-  detail(id: string) {
+  detail(id: string, mode?: 'literal') {
+    if (mode === 'literal') {
+      if (!isNeoBatchDeleteId(id)) throw new CompetitorQueryError('input');
+      return this.query({ current: 1, pageSize: 1 }, id, mode);
+    }
     if (
       typeof id !== 'string' ||
       !id.trim() ||
@@ -94,8 +99,15 @@ export class DrizzleCompetitorReadUnit {
   private async query(
     query: CompetitorGroupQuery,
     id?: string,
+    mode?: 'literal',
   ): Promise<CompetitorGroupReadResult> {
     validate(query);
+    // Literal native equality is an indexable candidate superset; C retains the
+    // literal filter independently of Legacy case/padding association.
+    const match = (left: unknown, right: unknown) =>
+      mode === 'literal'
+        ? sql`(${left} = ${right} AND ${left} COLLATE "C" = ${right} COLLATE "C")`
+        : equal(left, right);
     const keyword = query.keyword
       ? or(
           like(g.name, query.keyword),
@@ -105,7 +117,7 @@ export class DrizzleCompetitorReadUnit {
       : undefined;
     const groupWhere =
       id !== undefined
-        ? equal(g.id, id)
+        ? match(g.id, id)
         : and(
             query.keyword
               ? or(
@@ -137,7 +149,7 @@ export class DrizzleCompetitorReadUnit {
             g.id,
           )} WHERE ${asinWhere})`
         : sql`'0'`;
-    const asinCount = sql`(SELECT count(*)::text FROM ${competitorAsins} AS a WHERE ${equal(
+    const asinCount = sql`(SELECT count(*)::text FROM ${competitorAsins} AS a WHERE ${match(
       a.variantGroupId,
       g.id,
     )} AND ${keyword ?? sql`true`})`;
@@ -148,7 +160,10 @@ export class DrizzleCompetitorReadUnit {
         ORDER BY ${g.createTime} DESC NULLS LAST, ${g.id} DESC
         LIMIT ${query.pageSize} OFFSET ${(query.current - 1) * query.pageSize}
       ), child_page AS MATERIALIZED (
-        SELECT a.* FROM ${competitorAsins} AS a INNER JOIN selected p ON rtrim(a.variant_group_id) COLLATE public.neo_competitor_query_ci = rtrim(p.id)
+        SELECT a.* FROM ${competitorAsins} AS a INNER JOIN selected p ON ${match(
+      a.variantGroupId,
+      sql`p.id`,
+    )}
         ORDER BY ${a.variantGroupId}, ${a.createTime} ASC NULLS FIRST, ${a.id}
         LIMIT ${MAX_CHILDREN + 1}
       )

@@ -11,6 +11,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { AsinQueryInputError } from '../asin/asin-query-values';
+import { parseCatalogLiteralDetailQuery } from '../asin/catalog-literal-detail-query';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
@@ -87,6 +88,16 @@ export class CompetitorQueryService implements OnModuleDestroy {
   detail(principal: AuthPrincipal, id: unknown) {
     return this.read(principal, 'detail', async (unit) => {
       const result = await unit.detail(parseCompetitorGroupId(id));
+      if (!result.groups.length) fail(404, '竞品变体组不存在');
+      return mapCompetitorQueryGroups(result)[0];
+    });
+  }
+  literalDetail(principal: AuthPrincipal, url: string) {
+    return this.read(principal, 'detail', async (unit) => {
+      const result = await unit.detail(
+        parseCatalogLiteralDetailQuery(url),
+        'literal',
+      );
       if (!result.groups.length) fail(404, '竞品变体组不存在');
       return mapCompetitorQueryGroups(result)[0];
     });

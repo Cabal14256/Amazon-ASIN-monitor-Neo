@@ -285,7 +285,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO competitor_monitor_history(asin_id,country,is_broken,check_time) VALUES('g1-a0','US',false,'2026-01-01 08:00:00')",
       );
       const payload = {
-        groupIds: [' g1 ', 'missing', 'g1'],
+        groupIds: ['g1', 'missing', 'g1'],
         asinIds: ['g1-a0', 'g2-a0', 'absent'],
         useAsync: false,
       };
@@ -328,6 +328,258 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await queue.getJobCounts('wait', 'active', 'completed'),
       ).toMatchObject({ wait: 0, active: 0, completed: 0 });
     });
+    it.each([false, true])(
+      'preserves literal competitor group keys through real HTTP and compiled Worker (async=%s)',
+      async (useAsync) => {
+        const selected = [
+          ' Raw Ś ',
+          ' Lead Ś',
+          'Tail Ś ',
+          'Case',
+          'café',
+          '   ',
+          '😺'.repeat(50),
+        ];
+        const neighbors = ['Raw Ś', 'Lead Ś'];
+        // The migrated ICU/rtrim lookup indexes reject trailing-space,
+        // case and accent aliases. Keep every actual uniqueness constraint.
+        for (const [index, id] of [...selected, ...neighbors].entries()) {
+          await f.pools.competitorPool.query(
+            "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES($1,$1,'US','Fixture')",
+            [id],
+          );
+          if (id.length <= 50)
+            await f.pools.competitorPool.query(
+              "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture',$3)",
+              [`${id}-a0`, `B${String(index).padStart(9, '0')}`, id],
+            );
+        }
+        for (const alias of ['Tail Ś', 'case', 'cafe'])
+          await expect(
+            f.pools.competitorPool.query(
+              "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES($1,$1,'US','Fixture')",
+              [alias],
+            ),
+          ).rejects.toMatchObject({ code: '23505' });
+        let result;
+        if (useAsync) {
+          const id = await accepted({ groupIds: selected });
+          expect((await queue.getJob(id))?.data.groupIds).toEqual(selected);
+          await start();
+          result = (await terminal(id)).result;
+        } else {
+          const response = await request({ groupIds: selected, useAsync });
+          expect(response.statusCode).toBe(200);
+          result = response.json().data;
+        }
+        expect(result).toMatchObject({
+          totalRequested: 7,
+          deletedGroupCount: 7,
+          deletedNestedAsinCount: 6,
+          skipped: { groupIds: [], asinIds: [] },
+        });
+        expect(
+          (await rows('competitor_variant_groups')).map((row) => row.id).sort(),
+        ).toEqual(neighbors.sort());
+        const missingLiterals = ['Tail Ś ', 'Case', 'café'];
+        const aliasNeighbors = ['Tail Ś', 'case', 'cafe'];
+        for (const id of aliasNeighbors) await group(id, 0);
+        let missingResult;
+        if (useAsync) {
+          const id = await accepted({ groupIds: missingLiterals });
+          expect((await queue.getJob(id))?.data.groupIds).toEqual(
+            missingLiterals,
+          );
+          missingResult = (await terminal(id)).result;
+        } else {
+          const response = await request({
+            groupIds: missingLiterals,
+            useAsync,
+          });
+          expect(response.statusCode).toBe(200);
+          missingResult = response.json().data;
+        }
+        expect(missingResult).toMatchObject({
+          totalRequested: 3,
+          deletedGroupCount: 0,
+          deletedNestedAsinCount: 0,
+          skipped: { groupIds: missingLiterals, asinIds: [] },
+        });
+        expect(
+          (await rows('competitor_variant_groups')).map((row) => row.id).sort(),
+        ).toEqual([...neighbors, ...aliasNeighbors].sort());
+        expect(
+          (await rows('competitor_asins'))
+            .map((row) => row.variant_group_id)
+            .sort(),
+        ).toEqual(neighbors.sort());
+      },
+    );
+    it.each([false, true])(
+      'preserves literal competitor direct-ASIN keys and neighbors (async=%s)',
+      async (useAsync) => {
+        await group('parent', 0);
+        const selected = [
+          ' Child Ś ',
+          ' Lead Ś',
+          'Tail Ś ',
+          'Case',
+          'café',
+          '   ',
+          '😺'.repeat(50),
+        ];
+        const neighbors = ['Child Ś', 'Lead Ś'];
+        for (const [index, id] of [...selected, ...neighbors].entries())
+          await f.pools.competitorPool.query(
+            "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
+            [id, `B${String(index).padStart(9, '0')}`],
+          );
+        for (const [index, alias] of ['Tail Ś', 'case', 'cafe'].entries())
+          await expect(
+            f.pools.competitorPool.query(
+              "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
+              [alias, `B${String(100 + index).padStart(9, '0')}`],
+            ),
+          ).rejects.toMatchObject({
+            code: '23505',
+            constraint: 'idx_neo_competitor_query_asin_id',
+          });
+        let result;
+        if (useAsync) {
+          const id = await accepted({ asinIds: selected });
+          expect((await queue.getJob(id))?.data.asinIds).toEqual(selected);
+          await start();
+          result = (await terminal(id)).result;
+        } else {
+          const response = await request({ asinIds: selected, useAsync });
+          expect(response.statusCode).toBe(200);
+          result = response.json().data;
+        }
+        expect(result).toMatchObject({
+          totalRequested: 7,
+          deletedDirectAsinCount: 7,
+          deletedGroupCount: 0,
+          skipped: { groupIds: [], asinIds: [] },
+        });
+        expect(
+          (await rows('competitor_asins')).map((row) => row.id).sort(),
+        ).toEqual(neighbors.sort());
+        expect(
+          (await rows('competitor_variant_groups')).map((row) => row.id),
+        ).toEqual(['parent']);
+        const missingLiterals = ['Tail Ś ', 'Case', 'café'];
+        const aliasNeighbors = ['Tail Ś', 'case', 'cafe'];
+        for (const [index, id] of aliasNeighbors.entries())
+          await f.pools.competitorPool.query(
+            "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
+            [id, `B${String(100 + index).padStart(9, '0')}`],
+          );
+        let missingResult;
+        if (useAsync) {
+          const id = await accepted({ asinIds: missingLiterals });
+          expect((await queue.getJob(id))?.data.asinIds).toEqual(
+            missingLiterals,
+          );
+          missingResult = (await terminal(id)).result;
+        } else {
+          const response = await request({
+            asinIds: missingLiterals,
+            useAsync,
+          });
+          expect(response.statusCode).toBe(200);
+          missingResult = response.json().data;
+        }
+        expect(missingResult).toMatchObject({
+          totalRequested: 3,
+          deletedDirectAsinCount: 0,
+          deletedGroupCount: 0,
+          skipped: { groupIds: [], asinIds: missingLiterals },
+        });
+        expect(
+          (await rows('competitor_asins')).map((row) => row.id).sort(),
+        ).toEqual([...neighbors, ...aliasNeighbors].sort());
+      },
+    );
+    it.each([false, true])(
+      'intentionally fixes real Legacy competitor MySQL trim-neighbor deletion (raw exists=%s)',
+      async (rawExists) => {
+        const raw = ' Source Ś ',
+          neighbor = 'Source Ś';
+        for (const id of rawExists ? [raw, neighbor] : [neighbor])
+          await group(id);
+        const payload = { groupIds: [raw], useAsync: false };
+        const old = await legacy.batchDelete(payload);
+        const response = await request(payload);
+        expect(old.statusCode).toBe(200);
+        expect(response.statusCode).toBe(200);
+        expect(
+          (old.body as { data: { deletedGroupCount: number } }).data
+            .deletedGroupCount,
+        ).toBe(1);
+        expect(
+          (await legacy.query('SELECT id FROM competitor_variant_groups')).map(
+            (row) => row.id,
+          ),
+        ).toEqual(rawExists ? [raw] : []);
+        expect(response.json().data).toMatchObject({
+          deletedGroupCount: rawExists ? 1 : 0,
+          skipped: { groupIds: rawExists ? [] : [raw], asinIds: [] },
+        });
+        expect(
+          (await rows('competitor_variant_groups')).map((row) => row.id),
+        ).toEqual([neighbor]);
+        expect((await rows('competitor_asins')).map((row) => row.id)).toEqual([
+          `${neighbor}-a0`,
+        ]);
+      },
+    );
+    it.each([false, true])(
+      'intentionally fixes real Legacy competitor MySQL direct-ASIN trim-neighbor deletion (raw exists=%s)',
+      async (rawExists) => {
+        const raw = ' Child Ś ',
+          neighbor = 'Child Ś';
+        await group('parent', 0);
+        for (const [index, id] of (rawExists
+          ? [raw, neighbor]
+          : [neighbor]
+        ).entries()) {
+          const values = [id, `B${String(index).padStart(9, '0')}`];
+          await f.pools.competitorPool.query(
+            "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES($1,$2,'US','Fixture','parent')",
+            values,
+          );
+          await legacy.query(
+            "INSERT INTO competitor_asins(id,asin,country,brand,variant_group_id) VALUES(?,?,'US','Fixture','parent')",
+            values,
+          );
+        }
+        const payload = { asinIds: [raw], useAsync: false };
+        const old = await legacy.batchDelete(payload);
+        const response = await request(payload);
+        expect(old.statusCode).toBe(200);
+        expect(response.statusCode).toBe(200);
+        expect(
+          (old.body as { data: { deletedDirectAsinCount: number } }).data
+            .deletedDirectAsinCount,
+        ).toBe(1);
+        expect(
+          (await legacy.query('SELECT id FROM competitor_asins')).map(
+            (row) => row.id,
+          ),
+        ).toEqual(rawExists ? [raw] : []);
+        expect(response.json().data).toMatchObject({
+          deletedGroupCount: 0,
+          deletedDirectAsinCount: rawExists ? 1 : 0,
+          skipped: { groupIds: [], asinIds: rawExists ? [] : [raw] },
+        });
+        expect((await rows('competitor_asins')).map((row) => row.id)).toEqual([
+          neighbor,
+        ]);
+        expect(
+          (await rows('competitor_variant_groups')).map((row) => row.id),
+        ).toEqual(['parent']);
+      },
+    );
     it.each(['child-delete', 'parent-touch'])(
       'rolls back the entire synchronous transaction on %s failure',
       async (failure) => {

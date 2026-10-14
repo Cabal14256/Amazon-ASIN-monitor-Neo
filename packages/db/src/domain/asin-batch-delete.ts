@@ -1,8 +1,13 @@
+import {
+  NEO_BATCH_DELETE_MAX_TARGETS,
+  neoBatchDeleteIdSchema,
+  neoBatchDeleteTargetsSchema,
+} from '@asin-monitor/contracts';
 import { z } from 'zod';
 
-export const MAX_ASIN_BATCH_DELETE_TARGETS = 1000;
+export const MAX_ASIN_BATCH_DELETE_TARGETS = NEO_BATCH_DELETE_MAX_TARGETS;
 const jobIds = z
-  .array(z.string().min(1).max(100))
+  .array(neoBatchDeleteIdSchema)
   .max(MAX_ASIN_BATCH_DELETE_TARGETS);
 const taskFields = {
   taskId: z.string().uuid(),
@@ -14,7 +19,7 @@ const taskFields = {
 };
 function validateTaskTargets(data: BatchDeleteIds, ctx: z.RefinementCtx) {
   try {
-    const normalized = parseBatchDeleteRequest({
+    const normalized = parseNeoBatchDeleteRequest({
       groupIds: data.groupIds,
       asinIds: data.asinIds,
     });
@@ -143,6 +148,36 @@ export function parseBatchDeleteRequest(value: unknown): BatchDeleteRequest {
     asinIds = ids(raw.asinIds);
   if (!groupIds.length && !asinIds.length)
     throw new BatchDeleteInputError('empty');
+  const useAsync = normalizeBatchDeleteMode(raw.useAsync);
+  return { groupIds, asinIds, ...(useAsync === undefined ? {} : { useAsync }) };
+}
+
+/** Neo accepts literal string keys only. Keep the Legacy parser above frozen;
+ * it must never be used by a Neo service, repository or queue validator. */
+export function parseNeoBatchDeleteRequest(value: unknown): BatchDeleteRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new BatchDeleteInputError();
+  const raw = value as Record<string, unknown>;
+  if (
+    Object.keys(raw).some(
+      (key) => !['groupIds', 'asinIds', 'useAsync'].includes(key),
+    )
+  )
+    throw new BatchDeleteInputError();
+  const count =
+    (Array.isArray(raw.groupIds) ? raw.groupIds.length : 0) +
+    (Array.isArray(raw.asinIds) ? raw.asinIds.length : 0);
+  if (count > MAX_ASIN_BATCH_DELETE_TARGETS)
+    throw new BatchDeleteInputError('capacity');
+  const parsed = neoBatchDeleteTargetsSchema.safeParse({
+    groupIds: raw.groupIds,
+    asinIds: raw.asinIds,
+  });
+  if (!parsed.success)
+    throw new BatchDeleteInputError(count === 0 ? 'empty' : 'input');
+  const groupIds = [...new Set(parsed.data.groupIds ?? [])];
+  const asinIds = [...new Set(parsed.data.asinIds ?? [])];
+  // Preserve the existing explicit async control policy, not ID normalization.
   const useAsync = normalizeBatchDeleteMode(raw.useAsync);
   return { groupIds, asinIds, ...(useAsync === undefined ? {} : { useAsync }) };
 }

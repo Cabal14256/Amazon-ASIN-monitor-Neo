@@ -14,6 +14,7 @@ import {
 import {
   createDurationMetricsAccumulator,
   finalizeDurationMetrics,
+  finalizeSqlRawDurationSummary,
   normalizeSqlDurationMetricRow,
 } from '../domain/monitor-duration';
 import type { MonitorDurationSourceRow } from '../domain/monitor-duration-groups';
@@ -161,9 +162,35 @@ function aggregateRow(row: Row, operation: string): Row {
       : operation === 'by-time' || operation === 'analytics-monthly-breakdown'
       ? { time_period: row.group_label }
       : {};
-  const metrics = normalizeSqlDurationMetricRow(row, extra);
+  const rawSummary =
+    operation === 'all-countries-summary' || operation === 'region-summary';
+  if (rawSummary) {
+    for (const key of [
+      'totalChecks',
+      'brokenCount',
+      'totalAsinsDedup',
+      'brokenAsinsDedup',
+    ])
+      safeCount(row[key]);
+    for (const key of [
+      'totalDurationHours',
+      'abnormalDurationHours',
+      'normalDurationHours',
+      'peakDurationHours',
+      'peakAbnormalDurationHours',
+      'lowDurationHours',
+      'lowAbnormalDurationHours',
+      'sumAsinDurationRate',
+    ]) {
+      const value = Number(row[key]);
+      if (!Number.isFinite(value) || value < 0)
+        throw new MonitorAnalyticsQueryError('invalid-result');
+    }
+  }
+  const source = rawSummary ? finalizeSqlRawDurationSummary(row) : row;
+  const metrics = normalizeSqlDurationMetricRow(source, extra);
   for (const [key, value] of Object.entries(
-    normalizeSqlDurationMetricRow(row),
+    normalizeSqlDurationMetricRow(source),
   )) {
     if (!Number.isFinite(value) || value < 0)
       throw new MonitorAnalyticsQueryError('invalid-result');
@@ -213,7 +240,14 @@ export async function readMonitorDurationQuery(
           query.endTime,
         );
   const attemptAggregate = async (source: MonitorSourceGranularity) => {
-    let select = monitorAggregateDurationSelect(query, source);
+    let select = monitorAggregateDurationSelect(
+      query,
+      source,
+      query.operation === 'all-countries-summary' ||
+        query.operation === 'region-summary'
+        ? 'legacy-raw-summary'
+        : 'legacy-aggregate',
+    );
     if (root)
       select = sql`SELECT ${countsPayload()} AS statistics_counts, metrics.*
       FROM (${monitorCountStatisticsSelect(
@@ -337,6 +371,10 @@ export async function readMonitorDurationQuery(
     query,
     root ? 'asin' : variant ? 'variant_group' : 'dim',
     granularity,
+    undefined,
+    query.operation === 'all-countries-summary' || region
+      ? 'binary-min'
+      : 'legacy',
   );
   if (root)
     select = sql`SELECT ${countsPayload()} AS statistics_counts,

@@ -13,7 +13,8 @@ import {
   useSyncExternalStore,
   type FormEvent,
 } from 'react';
-import { useAuth } from '../../auth/context';
+import { createAccess } from '../../auth/access';
+import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
 import { Button } from '../../components/ui/button';
 import {
@@ -28,11 +29,18 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
-import { ApiError } from '../../lib/http';
+import { ApiError, type HttpClient } from '../../lib/http';
+import {
+  abnormalDurationPath,
+  type AbnormalDurationScope,
+} from '../../services/monitor-abnormal';
+import { HistoryAbnormal } from './history-abnormal';
+import { historyAbnormalScope } from './history-abnormal-data';
 import {
   createHistoryReadAccess,
   type HistoryReadAccess,
 } from './history-access';
+import { historyAnalyticsAdmission } from './history-analytics-admission';
 import {
   historyError,
   historyHasIntervalWindow,
@@ -46,6 +54,8 @@ import {
   historyWallTime,
 } from './history-data';
 import type { HistorySource, TextKey } from './history-sources';
+import { HistoryStatistics } from './history-statistics';
+import { historyStatisticsQueries } from './history-statistics-query';
 
 const INITIAL_QUERY: MonitorHistoryListQuery = { current: 1, pageSize: 10 };
 const PAGE_SIZES = [10, 20, 50] as const;
@@ -366,15 +376,17 @@ function HistoryDetail({
   close,
   source,
   readAccess,
+  owner,
 }: {
   id: number;
   close: () => void;
   source: HistorySource;
   readAccess: HistoryReadAccess;
+  owner: string;
 }) {
   const { runtime } = useAuth();
   const detail = useQuery({
-    queryKey: [source.key, 'detail', id],
+    queryKey: [source.key, 'detail', id, owner],
     queryFn: ({ signal }) =>
       readAccess.read(() => source.getDetail(runtime.http, id, signal), signal),
     staleTime: 0,
@@ -506,8 +518,44 @@ function HistoryDetail({
 }
 
 export function HistoryBrowser({ source }: { source: HistorySource }) {
+  const auth = useIdentity();
+  if (
+    auth.status !== 'authenticated' ||
+    !createAccess(auth.identity).canReadMonitor
+  )
+    return null;
+  const owner = JSON.stringify([
+    auth.identity.user.id,
+    auth.identity.sessionId ?? null,
+  ]);
+  return (
+    <HistoryBrowserSession
+      key={`${source.key}:${owner}`}
+      source={source}
+      owner={owner}
+    />
+  );
+}
+
+function HistoryBrowserSession({
+  source,
+  owner,
+}: {
+  source: HistorySource;
+  owner: string;
+}) {
   const { runtime } = useAuth();
+  const analytics = historyAnalyticsAdmission(runtime.http);
   const [readAccess] = useState(createHistoryReadAccess);
+  const readAnalytics = <T,>(
+    signal: AbortSignal,
+    load: (http: Pick<HttpClient, 'request'>) => Promise<T>,
+  ) =>
+    analytics.read(signal, (http) => {
+      const snapshot = readAccess.getSnapshot();
+      if (snapshot.denial && !snapshot.recovering) throw snapshot.denial;
+      return readAccess.read(() => load(http), signal);
+    });
   const access = useSyncExternalStore(
     readAccess.subscribe,
     readAccess.getSnapshot,
@@ -524,6 +572,11 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [intervalPage, setIntervalPage] = useState(1);
   const [filterError, setFilterError] = useState<string | null>(null);
+  const [abnormalScope, setAbnormalScope] =
+    useState<AbnormalDurationScope | null>(null);
+  const [abnormalScopeError, setAbnormalScopeError] = useState<ApiError | null>(
+    null,
+  );
   const previousSearch = useRef(search);
   useEffect(() => {
     if (previousSearch.current === search) return;
@@ -534,9 +587,11 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
     setIntervalPage(1);
     setSelectedId(null);
     setFilterError(null);
+    setAbnormalScope(null);
+    setAbnormalScopeError(null);
   }, [search]);
   const history = useQuery({
-    queryKey: [source.key, 'list', query],
+    queryKey: [source.key, 'list', query, owner],
     queryFn: ({ signal }) =>
       readAccess.read(
         () => source.getList(runtime.http, query, signal),
@@ -563,13 +618,49 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
         }
       : null;
   const intervals = useQuery({
-    queryKey: [source.key, 'status-intervals', intervalQuery],
+    queryKey: [source.key, 'status-intervals', intervalQuery, owner],
     queryFn: ({ signal }) =>
       readAccess.read(
         () => source.getIntervals!(runtime.http, intervalQuery!, signal),
         signal,
       ),
     enabled: intervalQuery !== null && !access.denial,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const statisticQueries = historyStatisticsQueries(query);
+  const statistics = useQuery({
+    queryKey: [source.key, 'statistics', statisticQueries.statistics, owner],
+    queryFn: ({ signal }) =>
+      readAnalytics(signal, (http) =>
+        source.getStatistics!(http, statisticQueries.statistics, signal),
+      ),
+    enabled: Boolean(source.getStatistics) && !access.denial,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const peakHours = useQuery({
+    queryKey: [source.key, 'peak-hours', statisticQueries.peakHours, owner],
+    queryFn: ({ signal }) =>
+      readAnalytics(signal, (http) =>
+        source.getPeakHours!(http, statisticQueries.peakHours!, signal),
+      ),
+    enabled:
+      Boolean(source.getPeakHours && statisticQueries.peakHours) &&
+      !access.denial,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const abnormal = useQuery({
+    queryKey: [source.key, 'abnormal-duration', abnormalScope, owner],
+    queryFn: ({ signal }) =>
+      readAnalytics(signal, (http) =>
+        source.getAbnormal!(http, abnormalScope!, signal),
+      ),
+    enabled:
+      Boolean(source.getAbnormal && abnormalScope) &&
+      !abnormalScopeError &&
+      !access.denial,
     staleTime: 0,
     gcTime: 0,
   });
@@ -617,6 +708,9 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
       current: 1,
       pageSize: query.pageSize,
     };
+    const nextAbnormalScope = source.getAbnormal
+      ? historyAbnormalScope(filters, startTime, endTime)
+      : null;
     try {
       runtime.http.url(source.path, nextQuery);
     } catch {
@@ -626,9 +720,22 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
       return;
     }
     setFilterError(null);
+    let nextAbnormalError: ApiError | null = null;
+    if (nextAbnormalScope) {
+      try {
+        runtime.http.url(abnormalDurationPath(nextAbnormalScope));
+      } catch {
+        nextAbnormalError = new ApiError(
+          'INVALID_INPUT',
+          '异常时长统计请求地址过长或无效，请减少 ASIN 或其他筛选项后查询。',
+        );
+      }
+    }
     setSelectedId(null);
     setQuery(nextQuery);
     setIntervalPage(1);
+    setAbnormalScope(nextAbnormalScope);
+    setAbnormalScopeError(nextAbnormalError);
   }
   function changePage(next: number) {
     setSelectedId(null);
@@ -643,7 +750,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
         >
           <h1 className="font-semibold">读取权限需要重新确认</h1>
           <p className="text-sm">
-            历史记录、状态区间和详情已隐藏。请确认当前账号权限后重新读取。
+            历史记录、统计、状态区间和详情已隐藏。请确认当前账号权限后重新读取。
           </p>
           {access.recoveryFailed && (
             <p role="status" className="text-sm">
@@ -684,6 +791,28 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
                   }
                 });
               }
+              if (source.getStatistics)
+                readers.push(async () => {
+                  const result = await statistics.refetch({
+                    throwOnError: true,
+                  });
+                  if (!result.isSuccess) throw result.error;
+                  return result.data;
+                });
+              if (source.getPeakHours && statisticQueries.peakHours)
+                readers.push(async () => {
+                  const result = await peakHours.refetch({
+                    throwOnError: true,
+                  });
+                  if (!result.isSuccess) throw result.error;
+                  return result.data;
+                });
+              if (source.getAbnormal && abnormalScope && !abnormalScopeError)
+                readers.push(async () => {
+                  const result = await abnormal.refetch({ throwOnError: true });
+                  if (!result.isSuccess) throw result.error;
+                  return result.data;
+                });
               void readAccess.recover(readers);
             }}
           >
@@ -709,9 +838,19 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
             <Button
               variant="secondary"
               size="small"
-              pending={history.isFetching}
+              pending={
+                history.isFetching ||
+                statistics.isFetching ||
+                peakHours.isFetching ||
+                abnormal.isFetching
+              }
               onClick={() => {
                 void history.refetch();
+                if (source.getStatistics) void statistics.refetch();
+                if (source.getPeakHours && statisticQueries.peakHours)
+                  void peakHours.refetch();
+                if (source.getAbnormal && abnormalScope && !abnormalScopeError)
+                  void abnormal.refetch();
               }}
             >
               <RefreshCw aria-hidden="true" />
@@ -836,6 +975,8 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
                     setIntervalPage(1);
                     setSelectedId(null);
                     setFilterError(null);
+                    setAbnormalScope(null);
+                    setAbnormalScopeError(null);
                   }}
                 >
                   清空筛选
@@ -844,6 +985,43 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
             </form>
           </CardContent>
         </Card>
+        {source.getStatistics && source.getPeakHours && (
+          <HistoryStatistics
+            statistics={statistics}
+            peakHours={peakHours}
+            queries={statisticQueries}
+            retryStatistics={() => {
+              void statistics.refetch();
+            }}
+            retryPeakHours={() => {
+              void peakHours.refetch();
+            }}
+          />
+        )}
+        {source.getAbnormal && abnormalScope && (
+          <HistoryAbnormal
+            key={JSON.stringify(abnormalScope)}
+            scope={abnormalScope}
+            query={
+              abnormalScopeError
+                ? {
+                    data: undefined,
+                    isPending: false,
+                    isFetching: false,
+                    isError: true,
+                    error: abnormalScopeError,
+                  }
+                : abnormal
+            }
+            retry={
+              abnormalScopeError
+                ? undefined
+                : () => {
+                    void abnormal.refetch();
+                  }
+            }
+          />
+        )}
         <Card>
           <CardHeader
             title="检查记录"
@@ -1002,6 +1180,7 @@ export function HistoryBrowser({ source }: { source: HistorySource }) {
             id={visibleSelectedId}
             source={source}
             readAccess={readAccess}
+            owner={owner}
             close={() => setSelectedId(null)}
           />
         )}

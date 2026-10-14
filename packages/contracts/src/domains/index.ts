@@ -11,6 +11,8 @@ export * from './feishu';
 export * from './health';
 export * from './monitor';
 export * from './monitor-analytics-neo';
+export * from './neo-batch-delete';
+export * from './neo-catalog-id';
 export * from './ops';
 export * from './roles';
 export * from './spApiConfig';

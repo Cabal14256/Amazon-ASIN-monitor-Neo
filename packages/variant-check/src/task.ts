@@ -1,4 +1,5 @@
 import {
+  persistedVariantCheckJobSchema,
   variantCheckJobSchema,
   variantCheckResultReferenceSchema,
   type VariantCheckJobData,
@@ -12,14 +13,26 @@ import {
 } from '@asin-monitor/db';
 import { normalizeCountry } from '@asin-monitor/sp-api';
 
-export function parseVariantCheckJob(raw: unknown): VariantCheckJobData {
-  const parsed = variantCheckJobSchema.safeParse(raw);
+function parseJob(
+  raw: unknown,
+  schema: typeof variantCheckJobSchema,
+): VariantCheckJobData {
+  const parsed = schema.safeParse(raw);
   if (!parsed.success) throw new VariantCheckError('invalid-input');
   const data = parsed.data;
   if (data.taskSubType === 'parent-asin-query')
     data.params.country = normalizeCountry(data.params.country);
   variantCheckJobOperation(data);
   return data;
+}
+/** Use only when reading payloads already persisted in BullMQ. */
+export function parsePersistedVariantCheckJob(
+  raw: unknown,
+): VariantCheckJobData {
+  return parseJob(raw, persistedVariantCheckJobSchema);
+}
+export function parseVariantCheckJob(raw: unknown): VariantCheckJobData {
+  return parseJob(raw, variantCheckJobSchema);
 }
 export function variantCheckJobOperation(
   data: VariantCheckJobData,

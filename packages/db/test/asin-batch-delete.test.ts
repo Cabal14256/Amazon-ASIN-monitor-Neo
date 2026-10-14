@@ -16,6 +16,7 @@ import {
   MAX_ASIN_BATCH_DELETE_TARGETS,
   normalizeBatchDeleteMode,
   parseBatchDeleteRequest,
+  parseNeoBatchDeleteRequest,
   splitBatchDeletePlan,
   useAsyncBatchDelete,
   type BatchDeleteAnalysis,
@@ -206,7 +207,7 @@ describe('batch deletion / actual Legacy domain compatibility', () => {
           });
         },
       );
-      it('accepts only the exact normalized queue identity for this domain', () => {
+      it('accepts only the exact literal queue identity for this domain', () => {
         const payload = {
           taskId: '12345678-1234-4234-8234-123456789012',
           taskType: 'batch-delete',
@@ -222,6 +223,12 @@ describe('batch deletion / actual Legacy domain compatibility', () => {
           asinIds: [],
         };
         expect(batchDeleteTaskDataSchema.parse(payload)).toEqual(payload);
+        const literal = {
+          ...payload,
+          groupIds: [' g1 ', 'g1', '   ', '😺'.repeat(50)],
+          asinIds: [' a1 '],
+        };
+        expect(batchDeleteTaskDataSchema.parse(literal)).toEqual(literal);
         const opposite =
           domain === 'asin'
             ? competitorBatchDeleteTaskDataSchema
@@ -233,7 +240,7 @@ describe('batch deletion / actual Legacy domain compatibility', () => {
           { taskSubType: 'other' },
           { title: 'other' },
           { extra: true },
-          { groupIds: [' g1 '] },
+          { groupIds: ['\ud800'] },
           { groupIds: ['g1', 'g1'] },
           { groupIds: [], asinIds: [] },
           { groupIds: Array(1000).fill('g1'), asinIds: ['a1'] },
@@ -245,6 +252,70 @@ describe('batch deletion / actual Legacy domain compatibility', () => {
       });
     },
   );
+
+  describe('Neo destructive literal parsing / intentional Legacy safety difference', () => {
+    it('never trims or folds group/ASIN keys, and deduplicates exact strings only', () => {
+      const raw = {
+        groupIds: [
+          ' Source Ś ',
+          'Source Ś',
+          ' Source Ś ',
+          'Case',
+          'case',
+          'café',
+          'cafe',
+          '   ',
+        ],
+        asinIds: [' Child Ś ', 'Child Ś'],
+        useAsync: ' YES ',
+      };
+      expect(parseNeoBatchDeleteRequest(raw)).toEqual({
+        groupIds: [
+          ' Source Ś ',
+          'Source Ś',
+          'Case',
+          'case',
+          'café',
+          'cafe',
+          '   ',
+        ],
+        asinIds: [' Child Ś ', 'Child Ś'],
+        useAsync: true,
+      });
+      expect(parseBatchDeleteRequest(raw).groupIds).toEqual([
+        'Source Ś',
+        'Case',
+        'case',
+        'café',
+        'cafe',
+      ]);
+    });
+    it.each([
+      { groupIds: [null] },
+      { asinIds: [1] },
+      { groupIds: [['g']] },
+      { groupIds: 'g' },
+      { groupIds: [''] },
+      { groupIds: ['\ud800'] },
+      { groupIds: ['a\u0085'] },
+      { groupIds: ['😺'.repeat(51)] },
+    ])(
+      'rejects malformed literal targets without Legacy coercion %j',
+      (raw) => {
+        expect(() => parseNeoBatchDeleteRequest(raw)).toThrow();
+      },
+    );
+    it('preserves the combined raw-count capacity code and asynchronous control policy', () => {
+      expect(() =>
+        parseNeoBatchDeleteRequest({ groupIds: Array(1001).fill('g') }),
+      ).toThrowError(expect.objectContaining({ code: 'capacity' }));
+      for (const value of [true, false, ' yes ', 'OFF', 'auto', null])
+        expect(
+          parseNeoBatchDeleteRequest({ groupIds: [' g '], useAsync: value })
+            .useAsync,
+        ).toBe(normalizeBatchDeleteMode(value));
+    });
+  });
   it.each([
     { totalRequested: 50, estimatedAsinCount: 500 },
     { totalRequested: 51, estimatedAsinCount: 5 },

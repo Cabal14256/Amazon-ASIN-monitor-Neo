@@ -198,7 +198,7 @@ jobs:
       - name: Verify scheduled ledgers on both PostgreSQL databases and batch policy against real MySQL
         env:
           RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'
-        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism
+        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts test/scheduled-monitor-run.integration.test.ts --no-file-parallelism
 
       - name: Run authentication cleanup and audit archive PostgreSQL transactions
         run: pnpm --filter @asin-monitor/db exec vitest run test/auth-maintenance.integration.test.ts
@@ -284,6 +284,18 @@ jobs:
       - name: Compare competitor query HTTP with Legacy MySQL and verify actual dual-database authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-query.integration.test.ts
 
+      - name: Verify literal catalog detail through actual HTTP, both PostgreSQL databases and Redis
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-literal-detail.integration.test.ts --maxWorkers=1
+
+      - name: Upload synthetic literal catalog index plans
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: catalog-literal-index-${{ github.run_id }}
+          path: artifacts/refactor-audit/catalog-literal-index-242-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upgrade competitor write policy twice
         run: |
           docker cp packages/db/docker/apply-competitor-write-policy.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-write-policy.sh"
@@ -321,6 +333,9 @@ jobs:
       - name: Compare complete monitor history HTTP queries with Legacy MySQL and verify PostgreSQL bounds
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-history.integration.test.ts
 
+      - name: Verify history preflight stops at the first overflowing prefix in one PostgreSQL snapshot
+        run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-history-preflight.integration.test.ts --maxWorkers=1
+
       - name: Compare competitor monitor history with Legacy MySQL and verify dual-database authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-history.integration.test.ts
 
@@ -329,6 +344,9 @@ jobs:
 
       - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
+
+      - name: Verify abnormal duration raw identifier query through HTTP and PostgreSQL
+        run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-abnormal-wire.integration.test.ts --maxWorkers=1
 
       - name: Verify monitor continuous aggregate freshness after late writes and historical corrections
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
@@ -343,7 +361,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: monitor-sql-decimal-${{ github.run_id }}
-          path: artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+          path: |
+            artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+            artifacts/refactor-audit/monitor-analytics-226-identity-failure.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -382,10 +402,10 @@ jobs:
       - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
         run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts
 
-      - name: Run ASIN batch deletion from HTTP through the compiled BullMQ Worker
+      - name: Verify literal ASIN deletion, real Legacy MySQL safety difference and compiled BullMQ Worker
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-batch-delete.integration.test.ts
 
-      - name: Compare competitor batch deletion with Legacy and verify shared compiled Worker dispatch
+      - name: Verify literal competitor deletion, real Legacy safety difference and compiled Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-delete.integration.test.ts
 
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
@@ -398,10 +418,16 @@ jobs:
         run: pnpm --filter @asin-monitor/worker exec vitest run test/competitor-monitor-entry.integration.test.ts --maxWorkers=1
 
       - name: Run variant check HTTP, full results, retry recovery and two API gateways
-        run: pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts
+        run: pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts test/literal-check-targets.integration.test.ts --no-file-parallelism
 
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
+
+      - name: Run ASIN export from HTTP through PostgreSQL, Redis and the compiled BullMQ Worker
+        run: pnpm --filter @asin-monitor/api exec vitest run test/asin-export.integration.test.ts
+
+      - name: Verify ASIN export group status and keyset queries against PostgreSQL
+        run: pnpm --filter @asin-monitor/db exec vitest run test/asin-export-query.integration.test.ts
 
       - name: Compare competitor imports with Legacy MySQL and verify shared compiled import Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-import.integration.test.ts

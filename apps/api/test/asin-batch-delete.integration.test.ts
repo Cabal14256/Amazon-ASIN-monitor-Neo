@@ -26,6 +26,7 @@ import { ENV } from '../src/config/config.module';
 import { AppLogger } from '../src/logger/app-logger.service';
 import { TaskQueryRuntime } from '../src/tasks/task-query.runtime';
 import { asinWriteApp } from './helpers/asin-write-app';
+import { legacyLiteralBatchDeleteFixture } from './helpers/literal-batch-delete-legacy';
 
 interface BusinessRuntime {
   queue: Queue;
@@ -51,6 +52,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       queue: Queue,
       store: RedisTaskRepository,
       runtime: BusinessRuntime | undefined;
+    let legacy: Awaited<ReturnType<typeof legacyLiteralBatchDeleteFixture>>;
     let headers: Record<string, string>, userId: string, sessionId: string;
     const fatal = vi.fn();
     beforeAll(async () => {
@@ -67,6 +69,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           },
         }),
       );
+      legacy = await legacyLiteralBatchDeleteFixture();
       redis = new Redis(env.REDIS_URL, {
         lazyConnect: true,
         commandTimeout: 2000,
@@ -144,7 +147,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           }
         } finally {
           redis?.disconnect(false);
-          if (f) await f.close();
+          try {
+            await legacy?.close();
+          } finally {
+            if (f) await f.close();
+          }
         }
       }
     });
@@ -156,6 +163,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       await f.pools.primaryPool.query('DELETE FROM asins');
       await f.pools.primaryPool.query('DELETE FROM variant_groups');
+      await legacy.query('DELETE FROM asins');
+      await legacy.query('DELETE FROM variant_groups');
       await f.pools.primaryPool.query(
         "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code='asin:delete' ON CONFLICT DO NOTHING",
       );
@@ -243,7 +252,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO monitor_history(asin_id,country,is_broken,check_time) VALUES('g1-a0','US',false,'2026-01-01 08:00:00')",
       );
       const response = await request({
-        groupIds: [' g1 ', 'missing', 'g1'],
+        groupIds: ['g1', 'missing', 'g1'],
         asinIds: ['g1-a0', 'g2-a0', 'absent'],
         useAsync: false,
       });
@@ -275,6 +284,210 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await queue.getJobCounts('wait', 'active', 'completed'),
       ).toMatchObject({ wait: 0, active: 0, completed: 0 });
     });
+    it.each([false, true])(
+      'preserves literal group keys through real HTTP and compiled Worker (async=%s)',
+      async (useAsync) => {
+        const selected = [
+          ' Raw Ś ',
+          ' Lead Ś',
+          'Tail Ś ',
+          'Case',
+          'café',
+          '   ',
+          '😺'.repeat(50),
+        ];
+        // The inherited ICU/rtrim unique index rejects trailing-space,
+        // case and accent aliases. Leading-space neighbors can coexist.
+        const neighbors = ['Raw Ś', 'Lead Ś'];
+        for (const [index, id] of [...selected, ...neighbors].entries()) {
+          await group(id, 0);
+          if (id.length <= 50)
+            await f.pools.primaryPool.query(
+              "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES($1,$2,'US','amazon.com','Fixture',$3)",
+              [`${id}-a0`, `B${String(index).padStart(9, '0')}`, id],
+            );
+        }
+        for (const alias of ['Tail Ś', 'case', 'cafe'])
+          await expect(group(alias, 0)).rejects.toMatchObject({
+            code: '23505',
+            constraint: 'variant_groups_rtrim_idx',
+          });
+        let result;
+        if (useAsync) {
+          const id = await accepted({ groupIds: selected });
+          expect((await queue.getJob(id))?.data.groupIds).toEqual(selected);
+          await start();
+          result = (await terminal(id)).result;
+        } else {
+          const response = await request({ groupIds: selected, useAsync });
+          expect(response.statusCode).toBe(200);
+          result = response.json().data;
+        }
+        expect(result).toMatchObject({
+          totalRequested: 7,
+          deletedGroupCount: 7,
+          deletedNestedAsinCount: 6,
+          skipped: { groupIds: [], asinIds: [] },
+        });
+        expect(
+          (await rows('variant_groups')).map((row) => row.id).sort(),
+        ).toEqual(neighbors.sort());
+        expect(
+          (await rows('asins')).map((row) => row.variant_group_id).sort(),
+        ).toEqual(neighbors.sort());
+        // Once the literal originals are absent, these normalized neighbors
+        // are legal. Retrying the original raw IDs must not delete them.
+        const missingLiterals = ['Tail Ś ', 'Case', 'café'];
+        const aliasNeighbors = ['Tail Ś', 'case', 'cafe'];
+        for (const id of aliasNeighbors) await group(id, 0);
+        let missingResult;
+        if (useAsync) {
+          const id = await accepted({ groupIds: missingLiterals });
+          expect((await queue.getJob(id))?.data.groupIds).toEqual(
+            missingLiterals,
+          );
+          missingResult = (await terminal(id)).result;
+        } else {
+          const response = await request({
+            groupIds: missingLiterals,
+            useAsync,
+          });
+          expect(response.statusCode).toBe(200);
+          missingResult = response.json().data;
+        }
+        expect(missingResult).toMatchObject({
+          totalRequested: 3,
+          deletedGroupCount: 0,
+          deletedNestedAsinCount: 0,
+          skipped: { groupIds: missingLiterals, asinIds: [] },
+        });
+        expect(
+          (await rows('variant_groups')).map((row) => row.id).sort(),
+        ).toEqual([...neighbors, ...aliasNeighbors].sort());
+      },
+    );
+    it.each([false, true])(
+      'preserves literal direct-ASIN keys and leaves trimmed/case/accent neighbors (async=%s)',
+      async (useAsync) => {
+        await group('parent', 0);
+        const selected = [
+          ' Child Ś ',
+          ' Lead Ś',
+          'Tail Ś ',
+          'Case',
+          'café',
+          '   ',
+          '😺'.repeat(50),
+        ];
+        const neighbors = ['Child Ś', 'Lead Ś', 'Tail Ś', 'case', 'cafe'];
+        for (const [index, id] of [...selected, ...neighbors].entries())
+          await f.pools.primaryPool.query(
+            "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES($1,$2,'US','amazon.com','Fixture','parent')",
+            [id, `B${String(index).padStart(9, '0')}`],
+          );
+        let result;
+        if (useAsync) {
+          const id = await accepted({ asinIds: selected });
+          expect((await queue.getJob(id))?.data.asinIds).toEqual(selected);
+          await start();
+          result = (await terminal(id)).result;
+        } else {
+          const response = await request({ asinIds: selected, useAsync });
+          expect(response.statusCode).toBe(200);
+          result = response.json().data;
+        }
+        expect(result).toMatchObject({
+          totalRequested: 7,
+          deletedDirectAsinCount: 7,
+          deletedGroupCount: 0,
+          skipped: { groupIds: [], asinIds: [] },
+        });
+        expect((await rows('asins')).map((row) => row.id).sort()).toEqual(
+          neighbors.sort(),
+        );
+        expect((await rows('variant_groups')).map((row) => row.id)).toEqual([
+          'parent',
+        ]);
+      },
+    );
+    it.each([false, true])(
+      'intentionally differs from real Legacy MySQL trim-neighbor deletion (raw exists=%s)',
+      async (rawExists) => {
+        const raw = ' Source Ś ',
+          neighbor = 'Source Ś';
+        for (const id of rawExists ? [raw, neighbor] : [neighbor]) {
+          await group(id);
+          await legacy.query(
+            "INSERT INTO variant_groups(id,name,country,site,brand) VALUES(?,?,'US','amazon.com','Fixture')",
+            [id, id],
+          );
+          await legacy.query(
+            "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES(?,?,'US','amazon.com','Fixture',?)",
+            [`${id}-a0`, id, id],
+          );
+        }
+        const old = await legacy.execute({ groupIds: [raw], asinIds: [] });
+        const response = await request({ groupIds: [raw], useAsync: false });
+        expect(response.statusCode).toBe(200);
+        expect(old.deletedGroupCount).toBe(1);
+        expect(
+          (await legacy.query('SELECT id FROM variant_groups')).map(
+            (row) => row.id,
+          ),
+        ).toEqual(rawExists ? [raw] : []);
+        expect(response.json().data).toMatchObject({
+          deletedGroupCount: rawExists ? 1 : 0,
+          skipped: { groupIds: rawExists ? [] : [raw], asinIds: [] },
+        });
+        expect((await rows('variant_groups')).map((row) => row.id)).toEqual([
+          neighbor,
+        ]);
+        expect((await rows('asins')).map((row) => row.id)).toEqual([
+          `${neighbor}-a0`,
+        ]);
+      },
+    );
+    it.each([false, true])(
+      'intentionally fixes real Legacy MySQL direct-ASIN trim-neighbor deletion (raw exists=%s)',
+      async (rawExists) => {
+        const raw = ' Child Ś ',
+          neighbor = 'Child Ś';
+        await group('parent', 0);
+        await legacy.query(
+          "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('parent','parent','US','amazon.com','Fixture')",
+        );
+        for (const [index, id] of (rawExists
+          ? [raw, neighbor]
+          : [neighbor]
+        ).entries()) {
+          const values = [id, `B${String(index).padStart(9, '0')}`];
+          await f.pools.primaryPool.query(
+            "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES($1,$2,'US','amazon.com','Fixture','parent')",
+            values,
+          );
+          await legacy.query(
+            "INSERT INTO asins(id,asin,country,site,brand,variant_group_id) VALUES(?,?,'US','amazon.com','Fixture','parent')",
+            values,
+          );
+        }
+        const old = await legacy.execute({ groupIds: [], asinIds: [raw] });
+        const response = await request({ asinIds: [raw], useAsync: false });
+        expect(response.statusCode).toBe(200);
+        expect(old.deletedDirectAsinCount).toBe(1);
+        expect(
+          (await legacy.query('SELECT id FROM asins')).map((row) => row.id),
+        ).toEqual(rawExists ? [raw] : []);
+        expect(response.json().data).toMatchObject({
+          deletedGroupCount: 0,
+          deletedDirectAsinCount: rawExists ? 1 : 0,
+          skipped: { groupIds: [], asinIds: rawExists ? [] : [raw] },
+        });
+        expect((await rows('asins')).map((row) => row.id)).toEqual([neighbor]);
+        expect((await rows('variant_groups')).map((row) => row.id)).toEqual([
+          'parent',
+        ]);
+      },
+    );
     it.each(['child-delete', 'parent-touch'])(
       'rolls back the entire synchronous transaction on %s failure',
       async (failure) => {
