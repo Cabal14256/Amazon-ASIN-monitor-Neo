@@ -530,6 +530,65 @@ async function main() {
     manifest.dataset.caggRefresh =
       'all nine actual migration-defined CAGGs, full two-month range; HTTP meta.source must still independently prove aggregate execution';
 
+    // Explain the real summary SQL outside measured HTTP requests. Persist only
+    // numeric work/row counts and node names, never SQL literals or credentials.
+    const { PgDialect } = dbRequire('drizzle-orm/pg-core');
+    const { monitorAggregateDurationSelect } = dbRequire(
+      path.join(
+        root,
+        'packages/db/dist/repositories/monitor-analytics-aggregate-query.js',
+      ),
+    );
+    const { parseMonitorAnalyticsQuery } = dbRequire(
+      path.join(root, 'packages/db/dist/domain/monitor-analytics-query.js'),
+    );
+    const summaryPlans = [];
+    for (const operation of ['all-countries-summary', 'region-summary']) {
+      const query = parseMonitorAnalyticsQuery(operation, {
+        startTime: WINDOWS.hot.startTime,
+        endTime: WINDOWS.hot.endTime,
+        sourceGranularity: 'hour',
+      });
+      const statement = new PgDialect().sqlToQuery(
+        monitorAggregateDurationSelect(query, 'hour', 'legacy-raw-summary'),
+      );
+      const explained = await primaryPg.query(
+        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.sql}`,
+        statement.params,
+      );
+      const plan = explained.rows[0]['QUERY PLAN'][0];
+      const nodes = [];
+      const visit = (node, depth) => {
+        nodes.push({
+          depth,
+          nodeType: node['Node Type'],
+          relation: node['Relation Name'],
+          index: node['Index Name'],
+          actualTotalMs: node['Actual Total Time'],
+          rows: node['Actual Rows'],
+          loops: node['Actual Loops'],
+          sharedHitBlocks: node['Shared Hit Blocks'],
+          sharedReadBlocks: node['Shared Read Blocks'],
+          tempReadBlocks: node['Temp Read Blocks'],
+          tempWrittenBlocks: node['Temp Written Blocks'],
+        });
+        for (const child of node.Plans ?? []) visit(child, depth + 1);
+      };
+      visit(plan.Plan, 0);
+      summaryPlans.push({
+        operation,
+        planningMs: plan['Planning Time'],
+        executionMs: plan['Execution Time'],
+        nodes,
+      });
+    }
+    await writeFile(
+      path.join(output, 'summary-sql-plans.json'),
+      `${JSON.stringify(summaryPlans, null, 2)}\n`,
+    );
+    manifest.summaryDiagnostics =
+      'real summary SQL EXPLAIN ANALYZE before warmup; numeric nodes only; excluded from paired HTTP samples';
+
     const userId = randomUUID(),
       sessionId = randomUUID();
     await primaryMysql.query(
