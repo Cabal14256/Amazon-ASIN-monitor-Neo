@@ -4,7 +4,7 @@
 
 ## 权限和数据源
 
-`statistics` 与 `statistics/peak-hours` 接受 `monitor:read` 或 `analytics:read` 中任意一个权限；`abnormal-duration-statistics` 要求 `monitor:read`；其他统计入口要求 `analytics:read`。
+`statistics`、`statistics/peak-hours` 与 `abnormal-duration-statistics` 接受 `monitor:read` 或 `analytics:read` 中任意一个权限；其他统计入口要求 `analytics:read`。
 
 每次读取都在 PostgreSQL `READ COMMITTED` 事务取得共享管理锁，再检查当前账户、密码状态、会话和权限。缓存命中也执行这些检查。Neo 统计入口要求 `AUTH_DATA_AUTHORITY=postgresql`；权威源尚未切换时返回固定 503。
 

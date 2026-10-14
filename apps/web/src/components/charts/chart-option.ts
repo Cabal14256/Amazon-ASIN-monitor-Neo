@@ -5,8 +5,10 @@ import type {
 } from 'echarts/charts';
 import type {
   AriaComponentOption,
+  DataZoomComponentOption,
   GridComponentOption,
   LegendComponentOption,
+  MarkAreaComponentOption,
   TooltipComponentOption,
 } from 'echarts/components';
 import type { ComposeOption, EChartsCoreOption } from 'echarts/core';
@@ -17,8 +19,10 @@ export type NeoChartOption = ComposeOption<
   | LineSeriesOption
   | PieSeriesOption
   | AriaComponentOption
+  | DataZoomComponentOption
   | GridComponentOption
   | LegendComponentOption
+  | MarkAreaComponentOption
   | TooltipComponentOption
 > & {
   textStyle?: EChartsCoreOption['textStyle'];

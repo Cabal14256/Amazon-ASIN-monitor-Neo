@@ -1,8 +1,10 @@
 import { BarChart, LineChart, PieChart } from 'echarts/charts';
 import {
   AriaComponent,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkAreaComponent,
   TooltipComponent,
 } from 'echarts/components';
 import { init, use as register } from 'echarts/core';
@@ -14,8 +16,10 @@ register([
   LineChart,
   PieChart,
   AriaComponent,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkAreaComponent,
   TooltipComponent,
   SVGRenderer,
 ]);
