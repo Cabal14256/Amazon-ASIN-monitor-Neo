@@ -3,6 +3,8 @@ import {
   CatalogOperationError,
   catalogTransactionExecution,
   competitorMonitorJobDigest,
+  PgAsinBatchDeleteRepository,
+  PgAsinImportRepository,
   withAuthDatabaseDeadline,
   type CatalogOperationIdentity,
   type CatalogOperationPin,
@@ -279,6 +281,59 @@ function fixture(
 }
 
 describe('required Worker catalog operation and physical settlement', () => {
+  it.each(['import', 'batch-delete'] as const)(
+    'joins the actual primary %s repository COMMIT after a logical timeout',
+    async (kind) => {
+      vi.useFakeTimers();
+      const f = fixture('asin', kind);
+      const commit = deferred();
+      const client = Object.assign(new EventEmitter(), {
+        query: vi.fn(async (statement: string | { text: string }) => {
+          const text =
+            typeof statement === 'string' ? statement : statement.text;
+          if (text === 'COMMIT') await commit.promise;
+          return {
+            rows: text.includes('AS installed')
+              ? [{ installed: text.includes('neo_import_group_ci') ? 1 : 2 }]
+              : [],
+          };
+        }),
+        release: vi.fn(),
+      });
+      const pool = { connect: async () => client } as unknown as Pool;
+      const repository =
+        kind === 'import'
+          ? new PgAsinImportRepository(pool)
+          : new PgAsinBatchDeleteRepository(pool);
+      let complete = false;
+      const run = f
+        .run(async () => {
+          try {
+            await repository.transaction(async () => 'value');
+          } catch {
+            f.patch({ status: 'failed' });
+          }
+          return 'retained';
+        })
+        .then((value) => {
+          complete = true;
+          return value;
+        });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(client.query).toHaveBeenCalledWith('COMMIT');
+      expect(complete).toBe(false);
+      expect(f.repository.finishPin).not.toHaveBeenCalled();
+      expect(f.repository.release).not.toHaveBeenCalled();
+      commit.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(run).resolves.toBe('retained');
+      expect(f.repository.finishPin).toHaveBeenCalledWith(
+        expect.anything(),
+        'uncertain',
+      );
+      expect(f.repository.release).not.toHaveBeenCalled();
+    },
+  );
   it('joins a timed-out repository transaction with no caller onActualWork before finishing the Bull job', async () => {
     vi.useFakeTimers();
     const f = fixture();
