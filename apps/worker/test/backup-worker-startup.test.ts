@@ -9,6 +9,7 @@ const dependencies = vi.hoisted(() => ({
   startMonitorIntervals: vi.fn(),
   startBatchDelete: vi.fn(),
   startImport: vi.fn(),
+  startExport: vi.fn(),
   startVariantChecks: vi.fn(),
   startBackup: vi.fn(),
   createQueue: vi.fn(),
@@ -39,6 +40,9 @@ vi.mock('../src/asin-batch-delete-runtime', () => ({
 }));
 vi.mock('../src/asin-import-runtime', () => ({
   startAsinImportRuntime: dependencies.startImport,
+}));
+vi.mock('../src/asin-export-runtime', () => ({
+  startAsinExportRuntime: dependencies.startExport,
 }));
 vi.mock('../src/variant-check-runtime', () => ({
   startVariantCheckRuntime: dependencies.startVariantChecks,
@@ -141,6 +145,9 @@ beforeEach(() => {
   dependencies.startImport.mockResolvedValue(
     runtime(getPhysicalQueueName('import')),
   );
+  dependencies.startExport.mockResolvedValue(
+    runtime(getPhysicalQueueName('export')),
+  );
   dependencies.startVariantChecks.mockImplementation(
     async (_env: unknown, names: readonly QueueName[]) => ({
       queues: names.map((name) => runtime(getPhysicalQueueName(name)).queue),
@@ -181,6 +188,7 @@ function expectDefaultRuntimes() {
   expect(dependencies.startMonitorIntervals).toHaveBeenCalledOnce();
   expect(dependencies.startBatchDelete).toHaveBeenCalledOnce();
   expect(dependencies.startImport).toHaveBeenCalledOnce();
+  expect(dependencies.startExport).toHaveBeenCalledOnce();
   expect(dependencies.startVariantChecks).toHaveBeenCalledOnce();
   expect(dependencies.startVariantChecks.mock.calls[0]?.[1]).toEqual([
     'monitor',
@@ -188,9 +196,7 @@ function expectDefaultRuntimes() {
     'batch-check',
     'variant-check',
   ]);
-  expect(dependencies.createQueue.mock.calls.map(([name]) => name)).toEqual([
-    getPhysicalQueueName('export'),
-  ]);
+  expect(dependencies.createQueue).not.toHaveBeenCalled();
   expect(dependencies.createRedis).toHaveBeenCalledOnce();
   expect(dependencies.startWatchdog).toHaveBeenCalledOnce();
 }
