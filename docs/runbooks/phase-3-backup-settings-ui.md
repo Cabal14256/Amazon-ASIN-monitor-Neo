@@ -4,6 +4,10 @@
 
 ## 实际接口与权限
 
+2026-10-14：入口先用 `GET /api/v1/backup/capabilities` 确认当前配置的后端提供 `neo-postgresql-backup-v1`、custom 格式和 primary/competitor 两个目标。未实现的 route、Legacy 返回、协议不符或请求失败仅显示不可用和 GET 重试，不挂载备份操作页；旧 Vite 代理继续指向 Legacy 时不会发送创建、恢复或删除。身份、session 或传输 revision 改变会使旧确认失效，待新会话重新确认。后端 #171 新增相同协议端点；没有更改整个代理或复制未合后端。
+
+共享流下载保留字节、30 分钟期限、块大小、前缀和磁盘背压校验。有效非空块不再受 200000 次固定上限约束，以免合法大于约 12 GiB 的归档被拒绝；连续空块仍限制 200000 次。普通 ASIN export 的调用方大小上限和 Blob 256 MiB 上限保持。新增测试复用 64 KiB chunk 验证 200001 块（不分配整个归档），并验证无字节进展拒绝。完整 Web 1187 项、lint/build 通过；真实 FSA 和 UI/API/两目标联动仍待独立验收。
+
 UI 对应 #171 实际存在的八个接口：`POST /api/v1/backup`、`POST /backup/restore`、`GET /backup`、`DELETE /backup/:filename`、`GET /backup/:filename/download`、`GET/POST /backup/config`、`GET /backup/scheduled-tasks`。以上简写均在 `/api/v1` 下。列表、下载、配置及计划执行记录也要求 `settings:write`；只有 `settings:read` 的用户不发送这些请求。
 
 创建与恢复固定使用 `useAsync: true`，不把同步成功消息假定为任务回执。主营和竞品各自使用真实 `target`。恢复前重读文件并比较原文件、大小、时间、来源与恢复能力；Neo custom 归档下载为包含 dump 与元数据的 `.tar`，不显示为 Legacy `.sql`。

@@ -29,6 +29,27 @@ function data(raw: unknown): unknown {
 export class BackupApi {
   constructor(private readonly http: Pick<HttpClient, 'request' | 'url'>) {}
 
+  async capabilities(signal?: AbortSignal): Promise<void> {
+    const value = object(
+      data(
+        await this.http.request(`${BASE}/capabilities`, {
+          signal,
+          timeoutMs: 5000,
+          maxResponseBytes: 8192,
+        }),
+      ),
+    );
+    if (
+      value?.protocol !== 'neo-postgresql-backup-v1' ||
+      value.format !== 'custom' ||
+      !Array.isArray(value.targets) ||
+      value.targets.length !== 2 ||
+      !value.targets.includes('primary') ||
+      !value.targets.includes('competitor')
+    )
+      throw new ApiError('INVALID_RESPONSE', '当前服务尚未支持此备份功能');
+  }
+
   async list(signal?: AbortSignal): Promise<BackupFile[]> {
     const rows = data(await this.http.request(BASE, { signal, ...OPTIONS }));
     if (!Array.isArray(rows) || rows.length > 10_000)

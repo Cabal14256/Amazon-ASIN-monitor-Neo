@@ -27,7 +27,7 @@ import {
   SettingsApi,
   type FeishuDraft,
 } from '../../services/settings';
-import { BackupPanel } from './backup-panel';
+import { BackupEntry } from './backup-entry';
 import {
   deniedSettingsError,
   isEmptySensitiveReplacement,
@@ -966,7 +966,7 @@ export default function SettingsPage() {
             onDenied={onDenied}
           />
         </div>
-        {tab === 'backup' && <BackupPanel />}
+        {tab === 'backup' && <BackupEntry />}
       </div>
     </AppShell>
   );
