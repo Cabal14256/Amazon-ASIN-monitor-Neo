@@ -92,6 +92,12 @@ UI 对应 #171 实际存在的八个接口：`POST /api/v1/backup`、`POST /back
 
 ## 回归与回滚
 
+当前备份入口先以 GET `/api/v1/backup/capabilities` 确认 `neo-postgresql-backup-v1`、custom 格式与 primary/competitor 两个 target；旧服务或未启用备份的服务不开放操作。探测受当前用户、sessionId、revision、权限和取消信号约束，不发送备份 POST。
+
+直接写文件复用共享 `saveToFile`：原生 `createWritable`、write、close 或 abort 未返回时，取消及期限仍及时结束界面等待；迟到的句柄只清理一次，不启动下载或写入。尚未结束的原生操作保留其物理并发许可。下载传输层与失败路径共享同一次 abort，磁盘失败不额外启动第二次清理。
+
+流式归档按字节总量、期限和连续空读取次数约束；正常有字节进度的读取不受累计 200000 次限制。回归包含 200001 个正常 64 KiB 块、无进度流、待返回句柄取消、迟到句柄零 GET/零写入及磁盘失败单次 abort。这些合成端口用例不替代上述真实 File System Access 与正式后端联调阶段门。
+
 正式合入 #171 后正常 merge 最新 main，复核新增字段与双布局导出 HTTP 下载默认值，运行 Web 全套、strict/lint/build、请求/导出 URL 与格式检查。重点回归两个 target、未知提交 GET-only 恢复、active/404/损坏回执、peer 解除后 GET 失败、同 owner 的 session revision、撤权与强制改密、配置并发及大文件直接保存。
 
 回滚本 Issue 的前端提交即可恢复备份占位区；不回滚数据库、备份卷、已创建任务或已经提交的恢复结果。Legacy 入口与生产切换状态按各自阶段保留。

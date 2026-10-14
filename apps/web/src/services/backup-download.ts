@@ -1,4 +1,5 @@
 import type { DownloadSink } from '../lib/download-stream';
+import { saveToFile } from '../lib/file-save';
 import { ApiError, type HttpClient } from '../lib/http';
 import type { BackupApi } from './backup';
 import {
@@ -139,16 +140,52 @@ export async function downloadBackup(
       throw new ApiError('CANCELLED', '下载已取消');
   };
   check();
-  let sink: DownloadSink;
-  if (destination.kind === 'file') {
-    sink = await destination.handle.createWritable();
+  const transfer = async (sink: DownloadSink, saveSignal: AbortSignal) => {
+    let aborting: Promise<void> | undefined;
+    const guarded: DownloadSink = {
+      async write(chunk) {
+        check();
+        await sink.write(chunk);
+        check();
+      },
+      async close() {
+        check();
+        await sink.close();
+        check();
+      },
+      abort(reason) {
+        return (aborting ??= Promise.resolve()
+          .then(() => sink.abort(reason))
+          .catch(() => undefined));
+      },
+    };
     try {
+      const bytes = await http.downloadTo(
+        api.downloadPath(file.filename),
+        guarded,
+        {
+          signal: saveSignal,
+          timeoutMs: BACKUP_TRANSFER_TIMEOUT_MS,
+          maxBytes: backupArchiveMaxBytes(file),
+          minBytes: Math.ceil(file.size / 512) * 512 + 2048,
+          expectedType: 'application/x-tar',
+          prefixBytes: 512,
+          validatePrefix: (prefix) => validateBackupTarPrefix(prefix, file),
+          onProgress: (bytes) => {
+            if (current() && !saveSignal.aborted) progress(bytes);
+          },
+        },
+      );
       check();
+      return bytes;
     } catch (error) {
-      await sink.abort(error).catch(() => undefined);
+      await guarded.abort(error);
       throw error;
     }
-  } else {
+  };
+  if (destination.kind === 'file')
+    return saveToFile(destination.handle, signal, current, transfer);
+  {
     if (backupArchiveMaxBytes(file) > BACKUP_BLOB_MAX_BYTES)
       throw new ApiError(
         'INVALID_INPUT',
@@ -156,7 +193,7 @@ export async function downloadBackup(
       );
     let parts: Uint8Array<ArrayBuffer>[] = [],
       bytes = 0;
-    sink = {
+    const sink: DownloadSink = {
       async write(chunk) {
         check();
         bytes += chunk.byteLength;
@@ -173,43 +210,6 @@ export async function downloadBackup(
         parts = [];
       },
     };
-  }
-  const guarded: DownloadSink = {
-    async write(chunk) {
-      check();
-      await sink.write(chunk);
-      check();
-    },
-    async close() {
-      check();
-      await sink.close();
-      check();
-    },
-    async abort(reason) {
-      await sink.abort(reason);
-    },
-  };
-  try {
-    const bytes = await http.downloadTo(
-      api.downloadPath(file.filename),
-      guarded,
-      {
-        signal,
-        timeoutMs: BACKUP_TRANSFER_TIMEOUT_MS,
-        maxBytes: backupArchiveMaxBytes(file),
-        minBytes: Math.ceil(file.size / 512) * 512 + 2048,
-        expectedType: 'application/x-tar',
-        prefixBytes: 512,
-        validatePrefix: (prefix) => validateBackupTarPrefix(prefix, file),
-        onProgress: (bytes) => {
-          if (current() && !signal.aborted) progress(bytes);
-        },
-      },
-    );
-    check();
-    return bytes;
-  } catch (error) {
-    await sink.abort(error).catch(() => undefined);
-    throw error;
+    return transfer(sink, signal);
   }
 }

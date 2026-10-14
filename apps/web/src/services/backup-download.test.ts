@@ -422,12 +422,13 @@ describe('bounded backup streaming save', () => {
       ),
     ).rejects.toMatchObject({ kind: 'NETWORK' });
     expect(next.sink.close).not.toHaveBeenCalled();
-    expect(next.sink.abort).toHaveBeenCalled();
+    expect(next.sink.abort).toHaveBeenCalledTimes(1);
   });
   it('cancels a late writable acquisition without starting GET or overwriting the chosen file', async () => {
     const f = fixture(),
       opening = deferred<DownloadSink>(),
       controller = new AbortController();
+    const createWritable = vi.fn(() => opening.promise);
     const work = downloadBackup(
       f.http,
       f.api,
@@ -435,17 +436,22 @@ describe('bounded backup streaming save', () => {
       {
         kind: 'file',
         filename: file.filename.replace('.dump', '.tar'),
-        handle: { createWritable: () => opening.promise },
+        handle: { createWritable },
       },
       controller.signal,
       () => true,
       vi.fn(),
     );
+    await vi.waitFor(() => expect(createWritable).toHaveBeenCalledTimes(1));
     controller.abort();
-    opening.resolve(f.sink);
     await expect(work).rejects.toMatchObject({ kind: 'CANCELLED' });
     expect(f.fetcher).not.toHaveBeenCalled();
-    expect(f.sink.abort).toHaveBeenCalled();
+    expect(f.sink.abort).not.toHaveBeenCalled();
+    opening.resolve(f.sink);
+    await vi.waitFor(() => expect(f.sink.abort).toHaveBeenCalledTimes(1));
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect(f.sink.write).not.toHaveBeenCalled();
+    expect(f.sink.close).not.toHaveBeenCalled();
   });
   it('enforces the deadline against a non-cooperating fetch and ignores its late body', async () => {
     vi.useFakeTimers();
