@@ -117,14 +117,14 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       : {};
   const status =
     state === 'completed' &&
-    [
+    ([
       'variant-check',
       'batch-check',
       'monitor',
       'competitor-monitor',
       'backup',
-      'export',
-    ].includes(type) &&
+    ].includes(type) ||
+      (type === 'export' && job.name === 'asin')) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
