@@ -4,6 +4,7 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { ApplicationExportArtifacts } from './export-storage.module';
 import { CANCELLABLE_TASK_TYPES } from './task-cancellation-script';
 import {
   parseTaskId,
@@ -25,6 +26,8 @@ export class TaskCancellationService {
     @Inject(ENV) private readonly env: Env,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationExportArtifacts)
+    private readonly artifacts: ApplicationExportArtifacts,
   ) {}
   async cancel(principal: AuthPrincipal, raw: unknown) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -74,8 +77,45 @@ export class TaskCancellationService {
       );
       if (!next) fail(404, '任务不存在');
       if (next.userId !== principal.userId) fail(403, '无权取消此任务');
+      if (
+        next.taskId !== task.taskId ||
+        next.taskType !== task.taskType ||
+        next.taskSubType !== task.taskSubType ||
+        next.createdAt !== task.createdAt
+      )
+        fail(409, '任务已变化，请刷新后重试');
       if (next.status === 'completed' || next.status === 'failed')
         fail(400, '任务已结束，无法取消');
+      if (
+        next.status === 'cancelled' &&
+        next.taskType === 'export' &&
+        next.taskSubType === 'asin'
+      ) {
+        // A delayed retry may own an earlier published file even though no
+        // Worker will run after atomic queue removal. Use only the verified
+        // immutable task's deterministic path, never a request filename.
+        let removed = false;
+        try {
+          await this.runtime.discardExport(next.taskId, deadline, () =>
+            this.artifacts.discardFinal(next.taskId),
+          );
+          removed = true;
+        } catch {
+          // The runtime retains the native-operation budget after this wait
+          // expires. Another cancellation cannot accumulate orphaned unlinks.
+        }
+        // Unlink cannot be aborted. A late completion remains safe for this
+        // cancelled UUID; its rejection is consumed above. Cleanup must never
+        // reverse the already acknowledged cancellation or extend its deadline.
+        if (!removed)
+          this.logger.warn(
+            '已取消导出文件清理未完成',
+            'TaskCancellationService',
+            {
+              reason: 'cancelled_export_cleanup_failed',
+            },
+          );
+      }
       this.logger.info('任务取消请求已处理', 'TaskCancellationService', {
         status: next.status,
       });

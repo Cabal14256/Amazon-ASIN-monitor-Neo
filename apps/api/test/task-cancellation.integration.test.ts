@@ -4,16 +4,24 @@ import {
   type Env,
   type QueueName,
 } from '@asin-monitor/config';
-import { taskInfoResultSchema } from '@asin-monitor/contracts';
+import {
+  asinExportJobDataSchema,
+  taskInfoResultSchema,
+} from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
   taskNotificationChannel,
   type TaskState,
 } from '@asin-monitor/db';
+import { ExportArtifactStore } from '@asin-monitor/export';
 import { FlowProducer, Queue, Worker, type JobsOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { finished } from 'node:stream/promises';
 import {
   afterAll,
   beforeAll,
@@ -25,6 +33,7 @@ import {
 } from 'vitest';
 import { ENV } from '../src/config/config.module';
 import { AppLogger } from '../src/logger/app-logger.service';
+import { ApplicationExportArtifacts } from '../src/tasks/export-storage.module';
 import { CANCELLABLE_TASK_TYPES } from '../src/tasks/task-cancellation-script';
 import { TaskQueryModule } from '../src/tasks/task-query.module';
 import { TaskQueryRuntime } from '../src/tasks/task-query.runtime';
@@ -55,13 +64,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     const events: WebSocketEvent[] = [];
     let unsubscribe: (() => void) | undefined;
     let restoreAtomic: (() => void) | undefined;
+    let artifacts: ExportArtifactStore, directory: string | undefined;
     const metaKey = (id: string) =>
       `${prefix}:neo:task:meta:${encodeURIComponent(id)}`;
     beforeAll(async () => {
+      directory = await mkdtemp(
+        join(tmpdir(), 'neo-cancel-export-integration-'),
+      );
+      artifacts = new ExportArtifactStore(directory);
       f = await spApiConfigApp({
         imports: [TaskQueryModule],
         configure: (builder) =>
           builder
+            .overrideProvider(ApplicationExportArtifacts)
+            .useValue(artifacts)
             .overrideProvider(WS_EVENT_BUS)
             .useFactory({
               inject: [ENV, AppLogger],
@@ -162,6 +178,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           } finally {
             redis?.disconnect(false);
             vi.restoreAllMocks();
+            if (directory)
+              await rm(directory, { recursive: true, force: true });
           }
         }
       }
@@ -269,6 +287,92 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         url: `/api/v1/tasks/${encodeURIComponent(id)}/cancel`,
         headers,
       });
+    it('discards a previous published ASIN artifact when cancellation removes its delayed retry', async () => {
+      const task = await store.create({
+        taskId: randomUUID(),
+        userId: owner.userId,
+        taskType: 'export',
+        taskSubType: 'asin',
+      });
+      const queue = await queueFor();
+      await queue.add(
+        'asin',
+        asinExportJobDataSchema.parse({
+          taskId: task.taskId,
+          taskType: 'export',
+          taskSubType: 'asin',
+          exportType: 'asin',
+          userId: task.userId,
+          createdAt: task.createdAt,
+          params: {},
+        }),
+        {
+          jobId: task.taskId,
+          attempts: 2,
+          removeOnComplete: false,
+          removeOnFail: false,
+        },
+      );
+      const job = await activate(queue, task.taskId);
+      await store.mutate(task.taskId, {
+        kind: 'processing',
+        message: '导出中',
+      });
+      const publish = async (id: string) => {
+        const temporary = await artifacts.temporary(id);
+        temporary.stream.end(Buffer.from([0x50, 0x4b, 0x03, 0x04, 1]));
+        await finished(temporary.stream);
+        const result = await artifacts.publish(
+          id,
+          temporary.path,
+          new AbortController().signal,
+        );
+        await artifacts.discard(temporary.path);
+        return result;
+      };
+      const artifact = await publish(task.taskId);
+      const neighbour = randomUUID();
+      await publish(neighbour);
+      const missingAck = vi
+        .spyOn(redis, 'eval')
+        .mockRejectedValueOnce(new Error('private-completion-ack-fixture'));
+      try {
+        await expect(
+          store.mutate(task.taskId, {
+            kind: 'completed',
+            result: { artifact },
+          }),
+        ).rejects.toThrow('private-completion-ack-fixture');
+      } finally {
+        missingAck.mockRestore();
+      }
+      await job.moveToDelayed(Date.now() + 60_000, 'fixture-lock-97');
+      expect(await queue.getJobState(task.taskId)).toBe('delayed');
+      expect(await artifacts.read(task.taskId)).not.toBeNull();
+      const response = await cancel(task.taskId);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data.status).toBe('cancelled');
+      expect(await queue.getJob(task.taskId)).toBeUndefined();
+      expect(await store.read(task.taskId)).toMatchObject({
+        status: 'cancelled',
+        userId: owner.userId,
+      });
+      expect(await artifacts.read(task.taskId)).toBeNull();
+      expect(await artifacts.read(neighbour)).not.toBeNull();
+      const worker = new Worker(queue.name, undefined, {
+        autorun: false,
+        prefix: getNeoQueuePrefix(env),
+        connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+      });
+      worker.on('error', () => undefined);
+      workers.add(worker);
+      await worker.waitUntilReady();
+      expect(
+        await worker.getNextJob('fixture-cancelled-retry-166', {
+          block: false,
+        }),
+      ).toBeUndefined();
+    });
     async function activate(queue: Queue, id: string) {
       const worker = new Worker(queue.name, undefined, {
         autorun: false,

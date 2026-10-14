@@ -1,4 +1,7 @@
-import type { PrimaryMonitorJob } from '@asin-monitor/contracts';
+import {
+  isNeoCatalogId,
+  type PrimaryMonitorJob,
+} from '@asin-monitor/contracts';
 import type { Pool, PoolClient } from 'pg';
 
 export interface PrimaryMonitorGroup {
@@ -72,9 +75,7 @@ export class PgPrimaryMonitorRepository {
             return (
               !group ||
               !job.countries.includes(group.country!) ||
-              typeof group.groupId !== 'string' ||
-              !group.groupId ||
-              group.groupId.length > 50
+              !isNeoCatalogId(group.groupId)
             );
           })
         )
@@ -91,6 +92,8 @@ export class PgPrimaryMonitorRepository {
       );
       if (selected.rows.length > MAX_GROUPS)
         throw new Error('MONITOR_GROUP_LIMIT');
+      if (selected.rows.some((row) => !isNeoCatalogId(row.id)))
+        throw new Error('MONITOR_SNAPSHOT_IDENTITY_CHANGED');
       const groups = selected.rows.map((row) => ({
         country: row.country as PrimaryMonitorGroup['country'],
         groupId: row.id,

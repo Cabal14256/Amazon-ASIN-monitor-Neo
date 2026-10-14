@@ -312,3 +312,53 @@ describe('variant and batch BullMQ processor lifecycle', () => {
     expect(f.state()?.status).toBe('cancelled');
   });
 });
+
+describe('persisted variant-check queue payloads', () => {
+  it.each([
+    ['variant-check', 51],
+    ['variant-check', 100],
+    ['batch-check', 51],
+    ['batch-check', 100],
+  ] as const)(
+    'transitions a historical %s target of %i characters to failed without upstream work',
+    async (type, length) => {
+      const f = fixture(type);
+      if (f.data.taskSubType === 'asin-check')
+        f.data.params.asinId = 'x'.repeat(length);
+      else if (f.data.taskSubType === 'variant-group')
+        f.data.params.groupIds[0] = 'x'.repeat(length);
+      await expect(f.run()).rejects.toBeInstanceOf(UnrecoverableError);
+      expect(f.state()).toMatchObject({
+        status: 'failed',
+        result: null,
+        startedAt: null,
+      });
+      expect(f.store.mutate).toHaveBeenCalledWith(
+        f.data.taskId,
+        expect.objectContaining({ kind: 'failed' }),
+        f.data,
+      );
+      expect(f.store.mutate).toHaveBeenCalledTimes(1);
+      expect(f.execute).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects malformed historical data and a changed queue identity before metadata access', async () => {
+    for (const invalid of ['x'.repeat(101), 'a\u0000b']) {
+      const f = fixture();
+      if (f.data.taskSubType !== 'asin-check')
+        throw new Error('fixture mismatch');
+      f.data.params.asinId = invalid;
+      await expect(f.run()).rejects.toBeInstanceOf(UnrecoverableError);
+      expect(f.store.read).not.toHaveBeenCalled();
+      expect(f.store.mutate).not.toHaveBeenCalled();
+    }
+    const changed = fixture();
+    if (changed.data.taskSubType !== 'asin-check')
+      throw new Error('fixture mismatch');
+    changed.data.params.asinId = 'x'.repeat(75);
+    changed.job.id = '10000000-0000-4000-8000-000000000999';
+    await expect(changed.run()).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(changed.store.read).not.toHaveBeenCalled();
+    expect(changed.store.mutate).not.toHaveBeenCalled();
+  });
+});

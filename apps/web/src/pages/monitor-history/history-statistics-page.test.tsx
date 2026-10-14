@@ -414,13 +414,18 @@ describe('mounted primary history statistics with real HTTP and schemas', () => 
           }),
         }),
       );
-      await screen.findByText('9,876');
       expect(oldReads.every((request) => request.signal?.aborted)).toBe(true);
+      // Cancellation hides the old owner immediately, but non-cooperating
+      // transport work still owns both admission slots until it settles.
+      expect(f.reads(STATS)).toHaveLength(2);
+      expect(screen.queryByText('1,234')).toBeNull();
+      expect(screen.queryByText('9,876')).toBeNull();
       await act(async () => {
         oldStats.resolve(ok(stats(5555)));
         oldPeak.resolve(ok({ ...peaks(), peakRate: 99 }));
         await Promise.all([oldStats.promise, oldPeak.promise]);
       });
+      await screen.findByText('9,876');
       expect(screen.queryByText('5,555')).toBeNull();
       expect(screen.queryByText('99.00%')).toBeNull();
       expect(screen.getByText('9,876')).toBeTruthy();
