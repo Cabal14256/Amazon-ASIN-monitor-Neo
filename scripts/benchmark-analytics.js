@@ -256,6 +256,35 @@ function firstDifferencePath(left, right, currentPath = '$') {
   return currentPath;
 }
 
+// Emit only finite analytics duration/rate scalars. Keep identifiers, strings,
+// credentials and whole response payloads out of shared acceptance artifacts.
+function numericDifferenceAtPath(left, right, differencePath) {
+  if (
+    typeof differencePath !== 'string' ||
+    !/^\$\.data(?:\.[A-Za-z_]\w*|\[\d+\])*\.(?:totalDurationHours|abnormalDurationHours|normalDurationHours|peakDurationHours|peakAbnormalDurationHours|lowDurationHours|lowAbnormalDurationHours|ratioAllAsin|ratioAllTime|globalPeakRate|globalLowRate|ratioHigh|ratioLow)$/.test(
+      differencePath,
+    )
+  )
+    return null;
+  const select = (value) => {
+    for (const part of differencePath.matchAll(/\.([A-Za-z_]\w*)|\[(\d+)\]/g)) {
+      const key = part[1] ?? part[2];
+      if (
+        value === null ||
+        typeof value !== 'object' ||
+        !Object.hasOwn(value, key)
+      )
+        return null;
+      value = value[key];
+    }
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+  const oldValue = select(left),
+    newValue = select(right);
+  if (oldValue === null || newValue === null) return null;
+  return { oldValue, newValue, delta: newValue - oldValue };
+}
+
 function requireText(value, name) {
   const text = String(value || '').trim();
   if (!text) throw new Error(`Missing required --${name}`);
@@ -582,6 +611,11 @@ function comparePairResults(oldResult, newResult, benchmarkCase, run) {
     run,
     matches: differencePath === null,
     differencePath,
+    numericDifference: numericDifferenceAtPath(
+      oldResult.comparable,
+      newResult.comparable,
+      differencePath,
+    ),
     statusesMatch,
     expectedStatus: benchmarkCase.expectedStatus,
     oldStatus: oldResult.status,
@@ -1075,6 +1109,7 @@ module.exports = {
   comparableResponse,
   digestValue,
   firstDifferencePath,
+  numericDifferenceAtPath,
   joinApiUrl,
   normalizeBaseUrl,
   normalizeComparableValue,
