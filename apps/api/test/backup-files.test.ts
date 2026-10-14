@@ -3,13 +3,16 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
+  truncate,
   utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteBackupFile,
   listBackupFiles,
@@ -17,7 +20,181 @@ import {
   resolveBackupPath,
 } from '../src/backup/backup-files';
 
+const fileFaults = vi.hoisted(() => ({
+  beforeOpen: undefined as ((path: string) => Promise<void>) | undefined,
+  beforeSidecarRead: undefined as ((path: string) => Promise<void>) | undefined,
+  failSidecarDelete: false,
+  openedSidecars: [] as import('node:fs/promises').FileHandle[],
+}));
+vi.mock('node:fs/promises', async (original) => {
+  const fs = await original<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    open: async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith('.meta.json')) {
+        const replace = fileFaults.beforeOpen;
+        fileFaults.beforeOpen = undefined;
+        await replace?.(String(args[0]));
+      }
+      const handle = await fs.open(...args);
+      if (String(args[0]).endsWith('.meta.json')) {
+        fileFaults.openedSidecars.push(handle);
+        const beforeRead = fileFaults.beforeSidecarRead;
+        fileFaults.beforeSidecarRead = undefined;
+        if (beforeRead) {
+          const read = handle.read.bind(handle);
+          vi.spyOn(handle, 'read').mockImplementationOnce(
+            async (...readArgs: Parameters<typeof read>) => {
+              await beforeRead(String(args[0]));
+              return Reflect.apply(read, handle, readArgs);
+            },
+          );
+        }
+      }
+      return handle;
+    },
+    unlink: async (...args: Parameters<typeof fs.unlink>) => {
+      if (
+        fileFaults.failSidecarDelete &&
+        String(args[0]).endsWith('.meta.json')
+      ) {
+        fileFaults.failSidecarDelete = false;
+        throw Object.assign(new Error('fixture sidecar delete retry'), {
+          code: 'EIO',
+        });
+      }
+      return fs.unlink(...args);
+    },
+  };
+});
+afterEach(async () => {
+  for (const handle of fileFaults.openedSidecars.splice(0))
+    if (handle.fd !== -1) await handle.close();
+  fileFaults.beforeOpen = undefined;
+  fileFaults.beforeSidecarRead = undefined;
+  fileFaults.failSidecarDelete = false;
+  vi.restoreAllMocks();
+});
+
 describe('backup file boundary', () => {
+  it('refuses metadata replaced between entry validation and open, without reading the replacement', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-sidecar-replacement-'));
+    const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+    const path = join(directory, `${filename}.meta.json`);
+    try {
+      await writeFile(
+        path,
+        JSON.stringify({
+          version: 1,
+          filename,
+          target: 'primary',
+          sourceEngine: 'postgresql',
+        }),
+      );
+      fileFaults.beforeOpen = async () => {
+        await rename(path, `${path}.original`);
+        await writeFile(
+          path,
+          JSON.stringify({
+            version: 2,
+            filename,
+            target: 'primary',
+            sourceEngine: 'postgresql',
+            description: 'replacement',
+          }),
+        );
+      };
+      expect(await readBackupMetadata(directory, filename)).toBeNull();
+      expect(fileFaults.openedSidecars).toHaveLength(1);
+      expect(fileFaults.openedSidecars[0].fd).toBe(-1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it('finishes orphan sidecar cleanup on retry after the dump was deleted', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-sidecar-delete-'));
+    const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+    const path = join(directory, filename);
+    try {
+      await writeFile(path, 'PGDMPfixture');
+      await writeFile(`${path}.meta.json`, '{}');
+      fileFaults.failSidecarDelete = true;
+      await expect(deleteBackupFile(directory, filename)).rejects.toMatchObject(
+        { code: 'EIO' },
+      );
+      await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(`${path}.meta.json`, 'utf8')).toBe('{}');
+      await expect(
+        deleteBackupFile(directory, filename),
+      ).resolves.toBeUndefined();
+      await expect(readFile(`${path}.meta.json`)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(deleteBackupFile(directory, filename)).rejects.toMatchObject(
+        { code: 'ENOENT' },
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it('rejects a sidecar growing past the cap during native reads without buffering its new size', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-sidecar-growth-'));
+    const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+    const path = join(directory, `${filename}.meta.json`);
+    const text = JSON.stringify({
+      version: 1,
+      filename,
+      target: 'primary',
+      sourceEngine: 'postgresql',
+    });
+    try {
+      await writeFile(path, text);
+      fileFaults.beforeSidecarRead = async () =>
+        truncate(path, BACKUP_ARTIFACT_METADATA_MAX_BYTES + 1);
+      expect(await readBackupMetadata(directory, filename)).toBeNull();
+      const handle = fileFaults.openedSidecars[0];
+      expect(handle.fd).toBe(-1);
+      expect(handle.read).toHaveBeenCalledOnce();
+      expect(handle.read).toHaveBeenCalledWith(
+        expect.objectContaining({ byteLength: Buffer.byteLength(text) + 1 }),
+        0,
+        Buffer.byteLength(text) + 1,
+        0,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it.skipIf(process.platform === 'win32')(
+    'refuses a replacement symlink into an oversized external file',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'neo-sidecar-symlink-'));
+      const filename = 'backup_20260927-020000-abcdef01-primary.dump';
+      const path = join(directory, `${filename}.meta.json`);
+      const external = join(directory, 'outside-metadata');
+      try {
+        await writeFile(
+          path,
+          JSON.stringify({
+            version: 1,
+            filename,
+            target: 'primary',
+            sourceEngine: 'postgresql',
+          }),
+        );
+        await writeFile(external, '');
+        await truncate(external, BACKUP_ARTIFACT_METADATA_MAX_BYTES + 1);
+        fileFaults.beforeOpen = async () => {
+          await rename(path, `${path}.original`);
+          await symlink(external, path);
+        };
+        expect(await readBackupMetadata(directory, filename)).toBeNull();
+        expect(fileFaults.openedSidecars).toHaveLength(0);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
   it('uses the delayed dump window from its sidecar across file transfer and identifies historical fallback sources', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-backup-files-'));
     const filename =

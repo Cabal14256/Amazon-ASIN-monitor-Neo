@@ -384,7 +384,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
     expect(response.json().data.error).toBe('任务执行失败');
     expect(response.body).not.toContain('private');
   });
-  it('keeps nonterminal recovery compatibility for an older creation queue result without commit proof', async () => {
+  it('keeps an older creation unresolved until a durable commit receipt is available', async () => {
     task = {
       ...task!,
       taskId: '10000000-0000-4000-8000-000000000161',
@@ -408,21 +408,37 @@ describe('own task query HTTP and bounded reconciliation', () => {
     const response = await get(`/tasks/${task.taskId}`);
     expect(response.statusCode).toBe(200);
     expect(response.json().data).toMatchObject({
-      status: 'completed',
-      progress: 100,
-      result,
+      status: 'processing',
+      result: null,
     });
-    expect(port.store.mutate).toHaveBeenCalledWith(
-      task.taskId,
-      expect.objectContaining({ kind: 'completed', result }),
-      {
-        userId: taskUserId,
-        taskType: 'backup',
-        taskSubType: 'create',
-        createdAt: task!.createdAt,
-      },
-    );
+    expect(port.store.mutate).not.toHaveBeenCalled();
   });
+  it.each(['create', 'restore'] as const)(
+    'does not mark a %s successful from an incomplete completed queue result in detail or list',
+    async (taskSubType) => {
+      task = taskFixture({
+        taskType: 'backup',
+        taskSubType,
+        status: 'cancelling',
+        cancelRequestedAt: taskFixture().createdAt,
+      });
+      rows = [task];
+      queue = {
+        ...task,
+        status: 'completed',
+        result: { operation: taskSubType, verification: 'confirmed' },
+      };
+      expect((await get()).json().data).toMatchObject({
+        status: 'cancelling',
+        result: null,
+      });
+      expect((await get('/tasks')).json().data[0]).toMatchObject({
+        status: 'cancelling',
+        result: null,
+      });
+      expect(port.store.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each(
     (['processing', 'cancelling', 'cancelled', 'failed'] as const).flatMap(
       (status) =>

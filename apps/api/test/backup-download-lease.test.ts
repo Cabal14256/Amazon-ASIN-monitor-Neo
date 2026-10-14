@@ -155,7 +155,7 @@ async function outcome(download: () => Promise<Readable>) {
 }
 
 describe('backup download capacity includes the live response stream', () => {
-  it('does not leak admission when file cleanup rejects after the actual descriptor closes', async () => {
+  it('retains admission until failed snapshot cleanup succeeds after the actual descriptor closes', async () => {
     const f = await fixture();
     let residual: string | undefined;
     try {
@@ -163,14 +163,18 @@ describe('backup download capacity includes the live response stream', () => {
       const owned = snapshotCleanup.files[0];
       residual = owned.path;
       snapshotCleanup.failUnlink = owned.path;
-      await f.close(f.streams[0]);
+      const closing = f.close(f.streams[0]);
+      await vi.waitFor(() => expect(owned.handle.fd).toBe(-1));
+      expect(f.streams[0].closed).toBe(false);
+      expect(await outcome(f.download)).toMatchObject({ status: 429 });
+      snapshotCleanup.failUnlink = '';
+      await closing;
       expect(owned.handle.fd).toBe(-1);
       expect(f.logger.warn).toHaveBeenCalledWith(
         '备份下载流未完成',
         'BackupService',
         { reason: 'backup_download_stream_failed' },
       );
-      snapshotCleanup.failUnlink = '';
       expect((await f.download()).closed).toBe(false);
       expect(await outcome(f.download)).toMatchObject({ status: 429 });
     } finally {
@@ -179,8 +183,14 @@ describe('backup download capacity includes the live response stream', () => {
         // Reclaim the exact owned residual before removing its backup-volume
         // parent. The fixture's recursive cleanup would otherwise remove it.
         if (residual) {
-          await unlink(residual);
-          await rmdir(dirname(residual));
+          await unlink(residual).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== 'ENOENT') throw error;
+          });
+          await rmdir(dirname(residual)).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code !== 'ENOENT') throw error;
+            },
+          );
         }
       } finally {
         await f.cleanup();

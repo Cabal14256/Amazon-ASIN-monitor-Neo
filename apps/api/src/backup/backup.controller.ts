@@ -128,6 +128,16 @@ export class BackupController {
     };
   }
 
+  @Get('capabilities')
+  @Header('Cache-Control', 'no-store')
+  async capabilities(@Req() request: FastifyRequest) {
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.backups.capabilities(request.auth!),
+    };
+  }
+
   @Post('config')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')

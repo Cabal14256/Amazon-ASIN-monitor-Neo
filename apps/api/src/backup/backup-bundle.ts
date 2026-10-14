@@ -12,6 +12,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const BLOCK_SIZE = 512;
 const READ_SIZE = 64 * 1024;
@@ -88,21 +89,34 @@ export async function backupBundle(
   };
   const closeFile = () =>
     (closing ??= (async () => {
-      // Try every owned cleanup even if a previous operation fails. _destroy
-      // reports cleanup failures but still closes the stream and its lease.
-      const errors: unknown[] = [];
-      for (const cleanup of [
-        () => snapshot?.close(),
-        () => (snapshotPath ? unlink(snapshotPath) : undefined),
-        () => (snapshotDirectory ? rmdir(snapshotDirectory) : undefined),
-      ]) {
-        try {
-          await cleanup();
-        } catch (error) {
-          errors.push(error);
+      // Failed native cleanup retains ownership and the response lease. Each
+      // retry calls close/unlink again, instead of reusing a rejected promise.
+      let firstError: unknown;
+      for (const [cleanup, acceptsMissing] of [
+        [() => file?.close(), false],
+        [() => snapshot?.close(), false],
+        [() => (snapshotPath ? unlink(snapshotPath) : undefined), true],
+        [
+          () => (snapshotDirectory ? rmdir(snapshotDirectory) : undefined),
+          true,
+        ],
+      ] as const) {
+        for (;;) {
+          try {
+            await cleanup();
+            break;
+          } catch (error) {
+            if (
+              acceptsMissing &&
+              (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+            )
+              break;
+            firstError ??= error;
+            await delay(100);
+          }
         }
       }
-      if (errors.length) throw errors[0];
+      if (firstError) throw firstError;
     })());
   try {
     checkDeadline();
@@ -225,7 +239,6 @@ export async function backupBundle(
     };
     return stream;
   } catch (error) {
-    await file?.close().catch(() => undefined);
     await closeFile().catch(() => undefined);
     if (error instanceof Error && error.message === 'BACKUP_BUNDLE_INVALID')
       throw error;

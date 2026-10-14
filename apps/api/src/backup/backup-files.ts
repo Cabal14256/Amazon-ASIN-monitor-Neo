@@ -1,11 +1,5 @@
-import {
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  unlink,
-} from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdir, open, readdir, unlink } from 'node:fs/promises';
 import { basename, resolve, sep } from 'node:path';
 
 import {
@@ -80,12 +74,56 @@ export async function readBackupMetadata(directory: string, filename: string) {
   const target = backupFilenameTarget(filename);
   try {
     const path = `${safeBackupPath(directory, filename)}.meta.json`;
-    const details = await lstat(path);
-    if (!details.isFile() || details.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES)
-      return null;
-    const parsed = backupArtifactMetadataSchema.safeParse(
-      JSON.parse(await readFile(path, 'utf8')),
+    const entry = await lstat(path, { bigint: true });
+    const maximum = BigInt(BACKUP_ARTIFACT_METADATA_MAX_BYTES);
+    if (!entry.isFile() || entry.size > maximum) return null;
+    const file = await open(
+      path,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_NOFOLLOW ?? 0) |
+        (fsConstants.O_NONBLOCK ?? 0),
     );
+    let parsed;
+    try {
+      const details = await file.stat({ bigint: true });
+      if (
+        !details.isFile() ||
+        details.size > maximum ||
+        details.dev !== entry.dev ||
+        details.ino !== entry.ino ||
+        details.size !== entry.size ||
+        details.mtimeNs !== entry.mtimeNs ||
+        details.ctimeNs !== entry.ctimeNs
+      )
+        return null;
+      // Allocate only the validated size plus one overflow byte. A growing file
+      // cannot bypass the cap or be read indefinitely through this descriptor.
+      const bytes = Buffer.alloc(Number(details.size) + 1);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const read = await file.read(
+          bytes,
+          offset,
+          Math.min(64 * 1024, bytes.length - offset),
+          offset,
+        );
+        if (!read.bytesRead) break;
+        offset += read.bytesRead;
+      }
+      const after = await file.stat({ bigint: true });
+      if (
+        offset !== Number(details.size) ||
+        after.size !== details.size ||
+        after.mtimeNs !== details.mtimeNs ||
+        after.ctimeNs !== details.ctimeNs
+      )
+        return null;
+      parsed = backupArtifactMetadataSchema.safeParse(
+        JSON.parse(bytes.subarray(0, offset).toString('utf8')),
+      );
+    } finally {
+      await file.close();
+    }
     return parsed.success &&
       parsed.data.filename === filename &&
       parsed.data.target === target
@@ -97,7 +135,7 @@ export async function readBackupMetadata(directory: string, filename: string) {
       (error &&
         typeof error === 'object' &&
         'code' in error &&
-        error.code === 'ENOENT')
+        (error.code === 'ENOENT' || error.code === 'ELOOP'))
     )
       return null;
     throw error;
@@ -172,8 +210,18 @@ export async function deleteBackupFile(
   filename: string,
 ): Promise<void> {
   const path = safeBackupPath(directory, filename);
-  await unlink(path);
-  await unlink(`${path}.meta.json`).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== 'ENOENT') throw error;
-  });
+  let removed = false;
+  let firstError: unknown;
+  let missing: unknown;
+  for (const target of [path, `${path}.meta.json`]) {
+    try {
+      await unlink(target);
+      removed = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing ??= error;
+      else firstError ??= error;
+    }
+  }
+  if (firstError) throw firstError;
+  if (!removed) throw missing;
 }

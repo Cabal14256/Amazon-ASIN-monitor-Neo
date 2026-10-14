@@ -81,6 +81,32 @@ async function consume(stream: Awaited<ReturnType<typeof backupBundle>>) {
 }
 
 describe('review5 capacity-managed download snapshots', () => {
+  it('retries an actual snapshot close and retains the stream until the descriptor closes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-close-retry-'));
+    let stream: Awaited<ReturnType<typeof backupBundle>> | undefined;
+    try {
+      const path = join(directory, filename);
+      await writeFile(path, 'PGDMPclose-retry');
+      stream = await backupBundle(path, filename, metadata);
+      const snapshot = opened.handles.at(-1)!;
+      vi.mocked(snapshot.close).mockRejectedValueOnce(
+        new Error('fixture transient close'),
+      );
+      stream.on('error', () => undefined);
+      const closed = new Promise<void>((resolve) =>
+        stream!.once('close', resolve),
+      );
+      stream.destroy();
+      await closed;
+      expect(snapshot.fd).toBe(-1);
+      expect(snapshot.close).toHaveBeenCalledTimes(2);
+      await expect(access(opened.paths.get(snapshot)!)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('downloads a valid backup-volume archive while system temporary snapshots have no capacity', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'neo-bundle-volume-'));
     try {

@@ -232,7 +232,7 @@ export class TaskQueryService {
         return current;
       }
     }
-    if (queued.status === 'completed' && !checkTask(task))
+    if (queued.status === 'completed' && !checkTask(task) && !backupTask(task))
       current = await port.store.mutate(
         task.taskId,
         {

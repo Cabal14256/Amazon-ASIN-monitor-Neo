@@ -2,6 +2,14 @@
 
 ## 格式与边界
 
+### 2026-10-14 任务回执与文件清理修复
+
+- `GET /api/v1/backup/capabilities` 经过当前 `settings:write` 鉴权和保留期校验后返回 `neo-postgresql-backup-v1`、custom 格式和 primary/competitor 两个目标。备份 UI 先确认这个协议，再挂载操作页；Legacy/未实现后端不接受 Neo 创建或恢复。此 GET 不创建任务，也不证明部署、真实 FSA 保存或生产切换已验收。
+- 保留队列中的 completed backup 只有经过创建/恢复专用提交回执校验才进入完成态；缺失或不完整回执保持原待核实状态，计划历史同样不再走普通 completion。
+- 下载 snapshot 的原生 close、unlink 和空目录清理失败会实际重试，保留容量和文件归属至清理成功；永久文件系统故障会继续占用容量并阻止关机完成，需运维处理实际 I/O，不能伪装已释放。
+- sidecar 使用 no-follow/non-blocking open、BigInt 文件身份校验和同 FD 有界读取；文件增长、替换或元数据版本变化会拒绝。先删除 dump 后 sidecar 清理失败时，再次删除仍尝试两个精确路径并清理 orphan；两个都不存在才返回 404。
+- 本机新增行为复现：回执 6 RED、snapshot close 1 RED、sidecar 替换/部分删除 2 RED。修复后相关 226 项 passed /1 Windows symlink skip；完整 API 在两 worker 下 2143 passed /645 opt-in skip。真实 symlink 和 PostgreSQL/Timescale/Redis/Worker 以新 head Linux Integration 验证，不用本机 skip 计通过。
+
 Neo 只生成 PostgreSQL `pg_dump --format=custom --no-owner --no-acl` 产物，文件名为 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-primary.dump` 或 `backup_YYYYMMDD-HHmmss-<完整任务 UUID 去除横线>-competitor.dump`，读取时兼容既有任务 ID 前八位的文件名。每个正式文件附带 `<文件名>.meta.json`，记录来源数据库类型和目标；两者都须保留。Legacy MySQL `.sql` 文件仅作为历史资料保留，不能通过 Neo 恢复接口导入。创建期间在备份卷内新建随机私有目录（0700），以独占文件（0600）接收 `pg_dump` 的 stdout；校验 `PGDMP` 文件头、大小、原 inode、摘要和权限后才发布正式文件。正常失败或重试只清理本次持有的确切文件及空目录，兼容处理同一任务旧版本的确定性 `.partial`；不递归清扫其他任务或未知目录。
 
 `GET /api/v1/backup/:filename/download` 下载 `.tar`，其中包含原始 `.dump` 和经过校验的同名 `.meta.json`；缺失或无效的元数据会拒绝下载。跨实例恢复时先在受控环境解包，把两个文件以原文件名一起放入目标实例的 `BACKUP_STORAGE_DIRECTORY`，再执行恢复。备份创建时填写的描述会保存在元数据中，并出现在列表中。普通 PostgreSQL 新产物使用 v3 元数据；TimescaleDB 新产物使用 v4 元数据并同样强制保存和核对 SHA-256。旧 Timescale v2 元数据可保留及下载，但缺少绑定摘要，不能自动恢复。普通 PostgreSQL v3 元数据以 `scope: full` 或 `scope: selective` 明确完整/按表归档，并记录归档 SHA-256；恢复前 Worker 流式核对，错配时不运行 `pg_restore`。按表备份使用 PostgreSQL 16 的 `--table-and-children`，包括所选父表的分区与继承子表。新元数据也保存来源数据库的 TimeZone（优先数据库级配置，否则取来源连接有效值）、编码、`LC_COLLATE`、`LC_CTYPE`、locale provider 与 ICU locale/rules；旧元数据缺少可靠范围或字符集信息时 Neo 不自动恢复。

@@ -553,7 +553,13 @@ export class BackupService implements OnModuleDestroy {
                 queued.status === 'completed'
                   ? backupCreationResult(task, queued)
                   : undefined;
-              if (!creation && isTerminalTaskStatus(task.status)) {
+              // BullMQ completion without a publication receipt does not prove
+              // a durable archive exists, including mixed-version jobs.
+              if (
+                !creation &&
+                (queued.status === 'completed' ||
+                  isTerminalTaskStatus(task.status))
+              ) {
                 reconciled.push(task);
                 continue;
               }
@@ -563,12 +569,6 @@ export class BackupService implements OnModuleDestroy {
                   ? {
                       kind: 'backup-create-committed',
                       result: creation,
-                      message: '备份完成（已从队列恢复）',
-                    }
-                  : queued.status === 'completed'
-                  ? {
-                      kind: 'completed',
-                      result: queued.result ?? task.result,
                       message: '备份完成（已从队列恢复）',
                     }
                   : { kind: 'failed', message: '备份任务失败' },
@@ -638,6 +638,18 @@ export class BackupService implements OnModuleDestroy {
       }
       this.logger.info('备份文件已删除', 'BackupService');
       return { message: '删除成功' };
+    });
+  }
+
+  capabilities(principal: AuthPrincipal) {
+    return this.run('capabilities', async () => {
+      await this.authorize(principal);
+      this.assertRetention();
+      return {
+        protocol: 'neo-postgresql-backup-v1',
+        format: 'custom',
+        targets: ['primary', 'competitor'],
+      };
     });
   }
 

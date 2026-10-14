@@ -55,6 +55,8 @@ vi.mock('node:fs/promises', async (original) => {
       return Reflect.apply(fs.unlink, fs, args);
     },
     open: async (...args: unknown[]) => {
+      if (String(args[0]).endsWith('.meta.json') && sidecarFailure.read)
+        throw sidecarFailure.read;
       if (String(args[0]).endsWith('.dump')) {
         if (archiveFailure.phase === 'open') throw archiveFailure.error;
         const handle = await Reflect.apply(fs.open, fs, args);
@@ -401,6 +403,36 @@ describe('backup submission HTTP / global exception boundary', () => {
         errorMessage: expect.stringContaining('未包含'),
       });
       expect(f.tasks.openBackup).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+  it('identifies the Neo backup protocol only after current authority and settings authorization', async () => {
+    const f = await fixture();
+    const app = await http(f.service);
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/backup/capabilities',
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data).toEqual({
+        protocol: 'neo-postgresql-backup-v1',
+        format: 'custom',
+        targets: ['primary', 'competitor'],
+      });
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(f.port.store.create).not.toHaveBeenCalled();
+      expect(f.port.enqueue).not.toHaveBeenCalled();
+      f.env.AUTH_DATA_AUTHORITY = 'legacy-mysql';
+      expect(
+        (
+          await app.inject({
+            method: 'GET',
+            url: '/api/v1/backup/capabilities',
+          })
+        ).statusCode,
+      ).toBe(503);
     } finally {
       await app.close();
     }
@@ -929,7 +961,7 @@ describe('scheduled backup queue reconciliation and sidecar storage errors', () 
       status: 'processing',
       createdAt,
     });
-  it.each(['completed', 'failed'] as const)(
+  it.each(['failed'] as const)(
     'recovers a scheduled %s run after a lost registry acknowledgement',
     async (status) => {
       const f = await fixture();
@@ -963,6 +995,23 @@ describe('scheduled backup queue reconciliation and sidecar storage errors', () 
       );
     },
   );
+  it.each(['pending', 'processing', 'cancelling'] as const)(
+    'keeps a scheduled %s run unresolved without creation commit evidence',
+    async (status) => {
+      const f = await fixture();
+      const task = { ...scheduled(), status };
+      f.scheduledStore.listUser.mockResolvedValueOnce([task]);
+      f.scheduledPort.findJob.mockResolvedValueOnce({
+        ...task,
+        status: 'completed',
+        result: { filename, format: 'custom', target: 'primary' },
+      });
+      expect(await f.service.scheduledTasks(principal)).toMatchObject([
+        { taskId: task.taskId, status },
+      ]);
+      expect(f.scheduledStore.mutate).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     ['taskId', 'another-task'],
     ['userId', 'another-owner'],
@@ -989,11 +1038,17 @@ describe('scheduled backup queue reconciliation and sidecar storage errors', () 
   );
   it('rejects an identity replacement during the registry CAS', async () => {
     const f = await fixture();
-    const task = scheduled();
+    const published = backupCreationFixture(
+      BACKUP_SCHEDULER_USER_ID,
+      createdAt,
+    );
+    const task = taskFixture({ ...published.data, status: 'processing' });
     f.scheduledStore.listUser.mockResolvedValueOnce([task]);
     f.scheduledPort.findJob.mockResolvedValueOnce({
       ...task,
       status: 'completed',
+      result: published.result,
+      backupData: published.data,
     });
     f.scheduledStore.mutate.mockResolvedValueOnce({
       ...task,
