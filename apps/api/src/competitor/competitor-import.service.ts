@@ -2,6 +2,7 @@ import type { Env } from '@asin-monitor/config';
 import type { ImportRepositoryPort } from '@asin-monitor/db';
 import { Inject, Injectable } from '@nestjs/common';
 import { AsinImportService } from '../asin/asin-import.service';
+import { ApplicationCatalogOperations } from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { ApplicationImportStorage } from '../import/import-storage.module';
 import { AppLogger } from '../logger/app-logger.service';
@@ -19,8 +20,9 @@ export class CompetitorImportService extends AsinImportService {
     @Inject(ApplicationImportStorage) storage: ApplicationImportStorage,
     @Inject(TaskQueryRuntime) runtime: TaskQueryRuntime,
     @Inject(AppLogger) logger: AppLogger,
+    @Inject(ApplicationCatalogOperations) catalog: ApplicationCatalogOperations,
   ) {
-    super(env, repository, storage, runtime, logger);
+    super(env, repository, storage, runtime, logger, catalog);
   }
   protected override get mode(): 'competitor' {
     return 'competitor';

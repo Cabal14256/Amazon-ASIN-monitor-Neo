@@ -21,6 +21,10 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import {
+  ApplicationCatalogOperations,
+  type CatalogOperationSubmission,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { ApplicationImportStorage } from '../import/import-storage.module';
 import { AppLogger } from '../logger/app-logger.service';
@@ -64,6 +68,8 @@ export class AsinImportService implements OnModuleDestroy {
     private readonly storage: ApplicationImportStorage,
     @Inject(TaskQueryRuntime) private readonly runtime: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   protected get mode(): 'standard' | 'competitor' {
     return 'standard';
@@ -75,6 +81,23 @@ export class AsinImportService implements OnModuleDestroy {
     principal: AuthPrincipal,
     request: FastifyRequest,
     reply: FastifyReply,
+  ) {
+    if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
+      fail(503, `鉴权权威源尚未切换，请使用现有 ${this.label} 入口`);
+    return this.catalog.execute(
+      principal,
+      this.mode === 'competitor' ? 'competitor' : 'asin',
+      'import',
+      'asin:write',
+      (submission) =>
+        this.executeReserved(principal, request, reply, submission),
+    );
+  }
+  private async executeReserved(
+    principal: AuthPrincipal,
+    request: FastifyRequest,
+    reply: FastifyReply,
+    submission: CatalogOperationSubmission,
   ) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, `鉴权权威源尚未切换，请使用现有 ${this.label} 入口`);
@@ -134,6 +157,7 @@ export class AsinImportService implements OnModuleDestroy {
           throw new Error('IMPORT_ENQUEUE_DEADLINE');
       });
       submissionStarted = true;
+      submission.retain();
       const identity =
         this.mode === 'competitor'
           ? ({
@@ -142,13 +166,16 @@ export class AsinImportService implements OnModuleDestroy {
               domain: 'competitor',
             } as const)
           : ({ taskSubType: 'asin', title: 'ASIN导入' } as const);
-      const task = await port.store.create({
-        taskId,
-        userId: principal.userId,
-        taskType: 'import',
-        ...identity,
-        message: '导入任务已创建，等待处理',
-      });
+      const task = await port.store.create(
+        {
+          taskId,
+          userId: principal.userId,
+          taskType: 'import',
+          ...identity,
+          message: '导入任务已创建，等待处理',
+        },
+        (prepared) => submission.bindTask(prepared),
+      );
       await port.enqueue({
         taskId,
         userId: principal.userId,

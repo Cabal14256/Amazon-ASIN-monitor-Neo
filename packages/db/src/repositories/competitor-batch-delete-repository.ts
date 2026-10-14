@@ -14,6 +14,7 @@ import {
   competitorVariantGroups as g,
 } from '../schema-competitor';
 import { AsinBatchDeleteRepositoryError } from './asin-batch-delete-repository';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import {
   CompetitorTransactionError,
   PgCompetitorTransactions,
@@ -93,6 +94,7 @@ class DrizzleCompetitorBatchDeleteUnit implements BatchDeleteExecutionUnit {
     );
   }
   async execute(raw: BatchDeleteIds) {
+    assertCatalogWriteExecution(this.db, 'competitor');
     const ids = parseNeoBatchDeleteRequest(raw);
     const candidates = await this.asins(ids.asinIds);
     const locked = new Set(

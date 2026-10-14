@@ -2,9 +2,12 @@ import type { PrimaryMonitorJob } from '@asin-monitor/contracts';
 import { getTableColumns } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Db } from '../src/client';
+import { withCatalogOperationExecution } from '../src/repositories/catalog-operation-execution';
+import type { PgCatalogOperationRepository } from '../src/repositories/catalog-operation-repository';
 import { PgCompetitorCheckRepository } from '../src/repositories/competitor-check-repository';
 import { PgCompetitorTransactions } from '../src/repositories/competitor-transactions';
 import { PgPrimaryMonitorRepository } from '../src/repositories/primary-monitor-repository';
@@ -264,11 +267,36 @@ describe('primary monitor exact frozen ID replay', () => {
         saved = JSON.parse(String(values[4]));
       return { rows: [], rowCount: 0 };
     });
+    const client = Object.assign(new EventEmitter(), {
+      query,
+      release: vi.fn(),
+    });
     const repository = new PgPrimaryMonitorRepository({
-      connect: async () => ({ query, release() {} }),
+      connect: async () => client,
     } as unknown as Pool);
-    expect(await repository.groups(job)).toEqual(groups);
-    expect(await repository.groups(job)).toEqual(groups);
+    const identity = {
+      ownerId: job.userId,
+      domain: 'asin' as const,
+      kind: 'monitor' as const,
+      generation: '1',
+      operationId: job.taskId,
+    };
+    const pin = { identity, pinId: job.taskId };
+    const fence = {
+      beginPin: vi.fn(async () => pin),
+      assertPin: vi.fn(async () => {}),
+      finishPin: vi.fn(async () => {}),
+    };
+    const run = () =>
+      withCatalogOperationExecution(
+        fence as unknown as PgCatalogOperationRepository,
+        identity,
+        () => repository.groups(job),
+      );
+    expect(await run()).toEqual(groups);
+    expect(await run()).toEqual(groups);
+    expect(fence.finishPin).toHaveBeenNthCalledWith(1, pin, 'committed');
+    expect(fence.finishPin).toHaveBeenNthCalledWith(2, pin, 'committed');
     expect(
       query.mock.calls.filter(([text]) =>
         text.includes('INSERT INTO primary_monitor_runs'),

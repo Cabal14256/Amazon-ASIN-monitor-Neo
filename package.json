@@ -19,6 +19,7 @@
     "db:up": "docker compose --env-file .env.neo -f compose.neo.yml up -d timescaledb",
     "db:upgrade:asin-timestamp-policy": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-asin-timestamp-policy.sh",
     "db:upgrade:auth-maintenance": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-auth-maintenance.sh",
+    "db:upgrade:catalog-fence": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-catalog-operation-fence.sh",
     "db:upgrade:competitor-check-receipts": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-competitor-check-receipts.sh",
     "db:upgrade:competitor-monitor": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-competitor-monitor.sh",
     "db:upgrade:competitor-query": "docker compose --env-file .env.neo -f compose.neo.yml exec -T timescaledb sh /opt/asin-monitor/apply-competitor-query-matching.sh",

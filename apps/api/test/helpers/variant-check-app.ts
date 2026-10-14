@@ -14,6 +14,7 @@ import {
 import type { VariantCheckContext } from '@asin-monitor/variant-check';
 import jwt from 'jsonwebtoken';
 import { vi } from 'vitest';
+import { ApplicationCatalogOperations } from '../../src/catalog/catalog-operation.service';
 import { ApplicationSpApiRuntime } from '../../src/sp-api-runtime/sp-api-runtime';
 import {
   TaskQueryRuntime,
@@ -23,6 +24,7 @@ import {
 import { VARIANT_CHECK_REPOSITORY } from '../../src/variant-check/variant-check-storage.module';
 import { VariantCheckModule } from '../../src/variant-check/variant-check.module';
 import { ApplicationVariantCheckRuntime } from '../../src/variant-check/variant-check.runtime';
+import { catalogOperationUnitFixture } from './catalog-operation-fixture';
 import { sessionApp } from './session-app';
 import {
   taskAuthFixture,
@@ -49,6 +51,7 @@ export const checkGroup: VariantGroupCheckData = {
   details: { results: [{ variantView: checkView }] },
 };
 export async function variantCheckApp(overrides: NodeJS.ProcessEnv = {}) {
+  const catalog = catalogOperationUnitFixture();
   const auth = taskAuthFixture();
   const permissions = ['asin:read'];
   auth.repository.getPermissionCodes.mockImplementation(
@@ -144,17 +147,20 @@ export async function variantCheckApp(overrides: NodeJS.ProcessEnv = {}) {
   };
   const producer = {
     store: {
-      create: vi.fn<CheckProducerPort['store']['create']>(async (input) => {
-        const now = new Date().toISOString();
-        const task = taskFixture({
-          ...input,
-          taskSubType: input.taskSubType ?? null,
-          createdAt: now,
-          updatedAt: now,
-        });
-        tasks.set(task.taskId, task);
-        return task;
-      }),
+      create: vi.fn<CheckProducerPort['store']['create']>(
+        async (input, onPrepared) => {
+          const now = new Date().toISOString();
+          const task = taskFixture({
+            ...input,
+            taskSubType: input.taskSubType ?? null,
+            createdAt: now,
+            updatedAt: now,
+          });
+          await onPrepared?.(structuredClone(task));
+          tasks.set(task.taskId, task);
+          return task;
+        },
+      ),
     },
     enqueue: vi.fn(async (_data: VariantCheckJobData) => undefined),
   };
@@ -183,6 +189,8 @@ export async function variantCheckApp(overrides: NodeJS.ProcessEnv = {}) {
     overrides,
     (builder) =>
       builder
+        .overrideProvider(ApplicationCatalogOperations)
+        .useValue(catalog)
         .overrideProvider(VARIANT_CHECK_REPOSITORY)
         .useValue(repository)
         .overrideProvider(ApplicationSpApiRuntime)
@@ -203,6 +211,7 @@ export async function variantCheckApp(overrides: NodeJS.ProcessEnv = {}) {
   return {
     ...app,
     auth,
+    catalog,
     permissions,
     unit,
     repository,

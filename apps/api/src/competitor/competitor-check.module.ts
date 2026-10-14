@@ -2,6 +2,7 @@ import { getNeoQueuePrefix, type Env } from '@asin-monitor/config';
 import type { CompetitorCheckRepositoryPort } from '@asin-monitor/db';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CatalogOperationModule } from '../catalog/catalog-operation.module';
 import { ENV } from '../config/config.module';
 import { DatabaseModule } from '../database/database.module';
 import { AppLogger } from '../logger/app-logger.service';
@@ -21,6 +22,7 @@ import { CompetitorCheckService } from './competitor-check.service';
 @Module({
   imports: [
     AuthModule,
+    CatalogOperationModule,
     DatabaseModule,
     TaskQueryModule,
     CompetitorCheckStorageModule,

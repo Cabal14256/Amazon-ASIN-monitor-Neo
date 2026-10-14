@@ -8,6 +8,10 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import {
+  ApplicationCatalogOperations,
+  type CatalogOperationSubmission,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { SP_API_CONFIG_REPOSITORY } from '../sp-api-config/sp-api-config.service';
@@ -52,10 +56,25 @@ export class CompetitorMonitorTriggerService {
     private readonly repository: SpApiConfigurationRepositoryPort,
     @Inject(TaskQueryRuntime) private readonly tasks: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async trigger(principal: AuthPrincipal, raw: unknown) {
     if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
       fail(503, '鉴权权威源尚未切换，请使用现有监控入口');
+    return this.catalog.execute(
+      principal,
+      'competitor',
+      'monitor',
+      'monitor:write',
+      (submission) => this.triggerReserved(principal, raw, submission),
+    );
+  }
+  private async triggerReserved(
+    principal: AuthPrincipal,
+    raw: unknown,
+    catalog: CatalogOperationSubmission,
+  ) {
     const parsed = triggerCompetitorMonitorAsyncRequestSchema.safeParse(
       raw === undefined ? {} : raw,
     );
@@ -89,14 +108,18 @@ export class CompetitorMonitorTriggerService {
       await port.assertConsumer();
       ensureOpen();
       submission = randomUUID();
-      const task = await port.store.create({
-        taskId: submission,
-        userId: principal.userId,
-        taskType: 'competitor-monitor',
-        taskSubType: 'competitor',
-        title: '竞品 ASIN 监控',
-        message: '监控任务已创建，等待处理',
-      });
+      catalog.retain();
+      const task = await port.store.create(
+        {
+          taskId: submission,
+          userId: principal.userId,
+          taskType: 'competitor-monitor',
+          taskSubType: 'competitor',
+          title: '竞品 ASIN 监控',
+          message: '监控任务已创建，等待处理',
+        },
+        (prepared) => catalog.bindTask(prepared),
+      );
       taskCreatedAt = task.createdAt;
       await port.enqueue({
         taskId: task.taskId,
@@ -145,6 +168,8 @@ export class CompetitorMonitorTriggerService {
           );
           if (!failed || failed.status !== 'failed')
             throw new Error('MONITOR_REJECTION_STATE_UNCONFIRMED');
+          if (!(await catalog.reject()))
+            throw new Error('MONITOR_REJECTION_FENCE_UNCONFIRMED');
         } catch {
           this.logger.warn(
             '监控任务拒绝状态写入未确认',

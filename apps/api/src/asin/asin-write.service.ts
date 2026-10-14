@@ -12,6 +12,7 @@ import {
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
+import { ApplicationCatalogOperations } from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { mapAsinQueryChild, mapAsinQueryGroups } from './asin-query-mapper';
@@ -55,6 +56,8 @@ export class AsinWriteService {
     @Inject(ASIN_WRITE_REPOSITORY)
     private readonly repository: AsinWriteRepositoryPort,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   private async write<T>(
     principal: AuthPrincipal,
@@ -78,16 +81,21 @@ export class AsinWriteService {
     if (this.active >= 8) fail(429, 'ASIN 写入繁忙，请稍后再试');
     this.active++;
     try {
-      const result = await this.repository.transaction(async (unit) => {
-        await authorizeAdministration(
-          unit,
-          principal,
-          operation === 'delete-group' || operation === 'delete-asin'
-            ? 'asin:delete'
-            : 'asin:write',
-        );
-        return action(unit);
-      });
+      const permission =
+        operation === 'delete-group' || operation === 'delete-asin'
+          ? 'asin:delete'
+          : 'asin:write';
+      const result = await this.catalog.execute(
+        principal,
+        'asin',
+        'write',
+        permission,
+        () =>
+          this.repository.transaction(async (unit) => {
+            await authorizeAdministration(unit, principal, permission);
+            return action(unit);
+          }),
+      );
       this.logger.info('ASIN 写入完成', 'AsinWriteService', { operation });
       return result;
     } catch (error) {

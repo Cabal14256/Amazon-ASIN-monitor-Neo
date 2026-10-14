@@ -1,6 +1,7 @@
 import { getNeoQueuePrefix, getPhysicalQueueName } from '@asin-monitor/config';
 import type { PrimaryMonitorJob } from '@asin-monitor/contracts';
 import {
+  PgCatalogOperationRepository,
   PgVariantCheckRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
@@ -33,6 +34,7 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import { createCatalogFixtureTask } from './helpers/catalog-operation-fixture';
 import {
   assertMetricsFixtureTargets,
   availableMetricsPort,
@@ -330,7 +332,7 @@ describe.skipIf(
     }, 15_000);
     const before = await scrapeWorker(metricsPort);
     const store = new RedisTaskRepository(f.redis, f.env);
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
@@ -353,6 +355,9 @@ describe.skipIf(
     const result = await queued.waitUntilFinished(events, 20_000);
     expect(result).toMatchObject({ success: true, totalChecked: 2 });
     expect((await store.read(task.taskId))?.status).toBe('completed');
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(task.userId, 'asin'),
+    ).toBeNull();
     const history = await f.pool.query(
       'SELECT country,check_type,monitor_task_id FROM monitor_history ORDER BY id',
     );
@@ -409,7 +414,7 @@ describe.skipIf(
     expect(
       metricValue(after, 'scheduler_runs_total', { type: 'monitor_task' }),
     ).toBe(1);
-    const failed = await store.create({
+    const failed = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
@@ -430,7 +435,7 @@ describe.skipIf(
       { jobId: failed.taskId, attempts: 1 },
     );
     await expect(failedJob.waitUntilFinished(events, 10_000)).rejects.toThrow();
-    const cancelled = await store.create({
+    const cancelled = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',
@@ -561,7 +566,7 @@ describe.skipIf(
       );
     }, 15_000);
     const store = new RedisTaskRepository(f.redis, f.env);
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'monitor',

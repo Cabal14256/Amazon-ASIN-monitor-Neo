@@ -36,6 +36,7 @@ import {
   withAsinDatabaseTransaction,
 } from './asin-query-repository';
 import { prepareAsinTimestampWrites } from './asin-timestamp-policy';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import {
   purgeVariantCheckReceipts,
   readVariantCheckReceipt,
@@ -73,6 +74,7 @@ export class DrizzleVariantCheckUnit
     return readVariantCheckReceipt(this.db, this.ensureOpen, operation, lock);
   }
   saveReceipt(operation: VariantCheckOperation, result: unknown) {
+    assertCatalogWriteExecution(this.db, 'asin', true);
     return saveVariantCheckReceipt(this.db, this.ensureOpen, operation, result);
   }
   purgeExpiredReceipts() {
@@ -129,6 +131,7 @@ export class DrizzleVariantCheckUnit
     value: CatalogVariantResult,
     guard: CheckCommitGuard,
   ): Promise<CommittedSingleCheck> {
+    assertCatalogWriteExecution(this.db, 'asin', true);
     const result = decodeCatalogVariantResult(
       value,
       expected.asin.asin,
@@ -212,6 +215,7 @@ export class DrizzleVariantCheckUnit
     observations: AsinCheckObservation[],
     guard: CheckCommitGuard,
   ): Promise<CommittedGroupCheck> {
+    assertCatalogWriteExecution(this.db, 'asin', true);
     if (
       !Array.isArray(observations) ||
       observations.length !== expected.asins.length ||
@@ -322,6 +326,7 @@ export class DrizzleVariantCheckUnit
     committed: CommittedGroupCheck,
     result: VariantGroupCheckData,
   ): Promise<void> {
+    assertCatalogWriteExecution(this.db, 'asin', true);
     if (!/^[a-f0-9-]{36}$/i.test(taskId))
       throw new VariantCheckError('invalid-input');
     const { group, asins, observations } = committed;

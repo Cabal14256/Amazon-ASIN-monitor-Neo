@@ -5,6 +5,7 @@ import {
 } from '@asin-monitor/config';
 import {
   createPgPool,
+  PgCatalogOperationRepository,
   PgCompetitorCheckRepository,
   PgCompetitorMonitorRepository,
   PgPrimaryMonitorRepository,
@@ -31,6 +32,7 @@ import {
 } from '@asin-monitor/variant-check';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
+import { createCatalogFencedProcessor } from './catalog-operation-processor';
 import { createCompetitorMonitorProcessor } from './competitor-monitor-processor';
 import { logger } from './logger';
 import type { MonitorMetrics } from './metrics';
@@ -358,10 +360,19 @@ export async function startVariantCheckRuntime(
                   updateProgress,
                 },
               );
-        const worker = new Worker(getPhysicalQueueName(name), processor, {
-          ...getWorkerOptions(name, env, connection),
-          autorun: false,
-        });
+        const worker = new Worker(
+          getPhysicalQueueName(name),
+          createCatalogFencedProcessor(
+            name,
+            new PgCatalogOperationRepository(pool),
+            store,
+            processor,
+          ),
+          {
+            ...getWorkerOptions(name, env, connection),
+            autorun: false,
+          },
+        );
         workers.push(worker);
         worker.on('error', () =>
           logger.warn('检查消费者连接异常', {

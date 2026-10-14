@@ -250,6 +250,7 @@ export class RedisTaskRepository {
     maxActiveExports?: number,
     maxGlobalExports?: number,
     onPrepared?: (identity: PreparedExportTaskIdentity) => void,
+    onTaskPrepared?: (task: TaskState) => Promise<void>,
   ): Promise<TaskState> {
     const data = createTaskInputSchema.parse(input);
     const timestamp = this.now().toISOString();
@@ -270,6 +271,9 @@ export class RedisTaskRepository {
       cancelledAt: null,
       revision: 0,
     };
+    // Bind this exact identity durably before a possibly lost Redis EVAL ACK.
+    // The callback receives a copy and cannot change the task sent to Redis.
+    if (onTaskPrepared) await onTaskPrepared(structuredClone(task));
     onPrepared?.({
       taskId: task.taskId,
       userId: task.userId,
@@ -282,8 +286,17 @@ export class RedisTaskRepository {
     return task;
   }
 
-  create(input: CreateTaskInput): Promise<TaskState> {
-    return this.createInternal(input);
+  create(
+    input: CreateTaskInput,
+    onPrepared?: (task: TaskState) => Promise<void>,
+  ): Promise<TaskState> {
+    return this.createInternal(
+      input,
+      undefined,
+      undefined,
+      undefined,
+      onPrepared,
+    );
   }
 
   /** The admission slot and task metadata are committed by one Redis script. */

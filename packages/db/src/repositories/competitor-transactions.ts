@@ -1,9 +1,14 @@
 import { sql } from 'drizzle-orm';
 import type { Pool, PoolClient } from 'pg';
 import { createDb, type Db } from '../client';
+import type { CatalogPhysicalOutcome } from '../domain/catalog-operation';
 import type { CompetitorQueryUnit } from '../domain/competitor-query';
 import { spApiConfig } from '../schema';
 import { DrizzleAsinQueryUnit } from './asin-query-repository';
+import {
+  catalogTransactionExecution,
+  observeCatalogOperationWork,
+} from './catalog-operation-execution';
 
 export class CompetitorTransactionError extends Error {
   constructor(
@@ -73,6 +78,21 @@ export class PgCompetitorTransactions {
     if (signal?.aborted) throw new CompetitorTransactionError('cancelled');
     if (this.active >= this.maximumOperations)
       throw new CompetitorTransactionError('capacity');
+    const execution = catalogTransactionExecution();
+    // Preserve synchronous capacity admission for ordinary unscoped reads.
+    // Fenced execution waits for its durable pin before any borrowed DB work.
+    if (execution.scoped) await execution.begin();
+    else void execution.begin();
+    if (
+      this.closed ||
+      signal?.aborted ||
+      this.active >= this.maximumOperations
+    ) {
+      await execution.settled('rolled-back');
+      throw new CompetitorTransactionError(
+        this.closed ? 'closed' : signal?.aborted ? 'cancelled' : 'capacity',
+      );
+    }
     this.active++;
     const clients = new Set<PoolClient>(),
       released = new Set<PoolClient>();
@@ -94,7 +114,7 @@ export class PgCompetitorTransactions {
       client.release(destroy);
     };
     const stop = (code: 'dependency' | 'timeout' | 'cancelled' | 'closed') => {
-      if (stopped) return;
+      if (stopped || finished) return;
       stopped = failure(code);
       for (const client of clients) release(client, true);
       rejectInterrupt(stopped);
@@ -129,6 +149,7 @@ export class PgCompetitorTransactions {
     if (signal?.aborted) abort();
     const work = (async () => {
       let success = false;
+      let outcome: CatalogPhysicalOutcome = 'uncertain';
       try {
         const primary = await acquire(this.primary);
         await query(primary, 'BEGIN');
@@ -144,7 +165,10 @@ export class PgCompetitorTransactions {
           await query(primary, 'SELECT current_database() AS name')
         ).rows[0]?.name;
         if (typeof primaryName !== 'string') throw failure('dependency');
-        const auth = new DrizzleAsinQueryUnit(createDb(primary), ensureOpen);
+        const primaryDb = createDb(primary);
+        await execution.guard(primaryDb);
+        ensureOpen();
+        const auth = new DrizzleAsinQueryUnit(primaryDb, ensureOpen);
         let businessClient: PoolClient | undefined,
           business: Promise<Db> | undefined;
         const acquireBusiness = async () => {
@@ -159,7 +183,9 @@ export class PgCompetitorTransactions {
           ).rows[0]?.name;
           if (typeof name !== 'string' || name === primaryName)
             throw failure('dependency');
-          return createDb(businessClient);
+          const db = createDb(businessClient);
+          execution.allowBusinessDatabase(db);
+          return db;
         };
         const result = await operation({
           authorization: {
@@ -202,21 +228,37 @@ export class PgCompetitorTransactions {
         }
         await query(primary, 'COMMIT');
         success = true;
+        outcome = 'committed';
         return result;
       } catch (error) {
+        if (execution.scoped && !stopped && !commitStarted) {
+          try {
+            for (const client of clients) await query(client, 'ROLLBACK');
+            outcome = 'rolled-back';
+          } catch {
+            // A disconnected/destroyed transaction is not physical-stop proof.
+          }
+        }
         // A driver error/timeout after COMMIT started cannot prove rollback.
         if (!readOnly && commitStarted) throw failure('commit-uncertain');
         throw error;
       } finally {
         finished = true;
+        // Physical SQL is settled. Durable pin acknowledgement can take longer
+        // than the business deadline without invalidating an acknowledged commit.
+        clearTimeout(timer);
         try {
           for (const client of clients) release(client, !success);
         } finally {
           this.active--;
+          // Report only after this real work promise and both DB clients settle.
+          // The outer Promise.race can already have returned an error.
+          await execution.settled(outcome);
         }
       }
     })();
     onActualWork?.(work);
+    observeCatalogOperationWork(work);
     try {
       return await Promise.race([work, interrupted]);
     } finally {

@@ -7,6 +7,7 @@ import {
   createPgPool,
   isTerminalTaskStatus,
   PgAsinImportRepository,
+  PgCatalogOperationRepository,
   PgCompetitorImportRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
@@ -14,6 +15,7 @@ import { ImportFileStore, ImportResultStore } from '@asin-monitor/import';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { createImportProcessor } from './asin-import-processor';
+import { createCatalogFencedProcessor } from './catalog-operation-processor';
 import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
@@ -107,28 +109,33 @@ export async function startAsinImportRuntime(env: Env, onFatal: () => void) {
         const activeQueue = queue;
         worker = new Worker(
           getPhysicalQueueName('import'),
-          createImportProcessor(
-            { asin: repository, competitor: competitorRepository },
+          createCatalogFencedProcessor(
+            'import',
+            new PgCatalogOperationRepository(pool),
             store,
-            files,
-            reports,
-            {
-              shutdownSignal: shutdown.signal,
-              assertJobLock: async (job, token) => {
-                if (
-                  !token ||
-                  !job.id ||
-                  (await control.get(`${activeQueue.toKey(job.id)}:lock`)) !==
-                    token
-                )
-                  throw new Error('IMPORT_JOB_LOCK_LOST');
+            createImportProcessor(
+              { asin: repository, competitor: competitorRepository },
+              store,
+              files,
+              reports,
+              {
+                shutdownSignal: shutdown.signal,
+                assertJobLock: async (job, token) => {
+                  if (
+                    !token ||
+                    !job.id ||
+                    (await control.get(`${activeQueue.toKey(job.id)}:lock`)) !==
+                      token
+                  )
+                    throw new Error('IMPORT_JOB_LOCK_LOST');
+                },
+                updateProgress: async (job, value) => {
+                  const current = await activeQueue.getJob(job.id!);
+                  if (!current) throw new Error('IMPORT_JOB_MISSING');
+                  await current.updateProgress(value);
+                },
               },
-              updateProgress: async (job, value) => {
-                const current = await activeQueue.getJob(job.id!);
-                if (!current) throw new Error('IMPORT_JOB_MISSING');
-                await current.updateProgress(value);
-              },
-            },
+            ),
           ),
           { ...getWorkerOptions('import', env, connection), autorun: false },
         );

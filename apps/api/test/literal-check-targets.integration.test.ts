@@ -22,6 +22,10 @@ import {
   it,
   vi,
 } from 'vitest';
+import {
+  createCatalogFixtureTask,
+  withCatalogFixtureTask,
+} from '../../worker/test/helpers/catalog-operation-fixture';
 import { CompetitorCheckModule } from '../src/competitor/competitor-check.module';
 import {
   SP_API_QUOTA_ENV,
@@ -610,15 +614,19 @@ suite(
               const port = f.app
                 .get(TaskQueryRuntime)
                 .openCheck(() => undefined);
-              const prepared = await port.store.create({
-                taskId: randomUUID(),
-                userId,
-                taskType: 'variant-check',
-                taskSubType:
-                  kind === 'group'
-                    ? 'competitor-variant-group-check'
-                    : 'competitor-asin-check',
-              });
+              const prepared = await createCatalogFixtureTask(
+                f.pools.primaryPool,
+                store,
+                {
+                  taskId: randomUUID(),
+                  userId,
+                  taskType: 'variant-check',
+                  taskSubType:
+                    kind === 'group'
+                      ? 'competitor-variant-group-check'
+                      : 'competitor-asin-check',
+                },
+              );
               const identity = {
                 taskId: prepared.taskId,
                 userId,
@@ -689,20 +697,38 @@ suite(
         await seed('primary', literalIds[i], `monitor-child-${i}`);
       const repository = new PgPrimaryMonitorRepository(f.pools.primaryPool);
       const now = new Date();
+      const prepared = await createCatalogFixtureTask(
+        f.pools.primaryPool,
+        store,
+        {
+          taskId: randomUUID(),
+          userId,
+          taskType: 'monitor',
+          taskSubType: 'primary',
+        },
+      );
       const job = {
-        taskId: randomUUID(),
+        taskId: prepared.taskId,
         userId,
         taskType: 'monitor' as const,
         taskSubType: 'primary' as const,
-        createdAt: now.toISOString(),
+        createdAt: prepared.createdAt,
         expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
         countries: ['US'] as ['US'],
       };
-      const frozen = await repository.groups(job);
+      const frozen = await withCatalogFixtureTask(
+        f.pools.primaryPool,
+        job,
+        () => repository.groups(job),
+      );
       expect(new Set(frozen.map((value) => value.groupId))).toEqual(
         new Set(literalIds),
       );
-      expect(await repository.groups(job)).toEqual(frozen);
+      expect(
+        await withCatalogFixtureTask(f.pools.primaryPool, job, () =>
+          repository.groups(job),
+        ),
+      ).toEqual(frozen);
       expect(
         (
           await f.pools.primaryPool.query(

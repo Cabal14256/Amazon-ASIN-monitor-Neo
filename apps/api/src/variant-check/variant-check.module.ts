@@ -2,6 +2,7 @@ import { getNeoQueuePrefix, type Env } from '@asin-monitor/config';
 import type { VariantCheckRepositoryPort } from '@asin-monitor/db';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CatalogOperationModule } from '../catalog/catalog-operation.module';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { RedisModule } from '../redis/redis.module';
@@ -23,6 +24,7 @@ import { VariantCheckService } from './variant-check.service';
 @Module({
   imports: [
     AuthModule,
+    CatalogOperationModule,
     VariantCheckStorageModule,
     SpApiRuntimeModule,
     TaskQueryModule,

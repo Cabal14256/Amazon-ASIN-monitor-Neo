@@ -11,6 +11,7 @@ import {
   type ImportRepositoryPort,
   type ImportWriteUnit,
 } from './asin-import-repository';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import { CompetitorBatchCreateUnit } from './competitor-batch-create-unit';
 import {
   CompetitorTransactionError,
@@ -37,6 +38,7 @@ class DrizzleCompetitorImportUnit {
     site: string;
     brand: string;
   }): Promise<string> {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (
       fields.site !== '' ||
       [
@@ -108,6 +110,7 @@ class DrizzleCompetitorImportUnit {
     return id;
   }
   async writeImportChunk(items: BatchAsinItem[]): Promise<ImportChunkResult> {
+    assertCatalogWriteExecution(this.db, 'competitor');
     if (!items.length || items.length > 1000)
       throw new AsinImportRepositoryError('capacity');
     const phases = new Map<

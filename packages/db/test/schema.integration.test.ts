@@ -52,7 +52,8 @@ async function publicTableNames(
         'primary_monitor_runs', 'primary_monitor_notifications',
         'primary_scheduled_monitor_runs', 'primary_scheduled_monitor_notifications',
         'primary_scheduled_monitor_group_receipts', 'competitor_scheduled_monitor_runs',
-        'competitor_scheduled_monitor_notifications', 'competitor_scheduled_monitor_group_receipts'
+        'competitor_scheduled_monitor_notifications', 'competitor_scheduled_monitor_group_receipts',
+        'catalog_operation_slots', 'catalog_operation_pins'
       )
       AND NOT EXISTS (
         SELECT 1 FROM pg_inherits inheritance
@@ -107,6 +108,10 @@ async function uniqueConstraintNames(
     FROM pg_constraint
     WHERE contype = 'u'
       AND connamespace = 'public'::regnamespace
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_class relation WHERE relation.oid=conrelid
+          AND relation.relname IN ('catalog_operation_slots','catalog_operation_pins')
+      )
     ORDER BY conname
   `);
   return result.rows.map(({ conname }) => conname);

@@ -197,6 +197,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await f.pools.primaryPool.query('DELETE FROM variant_groups');
       await legacy.query('DELETE FROM asins');
       await legacy.query('DELETE FROM variant_groups');
+      headers = await writer();
+    });
+    async function writer() {
       const userId = randomUUID(),
         sessionId = randomUUID();
       f.userIds.add(userId);
@@ -212,7 +215,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
         [sessionId, userId],
       );
-      headers = {
+      return {
         authorization: `Bearer ${jwt.sign(
           { userId, sessionId },
           f.env.JWT_SECRET,
@@ -220,7 +223,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         )}`,
         origin: f.env.CORS_ORIGIN,
       };
-    });
+    }
     const sample = (index: number, group = '主营组') => [
       group,
       'US',
@@ -230,7 +233,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       '1',
       '产品',
     ];
-    function request(buffer: Buffer, extension = 'csv', synchronous = false) {
+    function request(
+      buffer: Buffer,
+      extension = 'csv',
+      synchronous = false,
+      auth = headers,
+    ) {
       const boundary = `import-${randomUUID()}`;
       const payload = Buffer.concat([
         Buffer.from(
@@ -253,7 +261,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         method: 'POST',
         url: '/api/v1/variant-groups/import-excel',
         headers: {
-          ...headers,
+          ...auth,
           'content-type': `multipart/form-data; boundary=${boundary}`,
         },
         payload,
@@ -357,12 +365,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await compareRecords();
     });
     it('serializes concurrent imports of case/accent-equivalent groups', async () => {
+      const otherHeaders = await writer();
       const buffers = await Promise.all([
         contents([['Café', 'US', 'Shop', 'Brand', 'B000000001', '1', '']]),
         contents([['CAFE', 'US', 'shop', 'brand', 'B000000002', '1', '']]),
       ]);
       const responses = await Promise.all(
-        buffers.map((buffer) => request(buffer, 'csv', true)),
+        buffers.map((buffer, index) =>
+          request(buffer, 'csv', true, index === 0 ? headers : otherHeaders),
+        ),
       );
       expect(responses.map((response) => response.statusCode)).toEqual([
         200, 200,

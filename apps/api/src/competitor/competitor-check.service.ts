@@ -19,6 +19,10 @@ import {
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
+import {
+  ApplicationCatalogOperations,
+  type CatalogOperationSubmission,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
@@ -49,12 +53,33 @@ export class CompetitorCheckService implements OnModuleDestroy {
     private readonly runtime: ApplicationCompetitorCheckRuntime,
     @Inject(TaskQueryRuntime) private readonly tasks: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async execute(
     type: CheckType,
     id: string,
     request: FastifyRequest,
     reply: FastifyReply,
+  ): Promise<unknown> {
+    if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
+      fail(503, '鉴权权威源尚未切换，请使用现有检查入口');
+    if (!request.auth) fail(401, '请先登录');
+    return this.catalog.execute(
+      request.auth,
+      'competitor',
+      'check',
+      'asin:read',
+      (submission) =>
+        this.executeReserved(type, id, request, reply, submission),
+    );
+  }
+  private async executeReserved(
+    type: CheckType,
+    id: string,
+    request: FastifyRequest,
+    reply: FastifyReply,
+    catalog: CatalogOperationSubmission,
   ): Promise<unknown> {
     if (
       request.headers.origin &&
@@ -123,17 +148,21 @@ export class CompetitorCheckService implements OnModuleDestroy {
             throw new Error('COMPETITOR_CHECK_SUBMISSION_DEADLINE');
         });
         submission = randomUUID();
-        const task = await port.store.create({
-          taskId: submission,
-          userId: principal.userId,
-          taskType: 'variant-check',
-          taskSubType: type,
-          title:
-            type === 'competitor-asin-check'
-              ? '竞品 ASIN 检查'
-              : '竞品变体组检查',
-          message: '竞品检查任务已创建，等待处理',
-        });
+        catalog.retain();
+        const task = await port.store.create(
+          {
+            taskId: submission,
+            userId: principal.userId,
+            taskType: 'variant-check',
+            taskSubType: type,
+            title:
+              type === 'competitor-asin-check'
+                ? '竞品 ASIN 检查'
+                : '竞品变体组检查',
+            message: '竞品检查任务已创建，等待处理',
+          },
+          (prepared) => catalog.bindTask(prepared),
+        );
         const raw =
           type === 'competitor-asin-check'
             ? {

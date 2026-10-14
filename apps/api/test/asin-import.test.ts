@@ -133,14 +133,17 @@ describe('ASIN import authenticated HTTP acceptance and synchronous execution', 
       errorCode: 0,
       data: { taskId: expect.any(String), status: 'pending' },
     });
-    expect(create).toHaveBeenCalledWith({
-      taskId: envelope.data.taskId,
-      userId: taskUserId,
-      taskType: 'import',
-      taskSubType: 'asin',
-      title: 'ASIN导入',
-      message: '导入任务已创建，等待处理',
-    });
+    expect(create).toHaveBeenCalledWith(
+      {
+        taskId: envelope.data.taskId,
+        userId: taskUserId,
+        taskType: 'import',
+        taskSubType: 'asin',
+        title: 'ASIN导入',
+        message: '导入任务已创建，等待处理',
+      },
+      expect.any(Function),
+    );
     const payload = enqueue.mock.calls[0][0];
     expect(isAsinImportTaskData(payload)).toBe(true);
     expect(JSON.stringify(payload).length).toBeLessThan(1024);
