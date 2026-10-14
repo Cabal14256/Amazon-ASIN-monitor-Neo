@@ -8,9 +8,11 @@ import {
 } from '@asin-monitor/config';
 import {
   asinExportJobDataSchema,
+  backupJobDataSchema,
   competitorMonitorJobSchema,
   primaryMonitorJobSchema,
   type AsinExportJobData,
+  type BackupJobData,
   type CompetitorMonitorJob,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
@@ -18,6 +20,7 @@ import {
 import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
+  isBackupUncommittedFailure,
   parseCompetitorMonitorCompletion,
   type BatchDeleteTaskData,
   type TaskRedisPort,
@@ -78,6 +81,10 @@ export interface CheckProducerPort {
   store: Pick<RedisTaskRepository, 'create'>;
   enqueue(data: VariantCheckJobData): Promise<void>;
 }
+export interface BackupProducerPort {
+  store: Pick<RedisTaskRepository, 'create'>;
+  enqueue(data: BackupJobData): Promise<void>;
+}
 export interface ExportProducerPort {
   store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
   enqueue(data: AsinExportJobData): Promise<void>;
@@ -110,9 +117,13 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       : {};
   const status =
     state === 'completed' &&
-    (['variant-check', 'batch-check', 'monitor', 'competitor-monitor'].includes(
-      type,
-    ) ||
+    ([
+      'variant-check',
+      'batch-check',
+      'monitor',
+      'competitor-monitor',
+      'backup',
+    ].includes(type) ||
       (type === 'export' && job.name === 'asin')) &&
     resultObject.cancelled === true
       ? 'cancelled'
@@ -124,6 +135,18 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   const failure = status === 'failed' ? '任务执行失败' : null;
   const owner = job.data?.userId;
   let checkOperation: QueueTaskSnapshot['checkOperation'];
+  let backupData: QueueTaskSnapshot['backupData'];
+  let backupUncommittedFailure: boolean | undefined;
+  if (type === 'backup') {
+    backupData = backupJobDataSchema.parse(job.data);
+    if (backupData.taskId !== job.id || job.name !== backupData.operation)
+      throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+    if (state === 'failed')
+      backupUncommittedFailure = isBackupUncommittedFailure(
+        backupData,
+        job.failedReason,
+      );
+  }
   if (['variant-check', 'batch-check'].includes(type)) {
     const data = parsePersistedVariantCheckJob(job.data);
     if (data.taskId !== job.id || data.taskType !== type || job.name !== type)
@@ -157,6 +180,10 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
   }
   return {
     ...(checkOperation ? { checkOperation } : {}),
+    ...(backupData ? { backupData } : {}),
+    ...(backupUncommittedFailure !== undefined
+      ? { backupUncommittedFailure }
+      : {}),
     taskId: job.id!,
     taskType: type,
     userId:
@@ -171,7 +198,9 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
         ? Math.min(100, Math.max(0, job.progress))
         : 0,
     message:
-      failure ||
+      (status === 'failed' && type === 'backup' && !backupUncommittedFailure
+        ? '备份任务失败，副作用或清理未确认，请核对数据库状态和残留产物'
+        : failure) ||
       text(
         resultObject.summary || resultObject.message || job.data?.message,
         2000,
@@ -195,6 +224,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
   private readonly queues = new Map<string, QueueGetters>();
   private batchDeleteQueue?: Queue;
   private importQueue?: Queue;
+  private backupQueue?: Queue;
   private exportQueue?: Queue;
   private monitorQueue?: Queue;
   private competitorMonitorQueue?: Queue;
@@ -558,6 +588,43 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       },
     };
   }
+  openBackup(ensureOpen: () => void): BackupProducerPort {
+    const command = this.command(ensureOpen);
+    return {
+      store: this.createStore(ensureOpen),
+      enqueue: (input) =>
+        command(async () => {
+          const data = backupJobDataSchema.parse(input);
+          const queue = (this.backupQueue ??= new Queue(
+            getPhysicalQueueName('backup'),
+            {
+              connection: this.redis as unknown as ConnectionOptions,
+              prefix: getNeoQueuePrefix(this.env),
+              defaultJobOptions: getQueuePolicy('backup', this.env)
+                .defaultJobOptions,
+            },
+          ));
+          if (queue.listenerCount('error') === 0)
+            queue.on('error', () =>
+              this.logger.warn('备份队列连接异常', 'TaskQueryRuntime', {
+                reason: 'backup_queue_error',
+              }),
+            );
+          try {
+            await queue.waitUntilReady();
+          } catch (error) {
+            if (this.backupQueue === queue) this.backupQueue = undefined;
+            await queue.close().catch(() => undefined);
+            throw error;
+          }
+          ensureOpen();
+          await queue.add(data.operation, data, {
+            jobId: data.taskId,
+            ...(data.operation === 'restore' ? { attempts: 1 } : {}),
+          });
+        }),
+    };
+  }
   openExport(
     ensureOpen: () => void,
     onCreateWriteStarted?: () => void,
@@ -721,6 +788,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         ...this.queues.values(),
         ...(this.batchDeleteQueue ? [this.batchDeleteQueue] : []),
         ...(this.importQueue ? [this.importQueue] : []),
+        ...(this.backupQueue ? [this.backupQueue] : []),
         ...(this.exportQueue ? [this.exportQueue] : []),
         ...(this.monitorQueue ? [this.monitorQueue] : []),
         ...(this.competitorMonitorQueue ? [this.competitorMonitorQueue] : []),

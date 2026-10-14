@@ -3,6 +3,7 @@ import type { AuditRepositoryPort } from '@asin-monitor/db';
 import {
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   HttpCode,
@@ -27,7 +28,7 @@ import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppModule } from '../src/app.module';
 import { auditBody } from '../src/audit/audit-data';
-import { auditAction } from '../src/audit/audit-mapping';
+import { auditAction, auditBackupBody } from '../src/audit/audit-mapping';
 import { AuditInterceptor } from '../src/audit/audit.interceptor';
 import { AUDIT_REPOSITORY, AuditService } from '../src/audit/audit.service';
 import { ENV } from '../src/config/config.module';
@@ -75,6 +76,11 @@ describe('audit mapping and data', () => {
     ['GET', '/export/monitor-history', 'EXPORT', 'monitor_history'],
     ['POST', '/tasks/export', 'EXPORT', 'unknown'],
     ['POST', '/competitor/monitor/trigger', 'TRIGGER_MONITOR', 'monitor'],
+    ['POST', '/backup', 'CREATE', 'backup'],
+    ['POST', '/backup/restore', 'RESTORE', 'backup'],
+    ['DELETE', '/backup/:filename', 'DELETE', 'backup'],
+    ['POST', '/backup/config', 'UPDATE', 'backup_config'],
+    ['GET', '/backup/:filename/download', 'EXPORT', 'backup'],
   ])('%s %s retains action %s', (method, path, action, resource) => {
     expect(auditAction(method, `/api/v1${path}`)).toMatchObject({
       action,
@@ -111,6 +117,47 @@ describe('audit mapping and data', () => {
     expect(auditAction('POST', '/api/v1/api/v1/users')).toBeUndefined();
     expect(auditAction('OPTIONS', '/api/v1/users')).toBeUndefined();
     expect(auditAction('HEAD', '/api/v1/export/asin')).toBeUndefined();
+  });
+
+  it('identifies only valid backup artifacts and omits untrusted backup request text', () => {
+    const filename = 'backup_20260927-230000-1234abcd-primary.dump';
+    expect(
+      auditAction('POST', '/api/v1/backup/restore', {}, { filename }),
+    ).toMatchObject({ resourceId: filename, action: 'RESTORE' });
+    expect(
+      auditAction('DELETE', '/api/v1/backup/:filename', { filename }),
+    ).toMatchObject({ resourceId: filename, action: 'DELETE' });
+    expect(
+      auditAction('GET', '/api/v1/backup/:filename/download', { filename }),
+    ).toMatchObject({ resourceId: filename, action: 'EXPORT' });
+    expect(
+      auditAction('GET', '/api/v1/backup/:filename/download', {
+        filename: 'password=private-token.dump',
+      }),
+    ).toMatchObject({ resourceId: null });
+    expect(
+      auditAction('DELETE', '/api/v1/backup/:filename', {
+        filename: 'password=private-token.dump',
+      }),
+    ).toMatchObject({ resourceId: null });
+    const create = auditBackupBody('/api/v1/backup', {
+      target: 'primary',
+      description: 'private-customer-name',
+      tables: ['private-table'],
+    });
+    const restore = auditBackupBody('/api/v1/backup/restore', {
+      filename: 'password=private-token.dump',
+      target: 'competitor',
+      secret: 'private-secret',
+    });
+    const config = auditBackupBody('/api/v1/backup/config', {
+      backupTime: 'private-time',
+      secret: 'private-secret',
+    });
+    expect(create).toEqual({ target: 'primary' });
+    expect(restore).toEqual({ filename: null, target: 'competitor' });
+    expect(config).toEqual({ change: 'backup_schedule' });
+    expect(JSON.stringify([create, restore, config])).not.toContain('private-');
   });
 
   it('nested credentials are masked without mutating input; cycles and large uploads are bounded', () => {
@@ -212,6 +259,36 @@ class AuditFixtureController {
   static started = false;
   static completed = false;
   static streamFailure = false;
+  @Post('backup')
+  @UseGuards(AuditFixtureGuard)
+  backupCreate() {
+    return { success: true };
+  }
+
+  @Post('backup/restore')
+  @UseGuards(AuditFixtureGuard)
+  backupRestore() {
+    return { success: true };
+  }
+
+  @Delete('backup/:filename')
+  @UseGuards(AuditFixtureGuard)
+  backupDelete() {
+    return { success: true };
+  }
+
+  @Post('backup/config')
+  @UseGuards(AuditFixtureGuard)
+  backupConfig() {
+    return { success: true };
+  }
+  @Get('backup/:filename/download')
+  @UseGuards(AuditFixtureGuard)
+  backupDownload(@Res() reply: FastifyReply) {
+    return reply
+      .type('application/x-tar')
+      .send(Readable.from(['private-backup-content']));
+  }
   @Post('asins')
   async earlyReply(@Req() request: FastifyRequest, @Res() reply: FastifyReply) {
     reply.status(201).send({ success: true });
@@ -329,6 +406,85 @@ describe('Neo audit HTTP lifecycle', () => {
     app.getHttpServer().closeAllConnections();
     await app.close();
     vi.restoreAllMocks();
+  });
+
+  it('persists actor and sanitized metadata for every backup mutation route', async () => {
+    const filename = 'backup_20260927-230000-1234abcd-primary.dump';
+    for (const [method, url, payload] of [
+      [
+        'POST',
+        '/api/v1/backup',
+        { target: 'primary', description: 'private-person' },
+      ],
+      [
+        'POST',
+        '/api/v1/backup/restore',
+        { filename, target: 'primary', secret: 'private-secret' },
+      ],
+      ['DELETE', `/api/v1/backup/${filename}`, undefined],
+      ['POST', '/api/v1/backup/config', { backupTime: '02:00' }],
+    ] as const) {
+      expect(
+        (
+          await app.inject({
+            method,
+            url,
+            headers: { authorization: 'Bearer fixture' },
+            payload,
+          })
+        ).statusCode,
+      ).toBeLessThan(400);
+    }
+    await audit.flush();
+    const entries = vi
+      .mocked(repository.append)
+      .mock.calls.map(([entry]) => entry);
+    expect(entries).toHaveLength(4);
+    expect(entries.map((entry) => [entry.action, entry.resource])).toEqual([
+      ['CREATE', 'backup'],
+      ['RESTORE', 'backup'],
+      ['DELETE', 'backup'],
+      ['UPDATE', 'backup_config'],
+    ]);
+    expect(entries.map((entry) => entry.resourceId)).toEqual([
+      null,
+      filename,
+      filename,
+      null,
+    ]);
+    expect(entries.every((entry) => entry.userId === 'actor-23')).toBe(true);
+    expect(JSON.stringify(entries)).not.toMatch(
+      /private-person|private-secret/,
+    );
+  });
+
+  it('audits the backup download actor and validated artifact without persisting contents or query secrets', async () => {
+    const filename = 'backup_20260927-230000-1234abcd-primary.dump';
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/backup/${filename}/download?token=private-query`,
+      headers: { authorization: 'Bearer fixture' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('private-backup-content');
+    // Stream response completion can follow inject's payload resolution.
+    await vi.waitFor(() => expect(repository.append).toHaveBeenCalledOnce());
+    await audit.flush();
+    expect(repository.append).toHaveBeenCalledOnce();
+    expect(repository.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'actor-23',
+        action: 'EXPORT',
+        resource: 'backup',
+        resourceId: filename,
+        path: '/api/v1/backup/:filename/download',
+        requestData: null,
+        responseStatus: 200,
+      }),
+    );
+    expect(
+      JSON.stringify(vi.mocked(repository.append).mock.calls),
+    ).not.toContain('private-');
   });
 
   it('uses authenticated actor, immutable redacted body and final status, ignoring spoofed proxy headers', async () => {

@@ -40,6 +40,14 @@ export async function listBackups(options?: { [key: string]: any }) {
   });
 }
 
+/** 查看自动备份的真实任务状态（需要 settings:write） */
+export async function listScheduledBackups(options?: { [key: string]: any }) {
+  return request<{ success?: boolean; data?: API.BackupScheduledTask[] }>(
+    '/api/v1/backup/scheduled-tasks',
+    { method: 'GET', ...(options || {}) },
+  );
+}
+
 /** 删除备份 */
 export async function deleteBackup(
   params: {
@@ -99,6 +107,7 @@ export default {
   createBackup,
   restoreBackup,
   listBackups,
+  listScheduledBackups,
   deleteBackup,
   downloadBackup,
   getBackupConfig,

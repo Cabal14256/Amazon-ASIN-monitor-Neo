@@ -1,6 +1,11 @@
 import 'reflect-metadata';
 
-import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
+import {
+  assertBackupTaskRetention,
+  loadEnv,
+  loadEnvironmentFiles,
+  type Env,
+} from '@asin-monitor/config';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
@@ -12,6 +17,7 @@ import {
   AUTH_MAINTENANCE_QUEUE,
   resolveWorkerSelection,
 } from './auth-maintenance-schedules';
+import { startBackupRuntime } from './backup-runtime';
 import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
 import { startWorkerMetrics, type WorkerMetricsRuntime } from './metrics';
@@ -54,11 +60,22 @@ async function startConfiguredWorker(
   metrics: WorkerMetricsRuntime | undefined,
 ): Promise<void> {
   const {
-    enabledQueues: enabled,
+    enabledQueues: selectedQueues,
     unknownQueues,
     maintenance: selectedMaintenance,
     intervalMaintenance: selectedIntervals,
   } = resolveWorkerSelection(env.WORKER_ENABLED_QUEUES);
+  let enabled = selectedQueues;
+  if (enabled.includes('backup') && env.AUTH_DATA_AUTHORITY === 'postgresql') {
+    try {
+      assertBackupTaskRetention(env);
+    } catch {
+      enabled = enabled.filter((name) => name !== 'backup');
+      logger.warn('备份消费者未启用：任务元数据保留时间不足', {
+        reason: 'backup_task_retention_too_short',
+      });
+    }
+  }
   const enableMaintenance =
     selectedMaintenance && env.AUTH_DATA_AUTHORITY === 'postgresql';
   const enableIntervals =
@@ -128,6 +145,10 @@ async function startConfiguredWorker(
           metrics?.observer,
         )
       : undefined;
+  const backup =
+    enabled.includes('backup') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startBackupRuntime(env, () => process.exit(1))
+      : undefined;
 
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
@@ -143,6 +164,7 @@ async function startConfiguredWorker(
             name === 'competitor-monitor')
         ),
     )
+    .filter((name) => !(backup && name === 'backup'))
     .map((name) => {
       const physicalName = getPhysicalQueueName(name);
       const queue = new Queue(
@@ -164,6 +186,7 @@ async function startConfiguredWorker(
       ...(asinImport ? [asinImport.queue] : []),
       ...(asinExport ? [asinExport.queue] : []),
       ...(variantChecks ? variantChecks.queues : []),
+      ...(backup ? [backup.queue] : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
   watchdog.start(() => {
@@ -183,6 +206,7 @@ async function startConfiguredWorker(
         ...(asinImport ? [asinImport] : []),
         ...(asinExport ? [asinExport] : []),
         ...(variantChecks ? [variantChecks] : []),
+        ...(backup ? [backup] : []),
         ...(metrics ? [metrics] : []),
       ],
       watchdogRedis,
@@ -195,7 +219,7 @@ async function startConfiguredWorker(
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode:
-      batchDelete || asinImport || asinExport || variantChecks
+      batchDelete || asinImport || asinExport || variantChecks || backup
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
@@ -208,13 +232,15 @@ async function startConfiguredWorker(
       Number(!!batchDelete) +
       Number(!!asinImport) +
       Number(!!asinExport) +
-      (variantChecks?.workers.length ?? 0),
+      (variantChecks?.workers.length ?? 0) +
+      Number(!!backup),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
     physicalQueues: [
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
       ...(intervals ? [MONITOR_INTERVAL_QUEUE] : []),
+      ...(backup ? [getPhysicalQueueName('backup')] : []),
     ],
     queueCount:
       queues.length +
@@ -223,8 +249,10 @@ async function startConfiguredWorker(
       Number(!!batchDelete) +
       Number(!!asinImport) +
       Number(!!asinExport) +
-      (variantChecks?.queues.length ?? 0),
-    schedulerEnabled: !!(maintenance || intervals) && env.SCHEDULER_ENABLED,
+      (variantChecks?.queues.length ?? 0) +
+      Number(!!backup),
+    schedulerEnabled:
+      !!(maintenance || intervals || backup) && env.SCHEDULER_ENABLED,
   });
 }
 

@@ -3,6 +3,7 @@ export * from './domains';
 export * from './endpoints';
 export * from './envelope';
 export * from './internal/scheduled-monitor';
+export * from './neo-endpoints';
 export * from './permissions';
 export * from './timescaleAggregate';
 export * from './ws';

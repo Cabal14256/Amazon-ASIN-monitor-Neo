@@ -1,11 +1,16 @@
 import {
+  backupCreationFilenameMatches,
+  backupCreationReceiptSchema,
+  backupFilenameCreatedAt,
   taskInfoSchema,
   taskListQuerySchema,
   variantCheckResultReferenceSchema,
+  type BackupJobData,
   type TaskInfo,
 } from '@asin-monitor/contracts';
 import {
   isTerminalTaskStatus,
+  parseBackupCreationReceipt,
   TASK_RECORD_MAX_BYTES,
   type TaskState,
   type VariantCheckOperation,
@@ -19,6 +24,9 @@ export type QueueTaskSnapshot = Omit<
   userId: string | null;
   /** Internal only: derived from validated immutable BullMQ data, never serialized. */
   checkOperation?: VariantCheckOperation;
+  backupData?: BackupJobData;
+  /** Private proof from this immutable queue incarnation's failedReason. */
+  backupUncommittedFailure?: boolean;
 };
 export class TaskQueryInputError extends Error {}
 export function parseTaskId(raw: unknown): string {
@@ -40,7 +48,7 @@ export function parseTaskQuery(raw: unknown) {
   return { status: value.data.status || 'all', limit: value.data.limit ?? 50 };
 }
 const privateKey =
-  /password|token|secret|authorization|cookie|credential|file.?path|^path$|directory|^stack$|^_competitorMonitorCommit$|^__proto__$|^constructor$|^prototype$/i;
+  /password|token|secret|authorization|cookie|credential|file.?path|^path$|directory|^stack$|^backupCreationCommit$|^_competitorMonitorCommit$|^__proto__$|^constructor$|^prototype$/i;
 /** Preserve structured business results while excluding server-only fields at every depth. */
 export function publicTaskResult(raw: unknown): unknown {
   if (!raw) return null;
@@ -72,6 +80,38 @@ function filename(value: unknown): string | null {
     return null;
   return value.split(/[\\/]/).pop() || null;
 }
+/** Historical completed tasks need no queue reconciliation. Their stored proof
+ * can establish filename-time provenance, never an observed dump timestamp. */
+function historicalBackupTimeSource(
+  task: TaskState | QueueTaskSnapshot,
+): 'filename' | 'unavailable' {
+  const parsed = backupCreationReceiptSchema.safeParse(task.result);
+  if (!parsed.success || typeof task.createdAt !== 'string')
+    return 'unavailable';
+  const value = parsed.data;
+  const proof = value.backupCreationCommit;
+  if (
+    proof.taskId !== task.taskId ||
+    proof.userId !== task.userId ||
+    proof.taskCreatedAt !== task.createdAt ||
+    !backupCreationFilenameMatches(
+      value.filename,
+      task.taskId,
+      task.createdAt,
+      value.target,
+    ) ||
+    value.createdAt !== backupFilenameCreatedAt(value.filename)
+  )
+    return 'unavailable';
+  if ('backupData' in task && task.backupData) {
+    try {
+      parseBackupCreationReceipt(task.backupData, task.result);
+    } catch {
+      return 'unavailable';
+    }
+  }
+  return 'filename';
+}
 export function serializeTask(task: TaskState | QueueTaskSnapshot): TaskInfo {
   const raw =
     task.result &&
@@ -88,11 +128,19 @@ export function serializeTask(task: TaskState | QueueTaskSnapshot): TaskInfo {
     : filename(raw.filename) ?? filename(raw.filepath);
   // Only this authenticated task's own download endpoint may be advertised.
   const downloadUrl =
-    raw.downloadUrl || raw.filepath || isCheckResult
+    task.taskType !== 'backup' &&
+    (raw.downloadUrl || raw.filepath || isCheckResult)
       ? `/api/v1/tasks/${encodeURIComponent(task.taskId)}/download`
       : null;
   if (result && typeof result === 'object' && !Array.isArray(result)) {
     const data = result as Record<string, unknown>;
+    if (
+      task.taskType === 'backup' &&
+      task.taskSubType === 'create' &&
+      raw.timeSource === undefined &&
+      raw.execution === undefined
+    )
+      data.timeSource = historicalBackupTimeSource(task);
     if ('filename' in data) data.filename = publicFilename;
     if ('downloadUrl' in data) data.downloadUrl = downloadUrl;
   }

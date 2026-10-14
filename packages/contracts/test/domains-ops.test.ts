@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  backupArtifactMetadataSchema,
   backupConfigResultSchema,
+  backupCreationFilename,
+  backupCreationReceiptSchema,
+  backupExecutionTimesSchema,
+  backupFilenameCreatedAt,
+  backupFilenameSchema,
+  backupJobDataSchema,
   backupListResultSchema,
+  backupRestoreReceiptSchema,
+  backupTaskResultSchema,
+  createBackupRequestSchema,
   createBackupResultSchema,
+  restoreBackupResultSchema,
   saveBackupConfigRequestSchema,
 } from '../src/domains/backup';
 import {
@@ -72,12 +83,365 @@ describe('tasks 域', () => {
 });
 
 describe('backup 域', () => {
+  it('accepts strict ordered execution windows and rejects partial, reversed or misleading sources', () => {
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt: '2026-10-03T01:00:00.123Z',
+      dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+      publicationStartedAt: '2026-10-03T01:03:00.789Z',
+    };
+    expect(backupExecutionTimesSchema.parse(execution)).toEqual(execution);
+    for (const changed of [
+      { ...execution, timeSource: 'snapshot' },
+      { ...execution, dumpCompletedAt: undefined },
+      { ...execution, dumpStartedAt: execution.publicationStartedAt },
+      { ...execution, publicationStartedAt: execution.dumpStartedAt },
+      { ...execution, exactSnapshotAt: execution.dumpStartedAt },
+    ])
+      expect(backupExecutionTimesSchema.safeParse(changed).success).toBe(false);
+    const receipt = {
+      operation: 'create',
+      format: 'custom',
+      target: 'primary',
+      size: 12,
+      filename:
+        'backup_20261001-080000-10000000000040008000000000000161-primary.dump',
+      createdAt: execution.dumpStartedAt,
+      sourceEngine: 'postgresql',
+      restoreSupported: true,
+      timeSource: 'dump-start',
+      execution,
+      backupCreationCommit: {
+        version: 1,
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: 'owner',
+        taskCreatedAt: '2026-10-01T00:00:00.000Z',
+        creationIdentity: 'a'.repeat(64),
+        archiveSha256: 'b'.repeat(64),
+      },
+    };
+    expect(backupCreationReceiptSchema.parse(receipt)).toEqual(receipt);
+    for (const change of [
+      { createdAt: receipt.backupCreationCommit.taskCreatedAt },
+      { timeSource: 'filename' },
+      { execution: undefined },
+    ])
+      expect(
+        backupCreationReceiptSchema.safeParse({ ...receipt, ...change })
+          .success,
+      ).toBe(false);
+  });
+  it.each(['postgresql', 'timescaledb'] as const)(
+    'keeps old %s sidecars compatible and preserves a new execution window',
+    (sourceEngine) => {
+      const metadata = {
+        version: sourceEngine === 'postgresql' ? 3 : 4,
+        filename:
+          'backup_20261001-080000-10000000000040008000000000000161-primary.dump',
+        target: 'primary',
+        sourceEngine,
+        archiveSha256: 'a'.repeat(64),
+        creationIdentity: 'b'.repeat(64),
+        databaseSettings: {
+          encoding: 'UTF8',
+          lcCollate: 'C',
+          lcCtype: 'C',
+          localeProvider: 'libc',
+        },
+        ...(sourceEngine === 'postgresql'
+          ? { scope: 'full' }
+          : {
+              timescale: {
+                extensionVersion: '2.29.2',
+                hypertables: [],
+                continuousAggregates: [],
+              },
+            }),
+      };
+      expect(backupArtifactMetadataSchema.parse(metadata)).toEqual(metadata);
+      const timed = {
+        ...metadata,
+        execution: {
+          timeSource: 'dump-start',
+          dumpStartedAt: '2026-10-03T01:00:00.123Z',
+          dumpCompletedAt: '2026-10-03T01:02:00.456Z',
+          publicationStartedAt: '2026-10-03T01:03:00.789Z',
+        },
+      };
+      expect(backupArtifactMetadataSchema.parse(timed)).toEqual(timed);
+      expect(
+        backupArtifactMetadataSchema.safeParse({
+          ...timed,
+          execution: { ...timed.execution, dumpStartedAt: 'invalid' },
+        }).success,
+      ).toBe(false);
+    },
+  );
+  it('keeps Shanghai midnight filenames and rejects rolled calendar dates as recovery points', () => {
+    const filename = backupCreationFilename(
+      '10000000-0000-4000-8000-000000000161',
+      '2026-09-01T16:00:00.123Z',
+      'primary',
+    );
+    expect(backupFilenameCreatedAt(filename)).toBe('2026-09-01T16:00:00.000Z');
+    expect(
+      backupFilenameCreatedAt('backup_20260902-240001-abcdef01-primary.dump'),
+    ).toBe('2026-09-01T16:00:01.000Z');
+    for (const invalid of [
+      '20260230-020000',
+      '20261301-020000',
+      '20260902-250000',
+      '20260902-020060',
+    ])
+      expect(
+        backupFilenameCreatedAt(`backup_${invalid}-abcdef01-primary.dump`),
+      ).toBeUndefined();
+  });
+  it('bounds the private durable creation proof and rejects restore or unknown proof fields', () => {
+    const result = {
+      operation: 'create',
+      format: 'custom',
+      target: 'primary',
+      size: 12,
+      filename:
+        'backup_20260901-080000-10000000000040008000000000000161-primary.dump',
+      createdAt: '2026-09-01T00:00:00.000Z',
+      sourceEngine: 'postgresql',
+      restoreSupported: true,
+      backupCreationCommit: {
+        version: 1,
+        taskId: '10000000-0000-4000-8000-000000000161',
+        userId: 'owner',
+        taskCreatedAt: '2026-09-01T00:00:00.000Z',
+        creationIdentity: 'a'.repeat(64),
+        archiveSha256: 'b'.repeat(64),
+      },
+    };
+    expect(backupCreationReceiptSchema.parse(result)).toEqual(result);
+    for (const changed of [
+      { ...result, operation: 'restore' },
+      {
+        ...result,
+        backupCreationCommit: { ...result.backupCreationCommit, version: 2 },
+      },
+      {
+        ...result,
+        backupCreationCommit: {
+          ...result.backupCreationCommit,
+          archiveSha256: 'private-token',
+        },
+      },
+      {
+        ...result,
+        backupCreationCommit: {
+          ...result.backupCreationCommit,
+          params: { password: 'private-token' },
+        },
+      },
+    ])
+      expect(() => backupCreationReceiptSchema.parse(changed)).toThrow();
+  });
+  it('accepts complete UUID filenames and binds creation metadata to a bounded digest', () => {
+    const filename =
+      'backup_20261002-020000-10000000000040008000000000000161-primary.dump';
+    expect(backupFilenameSchema.parse(filename)).toBe(filename);
+    expect(
+      backupFilenameSchema.parse(
+        'backup_20261002-020000-abcdef01-primary.dump',
+      ),
+    ).toBeDefined();
+    for (const invalid of [
+      `../${filename}`,
+      `${filename}.partial`,
+      filename.replace('10000000000040008000000000000161', 'abcdef012'),
+    ])
+      expect(() => backupFilenameSchema.parse(invalid)).toThrow();
+    const metadata = {
+      version: 3,
+      filename,
+      target: 'primary',
+      sourceEngine: 'postgresql',
+      scope: 'full',
+      archiveSha256: 'a'.repeat(64),
+      creationIdentity: 'b'.repeat(64),
+      databaseSettings: {
+        encoding: 'UTF8',
+        lcCollate: 'C',
+        lcCtype: 'C',
+        localeProvider: 'libc',
+      },
+    };
+    expect(backupArtifactMetadataSchema.parse(metadata)).toEqual(metadata);
+    const { creationIdentity: _identity, ...older } = metadata;
+    expect(backupArtifactMetadataSchema.parse(older)).toEqual(older);
+    for (const creationIdentity of ['', 'b'.repeat(63), 'G'.repeat(64)])
+      expect(() =>
+        backupArtifactMetadataSchema.parse({ ...metadata, creationIdentity }),
+      ).toThrow();
+  });
+
+  it('accepts only a bounded isolated restore receipt with an unchanged online target', () => {
+    const receipt = {
+      operation: 'restore',
+      format: 'custom',
+      filename: 'backup_20260927-020000-abcdef01-primary.dump',
+      target: 'primary',
+      restoreMode: 'isolated',
+      restoredDatabase: 'neo_restore_primary_0123456789abcdef',
+      targetDatabaseChanged: false,
+      verification: 'unconfirmed',
+      message: '隔离数据库已恢复，任务状态待核实',
+    };
+    expect(backupRestoreReceiptSchema.parse(receipt)).toEqual(receipt);
+    for (const change of [
+      { targetDatabaseChanged: true },
+      { restoredDatabase: 'postgres' },
+      { restoredDatabase: undefined },
+      { databaseUrl: 'postgresql://private' },
+      { message: 'x'.repeat(2001) },
+    ])
+      expect(
+        backupRestoreReceiptSchema.safeParse({ ...receipt, ...change }).success,
+      ).toBe(false);
+  });
+  it('distinguishes full and selective PostgreSQL artifacts in v3 metadata', () => {
+    const databaseSettings = {
+      encoding: 'UTF8',
+      lcCollate: 'en_US.utf8',
+      lcCtype: 'en_US.utf8',
+      localeProvider: 'libc',
+    };
+    const base = {
+      version: 3,
+      filename: 'backup_20260824-020000-1234abcd-primary.dump',
+      target: 'primary',
+      sourceEngine: 'postgresql',
+      archiveSha256: 'a'.repeat(64),
+      databaseSettings,
+    };
+    expect(
+      backupArtifactMetadataSchema.parse({ ...base, scope: 'full' }),
+    ).toMatchObject({ scope: 'full' });
+    expect(
+      backupArtifactMetadataSchema.parse({
+        ...base,
+        scope: 'selective',
+        tables: ['public.asins'],
+      }),
+    ).toMatchObject({ scope: 'selective', tables: ['public.asins'] });
+    expect(() => backupArtifactMetadataSchema.parse(base)).toThrow();
+    for (const invalid of [
+      { ...base, scope: 'full', archiveSha256: undefined },
+      { ...base, scope: 'full', archiveSha256: 'b'.repeat(63) },
+      { ...base, scope: 'full', archiveSha256: 'G'.repeat(64) },
+      { ...base, scope: 'full', databaseSettings: undefined },
+      {
+        ...base,
+        scope: 'full',
+        databaseSettings: { ...databaseSettings, lcCollate: 'C\nDROP' },
+      },
+      { ...base, scope: 'full', tables: ['public.asins'] },
+      { ...base, scope: 'selective' },
+      { ...base, scope: 'selective', tables: [] },
+      { ...base, scope: 'selective', tables: ['public.asins; DROP TABLE x'] },
+    ])
+      expect(() => backupArtifactMetadataSchema.parse(invalid)).toThrow();
+  });
+  it('Timescale 隔离恢复契约需要目录清单并明确在线目标未切换', () => {
+    const metadata = {
+      version: 2,
+      filename: 'backup_20260824-020000-1234abcd-primary.dump',
+      target: 'primary',
+      sourceEngine: 'timescaledb',
+      databaseSettings: {
+        encoding: 'UTF8',
+        lcCollate: 'en-US-x-icu',
+        lcCtype: 'en-US-x-icu',
+        localeProvider: 'icu',
+        icuLocale: 'en-US',
+        icuRules: '&a < b',
+      },
+      timescale: {
+        extensionVersion: '2.29.2',
+        hypertables: ['public.monitor_history'],
+        continuousAggregates: ['public.monitor_hourly'],
+      },
+    };
+    expect(backupArtifactMetadataSchema.parse(metadata)).toMatchObject(
+      metadata,
+    );
+    const verified = {
+      ...metadata,
+      version: 4,
+      archiveSha256: 'a'.repeat(64),
+      databaseSettings: {
+        ...metadata.databaseSettings,
+        timeZone: 'Asia/Shanghai',
+      },
+    };
+    expect(backupArtifactMetadataSchema.parse(verified)).toEqual(verified);
+    for (const archiveSha256 of [undefined, '', 'a'.repeat(63), 'G'.repeat(64)])
+      expect(() =>
+        backupArtifactMetadataSchema.parse({ ...verified, archiveSha256 }),
+      ).toThrow();
+    expect(() =>
+      backupArtifactMetadataSchema.parse({
+        ...verified,
+        databaseSettings: {
+          ...verified.databaseSettings,
+          timeZone: 'UTC\nprivate',
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      backupArtifactMetadataSchema.parse({ ...metadata, timescale: undefined }),
+    ).toThrow();
+    expect(() =>
+      backupArtifactMetadataSchema.parse({
+        ...metadata,
+        databaseSettings: undefined,
+      }),
+    ).toThrow();
+    expect(
+      restoreBackupResultSchema.parse({
+        success: true,
+        data: { taskId: 'task', status: 'pending', restoreMode: 'isolated' },
+      }).data,
+    ).toMatchObject({ restoreMode: 'isolated' });
+    expect(
+      backupTaskResultSchema.parse({
+        success: true,
+        data: {
+          operation: 'restore',
+          format: 'custom',
+          target: 'primary',
+          restoreMode: 'isolated',
+          restoredDatabase: 'neo_restore_primary_1234567890abcdef',
+          targetDatabaseChanged: false,
+        },
+      }).data,
+    ).toMatchObject({ targetDatabaseChanged: false });
+    expect(() =>
+      backupTaskResultSchema.parse({
+        success: true,
+        data: {
+          operation: 'restore',
+          format: 'custom',
+          target: 'primary',
+          restoreMode: 'isolated',
+          targetDatabaseChanged: true,
+        },
+      }),
+    ).toThrow();
+  });
   it('备份列表项含 filename/size/createdAt', () => {
     const parsed = backupListResultSchema.parse({
       success: true,
       data: [
         {
-          filename: 'backup_20260824.sql',
+          filename: 'backup_20260824-020000-1234abcd-primary.dump',
+          format: 'custom',
+          target: 'primary',
           size: 1024,
           createdAt: '2026-08-24',
         },
@@ -90,15 +454,107 @@ describe('backup 域', () => {
     expect(
       createBackupResultSchema.parse({
         success: true,
-        data: { filename: 'b.sql', size: 1, createdAt: 't' },
+        data: {
+          filename: 'backup_20260824-020000-1234abcd-primary.dump',
+          format: 'custom',
+          target: 'primary',
+          size: 1,
+          createdAt: 't',
+        },
       }).data,
-    ).toMatchObject({ filename: 'b.sql' });
+    ).toMatchObject({
+      filename: 'backup_20260824-020000-1234abcd-primary.dump',
+      format: 'custom',
+    });
     expect(
       createBackupResultSchema.parse({
         success: true,
         data: { taskId: 'bt1', status: 'pending' },
       }).data,
     ).toMatchObject({ taskId: 'bt1' });
+  });
+
+  it('只接受 pg_dump custom 备份文件并拒绝 Legacy SQL', () => {
+    expect(() =>
+      backupListResultSchema.parse({
+        success: true,
+        data: [
+          {
+            filename: 'legacy.sql',
+            format: 'custom',
+            target: 'primary',
+            size: 1,
+            createdAt: '2026-08-24',
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      backupJobDataSchema.parse({
+        taskId: 'not-a-uuid',
+        taskType: 'backup',
+        taskSubType: 'restore',
+        operation: 'restore',
+        target: 'primary',
+        userId: 'u1',
+        createdAt: '2026-08-24T10:00:00.000Z',
+        params: { filename: 'legacy.sql' },
+      }),
+    ).toThrow();
+    expect(
+      backupJobDataSchema.parse({
+        taskId: '00000000-0000-4000-8000-000000000001',
+        taskType: 'backup',
+        taskSubType: 'restore',
+        operation: 'restore',
+        target: 'competitor',
+        userId: 'u1',
+        createdAt: '2026-08-24T10:00:00.000Z',
+        params: { filename: 'backup_20260824-020000-1234abcd-competitor.dump' },
+      }),
+    ).toMatchObject({ target: 'competitor', operation: 'restore' });
+    expect(() =>
+      backupJobDataSchema.parse({
+        taskId: '00000000-0000-4000-8000-000000000001',
+        taskType: 'backup',
+        taskSubType: 'restore',
+        operation: 'restore',
+        target: 'primary',
+        userId: 'u1',
+        createdAt: '2026-08-24T10:00:00.000Z',
+        params: {
+          filename: 'backup_20260824-020000-1234abcd-competitor.dump',
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('备份与恢复任务结果携带格式、操作和目标库', () => {
+    for (const operation of ['create', 'restore'] as const) {
+      expect(
+        backupTaskResultSchema.parse({
+          success: true,
+          data: {
+            operation,
+            format: 'custom',
+            target: 'primary',
+            filename: 'backup_20260824-020000-1234abcd-primary.dump',
+          },
+        }).data,
+      ).toMatchObject({ operation, format: 'custom', target: 'primary' });
+    }
+  });
+
+  it('表名只接受有限的 PostgreSQL 标识符', () => {
+    expect(
+      createBackupRequestSchema.parse({ tables: ['public.asins'] }).tables,
+    ).toEqual(['public.asins']);
+    expect(() =>
+      createBackupRequestSchema.parse({ tables: ['asins; DROP TABLE users'] }),
+    ).toThrow();
+    expect(() =>
+      createBackupRequestSchema.parse({ tables: Array(513).fill('asins') }),
+    ).toThrow();
   });
 
   it('备份配置含默认值形态（无记录时 id 为 null）', () => {
