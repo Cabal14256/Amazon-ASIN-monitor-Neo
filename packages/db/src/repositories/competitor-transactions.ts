@@ -5,7 +5,10 @@ import type { CatalogPhysicalOutcome } from '../domain/catalog-operation';
 import type { CompetitorQueryUnit } from '../domain/competitor-query';
 import { spApiConfig } from '../schema';
 import { DrizzleAsinQueryUnit } from './asin-query-repository';
-import { catalogTransactionExecution } from './catalog-operation-execution';
+import {
+  catalogTransactionExecution,
+  observeCatalogOperationWork,
+} from './catalog-operation-execution';
 
 export class CompetitorTransactionError extends Error {
   constructor(
@@ -111,7 +114,7 @@ export class PgCompetitorTransactions {
       client.release(destroy);
     };
     const stop = (code: 'dependency' | 'timeout' | 'cancelled' | 'closed') => {
-      if (stopped) return;
+      if (stopped || finished) return;
       stopped = failure(code);
       for (const client of clients) release(client, true);
       rejectInterrupt(stopped);
@@ -241,6 +244,9 @@ export class PgCompetitorTransactions {
         throw error;
       } finally {
         finished = true;
+        // Physical SQL is settled. Durable pin acknowledgement can take longer
+        // than the business deadline without invalidating an acknowledged commit.
+        clearTimeout(timer);
         try {
           for (const client of clients) release(client, !success);
         } finally {
@@ -252,6 +258,7 @@ export class PgCompetitorTransactions {
       }
     })();
     onActualWork?.(work);
+    observeCatalogOperationWork(work);
     try {
       return await Promise.race([work, interrupted]);
     } finally {

@@ -322,6 +322,7 @@ export function createCatalogFencedProcessor(
       released = false,
       allocating = 0;
     const pins = new Set<string>();
+    const actualWork = new Set<Promise<unknown>>();
     let settlement: Promise<void> = Promise.resolve();
     const settle = () => {
       settlement = settlement
@@ -469,13 +470,23 @@ export function createCatalogFencedProcessor(
       },
     });
     try {
-      return await withCatalogOperationExecution(observed, identity, () =>
-        processor(job, token),
+      return await withCatalogOperationExecution(
+        observed,
+        identity,
+        () => processor(job, token),
+        (work) => {
+          actualWork.add(work);
+          void work.then(
+            () => actualWork.delete(work),
+            () => actualWork.delete(work),
+          );
+        },
       );
     } finally {
       // Reject any later chunk/pin from an asynchronous continuation of this
       // attempt. Already-begun physical transactions keep the gate until settled.
       actionDone = true;
+      await Promise.allSettled([...actualWork]);
       await settle();
     }
   };

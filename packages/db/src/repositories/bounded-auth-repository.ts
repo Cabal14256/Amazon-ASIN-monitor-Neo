@@ -6,6 +6,7 @@ import {
   type AuthDataRepository,
   type SessionManagementRepositoryPort,
 } from './auth-repository';
+import { observeCatalogOperationWork } from './catalog-operation-execution';
 
 export class AuthQueryTimeoutError extends Error {
   readonly code = 'AUTH_QUERY_TIMEOUT';
@@ -28,6 +29,7 @@ export async function withAuthDatabaseDeadline<T>(
     completeActual = resolve;
   });
   onActualWork?.(actualDone);
+  observeCatalogOperationWork(actualDone);
   let client: PoolClient;
   try {
     client = await pool.connect();
@@ -81,6 +83,10 @@ export async function withAuthDatabaseDeadline<T>(
           await client.query('COMMIT');
           ensureOpen();
           outcome = 'committed';
+          // The business deadline ends at its actual COMMIT acknowledgement;
+          // pin settlement remains joined but cannot turn a commit into timeout.
+          if (timer) clearTimeout(timer);
+          timer = undefined;
           return result;
         } catch (error) {
           // Destruction / an unacknowledged COMMIT is never a rollback proof.
@@ -89,6 +95,8 @@ export async function withAuthDatabaseDeadline<T>(
               await client.query('ROLLBACK');
               ensureOpen();
               outcome = 'rolled-back';
+              if (timer) clearTimeout(timer);
+              timer = undefined;
             } catch {
               // Durable execution pin remains uncertain.
             }

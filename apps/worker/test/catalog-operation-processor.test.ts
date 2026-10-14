@@ -3,6 +3,7 @@ import {
   CatalogOperationError,
   catalogTransactionExecution,
   competitorMonitorJobDigest,
+  withAuthDatabaseDeadline,
   type CatalogOperationIdentity,
   type CatalogOperationPin,
   type CatalogOperationSnapshot,
@@ -18,6 +19,8 @@ import {
   variantCheckResultReference,
 } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job } from 'bullmq';
+import { EventEmitter } from 'node:events';
+import type { Pool } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCatalogFencedProcessor } from '../src/catalog-operation-processor';
 
@@ -276,6 +279,54 @@ function fixture(
 }
 
 describe('required Worker catalog operation and physical settlement', () => {
+  it('joins a timed-out repository transaction with no caller onActualWork before finishing the Bull job', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const commit = deferred();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(async (statement: string) => {
+        if (statement === 'COMMIT') await commit.promise;
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    });
+    const pool = { connect: async () => client } as unknown as Pool;
+    let complete = false;
+    const run = f
+      .run(async () => {
+        const execution = catalogTransactionExecution();
+        await execution.begin();
+        try {
+          await withAuthDatabaseDeadline(
+            pool,
+            async (db) => {
+              await execution.guard(db);
+              return 'value';
+            },
+            undefined,
+            (outcome) => execution.settled(outcome),
+          );
+        } catch {
+          f.patch({ status: 'failed' });
+        }
+        return 'retained';
+      })
+      .then((value) => {
+        complete = true;
+        return value;
+      });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(complete).toBe(false);
+    expect(f.repository.release).not.toHaveBeenCalled();
+    commit.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(run).resolves.toBe('retained');
+    expect(f.repository.finishPin).toHaveBeenCalledWith(
+      expect.anything(),
+      'uncertain',
+    );
+    expect(f.repository.release).not.toHaveBeenCalled();
+  });
   for (const domain of ['asin', 'competitor'] as const) {
     for (const kind of [
       'import',

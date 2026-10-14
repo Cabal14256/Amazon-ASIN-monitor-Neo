@@ -22,6 +22,34 @@ function fixture() {
   return { pool, client };
 }
 describe('bounded PostgreSQL authentication operations', () => {
+  it('waits for delayed pin settlement after a confirmed COMMIT without a business timeout', async () => {
+    vi.useFakeTimers();
+    const { pool, client } = fixture();
+    let finish!: () => void;
+    const settled = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    let done = false;
+    const work = withAuthDatabaseDeadline(
+      pool,
+      async () => 'committed-value',
+      undefined,
+      settled,
+    ).then((value) => {
+      done = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledWith('committed');
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(done).toBe(false);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith();
+    finish();
+    await expect(work).resolves.toBe('committed-value');
+  });
   it('settles only after actual COMMIT and returns its client before borrowing a pin-settlement connection', async () => {
     const { pool, client } = fixture();
     const settled = vi.fn(async (outcome) => {

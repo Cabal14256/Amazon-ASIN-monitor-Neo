@@ -32,6 +32,12 @@ HTTP 鉴权先更新当前会话活跃时间。若原业务仍持有同一 sessi
 
 ## 验收门与回滚
 
+业务事务期限以真实 COMMIT/ROLLBACK 的确认结束。之后的持久 pin 结算仍必须等待，但不会把已经确认提交的成功变成业务超时；未确认的 COMMIT 继续按原期限记录不确定状态。主营与竞品的事务包装保持这一边界一致。
+
+每个 Worker 目录执行域自动登记事务的物理完成 Promise，业务消费者即使只收到逻辑超时，也不能在实际事务和 pin finally 尚未结束时退出原执行闭包。无需各 import/delete 仓库额外传递回调；原有调用方回调仍保留。已开始事务排空期间保持原代次保护，迟到的新 pin/业务块仍被拒绝。
+
+literal-check-targets 原生夹具通过正式目录保留与任务绑定 helper 准备异步 monitor/import，并在确切原执行域内调用 monitor groups；主营批量创建 unit 的模拟数据库同样声明对应目录执行域。这些夹具改动适配强制保护，未绕过生产准入。
+
 - 定向 unit/HTTP：Worker catalog-operation-processor；API catalog-operation、task-cancellation、task-cancellation-settlement；DB catalog-operation-reservation。driver seam 故障测试不是原生数据库证明。
 - 生产者准备：API catalog-submission-binding.test 使用实际 ApplicationCatalogOperations、PgCatalogOperationRepository 与 RedisTaskRepository，只在 SQL/Redis transport seam 注入故障，覆盖绑定前零 EVAL 调用、后续准入、绑定 COMMIT ACK 丢失、真正 EVAL 返回零及已发 EVAL ACK 丢失。catalog-submission-binding.integration 在隔离 PostgreSQL 中验证两个 domain 的实际回滚、持久绑定和仍持锁的物理 COMMIT 与 cleanup 序列化；这八例的 Redis driver 是合成夹具，不声称真正 Redis/BullMQ 覆盖。独立 CI step 明确运行新文件，继承原 RUN_INTEGRATION_TESTS 与隔离服务配置。
 - 隔离 PostgreSQL：DB catalog-operation.integration 的两个 domain 持真实 assertPin SHARE 锁时新 reserve 返回 BUSY，原槽/pin/业务原值不变；API catalog-operation.integration 在原 4000ms 竞品业务事务期间，同 owner 第二合法 session 返回 HTTP 409、确实到达目录仲裁，同 session heartbeat 受锁返回鉴权 503 且未进入仲裁；两者均不调用第二业务事务，原槽/pin/业务值不变，原业务完成后下一写入成功。

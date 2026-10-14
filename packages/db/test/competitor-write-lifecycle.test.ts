@@ -134,6 +134,49 @@ describe('paired competitor writes / commit outcome and authorization lifetime',
     );
     expect(repository.finishPin).toHaveBeenCalledTimes(1);
   });
+  it('keeps a confirmed competitor write successful while durable pin settlement is delayed', async () => {
+    const identity: CatalogOperationIdentity = {
+      ownerId: 'owner',
+      domain: 'competitor',
+      kind: 'write',
+      generation: '1',
+      operationId: '00000000-0000-4000-8000-000000000224',
+    };
+    const pin = { identity, pinId: '00000000-0000-4000-8000-000000000225' };
+    let finish!: () => void;
+    const repository = {
+      beginPin: vi.fn(async () => pin),
+      assertPin: vi.fn(async () => undefined),
+      finishPin: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    let done = false;
+    const work = withCatalogOperationExecution(
+      repository as unknown as PgCatalogOperationRepository,
+      identity,
+      () =>
+        transactions.run(false, async ({ database }) => {
+          await database();
+          return 'committed-value';
+        }),
+    ).then((value) => {
+      done = true;
+      return value;
+    });
+    const result = expect(work).resolves.toBe('committed-value');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(repository.finishPin).toHaveBeenCalledWith(pin, 'committed');
+    expect(p.query).toHaveBeenCalledWith('COMMIT');
+    expect(c.query).toHaveBeenCalledWith('COMMIT');
+    await vi.advanceTimersByTimeAsync(4500);
+    expect(done).toBe(false);
+    finish();
+    await result;
+  });
   it.each(['primary', 'competitor'])(
     'reports %s commit acknowledgement failure as uncertain, without promising rollback',
     async (which) => {

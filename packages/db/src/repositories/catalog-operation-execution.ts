@@ -17,6 +17,7 @@ type Scope = {
       kind: 'fenced';
       repository: PgCatalogOperationRepository;
       identity: CatalogOperationIdentity;
+      onActualWork?: (work: Promise<unknown>) => void;
     }
   | { kind: 'exempt'; reason: 'anonymous-check' | 'scheduled-system' }
 );
@@ -26,6 +27,7 @@ export function withCatalogOperationExecution<T>(
   repository: PgCatalogOperationRepository,
   identity: CatalogOperationIdentity,
   action: () => Promise<T>,
+  onActualWork?: (work: Promise<unknown>) => void,
 ): Promise<T> {
   if (scopes.getStore())
     throw new CatalogOperationError('CATALOG_OPERATION_IDENTITY');
@@ -35,9 +37,16 @@ export function withCatalogOperationExecution<T>(
       repository,
       identity: parseCatalogIdentity(identity),
       allowedDatabases: new Set(),
+      onActualWork,
     },
     action,
   );
+}
+
+/** Join a transaction's physical drain even when its caller uses a deadline race. */
+export function observeCatalogOperationWork(work: Promise<unknown>): void {
+  const scope = scopes.getStore();
+  if (scope?.kind === 'fenced') scope.onActualWork?.(work);
 }
 
 /** Trusted internal call sites only. No request field selects this exemption. */
