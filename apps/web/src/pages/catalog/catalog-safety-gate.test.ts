@@ -19,6 +19,55 @@ class MemoryStorage {
 }
 
 describe('catalog write safety across page loads', () => {
+  it('binds original-session recovery to the current user and exact operation without trimming the source group', () => {
+    const storage = new MemoryStorage();
+    const gate = {
+      phase: 'refresh' as const,
+      message: '已知部分回执',
+      detailId: ' source group ',
+      createUncertain: false,
+      batchCreate: true,
+      batchCreateOwner: JSON.stringify(['asin', 'owner', 'session-1']),
+      operationId: 'original-operation',
+    };
+    expect(writeCatalogSafetyGate(storage, 'owner', 'asin', gate)).toBe(true);
+    expect(readCatalogSafetyGate(storage, 'owner', 'asin')).toEqual(gate);
+  });
+
+  it.each([
+    JSON.stringify(['asin', 'other', 'session-1']),
+    JSON.stringify(['competitor', 'owner', 'session-1']),
+    JSON.stringify(['asin', 'owner', {}]),
+    'broken',
+  ])(
+    'retains write protection while rejecting an invalid original-session owner %s',
+    (batchCreateOwner) => {
+      const storage = new MemoryStorage();
+      const key = catalogSafetyKey('owner', 'asin');
+      storage.setItem(
+        key,
+        JSON.stringify({
+          phase: 'refresh',
+          message: null,
+          detailId: ' group ',
+          createUncertain: true,
+          batchCreate: true,
+          batchCreateOwner,
+          operationId: 'original-operation',
+        }),
+      );
+      const gate = readCatalogSafetyGate(storage, 'owner', 'asin');
+      expect(gate).toMatchObject({
+        phase: 'refresh',
+        createUncertain: false,
+        batchCreate: true,
+        detailId: ' group ',
+        operationId: 'original-operation',
+      });
+      expect(gate).not.toHaveProperty('batchCreateOwner');
+      expect(storage.getItem(key)).not.toBeNull();
+    },
+  );
   it.each(['asin', 'competitor'])(
     'preserves fifty-codepoint detail IDs while rejecting fifty-one in the %s catalog',
     (source) => {
