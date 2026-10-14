@@ -14,6 +14,7 @@ import type {
   SpApiConfig,
   Transport,
 } from './types';
+import { createWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 interface Token {
   token: string;
@@ -25,6 +26,7 @@ interface Flight {
   key: string;
   controller: AbortController;
   promise: Promise<Token>;
+  actualDone: Promise<void>;
 }
 function keyFor(config: SpApiConfig, region: Region) {
   return createHash('sha256')
@@ -57,6 +59,7 @@ export class LwaTokenService {
         return { token: cached.token, config };
       const flight = this.flights.get(region);
       if (flight) {
+        trackWorkSettlement(signal, flight.actualDone);
         try {
           const result = await waitFor(flight.promise, signal);
           if (flight.key === key) return result;
@@ -67,6 +70,7 @@ export class LwaTokenService {
         continue; // Config rotated while the old, bounded request was in flight.
       }
       const controller = new AbortController();
+      const settlement = createWorkSettlement(controller.signal);
       const timer = setTimeout(
         () => controller.abort(new SpApiError('TIMEOUT')),
         10000,
@@ -85,6 +89,11 @@ export class LwaTokenService {
           if (this.flights.get(region) === current) this.flights.delete(region);
         });
       this.flights.set(region, current);
+      current.actualDone = current.promise.then(
+        () => settlement.drain(),
+        () => settlement.drain(),
+      );
+      trackWorkSettlement(signal, current.actualDone);
       // One caller cancelling does not cancel a refresh shared by other callers.
       return waitFor(current.promise, signal);
     }

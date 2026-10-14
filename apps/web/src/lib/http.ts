@@ -52,6 +52,14 @@ export interface RequestOptions {
   maxResponseBytes?: number;
   /** Login failures are not expired sessions; callers can suppress global logout. */
   authFailure?: 'notify' | 'ignore';
+  /** Internal admission owners retain their slot until aborted work settles. */
+  waitForSettlement?: boolean;
+}
+export interface DownloadOptions {
+  /** File transfers may opt into the API's bounded 30 minute export window. */
+  timeoutMs?: number;
+  /** Endpoint callers can lower, never raise, the existing 256 MiB bound. */
+  maxBytes?: number;
 }
 export interface ResponseSchema<T> {
   parse(value: unknown): T;
@@ -287,7 +295,19 @@ export class HttpClient {
         credentials: 'include',
         redirect: 'error',
       });
-      if (signal.aborted) throw signal.reason;
+      if (signal.aborted) {
+        // Fetch may resolve headers after an injected/native dependency has
+        // ignored abort. The opt-in admission owner must await body cleanup so
+        // a still-live response stream cannot release its slot early.
+        if (options.waitForSettlement) {
+          try {
+            await response.body?.cancel();
+          } catch {
+            /* The original cancellation/deadline reason remains authoritative. */
+          }
+        }
+        throw signal.reason;
+      }
       let parsed: unknown;
       try {
         parsed = await readJson(response, maxResponseBytes);
@@ -387,6 +407,7 @@ export class HttpClient {
         this.active.delete(controller);
       });
     // A non-cooperating injected fetch retains its actual-work admission slot.
+    if (options.waitForSettlement) return work;
     return new Promise<T>((resolve, reject) => {
       const cancelled = () => reject(signal.reason);
       if (signal.aborted) cancelled();
@@ -397,10 +418,24 @@ export class HttpClient {
     });
   }
   /** Bounded authenticated file transfer for Cookie and legacy Bearer sessions. */
-  async download(path: string, signal?: AbortSignal): Promise<Blob> {
+  async download(
+    path: string,
+    signal?: AbortSignal,
+    options: DownloadOptions = {},
+  ): Promise<Blob> {
     if (this.closed) throw new ApiError('CLOSED', '请求客户端已关闭');
     if (this.active.size >= 64)
       throw new ApiError('CAPACITY', '请求过多，请稍后重试');
+    const timeout = options.timeoutMs ?? 125_000;
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 30 * 60_000)
+      throw new ApiError('INVALID_INPUT', '下载期限无效');
+    const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1 ||
+      maxBytes > 256 * 1024 * 1024
+    )
+      throw new ApiError('INVALID_INPUT', '下载大小上限无效');
     const url = this.url(path);
     const headers = new Headers({ accept: 'application/json' });
     const token = this.options.session.getLegacyToken();
@@ -412,7 +447,7 @@ export class HttpClient {
     else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(
       () => controller.abort(new ApiError('TIMEOUT', '下载超时')),
-      125_000,
+      timeout,
     );
     const revision = this.options.session.revision;
     this.active.add(controller);
@@ -456,7 +491,7 @@ export class HttpClient {
             : '任务下载失败';
         throw new ApiError('HTTP', message, response.status);
       }
-      return readBlob(response, 256 * 1024 * 1024);
+      return readBlob(response, maxBytes);
     })()
       .catch((error: unknown) => {
         if (requestSignal.aborted) throw requestSignal.reason;
@@ -477,7 +512,7 @@ export class HttpClient {
         .finally(() => requestSignal.removeEventListener('abort', cancelled));
     });
   }
-  /** Authenticated streaming transfers participate in the same session cleanup. */
+  /** Bounded authenticated file writes share the ordinary session cleanup. */
   async downloadTo(
     path: string,
     sink: DownloadSink,
@@ -488,10 +523,10 @@ export class HttpClient {
       throw new ApiError('CAPACITY', '请求过多，请稍后重试');
     if (!validStreamOptions(options))
       throw new ApiError('INVALID_INPUT', '流式下载限制无效');
-    const deadline = performance.now() + options.timeoutMs;
     const url = this.url(path);
-    const controller = new AbortController();
-    const signal = controller.signal;
+    const deadline = performance.now() + options.timeoutMs;
+    const controller = new AbortController(),
+      signal = controller.signal;
     const revision = this.options.session.revision;
     const abort = () =>
       controller.abort(new ApiError('CANCELLED', '下载已取消'));
@@ -505,12 +540,13 @@ export class HttpClient {
     const token = this.options.session.getLegacyToken();
     if (token) headers.set('authorization', `Bearer ${token}`);
     this.active.add(controller);
-    let abortedSink = false;
-    let received: Response | undefined;
+    let abortingSink: Promise<void> | undefined, received: Response | undefined;
     const abortSink = (reason: unknown) => {
-      if (abortedSink) return;
-      abortedSink = true;
-      void sink.abort(reason).catch(() => undefined);
+      // Assign before calling the native method, including synchronous throws
+      // and reentrant cancellation. This one promise owns physical settlement.
+      return (abortingSink ??= Promise.resolve()
+        .then(() => sink.abort(reason))
+        .catch(() => undefined));
     };
     const onAbort = () => abortSink(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });
@@ -531,29 +567,32 @@ export class HttpClient {
       if (!response.ok) {
         let envelope: Record<string, unknown> | undefined;
         try {
-          const payload = await readJson(response, 8192);
-          if (payload && typeof payload === 'object' && !Array.isArray(payload))
-            envelope = payload as Record<string, unknown>;
+          const value = await readJson(response, 8192);
+          if (value && typeof value === 'object' && !Array.isArray(value))
+            envelope = value as Record<string, unknown>;
         } catch {
-          /* HTTP status remains authoritative. */
+          /* HTTP status is authoritative. */
         }
         if (response.status === 401) {
+          const failure = new ApiError('AUTH', '未认证或认证已过期', 401, 401);
           if (revision === this.options.session.revision) {
-            this.active.delete(controller);
+            // Session reset may cancelAll. Preserve this request's AUTH reason
+            // while its physical sink remains in admission until settled.
+            controller.abort(failure);
             try {
               this.options.onUnauthorized?.();
             } catch {
-              /* Preserve auth failure. */
+              /* Preserve authentication failure. */
             }
           }
-          throw new ApiError('AUTH', '未认证或认证已过期', 401, 401);
+          throw failure;
         }
         throw new ApiError(
           'HTTP',
           typeof envelope?.errorMessage === 'string' &&
           envelope.errorMessage.length <= 500
             ? envelope.errorMessage
-            : '备份下载失败',
+            : '文件下载失败',
           response.status,
         );
       }
@@ -571,18 +610,23 @@ export class HttpClient {
           ? signal.reason
           : error instanceof ApiError
           ? error
-          : new ApiError('NETWORK', '网络或保存文件失败，归档未完成');
+          : new ApiError('NETWORK', '网络或保存文件失败，下载未完成');
         abortSink(failure);
         if (!signal.aborted) controller.abort(failure);
         throw failure;
       })
-      .finally(() => {
+      .finally(async () => {
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);
         signal.removeEventListener('abort', onAbort);
+        // Keep the internal reservation after the caller's prompt timeout.
+        // write/close already belong to work; abort is an independent native
+        // operation and may outlive a cancelled network read. Do not await an
+        // absent promise: success cleanup has no gap for a new untracked abort.
+        if (abortingSink) await abortingSink;
         this.active.delete(controller);
       });
-    // Non-cooperating fetch/disk work keeps its admission slot until settled.
+    // Uncooperative fetch/disk work keeps its admission slot until it settles.
     return new Promise<number>((resolve, reject) => {
       const cancelled = () => {
         abortSink(signal.reason);

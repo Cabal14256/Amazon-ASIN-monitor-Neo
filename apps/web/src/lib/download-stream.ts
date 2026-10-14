@@ -15,8 +15,27 @@ export interface DownloadStreamOptions {
   validatePrefix?: (prefix: Uint8Array) => void;
   onProgress?: (bytes: number) => void;
 }
+export function validStreamOptions(options: DownloadStreamOptions): boolean {
+  return (
+    Number.isSafeInteger(options.maxBytes) &&
+    options.maxBytes >= 1 &&
+    // Backup archives may include a full PostgreSQL dump plus bounded metadata.
+    options.maxBytes <= 1024 ** 4 + 16 * 1024 * 1024 + 4096 &&
+    Number.isSafeInteger(options.minBytes) &&
+    options.minBytes >= 1 &&
+    options.minBytes <= options.maxBytes &&
+    Number.isSafeInteger(options.timeoutMs) &&
+    options.timeoutMs >= 1 &&
+    options.timeoutMs <= 30 * 60_000 &&
+    Number.isSafeInteger(options.prefixBytes ?? 0) &&
+    (options.prefixBytes ?? 0) >= 0 &&
+    (options.prefixBytes ?? 0) <= 4096 &&
+    (options.prefixBytes ?? 0) <= options.minBytes &&
+    /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(options.expectedType)
+  );
+}
 
-/** One network chunk plus a small prefix; no read-ahead across disk backpressure. */
+/** Hold one bounded network chunk; wait for disk before reading the next one. */
 export async function writeDownloadStream(
   response: Response,
   sink: DownloadSink,
@@ -28,7 +47,7 @@ export async function writeDownloadStream(
     response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !==
     options.expectedType
   )
-    throw new ApiError('INVALID_RESPONSE', '下载归档格式不符合预期');
+    throw new ApiError('INVALID_RESPONSE', '下载文件类型与任务回执不符');
   const length = response.headers.get('content-length');
   if (
     length !== null &&
@@ -37,24 +56,24 @@ export async function writeDownloadStream(
       Number(length) > options.maxBytes ||
       Number(length) < options.minBytes)
   )
-    throw new ApiError('INVALID_RESPONSE', '下载归档声明大小无效或超过限制');
-  if (!response.body) throw new ApiError('INVALID_RESPONSE', '下载归档为空');
+    throw new ApiError('INVALID_RESPONSE', '下载文件声明大小与任务回执不符');
+  if (!response.body) throw new ApiError('INVALID_RESPONSE', '下载文件为空');
   const reader = response.body.getReader();
   const prefixSize = options.prefixBytes ?? 0;
   const prefix = new Uint8Array(prefixSize);
   let prefixOffset = 0,
-    prefixChecked = prefixSize === 0;
-  let bytes = 0,
+    prefixChecked = prefixSize === 0,
+    bytes = 0,
     reads = 0;
   const check = () => {
     if (signal.aborted) throw signal.reason;
     if (performance.now() >= deadline)
       throw new ApiError('TIMEOUT', '下载超时');
   };
-  const abortReader = () => {
+  const cancelReader = () => {
     void reader.cancel(signal.reason).catch(() => undefined);
   };
-  signal.addEventListener('abort', abortReader, { once: true });
+  signal.addEventListener('abort', cancelReader, { once: true });
   try {
     for (;;) {
       check();
@@ -62,12 +81,13 @@ export async function writeDownloadStream(
       check();
       if (part.done) break;
       if (
-        !(part.value instanceof Uint8Array) ||
+        !ArrayBuffer.isView(part.value) ||
+        Object.prototype.toString.call(part.value) !== '[object Uint8Array]' ||
         part.value.byteLength > 8 * 1024 * 1024 ||
-        ++reads > 64_000_000 ||
+        ++reads > 200_000 ||
         bytes + part.value.byteLength > options.maxBytes
       )
-        throw new ApiError('INVALID_RESPONSE', '下载归档超过有界流大小限制');
+        throw new ApiError('INVALID_RESPONSE', '下载文件超过有界流大小限制');
       bytes += part.value.byteLength;
       if (!prefixChecked) {
         const count = Math.min(
@@ -90,7 +110,7 @@ export async function writeDownloadStream(
       bytes < options.minBytes ||
       (length !== null && bytes !== Number(length))
     )
-      throw new ApiError('INVALID_RESPONSE', '下载归档不完整');
+      throw new ApiError('INVALID_RESPONSE', '下载文件不完整');
     check();
     await sink.close();
     check();
@@ -99,26 +119,7 @@ export async function writeDownloadStream(
     void reader.cancel(error).catch(() => undefined);
     throw error;
   } finally {
-    signal.removeEventListener('abort', abortReader);
+    signal.removeEventListener('abort', cancelReader);
     reader.releaseLock();
   }
-}
-
-export function validStreamOptions(options: DownloadStreamOptions): boolean {
-  return (
-    Number.isSafeInteger(options.maxBytes) &&
-    options.maxBytes >= 1 &&
-    options.maxBytes <= 1024 ** 4 + 16 * 1024 * 1024 + 4096 &&
-    Number.isSafeInteger(options.minBytes) &&
-    options.minBytes >= 1 &&
-    options.minBytes <= options.maxBytes &&
-    Number.isSafeInteger(options.timeoutMs) &&
-    options.timeoutMs >= 1 &&
-    options.timeoutMs <= 30 * 60 * 1000 &&
-    Number.isSafeInteger(options.prefixBytes ?? 0) &&
-    (options.prefixBytes ?? 0) >= 0 &&
-    (options.prefixBytes ?? 0) <= 4096 &&
-    (options.prefixBytes ?? 0) <= options.minBytes &&
-    /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(options.expectedType)
-  );
 }
