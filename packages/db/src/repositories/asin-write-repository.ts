@@ -33,6 +33,7 @@ import {
 } from '../schema';
 import {
   DrizzleAsinQueryUnit,
+  MAX_ASIN_QUERY_CHILDREN,
   withAsinDatabaseTransaction,
   type AsinGroupReadResult,
   type AsinQueryUnit,
@@ -184,11 +185,12 @@ export class DrizzleAsinWriteUnit
     return result;
   }
   async batchCreateAsins(raw: unknown[]): Promise<BatchCreateAsinsData> {
-    return this.writePreparedAsins(prepareBatchAsins(raw));
+    return this.writePreparedAsins(prepareBatchAsins(raw), undefined, true);
   }
   protected async writePreparedAsins(
     { result, items }: BatchAsinPlan,
     onFailure?: (index: number, phase: 'group' | 'existing' | 'write') => void,
+    enforceReadableCapacity = false,
   ): Promise<BatchCreateAsinsData> {
     const fail = (
       item: BatchAsinItem,
@@ -254,17 +256,49 @@ export class DrizzleAsinWriteUnit
         fail(item, batchDuplicateMessage(item), 'existing');
       else candidates.push(item);
     }
+    const overCapacity = new Set<string>();
+    if (enforceReadableCapacity) {
+      const additions = new Map<string, number>();
+      for (const item of candidates) {
+        if (!batchAsinFitsStorage(item)) continue;
+        additions.set(item.parentId!, (additions.get(item.parentId!) ?? 0) + 1);
+      }
+      for (const parentId of [...additions.keys()].sort()) {
+        this.ensureOpen();
+        // The parent FOR UPDATE remains held. This READ COMMITTED statement
+        // sees a preceding batch's commit after waiting for that parent lock.
+        // The bounded subquery also rejects already oversized groups safely.
+        const count = await this.db.execute<{ child_count: number }>(sql`
+          SELECT count(*)::int AS child_count FROM (
+            SELECT 1 FROM ${asins} WHERE ${asins.variantGroupId}=${parentId}
+            LIMIT ${MAX_ASIN_QUERY_CHILDREN + 1}
+          ) capacity_children
+        `);
+        this.ensureOpen();
+        const children = count.rows[0]?.child_count;
+        if (!Number.isSafeInteger(children) || children < 0)
+          throw new Error('Invalid locked child count');
+        if (children + additions.get(parentId)! > MAX_ASIN_QUERY_CHILDREN)
+          overCapacity.add(parentId);
+      }
+    }
     // Stable unique-key order also serializes overlapping batches in different
     // parent groups. Public results retain their original validation phase order.
-    const sorted = [...candidates].sort((left, right) =>
-      batchAsinKey(left) < batchAsinKey(right)
-        ? -1
-        : batchAsinKey(left) > batchAsinKey(right)
-        ? 1
-        : 0,
-    );
+    const sorted = candidates
+      .filter((item) => !overCapacity.has(item.parentId!))
+      .sort((left, right) =>
+        batchAsinKey(left) < batchAsinKey(right)
+          ? -1
+          : batchAsinKey(left) > batchAsinKey(right)
+          ? 1
+          : 0,
+      );
     const created = new Set<string>();
     const failed = new Map<string, string>();
+    for (const item of candidates) {
+      if (overCapacity.has(item.parentId!))
+        fail(item, '变体组最多允许 5000 个 ASIN，本批新增未提交', 'write');
+    }
     for (
       let offset = 0;
       offset < sorted.length;

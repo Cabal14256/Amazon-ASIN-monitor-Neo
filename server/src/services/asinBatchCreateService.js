@@ -6,7 +6,9 @@ const CompetitorVariantGroup = require('../models/CompetitorVariantGroup');
 const logger = require('../utils/logger');
 
 const DEFAULT_CHUNK_SIZE = 100;
+const MAX_ASIN_BATCH_CREATE_ITEMS = 1000;
 const ASIN_CODE_PATTERN = /^[A-Z0-9]{10}$/;
+const MAX_READABLE_GROUP_CHILDREN = 5000;
 
 function getChunkSize() {
   const configured = Number(process.env.ASIN_BATCH_CREATE_CHUNK_SIZE);
@@ -44,6 +46,40 @@ function normalizeOptionalText(value) {
   }
   const normalized = String(value).trim();
   return normalized || null;
+}
+
+function literalParentId(value) {
+  return value == null ? null : String(value);
+}
+
+function safeParentId(value) {
+  let length = 0;
+  for (const character of value) {
+    const point = character.codePointAt(0);
+    if (
+      ++length > 50 ||
+      point <= 0x1f ||
+      (point >= 0x7f && point <= 0x9f) ||
+      (point >= 0xd800 && point <= 0xdfff)
+    )
+      return false;
+  }
+  return true;
+}
+
+function fitsLegacyStorage(item, config) {
+  const fields = [
+    [item.name, 500],
+    [item.country, 10],
+    [config.hasSite ? item.site : null, 100],
+    [item.brand, 100],
+    [item.parentId, 50],
+  ];
+  return fields.every(([value, maximum]) => {
+    let length = 0;
+    for (const _character of value || '') if (++length > maximum) return false;
+    return true;
+  });
 }
 
 function normalizeAsinType(asinType) {
@@ -120,7 +156,7 @@ function addSuccess(result, item) {
   });
 }
 
-function normalizeItems(items, config, result) {
+function normalizeItems(items, config, result, preserveLiteralParent = false) {
   const seen = new Set();
   const validItems = [];
 
@@ -135,7 +171,9 @@ function normalizeItems(items, config, result) {
       country: normalizeCountryCode(item.country),
       site: normalizeOptionalText(item.site),
       brand: normalizeOptionalText(item.brand),
-      parentId: normalizeOptionalText(item.parentId || item.variantGroupId),
+      parentId: preserveLiteralParent
+        ? literalParentId(item.parentId || item.variantGroupId)
+        : normalizeOptionalText(item.parentId || item.variantGroupId),
     };
 
     if (!normalized.asin || !ASIN_CODE_PATTERN.test(normalized.asin)) {
@@ -158,6 +196,10 @@ function normalizeItems(items, config, result) {
       addFailure(result, normalized, '所属变体组不能为空');
       return;
     }
+    if (preserveLiteralParent && !safeParentId(normalized.parentId)) {
+      addFailure(result, normalized, '所属变体组ID格式无效');
+      return;
+    }
     if (item.asinType && !normalized.asinType) {
       addFailure(result, normalized, 'ASIN类型必须是 1（主链）或 2（副评）');
       return;
@@ -177,10 +219,10 @@ function normalizeItems(items, config, result) {
 
 async function findVariantGroups(queryExecutor, config, groupIds) {
   const groupMap = new Map();
-  for (const chunk of chunkArray(groupIds)) {
+  for (const chunk of chunkArray([...groupIds].sort())) {
     const placeholders = chunk.map(() => '?').join(', ');
     const rows = await queryExecutor(
-      `SELECT id, country FROM ${config.groupTable} WHERE id IN (${placeholders})`,
+      `SELECT id, country FROM ${config.groupTable} WHERE id IN (${placeholders}) ORDER BY id FOR UPDATE`,
       chunk,
     );
     for (const row of rows) {
@@ -304,7 +346,14 @@ async function batchCreateASINs({
   }
 
   const result = createEmptyResult(items.length);
-  const normalizedItems = normalizeItems(items, config, result);
+  // The canonical-ID safety fix belongs to primary HTTP batch creation.
+  // Competitor and clearCache:false file imports keep their frozen normalizer.
+  const normalizedItems = normalizeItems(
+    items,
+    config,
+    result,
+    config.domain === 'asin' && clearCache,
+  );
 
   if (normalizedItems.length > 0) {
     await config.database.withTransaction(async ({ query }) => {
@@ -355,7 +404,65 @@ async function batchCreateASINs({
       }
 
       const createdItems = [];
-      for (const chunk of chunkArray(insertItems)) {
+      const overCapacity = new Set();
+      // The HTTP controller uses clearCache=true. The existing full-file import
+      // explicitly uses false; preserve its separately bounded write contract.
+      if (config.domain === 'asin' && clearCache) {
+        let capacityItems = insertItems;
+        if (insertItems.some((item) => !fitsLegacyStorage(item, config))) {
+          // Strict MySQL rejects overlong values; exclude those definite row
+          // failures from capacity only. Non-strict truncation can succeed and
+          // must still count. Preserve actual INSERT fallback/error receipts.
+          const modeRows = await query('SELECT @@SESSION.sql_mode AS sql_mode');
+          const mode = modeRows[0]?.sql_mode;
+          if (typeof mode !== 'string')
+            throw new Error('ASIN_BATCH_STORAGE_MODE_UNAVAILABLE');
+          if (
+            mode
+              .split(',')
+              .some((entry) =>
+                ['STRICT_TRANS_TABLES', 'STRICT_ALL_TABLES'].includes(
+                  entry.trim().toUpperCase(),
+                ),
+              )
+          )
+            capacityItems = insertItems.filter((item) =>
+              fitsLegacyStorage(item, config),
+            );
+        }
+        const additions = new Map();
+        for (const item of capacityItems)
+          additions.set(item.parentId, (additions.get(item.parentId) || 0) + 1);
+        for (const parentId of [...additions.keys()].sort()) {
+          // MySQL's default REPEATABLE READ may already have an older snapshot.
+          // A locking current read, after the parent lock, sees the last writer.
+          const children = await query(
+            `SELECT id FROM ${
+              config.asinTable
+            } WHERE variant_group_id=? ORDER BY id LIMIT ${
+              MAX_READABLE_GROUP_CHILDREN + 1
+            } FOR UPDATE`,
+            [parentId],
+          );
+          if (
+            children.length + additions.get(parentId) >
+            MAX_READABLE_GROUP_CHILDREN
+          )
+            overCapacity.add(parentId);
+        }
+      }
+      const writable = insertItems.filter(
+        (item) => !overCapacity.has(item.parentId),
+      );
+      for (const item of insertItems) {
+        if (overCapacity.has(item.parentId))
+          addFailure(
+            result,
+            item,
+            '变体组最多允许 5000 个 ASIN，本批新增未提交',
+          );
+      }
+      for (const chunk of chunkArray(writable)) {
         try {
           await insertAsinChunk(query, config, chunk);
           createdItems.push(...chunk);
@@ -412,6 +519,7 @@ async function batchCreateASINs({
 }
 
 module.exports = {
+  MAX_ASIN_BATCH_CREATE_ITEMS,
   batchCreateASINs,
   getAsinBatchCreateChunkSize: getChunkSize,
 };
