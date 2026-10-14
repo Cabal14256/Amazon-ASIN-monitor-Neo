@@ -16,6 +16,7 @@ import {
   updateVariantGroupManual,
   updateVariantGroupNotify,
 } from '../../services/asin';
+import { batchCreateAsins } from '../../services/asin-batch-create';
 import type { CatalogConfig } from '../catalog/catalog-types';
 
 export const ASIN_CATALOG: CatalogConfig = {
@@ -24,7 +25,7 @@ export const ASIN_CATALOG: CatalogConfig = {
   label: 'ASIN',
   heading: '变体组与 ASIN',
   description:
-    '查找变体组和组内 ASIN，管理资料与归属，支持多选批量删除及 CSV/XLSX 异步导入。批量检查与导出仍在迁移。',
+    '查找变体组和组内 ASIN，管理资料与归属，支持组内批量添加、多选批量删除和 CSV/XLSX 异步导入。批量检查与导出仍在迁移。',
   showSite: true,
   showSource: true,
   showManual: true,
@@ -33,6 +34,7 @@ export const ASIN_CATALOG: CatalogConfig = {
   batchDelete: batchDeleteVariantGroups,
   checks: { group: checkVariantGroup, asin: checkAsin },
   writes: {
+    batchCreateAsins,
     createGroup: createVariantGroup,
     updateGroup: updateVariantGroup,
     deleteGroup: deleteVariantGroup,
