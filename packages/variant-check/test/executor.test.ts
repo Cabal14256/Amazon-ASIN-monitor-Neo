@@ -135,6 +135,31 @@ function setup(concurrency = 2) {
   };
 }
 describe('complete check task execution and replay', () => {
+  it.each([
+    'x'.repeat(51),
+    '😺'.repeat(51),
+    '\u0085',
+    '\u009f',
+    '\ud800',
+    'a\udfff',
+  ])(
+    'rejects an unsafe direct batch target %j before pipeline execution',
+    async (id) => {
+      const f = setup();
+      await expect(
+        Promise.resolve().then(() => f.executor.checkGroups([id], f.context)),
+      ).rejects.toMatchObject({ code: 'invalid-input' });
+      expect(f.pipeline.checkGroup).not.toHaveBeenCalled();
+      expect(f.receipts.size).toBe(0);
+    },
+  );
+  it('keeps literal batch order, duplicates and 50-codepoint targets', async () => {
+    const f = setup();
+    const ids = [' Raw Ś ', '   ', '😺'.repeat(50), ' Raw Ś '];
+    const result = await f.executor.checkGroups(ids, f.context, 1);
+    expect(result.results.map((row) => row.groupId)).toEqual(ids);
+    expect(f.writes).toEqual(ids);
+  });
   it('preserves ordered success and failed groups and the full Legacy task summary', async () => {
     const f = setup();
     f.pipeline.checkGroup.mockImplementation(async (id, context) => {

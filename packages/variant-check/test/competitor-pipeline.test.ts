@@ -8,13 +8,18 @@ import type {
 import {
   competitorMonitorSnapshotDigest,
   createVariantCheckOperation,
+  PgCompetitorCheckRepository,
 } from '@asin-monitor/db';
 import {
   CatalogDeferredError,
   catalogNotFoundResult,
+  CatalogVariantChecker,
+  RedisCatalogCheckStore,
   SpApiError,
   type CatalogVariantResult,
 } from '@asin-monitor/sp-api';
+import { EventEmitter } from 'node:events';
+import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CompetitorCheckPipeline,
@@ -188,6 +193,168 @@ function monitorContext(f: ReturnType<typeof fixture>): CompetitorCheckContext {
 }
 
 describe('competitor check pipeline', () => {
+  it('retains the competitor group permit through a cancelled real repository late pool acquisition', async () => {
+    const f = fixture();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(),
+      release: vi.fn(),
+    });
+    let settle!: () => void;
+    const primary = {
+      connect: vi.fn(
+        () =>
+          new Promise<PoolClient>((resolve) => {
+            settle = () => resolve(client as unknown as PoolClient);
+          }),
+      ),
+    };
+    const competitor = { connect: vi.fn() };
+    const repository = new PgCompetitorCheckRepository(
+      primary as unknown as Pool,
+      competitor as unknown as Pool,
+    );
+    const pipeline = new CompetitorCheckPipeline(
+      repository,
+      f.checker,
+      f.cache,
+      f.logger,
+    );
+    const release = vi.fn();
+    const stop = new AbortController();
+    const work = pipeline.checkGroup('cg1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    const flush = async () => {
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+    };
+    try {
+      await flush();
+      expect(primary.connect).toHaveBeenCalledOnce();
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(client.query).not.toHaveBeenCalled();
+      expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+      expect(competitor.connect).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await flush();
+      pipeline.close();
+      repository.close();
+      f.pipeline.close();
+    }
+  });
+  it('retains the competitor group permit through real catalog scheduler and Redis I/O after cancellation', async () => {
+    const f = fixture();
+    let settle!: () => void;
+    const wire = new Promise<null>((resolve) => {
+      settle = () => resolve(null);
+    });
+    const evalCommand = vi.fn(() => wire);
+    const store = new RedisCatalogCheckStore(
+      { status: 'ready', eval: evalCommand },
+      'competitor-settlement-fixture',
+    );
+    const checker = new CatalogVariantChecker({
+      store,
+      standard: {
+        call: async () => {
+          throw new Error('unexpected upstream');
+        },
+      },
+      legacy: {
+        call: async () => {
+          throw new Error('unexpected fallback');
+        },
+      },
+      html: {
+        checkVariants: async () => {
+          throw new Error('unexpected HTML');
+        },
+      },
+      isEnabled: async () => false,
+      risk: { recordCheck: vi.fn() },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    f.checker.check.mockImplementation(
+      (...args: Parameters<CatalogVariantChecker['check']>) =>
+        checker.check(...args),
+    );
+    const release = vi.fn();
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      forceRefresh: false,
+      signal: stop.signal,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    const flush = async () => {
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+    };
+    try {
+      await flush();
+      expect(evalCommand).toHaveBeenCalledTimes(3);
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await flush();
+      checker.close();
+      store.close();
+      f.pipeline.close();
+    }
+  });
+  it('retains shared group admission until cancelled noncooperative competitor work actually settles', async () => {
+    const f = fixture();
+    let settle!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    f.checker.check.mockImplementation(async (code: string) => {
+      await blocked;
+      return catalogResult(code, true);
+    });
+    const release = vi.fn();
+    const acquire = vi.fn(async () => release);
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire },
+    } as CompetitorCheckContext);
+    void work.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(f.checker.check).toHaveBeenCalledTimes(3));
+      expect(acquire).toHaveBeenCalledTimes(1);
+      stop.abort();
+      await expect(work).rejects.toThrow('CANCELLED');
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await work.catch(() => {});
+      f.pipeline.close();
+    }
+  });
   it('clears only the old deferred item after a normal force-refresh recovery without invalidating its successful cache', async () => {
     const f = fixture(),
       context = monitorContext(f);

@@ -1,6 +1,6 @@
 import type { TaskInfo } from '@asin-monitor/contracts';
 import { ChevronDown, Download, RefreshCw, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
@@ -25,7 +25,9 @@ import {
   useTaskListQuery,
   useTaskQuery,
 } from '../../hooks/tasks';
+import { chooseFileSave, saveToFile } from '../../lib/file-save';
 import { ApiError } from '../../lib/http';
+import { asinExportDownloadFilename } from '../../services/tasks';
 import {
   canCancelTask,
   canOpenTaskDetail,
@@ -228,11 +230,27 @@ function TaskDetails({
 }
 
 export default function TaskCenterPage() {
-  const { runtime } = useAuth();
+  const { runtime, identity: identityStore } = useAuth();
   const identity = useIdentity();
+  const access = createAccess(
+    identity.status === 'authenticated' ? identity.identity : undefined,
+  );
   const canReadASIN =
     identity.status === 'authenticated' &&
-    createAccess(identity.identity).canReadASIN;
+    access.canReadASIN &&
+    !access.mustChangePassword;
+  const scope = JSON.stringify([
+    identity.status,
+    identity.status === 'authenticated' ? identity.identity.user.id : null,
+    identity.status === 'authenticated' ? identity.identity.sessionId : null,
+    runtime.session.revision,
+    canReadASIN,
+    access.mustChangePassword,
+  ]);
+  const downloadScope = useRef(scope);
+  downloadScope.current = scope;
+  const downloadRequest = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
   const [filter, setFilter] = useState<'all' | 'active'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -243,6 +261,19 @@ export default function TaskCenterPage() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      downloadRequest.current?.abort();
+    };
+  }, []);
+  useEffect(() => {
+    downloadRequest.current?.abort();
+    downloadRequest.current = null;
+    setDownloadId(null);
+    setDownloadError(null);
+  }, [scope]);
   const tasks = useTaskListQuery(runtime, { status: filter, limit: 100 }, true);
   const list = tasks.data;
   const selectedTask = list?.find((task) => task.taskId === selectedId);
@@ -305,29 +336,105 @@ export default function TaskCenterPage() {
   }
 
   async function downloadTask(task: TaskInfo) {
-    if (downloadId || !hasTaskDownload(task, canReadASIN)) return;
+    if (
+      identity.status !== 'authenticated' ||
+      access.mustChangePassword ||
+      downloadRequest.current ||
+      !hasTaskDownload(task, canReadASIN)
+    )
+      return;
+    const controller = new AbortController();
+    downloadRequest.current = controller;
     setDownloadId(task.taskId);
     setDownloadError(null);
+    const revision = runtime.session.revision;
+    const owner = identity.identity.user.id;
+    const sessionId = identity.identity.sessionId;
+    const currentDownload = () => {
+      const state = identityStore.getSnapshot();
+      const policy = createAccess(
+        state.status === 'authenticated' ? state.identity : undefined,
+      );
+      return (
+        !controller.signal.aborted &&
+        mounted.current &&
+        downloadScope.current === scope &&
+        runtime.session.revision === revision &&
+        state.status === 'authenticated' &&
+        state.identity.user.id === owner &&
+        state.identity.sessionId === sessionId &&
+        !policy.mustChangePassword &&
+        hasTaskDownload(task, policy.canReadASIN)
+      );
+    };
     try {
-      const blob = await runtime.tasks.download(task.taskId);
+      if (task.taskType === 'export') {
+        const filename = asinExportDownloadFilename(task);
+        if (!filename)
+          throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
+        // Native picker must run in this gesture, before the first await/GET.
+        const selected = chooseFileSave(
+          filename,
+          (task.result as { fileSizeBytes: number }).fileSizeBytes,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          '.xlsx',
+        );
+        const destination = await selected;
+        if (!currentDownload()) throw new ApiError('CANCELLED', '下载已取消');
+        if (destination.kind === 'file') {
+          await saveToFile(
+            destination.handle,
+            controller.signal,
+            currentDownload,
+            async (sink, saveSignal) =>
+              (
+                await runtime.tasks.downloadAsinExportTo(task, sink, saveSignal)
+              ).bytes,
+          );
+          return;
+        }
+      }
+      const { blob, filename } =
+        task.taskType === 'export'
+          ? await runtime.tasks.downloadAsinExport(task, controller.signal)
+          : {
+              blob: await runtime.tasks.download(
+                task.taskId,
+                controller.signal,
+              ),
+              filename: `${
+                task.taskType === 'import' ? 'import' : 'check'
+              }-result-${task.taskId}.json`,
+            };
+      if (!currentDownload()) return;
       const objectURL = URL.createObjectURL(blob);
       try {
         const link = document.createElement('a');
         link.href = objectURL;
-        link.download = `${
-          task.taskType === 'import' ? 'import' : 'check'
-        }-result-${task.taskId}.json`;
+        link.download = filename;
         document.body.append(link);
         link.click();
         link.remove();
       } finally {
         // Give the browser time to begin reading the object URL after click().
-        setTimeout(() => URL.revokeObjectURL(objectURL), 30_000);
+        const revoke = URL.revokeObjectURL.bind(URL);
+        setTimeout(() => revoke(objectURL), 30_000);
       }
     } catch (error) {
-      setDownloadError(errorMessage(error));
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof ApiError && error.kind === 'CANCELLED') return;
+      if (
+        mounted.current &&
+        downloadScope.current === scope &&
+        !controller.signal.aborted
+      )
+        setDownloadError(errorMessage(error));
     } finally {
-      setDownloadId(null);
+      if (downloadRequest.current === controller) {
+        downloadRequest.current = null;
+        if (mounted.current && downloadScope.current === scope)
+          setDownloadId(null);
+      }
     }
   }
 
@@ -379,6 +486,15 @@ export default function TaskCenterPage() {
           >
             下载失败：{downloadError}
           </p>
+        )}
+        {downloadId && (
+          <Button
+            variant="secondary"
+            size="small"
+            onClick={() => downloadRequest.current?.abort()}
+          >
+            取消文件下载
+          </Button>
         )}
 
         <Card>

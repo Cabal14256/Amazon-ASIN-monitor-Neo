@@ -1,8 +1,10 @@
 import { abortError, SpApiError, waitFor } from './errors';
 import type { Logger } from './types';
+import { trackWorkSettlement } from './work-settlement';
 
 interface Probe {
   visible: Promise<void>;
+  actualDone: Promise<void>;
   finish(): void;
 }
 /** One actual host connection probe. Its visible wait always ends, while a late
@@ -62,13 +64,14 @@ export class SpApiRedisReadiness {
       }, this.timeoutMs);
       const current: Probe = {
         visible,
+        actualDone: Promise.resolve(),
         finish() {
           clearTimeout(timer);
           resolve();
         },
       };
       this.probe = current;
-      void Promise.resolve()
+      current.actualDone = Promise.resolve()
         .then(async () => {
           if (this.closed) return;
           await this.owner.ping();
@@ -80,6 +83,7 @@ export class SpApiRedisReadiness {
           if (this.probe === current) this.probe = undefined;
         });
     }
+    trackWorkSettlement(signal, this.probe.actualDone);
     await waitFor(this.probe.visible, signal);
     if (this.closed) throw new SpApiError('CLOSED');
     if (signal.aborted) throw abortError(signal);
