@@ -78,10 +78,10 @@ function checkBody(input: CheckVariantGroupRequest): CheckVariantGroupRequest {
   });
 }
 
-function segment(id: string, literalRead = false): string {
+function segment(id: string): string {
   if (
     !id.length ||
-    (!literalRead && !id.trim()) ||
+    !id.trim() ||
     id === '.' ||
     id === '..' ||
     [...id].length > 50 ||

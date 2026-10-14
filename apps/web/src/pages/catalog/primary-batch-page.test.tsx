@@ -1316,7 +1316,14 @@ describe('actual primary batch-create catalog integration', () => {
         .slice(postIndex + 1)
         .map(([input]) => new URL(String(input)).pathname);
       expect(reads).toContain(`${f.prefix}/variant-groups`);
-      expect(reads).toContain(`${f.prefix}/variant-groups/group-1`);
+      expect(reads).toContain(`${f.prefix}/catalog/variant-groups/detail`);
+      expect(
+        f.fetcher.mock.calls
+          .slice(postIndex + 1)
+          .map(([input]) => new URL(String(input)))
+          .filter((url) => url.pathname.endsWith('/variant-groups/detail'))
+          .map((url) => url.searchParams.get('groupId')),
+      ).toContain(f.group.id);
       expect(window.localStorage.getItem(guardKey)).toBeNull();
       expect(
         f.fetcher.mock.calls.every(
@@ -1414,19 +1421,27 @@ describe('actual primary batch-create catalog integration', () => {
       const postIndex = f.fetcher.mock.calls.findIndex(
         ([, init]) => init?.method === 'POST',
       );
-      const rawDetailPath = `${f.prefix}/variant-groups/${encodeURIComponent(
-        groupId,
-      )}`;
+      const rawDetailPath = `${f.prefix}/catalog/variant-groups/detail`;
       const before = f.fetcher.mock.calls
         .slice(0, postIndex)
-        .map(([url]) => new URL(String(url)).pathname);
+        .map(([url]) => new URL(String(url)));
       const after = f.fetcher.mock.calls
         .slice(postIndex + 1)
-        .map(([url]) => new URL(String(url)).pathname);
+        .map(([url]) => new URL(String(url)));
       expect(
-        before.filter((path) => path === rawDetailPath).length,
+        before.filter(
+          (url) =>
+            url.pathname === rawDetailPath &&
+            url.searchParams.get('groupId') === groupId,
+        ).length,
       ).toBeGreaterThanOrEqual(2);
-      expect(after).toContain(rawDetailPath);
+      expect(
+        after.some(
+          (url) =>
+            url.pathname === rawDetailPath &&
+            url.searchParams.get('groupId') === groupId,
+        ),
+      ).toBe(true);
       expect(
         f.fetcher.mock.calls.every(
           ([url]) => !String(url).includes('/api/api/'),
@@ -1521,10 +1536,13 @@ describe('actual primary batch-create catalog integration', () => {
       name: '已核实原操作，重读目录并恢复写入',
     });
     expect(
-      f.fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname),
-    ).toContain(
-      `${f.prefix}/variant-groups/${encodeURIComponent(fiftyPointGroupId)}`,
-    );
+      f.fetcher.mock.calls
+        .map(([url]) => new URL(String(url)))
+        .filter(
+          (url) => url.pathname === `${f.prefix}/catalog/variant-groups/detail`,
+        )
+        .map((url) => url.searchParams.get('groupId')),
+    ).toContain(fiftyPointGroupId);
     expect(f.posts()).toHaveLength(1);
     expect(JSON.parse(window.localStorage.getItem(guardKey)!)).toMatchObject({
       phase: 'inspection',
