@@ -11,6 +11,8 @@ export async function legacyAsinBatch(
     groups?: { id: string; country: string }[];
     existing?: { asin: string; country: string }[];
     failAsin?: string;
+    childCounts?: Record<string, number>;
+    clearCache?: boolean;
   } = {},
 ) {
   const filename = resolve(
@@ -22,9 +24,20 @@ export async function legacyAsinBatch(
   let counter = 0;
   const query = async (sql: string, params: any[] = []) => {
     if (sql.includes('SELECT id, country FROM'))
-      return options.groups ?? [{ id: 'g', country: 'US' }];
+      return (
+        options.groups ?? [
+          { id: 'g', country: 'US' },
+          { id: ' g ', country: 'US' },
+          { id: ' ', country: 'US' },
+        ]
+      );
     if (sql.includes('SELECT asin, country FROM'))
       return options.existing ?? [];
+    if (sql.includes('SELECT id FROM') && sql.includes('FOR UPDATE'))
+      return Array.from(
+        { length: Math.min(options.childCounts?.[params[0]] ?? 0, 5001) },
+        (_, index) => ({ id: `existing-child-${index}` }),
+      );
     if (
       sql.includes('INSERT INTO asins') ||
       sql.includes('INSERT INTO competitor_asins')
@@ -57,6 +70,7 @@ export async function legacyAsinBatch(
       batchCreateASINs(options: {
         domain?: 'asin' | 'competitor';
         items: unknown[];
+        clearCache?: boolean;
       }): Promise<BatchCreateAsinsData>;
     },
   };
@@ -90,6 +104,7 @@ export async function legacyAsinBatch(
         await module.exports.batchCreateASINs({
           items,
           domain: options.domain,
+          clearCache: options.clearCache,
         }),
       ),
     ) as BatchCreateAsinsData,
