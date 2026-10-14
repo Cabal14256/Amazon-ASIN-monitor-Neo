@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   claimAsinImportGate,
   claimImportGate,
@@ -39,7 +39,13 @@ describe('ASIN import retry gate', () => {
     expect(readImportGate(storage, 'competitor', owner)).toBeNull();
     expect(readAsinImportGate(storage, owner)?.savedAt).toBe(100);
     storage.setItem(importGateKey('competitor', owner), 'invalid');
-    expect(readImportGate(storage, 'competitor', owner)).toBeNull();
+    expect(readImportGate(storage, 'competitor', owner)).toEqual({
+      phase: 'uncertain',
+      taskId: null,
+      savedAt: 0,
+    });
+    expect(storage.getItem(importGateKey('competitor', owner))).toBe('invalid');
+    expect(claimImportGate(storage, 'competitor', owner).kind).toBe('blocked');
     expect(readAsinImportGate(storage, owner)?.savedAt).toBe(100);
   });
 
@@ -59,7 +65,7 @@ describe('ASIN import retry gate', () => {
     expect(readAsinImportGate(storage, 'user-b')).toBeNull();
   });
 
-  it('keeps an accepted task ID until explicit reconciliation and discards invalid entries', () => {
+  it('keeps an accepted task ID until explicit reconciliation and preserves invalid entries for audit', () => {
     const storage = new MemoryStorage();
     const time = Date.UTC(2026, 8, 27);
     const taskId = 'b2b5894c-5802-4c9f-a1bd-9a20263d270a';
@@ -77,7 +83,25 @@ describe('ASIN import retry gate', () => {
       'neo:asin-import:user-a',
       JSON.stringify({ phase: 'accepted', taskId: '../unsafe', savedAt: time }),
     );
-    expect(readAsinImportGate(storage, 'user-a')).toBeNull();
+    expect(readAsinImportGate(storage, 'user-a')).toEqual({
+      phase: 'uncertain',
+      taskId: null,
+      savedAt: 0,
+    });
+    expect(storage.getItem('neo:asin-import:user-a')).toContain('../unsafe');
+  });
+
+  it('never treats unreadable import storage as absence or removes its claim', () => {
+    const denied = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: vi.fn(),
+      setItem: vi.fn(),
+    };
+    expect(claimImportGate(denied, 'asin', 'operator').kind).toBe('blocked');
+    expect(denied.removeItem).not.toHaveBeenCalled();
+    expect(denied.setItem).not.toHaveBeenCalled();
   });
 
   it('keeps a valid gate when the local clock is behind its saved timestamp', () => {

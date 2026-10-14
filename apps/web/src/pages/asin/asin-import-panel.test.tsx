@@ -13,6 +13,7 @@ import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
 import { ApiError } from '../../lib/http';
 import type { createTransportRuntime } from '../../services/runtime';
+import { catalogSafetyKey } from '../catalog/catalog-safety-gate';
 import { asinImportGateKey, writeAsinImportGate } from './asin-import-gate';
 import { AsinImportPanel } from './asin-import-panel';
 
@@ -90,7 +91,16 @@ function fixture(
   });
   const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
   const runtime = {
-    http: { request },
+    http: {
+      request: (path: string, options: { method?: string } = {}) => {
+        if (options.method === 'POST') return request(path, options);
+        return Promise.resolve({
+          success: true,
+          errorCode: 0,
+          data: { list: [], total: 0, current: 1, pageSize: 10 },
+        });
+      },
+    },
     queryClient,
   } as unknown as ReturnType<typeof createTransportRuntime>;
   const announce = vi.fn();
@@ -110,14 +120,17 @@ function fixture(
 }
 
 function installLocks() {
-  let prior = Promise.resolve();
+  const tails = new Map<string, Promise<void>>();
   const request = vi.fn(
-    async <T,>(_name: string, callback: () => Promise<T> | T) => {
-      const before = prior;
+    async <T,>(name: string, callback: () => Promise<T> | T) => {
+      const before = tails.get(name) ?? Promise.resolve();
       let release!: () => void;
-      prior = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      tails.set(
+        name,
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
       await before;
       try {
         return await callback();
@@ -362,7 +375,7 @@ describe('primary ASIN import page', () => {
     expect(f.request).toHaveBeenCalledOnce();
   });
 
-  it('retries clearing a session fallback after the completed local gate was removed', async () => {
+  it('retains the completed durable gate until session cleanup and a real catalog read succeed', async () => {
     installLocks();
     writeAsinImportGate(window.localStorage, 'operator', {
       phase: 'sending',
@@ -391,7 +404,7 @@ describe('primary ASIN import page', () => {
     });
     expect(
       window.localStorage.getItem(asinImportGateKey('operator')),
-    ).toBeNull();
+    ).toContain('settled');
     expect(
       window.sessionStorage.getItem(asinImportGateKey('operator')),
     ).toContain(taskId);
@@ -441,9 +454,10 @@ describe('primary ASIN import page', () => {
       configurable: true,
       value: {
         request: async <T,>(_name: string, callback: () => T) => {
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
+          if (_name === catalogSafetyKey('operator', 'asin'))
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
           return callback();
         },
       },
@@ -518,7 +532,12 @@ describe('primary ASIN import page', () => {
         name: '已核实原任务，允许重新导入',
       }),
     );
-    await screen.findByText('无法清除导入锁，请检查浏览器会话存储权限。');
+    await screen.findByText(
+      '目录重读或保护清理未确认，导入保护仍保留；请恢复读取及本地存储后再核实。',
+    );
+    expect(
+      window.localStorage.getItem(catalogSafetyKey('operator', 'asin')),
+    ).not.toBeNull();
     expect(screen.getByText(`任务编号：${taskId}`)).toBeTruthy();
     remove.mockRestore();
     fireEvent.click(
@@ -704,9 +723,10 @@ describe('primary ASIN import page', () => {
       let release!: () => void;
       const requested = vi.fn(
         async <T,>(_name: string, callback: () => Promise<T> | T) => {
-          await new Promise<void>((resolve) => {
-            release = resolve;
-          });
+          if (_name === catalogSafetyKey('operator', 'asin'))
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
           return callback();
         },
       );
