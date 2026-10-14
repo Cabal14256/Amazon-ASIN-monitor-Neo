@@ -73,6 +73,7 @@ function isolatedChildEnvironment(config, credentials, cwd) {
     DATABASE_URL: `postgresql://postgres@${config.postgresHost}:${config.postgresPort}/${config.names.neoPrimary}`,
     COMPETITOR_DATABASE_URL: `postgresql://postgres@${config.postgresHost}:${config.postgresPort}/${config.names.neoCompetitor}`,
     IMPORT_STORAGE_DIRECTORY: path.join(cwd, 'imports'),
+    EXPORT_STORAGE_DIRECTORY: path.join(cwd, 'exports'),
   };
 }
 
@@ -563,6 +564,7 @@ async function main() {
     const cwd = await mkdtemp(path.join(tmpdir(), 'analytics-http-190-'));
     const shared = isolatedChildEnvironment(config, credentials, cwd);
     await mkdir(shared.IMPORT_STORAGE_DIRECTORY, { recursive: true });
+    await mkdir(shared.EXPORT_STORAGE_DIRECTORY, { recursive: true });
     child(
       'legacy',
       path.join(root, 'server/src/index.js'),
