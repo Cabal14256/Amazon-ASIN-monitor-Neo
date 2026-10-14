@@ -7,12 +7,12 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
-  backupJobDataSchema,
   asinExportJobDataSchema,
+  backupJobDataSchema,
   competitorMonitorJobSchema,
   primaryMonitorJobSchema,
-  type BackupJobData,
   type AsinExportJobData,
+  type BackupJobData,
   type CompetitorMonitorJob,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
