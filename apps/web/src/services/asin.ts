@@ -80,6 +80,7 @@ function checkBody(input: CheckVariantGroupRequest): CheckVariantGroupRequest {
 
 function segment(id: string): string {
   if (
+    !id.length ||
     !id.trim() ||
     id === '.' ||
     id === '..' ||

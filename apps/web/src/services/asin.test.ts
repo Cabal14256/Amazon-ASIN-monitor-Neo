@@ -71,13 +71,34 @@ describe('ASIN catalog transport', () => {
     );
     expect(request.mock.calls[0][1].query).toEqual({ groupId: id });
   });
+  it('reads a nonempty all-whitespace canonical group ID literally without weakening unrelated writes', async () => {
+    const id = '   ';
+    const request = vi
+      .fn()
+      .mockResolvedValue({ success: true, data: { ...group, id } });
+    const http = { request } as unknown as Pick<HttpClient, 'request'>;
+    expect((await getVariantGroup(http, id)).id).toBe(id);
+    expect(request.mock.calls[0][0]).toBe(
+      '/api/v1/catalog/variant-groups/detail',
+    );
+    expect(request.mock.calls[0][1].query).toEqual({ groupId: id });
+    await expect(deleteVariantGroup(http, id)).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    await expect(deleteAsin(http, id)).rejects.toMatchObject({
+      kind: 'INVALID_INPUT',
+    });
+    await expect(
+      moveAsin(http, id, { targetGroupId: 'valid-target' }),
+    ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 
   it('retains mutation route boundaries and rejects malformed literal detail IDs before transport', async () => {
     const request = vi.fn();
     const http = { request } as unknown as Pick<HttpClient, 'request'>;
     for (const id of [
       '',
-      ' ',
       '.',
       '..',
       'a/b',
