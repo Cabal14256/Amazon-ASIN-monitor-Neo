@@ -4,11 +4,13 @@ import {
   assertBackupTaskRetention,
   loadEnv,
   loadEnvironmentFiles,
+  type Env,
 } from '@asin-monitor/config';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
 import { startAsinBatchDeleteRuntime } from './asin-batch-delete-runtime';
+import { startAsinExportRuntime } from './asin-export-runtime';
 import { startAsinImportRuntime } from './asin-import-runtime';
 import { startAuthMaintenanceRuntime } from './auth-maintenance-runtime';
 import {
@@ -18,6 +20,7 @@ import {
 import { startBackupRuntime } from './backup-runtime';
 import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
+import { startWorkerMetrics, type WorkerMetricsRuntime } from './metrics';
 import { startMonitorIntervalRuntime } from './monitor-interval-runtime';
 import { MONITOR_INTERVAL_QUEUE } from './monitor-interval-schedules';
 import { attachQueueErrorLogger, attachRedisErrorLogger } from './queue-events';
@@ -37,6 +40,25 @@ import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
 export async function bootstrap(): Promise<void> {
   loadEnvironmentFiles();
   const env = loadEnv();
+  // Bind before any Redis runtime/consumer; an enabled but unavailable scrape
+  // port is a configuration error, not a reason to consume without metrics.
+  const metrics = await startWorkerMetrics(env);
+  try {
+    await startConfiguredWorker(env, metrics);
+  } catch (error) {
+    try {
+      await metrics?.close();
+    } catch {
+      logger.warn('启动失败后关闭 Worker 指标端口失败');
+    }
+    throw error;
+  }
+}
+
+async function startConfiguredWorker(
+  env: Env,
+  metrics: WorkerMetricsRuntime | undefined,
+): Promise<void> {
   const {
     enabledQueues: selectedQueues,
     unknownQueues,
@@ -70,10 +92,14 @@ export async function bootstrap(): Promise<void> {
   }
 
   if (enabled.length === 0 && !enableMaintenance && !enableIntervals) {
-    const stopped = waitForShutdownSignal();
-    logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
-    const signal = await stopped;
-    logger.info('空闲 Worker 收到停止信号', { signal });
+    try {
+      const stopped = waitForShutdownSignal();
+      logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
+      const signal = await stopped;
+      logger.info('空闲 Worker 收到停止信号', { signal });
+    } finally {
+      await metrics?.close();
+    }
     return;
   }
 
@@ -92,6 +118,10 @@ export async function bootstrap(): Promise<void> {
     enabled.includes('import') && env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startAsinImportRuntime(env, () => process.exit(1))
       : undefined;
+  const asinExport =
+    enabled.includes('export') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startAsinExportRuntime(env, () => process.exit(1))
+      : undefined;
   const checkQueues = enabled.filter(
     (
       name,
@@ -107,7 +137,13 @@ export async function bootstrap(): Promise<void> {
   );
   const variantChecks =
     checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
-      ? await startVariantCheckRuntime(env, checkQueues, () => process.exit(1))
+      ? await startVariantCheckRuntime(
+          env,
+          checkQueues,
+          () => process.exit(1),
+          process.env,
+          metrics?.observer,
+        )
       : undefined;
   const backup =
     enabled.includes('backup') && env.AUTH_DATA_AUTHORITY === 'postgresql'
@@ -117,6 +153,7 @@ export async function bootstrap(): Promise<void> {
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
     .filter((name) => !(asinImport && name === 'import'))
+    .filter((name) => !(asinExport && name === 'export'))
     .filter(
       (name) =>
         !(
@@ -147,6 +184,7 @@ export async function bootstrap(): Promise<void> {
       ...(intervals ? [intervals.queue] : []),
       ...(batchDelete ? [batchDelete.queue] : []),
       ...(asinImport ? [asinImport.queue] : []),
+      ...(asinExport ? [asinExport.queue] : []),
       ...(variantChecks ? variantChecks.queues : []),
       ...(backup ? [backup.queue] : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
@@ -166,8 +204,10 @@ export async function bootstrap(): Promise<void> {
         ...(intervals ? [intervals] : []),
         ...(batchDelete ? [batchDelete] : []),
         ...(asinImport ? [asinImport] : []),
+        ...(asinExport ? [asinExport] : []),
         ...(variantChecks ? [variantChecks] : []),
         ...(backup ? [backup] : []),
+        ...(metrics ? [metrics] : []),
       ],
       watchdogRedis,
     });
@@ -179,7 +219,7 @@ export async function bootstrap(): Promise<void> {
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode:
-      batchDelete || asinImport || variantChecks || backup
+      batchDelete || asinImport || asinExport || variantChecks || backup
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
@@ -191,6 +231,7 @@ export async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
+      Number(!!asinExport) +
       (variantChecks?.workers.length ?? 0) +
       Number(!!backup),
     prefix: getNeoQueuePrefix(env),
@@ -207,6 +248,7 @@ export async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
+      Number(!!asinExport) +
       (variantChecks?.queues.length ?? 0) +
       Number(!!backup),
     schedulerEnabled:

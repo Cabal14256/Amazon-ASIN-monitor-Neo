@@ -43,3 +43,21 @@ export class AsinQueryController {
     };
   }
 }
+
+@Controller('catalog/variant-groups')
+@UseGuards(AuthenticationGuard, PermissionsGuard)
+@RequirePermissions('asin:read')
+export class AsinLiteralDetailController {
+  constructor(
+    @Inject(AsinQueryService) private readonly service: AsinQueryService,
+  ) {}
+  @Get('detail')
+  @Header('Cache-Control', 'no-store')
+  async detail(@Req() request: FastifyRequest) {
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.literalDetail(request.auth!, request.raw.url!),
+    };
+  }
+}

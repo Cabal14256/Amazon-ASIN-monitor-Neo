@@ -49,7 +49,7 @@ export class PgCompetitorQueryRepository
           return operation({
             ...authorization,
             list: async (value) => (await business()).list(value),
-            detail: async (id) => (await business()).detail(id),
+            detail: async (id, mode) => (await business()).detail(id, mode),
           });
         },
         signal,

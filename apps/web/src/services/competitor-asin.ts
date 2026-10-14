@@ -11,6 +11,7 @@ import {
   competitorGuardedUpdateAsinRequestSchema,
   competitorMoveAsinRequestSchema,
   competitorUpdateGroupRequestSchema,
+  isNeoBatchDeleteId,
   type CompetitorAsinSource,
   type CompetitorCreateAsinRequest,
   type CompetitorGroupListData,
@@ -83,9 +84,16 @@ export async function getCompetitorGroup(
   id: string,
   signal?: AbortSignal,
 ): Promise<CompetitorVariantGroup> {
+  if (!isNeoBatchDeleteId(id))
+    throw new ApiError('INVALID_INPUT', '竞品 ASIN 或变体组 ID 无效');
   const response = await http.request(
-    `${GROUPS}/${segment(id)}`,
-    { signal, timeoutMs: 30_000, maxResponseBytes: RESPONSE_LIMIT },
+    '/api/v1/competitor/catalog/variant-groups/detail',
+    {
+      query: { groupId: id },
+      signal,
+      timeoutMs: 30_000,
+      maxResponseBytes: RESPONSE_LIMIT,
+    },
     competitorGroupResultSchema,
   );
   if (!response.success || !response.data)

@@ -15,12 +15,15 @@
     "@asin-monitor/config": "workspace:*",
     "@asin-monitor/contracts": "workspace:*",
     "@asin-monitor/db": "workspace:*",
+    "@asin-monitor/export": "workspace:*",
     "@asin-monitor/import": "workspace:*",
     "@asin-monitor/notify": "workspace:*",
     "@asin-monitor/sp-api": "workspace:*",
     "@asin-monitor/variant-check": "workspace:*",
     "bullmq": "^5.58.0",
+    "exceljs": "4.4.0",
     "ioredis": "^5.8.2",
+    "prom-client": "15.1.3",
     "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {

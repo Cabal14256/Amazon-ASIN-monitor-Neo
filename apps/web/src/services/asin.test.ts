@@ -67,14 +67,12 @@ describe('ASIN catalog transport', () => {
       id,
     );
     expect(request.mock.calls[0][0]).toBe(
-      `/api/v1/variant-groups/${encodeURIComponent(id)}`,
+      '/api/v1/catalog/variant-groups/detail',
     );
-    expect(
-      decodeURIComponent(String(request.mock.calls[0][0]).split('/').at(-1)!),
-    ).toBe(id);
+    expect(request.mock.calls[0][1].query).toEqual({ groupId: id });
   });
 
-  it('retains route boundaries for blank, control, separator, dot and over-fifty IDs before issuing any record operation', async () => {
+  it('retains mutation route boundaries and rejects malformed literal detail IDs before transport', async () => {
     const request = vi.fn();
     const http = { request } as unknown as Pick<HttpClient, 'request'>;
     for (const id of [
@@ -92,9 +90,6 @@ describe('ASIN catalog transport', () => {
       'a\u007fb',
       '😀'.repeat(51),
     ]) {
-      await expect(getVariantGroup(http, id)).rejects.toMatchObject({
-        kind: 'INVALID_INPUT',
-      });
       await expect(deleteVariantGroup(http, id)).rejects.toMatchObject({
         kind: 'INVALID_INPUT',
       });
@@ -104,6 +99,20 @@ describe('ASIN catalog transport', () => {
       await expect(
         moveAsin(http, id, { targetGroupId: 'valid-target' }),
       ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+    }
+    for (const id of [
+      '',
+      'a\tb',
+      'a\nb',
+      'a\u0000b',
+      'a\u007fb',
+      'a\u0085b',
+      '\ud800',
+      '😀'.repeat(51),
+    ]) {
+      await expect(getVariantGroup(http, id)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
     }
     expect(request).not.toHaveBeenCalled();
   });
@@ -162,7 +171,7 @@ describe('ASIN catalog transport', () => {
           new URL(String(url)).pathname,
         ]),
       ).toEqual([
-        ['GET', groupPath],
+        ['GET', `${prefix}/catalog/variant-groups/detail`],
         ['PUT', groupPath],
         ['DELETE', groupPath],
         ['POST', `${prefix}/asins`],
@@ -174,6 +183,9 @@ describe('ASIN catalog transport', () => {
         ['PUT', `${childPath}/feishu-notify`],
         ['PUT', `${childPath}/manual-broken`],
       ]);
+      expect(
+        new URL(String(fetcher.mock.calls[0][0])).searchParams.get('groupId'),
+      ).toBe(groupId);
       expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body)).parentId).toBe(
         groupId,
       );
@@ -426,7 +438,7 @@ describe('ASIN catalog transport', () => {
     await expect(deleteAsin(http, '../outside')).rejects.toMatchObject({
       kind: 'INVALID_INPUT',
     });
-    await expect(getVariantGroup(http, '..')).rejects.toMatchObject({
+    await expect(getVariantGroup(http, '\u0085')).rejects.toMatchObject({
       kind: 'INVALID_INPUT',
     });
     await expect(deleteVariantGroup(http, 'group\n-1')).rejects.toMatchObject({
@@ -453,7 +465,7 @@ describe('ASIN catalog transport', () => {
         jsonResponse({
           success: true,
           errorCode: 0,
-          data: String(url).includes('/group-1')
+          data: new URL(String(url)).pathname.endsWith('/detail')
             ? group
             : {
                 list: [group],
@@ -481,7 +493,7 @@ describe('ASIN catalog transport', () => {
         'https://app.test/api/v1/variant-groups?keyword=B00FIXTURE&country=US&variantStatus=BROKEN&current=2&pageSize=10',
       );
       expect(fetcher.mock.calls[1][0]).toBe(
-        'https://app.test/api/v1/variant-groups/group-1',
+        'https://app.test/api/v1/catalog/variant-groups/detail?groupId=group-1',
       );
     },
   );
@@ -507,8 +519,13 @@ describe('ASIN catalog transport', () => {
       signal,
     );
     expect(request).toHaveBeenCalledWith(
-      '/api/v1/variant-groups/group-1',
-      { signal, timeoutMs: 120_000, maxResponseBytes: 32 * 1024 * 1024 },
+      '/api/v1/catalog/variant-groups/detail',
+      {
+        query: { groupId: 'group-1' },
+        signal,
+        timeoutMs: 120_000,
+        maxResponseBytes: 32 * 1024 * 1024,
+      },
       expect.anything(),
     );
   });
