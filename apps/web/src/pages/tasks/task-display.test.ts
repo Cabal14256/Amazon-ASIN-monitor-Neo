@@ -44,6 +44,39 @@ const report = {
 };
 
 describe('task center display boundaries', () => {
+  it('offers only a completed task-owned variant-group XLSX artifact', () => {
+    const result = {
+      exportType: 'variant-group',
+      filename: '变体组数据_2026-10-24.xlsx',
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      fileSizeBytes: 4,
+      artifact: {
+        taskId: importId,
+        key: `export-${importId}.xlsx`,
+        bytes: 4,
+        sha256: 'c'.repeat(64),
+      },
+    };
+    const exported = task({
+      taskId: importId,
+      taskType: 'export',
+      taskSubType: 'variant-group',
+      status: 'completed',
+      filename: result.filename,
+      downloadUrl: `/api/v1/tasks/${importId}/download`,
+      result,
+    });
+    expect(hasTaskDownload(exported, true)).toBe(true);
+    expect(hasTaskDownload(exported, false)).toBe(false);
+    expect(
+      hasTaskDownload({
+        ...exported,
+        result: { ...result, artifact: { ...result.artifact, bytes: 5 } },
+      }),
+    ).toBe(false);
+  });
+
   it('offers only a task-bound completed ASIN XLSX artifact with current read permission', () => {
     const result = {
       exportType: 'asin',

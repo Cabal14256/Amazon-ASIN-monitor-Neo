@@ -97,6 +97,33 @@ describe('Redis task registry behavior', () => {
     });
   });
 
+  it('captures and indexes the actual variant-group export identity', async () => {
+    const { repository, redis } = fixture();
+    const prepared = vi.fn();
+    const variantInput = {
+      taskId: '10000000-0000-4000-8000-000000000167',
+      userId: 'owner-a',
+      taskType: 'export',
+      taskSubType: 'variant-group',
+    };
+
+    const task = await repository.createLimitedExport(
+      variantInput,
+      2,
+      100,
+      prepared,
+    );
+
+    expect(task).toMatchObject({ taskSubType: 'variant-group' });
+    expect(prepared).toHaveBeenCalledWith({
+      ...variantInput,
+      createdAt: task.createdAt,
+    });
+    const [script, keyCount] = redis.eval.mock.calls[0]!;
+    expect(keyCount).toBe(4);
+    expect(script).toContain("task.taskSubType == 'variant-group'");
+  });
+
   it('preserves an accepted monitor cancellation against a racing final completion', async () => {
     const { repository } = fixture();
     const task = await repository.create({
@@ -127,6 +154,39 @@ describe('Redis task registry behavior', () => {
       status: 'cancelled',
       error: null,
       message: '监控任务已取消，已提交的结果保留',
+    });
+  });
+  it('preserves a variant-group export cancellation against completion and retry failure', async () => {
+    const { repository } = fixture();
+    const task = await repository.create({
+      taskId: 'variant-group-export-task',
+      userId: 'owner-a',
+      taskType: 'export',
+      taskSubType: 'variant-group',
+    });
+    const cancelling = await repository.mutate(
+      task.taskId,
+      { kind: 'cancel-request' },
+      task,
+    );
+    expect(
+      await repository.mutate(
+        task.taskId,
+        { kind: 'completed', result: { exportType: 'variant-group' } },
+        task,
+      ),
+    ).toEqual(cancelling);
+    await expect(
+      repository.mutate(
+        task.taskId,
+        { kind: 'failed', message: 'Queue failed' },
+        task,
+      ),
+    ).resolves.toMatchObject({
+      status: 'cancelled',
+      error: null,
+      result: null,
+      message: '导出任务已取消',
     });
   });
   it('rejects the retired absence-only check transition without altering metadata', async () => {

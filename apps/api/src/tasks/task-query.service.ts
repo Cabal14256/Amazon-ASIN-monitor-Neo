@@ -30,7 +30,8 @@ const cancellationSensitiveTask = (task: { taskType: string }) =>
   checkTask(task) || ['monitor', 'competitor-monitor'].includes(task.taskType);
 const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
   cancellationSensitiveTask(task) ||
-  (task.taskType === 'export' && task.taskSubType === 'asin');
+  (task.taskType === 'export' &&
+    ['asin', 'variant-group'].includes(task.taskSubType || ''));
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed');

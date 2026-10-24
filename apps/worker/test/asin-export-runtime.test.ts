@@ -163,18 +163,16 @@ describe('ASIN export startup deadline', () => {
     const firstSweep = new Promise<void>((resolve) => {
       completedSweep = resolve;
     });
-    const reconcile =
-      ExportArtifactStore.prototype.reconcileRejectedSubmissions;
-    vi.spyOn(
-      ExportArtifactStore.prototype,
-      'reconcileRejectedSubmissions',
-    ).mockImplementationOnce(async function (
-      this: ExportArtifactStore,
-      ...args
-    ) {
-      await reconcile.apply(this, args);
-      completedSweep();
-    });
+    const cleanup = ExportArtifactStore.prototype.cleanup;
+    let cleanupCalls = 0;
+    vi.spyOn(ExportArtifactStore.prototype, 'cleanup').mockImplementation(
+      async function (this: ExportArtifactStore, ...args) {
+        const removed = await cleanup.apply(this, args);
+        cleanupCalls += 1;
+        if (cleanupCalls === 3) completedSweep();
+        return removed;
+      },
+    );
     const runtime = await startAsinExportRuntime(env, vi.fn());
     try {
       await firstSweep;

@@ -27,7 +27,7 @@ import {
 } from '../../hooks/tasks';
 import { chooseFileSave, saveToFile } from '../../lib/file-save';
 import { ApiError } from '../../lib/http';
-import { asinExportDownloadFilename } from '../../services/tasks';
+import { exportDownloadFilename } from '../../services/tasks';
 import {
   canCancelTask,
   canOpenTaskDetail,
@@ -369,7 +369,7 @@ export default function TaskCenterPage() {
     };
     try {
       if (task.taskType === 'export') {
-        const filename = asinExportDownloadFilename(task);
+        const filename = exportDownloadFilename(task);
         if (!filename)
           throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
         // Native picker must run in this gesture, before the first await/GET.
@@ -386,17 +386,32 @@ export default function TaskCenterPage() {
             destination.handle,
             controller.signal,
             currentDownload,
-            async (sink, saveSignal) =>
-              (
+            async (sink, saveSignal) => {
+              if (task.taskSubType === 'variant-group') {
+                return (
+                  await runtime.tasks.downloadVariantGroupExportTo(
+                    task,
+                    sink,
+                    saveSignal,
+                  )
+                ).bytes;
+              }
+              return (
                 await runtime.tasks.downloadAsinExportTo(task, sink, saveSignal)
-              ).bytes,
+              ).bytes;
+            },
           );
           return;
         }
       }
       const { blob, filename } =
         task.taskType === 'export'
-          ? await runtime.tasks.downloadAsinExport(task, controller.signal)
+          ? task.taskSubType === 'variant-group'
+            ? await runtime.tasks.downloadVariantGroupExport(
+                task,
+                controller.signal,
+              )
+            : await runtime.tasks.downloadAsinExport(task, controller.signal)
           : {
               blob: await runtime.tasks.download(
                 task.taskId,

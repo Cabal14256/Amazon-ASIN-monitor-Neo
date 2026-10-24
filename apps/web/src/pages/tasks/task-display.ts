@@ -1,6 +1,6 @@
 import type { TaskInfo } from '@asin-monitor/contracts';
 import { formatBeijing } from '../../lib/beijingTime';
-import { asinExportDownloadFilename } from '../../services/tasks';
+import { exportDownloadFilename } from '../../services/tasks';
 
 type Badge =
   | 'pending'
@@ -146,7 +146,7 @@ export function canOpenTaskDetail(
 export function hasTaskDownload(task: TaskInfo, canReadASIN = true): boolean {
   if (task.status !== 'completed' || !task.downloadUrl) return false;
   if (task.taskType === 'export')
-    return canReadASIN && asinExportDownloadFilename(task) !== null;
+    return canReadASIN && exportDownloadFilename(task) !== null;
   if (completedCheckTask(task) && !canReadASIN) return false;
   if (task.taskType === 'import') {
     const result = taskResult(task);

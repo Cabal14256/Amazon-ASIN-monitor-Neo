@@ -355,6 +355,182 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(fatal).not.toHaveBeenCalled();
     }, 45_000);
 
+    it('exports the Legacy 11-column variant-group task through PostgreSQL, Redis, Worker and authorized download', async () => {
+      const created = await f.app.inject({
+        method: 'POST',
+        url: '/api/v1/tasks/export',
+        headers: ownerHeaders,
+        payload: {
+          exportType: 'variant-group',
+          params: {
+            keyword: 'Broken',
+            country: 'US',
+            variantStatus: 'BROKEN',
+          },
+        },
+      });
+      expect(created.statusCode).toBe(200);
+      expect(created.json().data.exportType).toBe('variant-group');
+      const taskId = created.json().data.taskId as string;
+      const task = await eventually(async () => {
+        const current = await store.read(taskId);
+        return current?.status === 'completed' ? current : null;
+      });
+      expect(task.taskSubType).toBe('variant-group');
+      expect(task.result).toMatchObject({
+        exportType: 'variant-group',
+        filename: expect.stringMatching(/^变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/),
+        rowCount: 1,
+      });
+
+      const foreign = await f.app.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${taskId}/download`,
+        headers: otherHeaders,
+      });
+      expect([403, 404]).toContain(foreign.statusCode);
+      const download = await f.app.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${taskId}/download`,
+        headers: ownerHeaders,
+      });
+      expect(download.statusCode).toBe(200);
+      expect(download.headers['content-disposition']).toContain(
+        `variant-group-export-${taskId}.xlsx`,
+      );
+      const ExcelJS = createRequire(
+        resolve(__dirname, '../../worker/package.json'),
+      )('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(download.rawPayload);
+      const sheet = workbook.worksheets[0];
+      expect(sheet.name).toBe('变体组数据');
+      expect(sheet.rowCount).toBe(2);
+      expect(sheet.getRow(1).cellCount).toBe(11);
+      expect(sheet.getRow(1).values).toEqual([
+        undefined,
+        '变体组名称',
+        '变体组ID',
+        '国家',
+        '站点',
+        '品牌',
+        '变体状态',
+        'ASIN数量',
+        '异常ASIN数量',
+        '创建时间',
+        '更新时间',
+        '最后检查时间',
+      ]);
+      expect(sheet.getRow(2).values.slice(1, 9)).toEqual([
+        'Broken',
+        'g-broken',
+        'US',
+        'amazon.com',
+        'Fixture',
+        '异常',
+        1,
+        1,
+      ]);
+      expect(sheet.getRow(2).getCell(9).value).toEqual(
+        new Date('2026-09-26T16:00:00.000Z'),
+      );
+      expect(fatal).not.toHaveBeenCalled();
+    }, 45_000);
+
+    it('runs the Legacy variant-group XLSX task through the compiled Worker and authorized download', async () => {
+      const created = await f.app.inject({
+        method: 'POST',
+        url: '/api/v1/tasks/export',
+        headers: ownerHeaders,
+        payload: {
+          exportType: 'variant-group',
+          params: {
+            keyword: 'Broken',
+            country: 'US',
+            variantStatus: 'BROKEN',
+          },
+        },
+      });
+      expect(created.statusCode).toBe(200);
+      expect(created.json().data.exportType).toBe('variant-group');
+      const taskId = created.json().data.taskId as string;
+      const task = await eventually(async () => {
+        const current = await store.read(taskId);
+        return current?.status === 'completed' ? current : null;
+      });
+      expect(task.taskSubType).toBe('variant-group');
+      expect(task.result).toMatchObject({
+        exportType: 'variant-group',
+        filename: expect.stringMatching(/^变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/),
+        rowCount: 1,
+      });
+
+      const foreign = await f.app.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${taskId}/download`,
+        headers: otherHeaders,
+      });
+      expect([403, 404]).toContain(foreign.statusCode);
+      const download = await f.app.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${taskId}/download`,
+        headers: ownerHeaders,
+      });
+      expect(download.statusCode).toBe(200);
+      expect(download.headers['content-disposition']).toContain(
+        `variant-group-export-${taskId}.xlsx`,
+      );
+      const ExcelJS = createRequire(
+        resolve(__dirname, '../../worker/package.json'),
+      )('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(download.rawPayload);
+      const sheet = workbook.worksheets[0];
+      expect(sheet.name).toBe('变体组数据');
+      expect(sheet.rowCount).toBe(2);
+      expect(sheet.getRow(1).cellCount).toBe(11);
+      expect(sheet.getRow(1).values.slice(1)).toEqual([
+        '变体组名称',
+        '变体组ID',
+        '国家',
+        '站点',
+        '品牌',
+        '变体状态',
+        'ASIN数量',
+        '异常ASIN数量',
+        '创建时间',
+        '更新时间',
+        '最后检查时间',
+      ]);
+      expect(sheet.getRow(2).values.slice(1, 9)).toEqual([
+        'Broken',
+        'g-broken',
+        'US',
+        'amazon.com',
+        'Fixture',
+        '异常',
+        1,
+        1,
+      ]);
+      expect(sheet.getRow(2).getCell(9).value).toEqual(
+        new Date('2026-09-26T16:00:00.000Z'),
+      );
+
+      await f.pools.primaryPool.query(
+        "DELETE FROM role_permissions WHERE role_id='writer-71' AND permission_id=(SELECT id FROM permissions WHERE code='asin:read')",
+      );
+      const revoked = await f.app.inject({
+        method: 'GET',
+        url: `/api/v1/tasks/${taskId}/download`,
+        headers: ownerHeaders,
+      });
+      expect(revoked.statusCode).toBe(403);
+      await f.pools.primaryPool.query(
+        "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71', id FROM permissions WHERE code='asin:read' ON CONFLICT DO NOTHING",
+      );
+      expect(fatal).not.toHaveBeenCalled();
+    }, 45_000);
+
     it('produces, tracks and streams a filtered Legacy-compatible workbook; denies other owners and revoked grants', async () => {
       const unsupported = await f.app.inject({
         method: 'POST',
