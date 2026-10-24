@@ -9,6 +9,7 @@ import ExcelJS from 'exceljs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createVariantGroupExportProcessor } from '../src/variant-group-export-processor';
 
@@ -209,4 +210,114 @@ describe('variant-group export processor', () => {
       (await readdir(directory)).filter((name) => name.endsWith('.part')),
     ).toEqual([]);
   });
+
+  it('uses the captured partial path when an output stream closes after the cleanup deadline', async () => {
+    const data: VariantGroupExportJobData = {
+      taskId: '10000000-0000-4000-8000-000000000211',
+      userId: 'variant-group-export-owner',
+      taskType: 'export',
+      taskSubType: 'variant-group',
+      exportType: 'variant-group',
+      createdAt: '2026-09-27T00:00:00.000Z',
+      params: {},
+    };
+    let state: TaskState = {
+      taskId: data.taskId,
+      userId: data.userId,
+      taskType: data.taskType,
+      taskSubType: data.taskSubType,
+      title: '变体组导出',
+      status: 'pending',
+      progress: 0,
+      message: '',
+      error: null,
+      result: null,
+      createdAt: data.createdAt,
+      updatedAt: data.createdAt,
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: null,
+      cancelledAt: null,
+      revision: 0,
+    };
+    let releaseClose: ((error?: Error | null) => void) | undefined;
+    const stream = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+      destroy(error, callback) {
+        releaseClose = () => callback(error);
+      },
+    });
+    const partialPath = join(tmpdir(), 'variant-group-delayed-close.part');
+    const discard = vi.fn(async () => undefined);
+    const artifacts = {
+      read: vi.fn(async () => null),
+      temporary: vi.fn(async () => ({ path: partialPath, stream })),
+      discard,
+    };
+    const repository = {
+      read: async <T>(
+        run: (unit: AsinExportQueryUnit, ensureOpen: () => void) => Promise<T>,
+      ) =>
+        run(
+          {
+            listExportGroups: async () => {
+              throw new Error('fixture query failure');
+            },
+            listExportChildrenPage: vi.fn(async () => []),
+          } as unknown as AsinExportQueryUnit,
+          () => undefined,
+        ),
+    };
+    const store = {
+      read: vi.fn(async () => state),
+      mutate: vi.fn(
+        async (
+          _taskId: string,
+          change: Parameters<typeof transitionTask>[1],
+        ) => {
+          state = transitionTask(
+            state,
+            change,
+            new Date('2026-09-27T02:00:00.000Z'),
+          );
+          return state;
+        },
+      ),
+    };
+    const processor = createVariantGroupExportProcessor(
+      repository as never,
+      store as never,
+      artifacts as never,
+      {
+        shutdownSignal: new AbortController().signal,
+        isClosing: () => false,
+        assertJobLock: async () => undefined,
+        updateProgress: vi.fn(async () => undefined),
+      },
+    );
+    const job = {
+      id: data.taskId,
+      name: 'variant-group',
+      data,
+      attemptsMade: 0,
+      opts: { attempts: 2 },
+    } as never;
+
+    const running = processor(job, 'fixture-lock').catch(
+      (error: unknown) => error,
+    );
+    const deadline = Date.now() + 1000;
+    while (!releaseClose && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseClose).toBeTypeOf('function');
+    await new Promise((resolve) => setTimeout(resolve, 5200));
+    await expect(running).resolves.toBeInstanceOf(Error);
+    expect(discard).not.toHaveBeenCalled();
+
+    releaseClose?.(null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(discard).toHaveBeenCalledWith(partialPath);
+  }, 15_000);
 });

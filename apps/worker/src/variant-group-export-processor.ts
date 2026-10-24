@@ -436,11 +436,13 @@ export function createVariantGroupExportProcessor(
         const canDiscard = await Promise.race([closed, closeDeadline]);
         clearTimeout(closeTimeout);
         outputStream.removeListener('close', onClose);
-        if (!canDiscard && partial)
+        if (!canDiscard && partial) {
+          const delayedPartial = partial;
           outputStream.once(
             'close',
-            () => void artifacts.discard(partial!).catch(() => undefined),
+            () => void artifacts.discard(delayedPartial).catch(() => undefined),
           );
+        }
         if (!canDiscard) partial = undefined;
       }
       if (partial)
