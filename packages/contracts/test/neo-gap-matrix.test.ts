@@ -12,14 +12,19 @@ function matrixRows() {
     .split('\n')
     .filter((line) => line.startsWith('| ') && !line.startsWith('| ---'))
     .slice(1)
-    .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()));
+    .map((line) =>
+      line
+        .split('|')
+        .slice(1, -1)
+        .map((cell) => cell.trim()),
+    );
 }
 
 describe('Issue #48 Neo gap matrix', () => {
   it('tracks every unique contract endpoint exactly once', () => {
     const rows = matrixRows();
-    const endpointKeys = ENDPOINTS.map((endpoint) =>
-      `${endpoint.method} ${endpoint.path}`,
+    const endpointKeys = ENDPOINTS.map(
+      (endpoint) => `${endpoint.method} ${endpoint.path}`,
     );
     const matrixKeys = rows.map(([key]) => key);
 
