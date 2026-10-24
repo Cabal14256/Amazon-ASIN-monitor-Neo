@@ -28,7 +28,7 @@ const jobData = (): PrimaryMonitorJob => ({
   taskSubType: 'primary',
   userId: 'monitor-owner',
   createdAt,
-  expiresAt: '2026-10-04T00:00:00.000Z',
+  expiresAt: new Date(Date.now() + 7 * 24 * 3600_000).toISOString(),
   countries: ['US', 'DE'],
 });
 function result(id: string, broken: boolean): VariantGroupCheckData {

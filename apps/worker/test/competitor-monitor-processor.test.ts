@@ -608,6 +608,23 @@ describe('competitor manual monitor consumer and real notification service', () 
     f.notifications.close();
     other.notifications.close();
   });
+  it('rejects an expired task before loading groups or checking them', async () => {
+    const f = fixture();
+    const expiresAt = Date.parse(f.data.createdAt) + 1000;
+    f.data.expiresAt = new Date(expiresAt).toISOString();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(expiresAt));
+    try {
+      await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+        '竞品监控任务未完成',
+      );
+      expect(f.groups).not.toHaveBeenCalled();
+      expect(f.checkGroup).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      f.notifications.close();
+    }
+  });
   it.each(['groupNotify', 'asinNotify'] as const)(
     'requires current %s even when a committed receipt had enabled flags',
     async (key) => {
