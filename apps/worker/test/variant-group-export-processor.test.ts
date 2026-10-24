@@ -204,5 +204,9 @@ describe('variant-group export processor', () => {
     expect(sheet.getRow(3).getCell(6).value).toBe('正常');
     expect(sheet.getRow(3).getCell(7).value).toBe(0);
     expect(sheet.getRow(3).getCell(8).value).toBe(0);
+    const { readdir } = await import('node:fs/promises');
+    expect(
+      (await readdir(directory)).filter((name) => name.endsWith('.part')),
+    ).toEqual([]);
   });
 });

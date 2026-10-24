@@ -432,7 +432,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         1,
       ]);
       expect(sheet.getRow(2).getCell(9).value).toEqual(
-        new Date('2026-09-27T00:00:00.000Z'),
+        new Date('2026-09-26T16:00:00.000Z'),
       );
       expect(fatal).not.toHaveBeenCalled();
     }, 45_000);
@@ -513,7 +513,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         1,
       ]);
       expect(sheet.getRow(2).getCell(9).value).toEqual(
-        new Date('2026-09-27T00:00:00.000Z'),
+        new Date('2026-09-26T16:00:00.000Z'),
       );
 
       await f.pools.primaryPool.query(

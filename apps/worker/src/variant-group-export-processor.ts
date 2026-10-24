@@ -443,7 +443,7 @@ export function createVariantGroupExportProcessor(
           );
         if (!canDiscard) partial = undefined;
       }
-      if (partial && !published)
+      if (partial)
         await artifacts.discard(partial).catch(() =>
           log.warn('变体组导出临时文件清理失败', {
             reason: 'export_partial_cleanup_failed',
