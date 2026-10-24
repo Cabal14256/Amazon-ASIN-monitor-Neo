@@ -65,6 +65,28 @@ describe('task API boundary', () => {
         },
       },
     });
+  const variantGroupExportTask = () =>
+    taskFixture({
+      taskId: id,
+      taskType: 'export',
+      taskSubType: 'variant-group',
+      status: 'completed',
+      filename: '变体组数据_2026-10-07.xlsx',
+      downloadUrl: `/api/v1/tasks/${id}/download`,
+      result: {
+        exportType: 'variant-group',
+        filename: '变体组数据_2026-10-07.xlsx',
+        mimeType:
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        fileSizeBytes: 4,
+        artifact: {
+          taskId: id,
+          key: `export-${id}.xlsx`,
+          bytes: 4,
+          sha256: 'a'.repeat(64),
+        },
+      },
+    });
   const workbook = () =>
     new Response(new Uint8Array([80, 75, 3, 4]), {
       headers: {
@@ -94,6 +116,28 @@ describe('task API boundary', () => {
       expect(f.fetcher).toHaveBeenCalledOnce();
     },
   );
+  it('downloads only a task-bound variant-group artifact using normalized API URL', async () => {
+    const f = setup('/api/');
+    f.fetcher.mockResolvedValueOnce(workbook());
+    const downloaded = await f.tasks.downloadVariantGroupExport(
+      variantGroupExportTask(),
+    );
+    expect(downloaded).toMatchObject({
+      filename: '变体组数据_2026-10-07.xlsx',
+    });
+    expect(downloaded.blob.size).toBe(4);
+    expect(f.fetcher.mock.calls[0][0]).toBe(
+      `https://app.test/api/v1/tasks/${id}/download`,
+    );
+    expect(String(f.fetcher.mock.calls[0][0])).not.toContain('/api/api/');
+    const invalid = {
+      ...variantGroupExportTask(),
+      taskSubType: 'asin',
+    };
+    await expect(
+      f.tasks.downloadVariantGroupExport(invalid),
+    ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+  });
   it('rejects absent or mismatched export receipts before downloading', async () => {
     const f = setup();
     for (const invalid of [

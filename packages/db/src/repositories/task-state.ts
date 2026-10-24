@@ -101,7 +101,7 @@ export function transitionTask(
   } else if (
     change.kind === 'completed' &&
     task.taskType === 'export' &&
-    task.taskSubType === 'asin' &&
+    ['asin', 'variant-group'].includes(task.taskSubType || '') &&
     (task.cancelRequestedAt || task.status === 'cancelling')
   ) {
     // Completion must not win if cancellation reached Redis after the
@@ -157,7 +157,8 @@ export function transitionTask(
           'monitor',
           'competitor-monitor',
         ].includes(task.taskType) ||
-          (task.taskType === 'export' && task.taskSubType === 'asin')) &&
+          (task.taskType === 'export' &&
+            ['asin', 'variant-group'].includes(task.taskSubType || ''))) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';

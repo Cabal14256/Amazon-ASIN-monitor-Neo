@@ -2,7 +2,7 @@ import { PgAsinQueryRepository, type TaskState } from '@asin-monitor/db';
 import { ExportArtifactStore } from '@asin-monitor/export';
 import { HttpException } from '@nestjs/common';
 import jwt from 'jsonwebtoken';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -105,6 +105,36 @@ describe('ASIN export download authorization and artifact integrity', () => {
     });
     expect(response.headers['content-disposition']).toContain(
       `asin-export-${task.taskId}.xlsx`,
+    );
+    expect(authorizeAdministration).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ userId: taskUserId }),
+      'asin:read',
+    );
+  });
+
+  it('streams the variant-group XLSX only for its own verified task artifact', async () => {
+    task.taskSubType = 'variant-group';
+    task.result = {
+      exportType: 'variant-group',
+      filename: '变体组数据_2026-09-27.xlsx',
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      fileSizeBytes: payload.length,
+      artifact: {
+        taskId: task.taskId,
+        key: `export-${task.taskId}.xlsx`,
+        bytes: payload.length,
+        sha256: createHash('sha256').update(payload).digest('hex'),
+      },
+    };
+
+    const response = await get();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.rawPayload).toEqual(payload);
+    expect(response.headers['content-disposition']).toContain(
+      `variant-group-export-${task.taskId}.xlsx`,
     );
     expect(authorizeAdministration).toHaveBeenCalledWith(
       {},
