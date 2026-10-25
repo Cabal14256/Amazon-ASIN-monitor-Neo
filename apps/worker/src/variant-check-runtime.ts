@@ -120,6 +120,11 @@ export async function startVariantCheckRuntime(
         groups: row?.groups,
         ledger: row?.ledger,
       });
+    else
+      logger.warn('定时监控集成数据库 schema 已验证', {
+        database: row.database,
+        schema: row.schema,
+      });
   }
   const competitorChecks =
     scheduledMonitorEnabled ||

@@ -168,6 +168,7 @@ export function createScheduledMonitorProcessor(
     let heartbeatCheck: Promise<void> | undefined;
     let heartbeatStopped = false;
     let activePipelineTransactions = 0;
+    let activeGroupId = 'accept';
     let activeRun: ScheduledMonitorRun | undefined;
     const check = async (run: ScheduledMonitorRun) => {
       signal.throwIfAborted();
@@ -265,6 +266,7 @@ export function createScheduledMonitorProcessor(
       let brokenGroups = 0;
       let brokenMembers = 0;
       for (const group of run.groups) {
+        activeGroupId = group.group.id;
         const current = await check(run);
         const receipt = await ledger.readGroupReceipt(
           job,
@@ -410,6 +412,7 @@ export function createScheduledMonitorProcessor(
           ? 'scheduled_monitor_commit_unconfirmed'
           : 'scheduled_monitor_attempt_interrupted',
         error: errorReason(error),
+        groupId: activeGroupId,
       });
       throw error;
     } finally {
