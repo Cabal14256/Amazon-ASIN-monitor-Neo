@@ -717,7 +717,19 @@ ${extra}
         scheduledEvents,
         30_000,
       );
-      expect(parentResult, output).toMatchObject({ state: 'completed' });
+      const debugLedger = await f.pool.query(
+        'SELECT groups FROM primary_scheduled_monitor_runs WHERE task_id=$1',
+        [job.taskId],
+      );
+      const debugGroups = await f.pool.query(
+        'SELECT id FROM variant_groups ORDER BY id',
+      );
+      expect(
+        parentResult,
+        `${output}\nledger=${JSON.stringify(
+          debugLedger.rows,
+        )}\ncatalog=${JSON.stringify(debugGroups.rows)}`,
+      ).toMatchObject({ state: 'completed' });
       const primary = (
         await f.pool.query(
           'SELECT state,follow_up_job FROM primary_scheduled_monitor_runs WHERE task_id=$1',
