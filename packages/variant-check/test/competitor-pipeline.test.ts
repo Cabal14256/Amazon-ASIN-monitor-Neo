@@ -431,6 +431,7 @@ describe('competitor check pipeline', () => {
       expect.any(Array),
       expect.any(Function),
       { operation: context.operation, snapshotDigest: context.snapshotDigest },
+      undefined,
     );
     expect(vi.mocked(f.unit.saveReceipt)).toHaveBeenCalledOnce();
     expect(f.cache.clearDeferred).toHaveBeenCalledWith(
