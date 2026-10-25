@@ -761,13 +761,13 @@ ${extra}
       const [primaryCounts, competitorCounts] = await Promise.all([
         f.pool.query(
           `SELECT (SELECT count(*)::int FROM primary_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
-                (SELECT count(*)::int FROM monitor_history WHERE monitor_task_id=$1) AS history`,
+                (SELECT count(*)::int FROM monitor_history WHERE monitor_task_id=$1::text) AS history`,
           [job.taskId],
         ),
         competitorPool!.query(
           `SELECT state,
                 (SELECT count(*)::int FROM competitor_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
-                (SELECT count(*)::int FROM competitor_monitor_history WHERE monitor_task_id=$1) AS history
+                (SELECT count(*)::int FROM competitor_monitor_history WHERE monitor_task_id=$1::text) AS history
            FROM competitor_scheduled_monitor_runs WHERE task_id=$1`,
           [followUp.taskId],
         ),
