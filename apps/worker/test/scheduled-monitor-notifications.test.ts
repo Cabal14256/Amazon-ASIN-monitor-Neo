@@ -136,4 +136,43 @@ describe('scheduled monitor notification adapter', () => {
     expect(f.ledger.claimNotification).not.toHaveBeenCalled();
     expect(f.notifications.withCountryDelivery).not.toHaveBeenCalled();
   });
+
+  it('bounds legal large summaries and marks omitted notification details', async () => {
+    const f = fixture({
+      isBroken: true,
+      brokenASINs: Array.from({ length: 10_008 }, (_, index) => ({
+        asin: '%'.repeat(20),
+      })),
+      groupSnapshot: {
+        id: 'g1',
+        country: 'US',
+        name: 'G1',
+        feishuNotifyEnabled: 1,
+        children: [],
+      },
+    });
+    let delivered: any;
+    f.notifications.withCountryDelivery.mockImplementationOnce(
+      async (_domain, _country, summary, send) => {
+        delivered = summary;
+        return send(async () => ({ success: true, skipped: false }));
+      },
+    );
+    await expect(
+      deliverScheduledMonitorNotifications(
+        run,
+        new AbortController().signal,
+        async () => undefined,
+        { ledgerFor: () => f.ledger, notifications: f.notifications },
+      ),
+    ).resolves.toBeUndefined();
+    expect(delivered.notificationTruncated).toBe(true);
+    expect(delivered.brokenASINs.length).toBeLessThan(10_000);
+    expect(
+      delivered.brokenGroupNames.length +
+        delivered.brokenGroupDetails.length +
+        delivered.brokenASINs.length,
+    ).toBeLessThanOrEqual(10_000);
+    expect(f.ledger.completeNotification).toHaveBeenCalledOnce();
+  });
 });

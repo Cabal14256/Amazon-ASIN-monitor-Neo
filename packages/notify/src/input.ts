@@ -94,6 +94,10 @@ export function snapshotNotification(value: unknown): NotificationData {
     const item = record(v);
     return { ...group(item), asin: text(item.asin), brand: text(item.brand) };
   });
+  if (row.notificationTruncated !== undefined) {
+    if (typeof row.notificationTruncated !== 'boolean') return fail();
+    result.notificationTruncated = row.notificationTruncated;
+  }
   if (row.brokenByType === null) result.brokenByType = null;
   else if (row.brokenByType !== undefined) {
     const types = record(row.brokenByType);

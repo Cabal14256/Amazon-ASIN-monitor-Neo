@@ -12,7 +12,12 @@ import type {
   VariantCheckPipeline,
   VariantGroupAdmission,
 } from '@asin-monitor/variant-check';
-import { UnrecoverableError, type Job, type Processor } from 'bullmq';
+import {
+  DelayedError,
+  UnrecoverableError,
+  type Job,
+  type Processor,
+} from 'bullmq';
 import { logger } from './logger';
 
 type Ledger = Pick<
@@ -39,6 +44,9 @@ export interface ScheduledMonitorProcessorOptions {
   shutdownSignal: AbortSignal;
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   enqueueFollowUp(job: ScheduledMonitorJob): Promise<void>;
+  competitorMonitorEnabled(unit?: {
+    competitorMonitorConfiguration?: () => Promise<string | null | undefined>;
+  }): Promise<boolean>;
   deliverNotifications?(
     run: ScheduledMonitorRun,
     signal: AbortSignal,
@@ -87,6 +95,8 @@ function commitMayHaveSucceeded(error: unknown): boolean {
   );
 }
 
+class ScheduledMonitorCompetitorDisabled extends Error {}
+
 /** Private system consumer. It never writes Redis task metadata or uses the
  * public task list; the PostgreSQL ledger is the sole recovery identity. */
 export function createScheduledMonitorProcessor(
@@ -106,6 +116,40 @@ export function createScheduledMonitorProcessor(
     )
       throw new UnrecoverableError('定时监控队列身份无效');
     const ledger = ledgerFor(job, options);
+    const assertCompetitorEnabled = async () => {
+      if (job.domain !== 'competitor') return;
+      const now = Date.now();
+      const freshness = evaluateScheduledMonitorFreshness(
+        job,
+        undefined,
+        now,
+        options.maxAgeMs,
+      );
+      if (freshness.stale || Date.parse(job.expiresAt) <= now) return;
+      if (!(await options.competitorMonitorEnabled()))
+        throw new ScheduledMonitorCompetitorDisabled();
+    };
+    const deferWhileCompetitorDisabled = async () => {
+      if (!token) throw new ScheduledMonitorRunError('dependency');
+      await bullJob.moveToDelayed(Date.now() + 30_000, token);
+      throw new DelayedError();
+    };
+    const existing =
+      job.domain === 'competitor'
+        ? await ledger.read(job, options.shutdownSignal)
+        : undefined;
+    if (
+      !existing ||
+      !['business-completed', 'completed'].includes(existing.state)
+    ) {
+      try {
+        await assertCompetitorEnabled();
+      } catch (error) {
+        if (error instanceof ScheduledMonitorCompetitorDisabled)
+          return deferWhileCompetitorDisabled();
+        throw error;
+      }
+    }
     const controller = new AbortController();
     const onShutdown = () =>
       controller.abort(new ScheduledMonitorRunError('cancelled'));
@@ -121,6 +165,7 @@ export function createScheduledMonitorProcessor(
     const check = async (run: ScheduledMonitorRun) => {
       signal.throwIfAborted();
       await options.assertJobLock(bullJob, token);
+      await assertCompetitorEnabled();
       const current = await ledger.read(job, signal);
       if (!current) throw new ScheduledMonitorRunError('dependency');
       if (current.cancelRequestedAt)
@@ -140,6 +185,7 @@ export function createScheduledMonitorProcessor(
         if (freshness.stale || Date.parse(job.expiresAt) <= Date.now())
           throw new ScheduledMonitorRunError('expired');
       }
+      await assertCompetitorEnabled();
       signal.throwIfAborted();
       return current;
     };
@@ -168,6 +214,7 @@ export function createScheduledMonitorProcessor(
       // and shutdown checks remain safe during that critical section.
       signal.throwIfAborted();
       await options.assertJobLock(bullJob, token);
+      await assertCompetitorEnabled();
     };
 
     let run: ScheduledMonitorRun;
@@ -192,7 +239,8 @@ export function createScheduledMonitorProcessor(
             if (!current || current.state !== 'business-completed')
               throw new ScheduledMonitorRunError('state');
           });
-        if (run.followUpJob) await options.enqueueFollowUp(run.followUpJob);
+        if (run.followUpJob && (await options.competitorMonitorEnabled()))
+          await options.enqueueFollowUp(run.followUpJob);
         return ledger.complete(job, signal);
       } finally {
         options.shutdownSignal.removeEventListener('abort', onShutdown);
@@ -234,7 +282,10 @@ export function createScheduledMonitorProcessor(
                   groupAdmission: options.groupAdmission,
                   signal,
                   scheduledMonitor,
-                  authorize: async () => undefined,
+                  authorize: async (unit) => {
+                    if (!(await options.competitorMonitorEnabled(unit)))
+                      throw new ScheduledMonitorCompetitorDisabled();
+                  },
                   checkpoint,
                 });
           const counts = resultCounts(result);
@@ -264,6 +315,13 @@ export function createScheduledMonitorProcessor(
           throw error;
         }
       }
+      await check(run);
+      heartbeatStopped = true;
+      if (heartbeat) clearTimeout(heartbeat);
+      heartbeat = undefined;
+      await heartbeatCheck;
+      signal.throwIfAborted();
+      await options.assertJobLock(bullJob, token);
       const completed = await ledger.completeBusiness(
         job,
         {
@@ -273,7 +331,9 @@ export function createScheduledMonitorProcessor(
           brokenGroups,
           brokenMembers,
         },
-        job.domain === 'primary' && job.country === 'US',
+        job.domain === 'primary' &&
+          job.country === 'US' &&
+          (await options.competitorMonitorEnabled()),
         signal,
       );
       activeRun = completed;
@@ -283,6 +343,8 @@ export function createScheduledMonitorProcessor(
         await options.enqueueFollowUp(completed.followUpJob);
       return ledger.complete(job, signal);
     } catch (error) {
+      if (error instanceof ScheduledMonitorCompetitorDisabled)
+        return deferWhileCompetitorDisabled();
       const reason = signal.reason;
       const observed = isCancellation(error) || isCancellation(reason);
       const shuttingDown = options.shutdownSignal.aborted;

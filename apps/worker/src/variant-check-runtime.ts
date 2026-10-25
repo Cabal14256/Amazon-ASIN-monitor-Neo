@@ -6,6 +6,7 @@ import {
 } from '@asin-monitor/config';
 import {
   createPgPool,
+  competitorMonitorEnabled as isCompetitorMonitorEnabled,
   PgCompetitorCheckRepository,
   PgCompetitorMonitorRepository,
   PgCompetitorScheduledMonitorRunRepository,
@@ -437,6 +438,26 @@ export async function startVariantCheckRuntime(
           groupAdmission: monitorGroupAdmission,
           shutdownSignal: shutdown.signal,
           assertJobLock,
+          competitorMonitorEnabled: async (unit) => {
+            let configuredValue: string | null | undefined;
+            if (unit?.competitorMonitorConfiguration) {
+              configuredValue = await unit.competitorMonitorConfiguration();
+            } else {
+              const rows = await configRepository.readConfiguration();
+              const matches = rows.filter(
+                (row) =>
+                  row.configKey.trim().toUpperCase() ===
+                  'COMPETITOR_MONITOR_ENABLED',
+              );
+              if (matches.length > 1)
+                throw new Error('COMPETITOR_MONITOR_CONFIG_DUPLICATE');
+              configuredValue = matches[0]?.configValue;
+            }
+            return isCompetitorMonitorEnabled(
+              configuredValue,
+              env.COMPETITOR_MONITOR_ENABLED,
+            );
+          },
           enqueueFollowUp: async (child) => {
             await queue.add('scheduled-monitor', child, { jobId: child.jobId });
           },

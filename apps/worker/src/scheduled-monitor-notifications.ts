@@ -5,6 +5,9 @@ import {
   type ScheduledMonitorRun,
 } from '@asin-monitor/db';
 import {
+  NOTIFICATION_MAX_ITEMS,
+  NOTIFICATION_MAX_TEXT_BYTES,
+  NotificationError,
   snapshotNotification,
   validateCountryNotification,
   type FeishuNotifications,
@@ -21,6 +24,10 @@ type Ledger = Pick<
 >;
 
 type DeliveryResult = { success: boolean; unconfirmed?: true };
+interface NotificationBudget {
+  items: number;
+  textBytes: number;
+}
 
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
@@ -33,6 +40,7 @@ function aggregateResult(
   summary: NotificationData,
   group: ScheduledMonitorRun['groups'][number],
   value: unknown,
+  budget: NotificationBudget,
 ) {
   const result = record(value);
   const snapshot = record(result.groupSnapshot);
@@ -47,15 +55,34 @@ function aggregateResult(
   if (result.isBroken === true) {
     summary.brokenGroups = (summary.brokenGroups ?? 0) + 1;
     const groupName = text(snapshot.name) ?? group.group.name;
-    summary.brokenGroupNames ??= [];
-    summary.brokenGroupDetails ??= [];
-    summary.brokenGroupNames.push(groupName);
-    summary.brokenGroupDetails.push({
+    const detail = {
       variantGroupId: group.group.id,
       groupName,
       statusSource: text(snapshot.statusSource),
       manualBrokenReason: text(snapshot.manualBrokenReason),
-    });
+    };
+    const groupDetailBytes = [
+      groupName,
+      detail.variantGroupId,
+      detail.statusSource,
+      detail.manualBrokenReason,
+    ].reduce(
+      (total, value) => total + (value ? Buffer.byteLength(value) : 0),
+      0,
+    );
+    if (
+      budget.items + 2 <= NOTIFICATION_MAX_ITEMS &&
+      budget.textBytes + groupDetailBytes <= NOTIFICATION_MAX_TEXT_BYTES - 256
+    ) {
+      summary.brokenGroupNames ??= [];
+      summary.brokenGroupDetails ??= [];
+      summary.brokenGroupNames.push(groupName);
+      summary.brokenGroupDetails.push(detail);
+      budget.items += 2;
+      budget.textBytes += groupDetailBytes;
+    } else {
+      summary.notificationTruncated = true;
+    }
   }
   const brokenByType = record(result.brokenByType);
   summary.brokenByType ??= {};
@@ -73,8 +100,8 @@ function aggregateResult(
     return;
   const children = Array.isArray(snapshot.children) ? snapshot.children : [];
   summary.brokenASINs ??= [];
-  for (const item of broken) {
-    const row = record(item);
+  for (const rawItem of broken) {
+    const row = record(rawItem);
     if (typeof row.asin !== 'string')
       throw new Error('SCHEDULED_MONITOR_NOTIFICATION_INVALID');
     const child = children
@@ -85,14 +112,29 @@ function aggregateResult(
       child?.feishuNotifyEnabled === false
     )
       continue;
-    summary.brokenASINs.push({
+    const item = {
       asin: row.asin,
       brand: text(row.brand),
       variantGroupId: group.group.id,
       groupName: text(snapshot.name) ?? group.group.name,
       statusSource: text(row.statusSource),
       manualBrokenReason: text(row.manualBrokenReason),
-    });
+    };
+    const itemBytes = Object.values(item).reduce(
+      (total, value) =>
+        total + (typeof value === 'string' ? Buffer.byteLength(value) : 0),
+      0,
+    );
+    if (
+      budget.items < NOTIFICATION_MAX_ITEMS &&
+      budget.textBytes + itemBytes <= NOTIFICATION_MAX_TEXT_BYTES - 256
+    ) {
+      summary.brokenASINs.push(item);
+      budget.items++;
+      budget.textBytes += itemBytes;
+    } else {
+      summary.notificationTruncated = true;
+    }
   }
 }
 
@@ -111,6 +153,10 @@ async function summaryFor(
     brokenByType: {},
     checkTime: run.job.createdAt,
   };
+  const budget: NotificationBudget = {
+    items: 0,
+    textBytes: Buffer.byteLength(String(run.job.createdAt ?? '')),
+  };
   for (const group of run.groups) {
     await checkpoint();
     const receipt = await ledger.readGroupReceipt(
@@ -120,9 +166,42 @@ async function summaryFor(
     );
     if (receipt === undefined)
       throw new Error('SCHEDULED_MONITOR_NOTIFICATION_RECEIPT_MISSING');
-    aggregateResult(summary, group, receipt);
+    aggregateResult(summary, group, receipt, budget);
   }
   return summary;
+}
+
+function validatedSummary(
+  job: ScheduledMonitorJob,
+  summary: NotificationData,
+): NotificationData {
+  for (;;) {
+    try {
+      const snapshot = snapshotNotification(summary);
+      validateCountryNotification(job.domain, job.country, snapshot);
+      return snapshot;
+    } catch (error) {
+      if (
+        !(error instanceof NotificationError) ||
+        error.reason !== 'invalid-input'
+      )
+        throw error;
+      const names = summary.brokenGroupNames ?? [];
+      const details = summary.brokenGroupDetails ?? [];
+      const asins = summary.brokenASINs ?? [];
+      if (names.length + details.length + asins.length === 0) throw error;
+      summary.notificationTruncated = true;
+      if (summary.brokenGroupNames)
+        summary.brokenGroupNames = names.slice(0, Math.floor(names.length / 2));
+      if (summary.brokenGroupDetails)
+        summary.brokenGroupDetails = details.slice(
+          0,
+          Math.floor(details.length / 2),
+        );
+      if (summary.brokenASINs)
+        summary.brokenASINs = asins.slice(0, Math.floor(asins.length / 2));
+    }
+  }
 }
 
 export interface ScheduledMonitorNotificationOptions {
@@ -149,11 +228,11 @@ export async function deliverScheduledMonitorNotifications(
     signal,
   );
   if (existing !== undefined) return;
-  const summary = snapshotNotification(
+  const summary = validatedSummary(
+    run.job,
     await summaryFor(run, ledger, signal, checkpoint),
   );
   if (!summary.brokenASINs?.length) return;
-  validateCountryNotification(run.job.domain, run.job.country, summary);
   let claimAttempted = false;
   let claimState: 'new' | 'claimed' | 'sent' | 'failed' | undefined;
   const claimForSend = async () => {

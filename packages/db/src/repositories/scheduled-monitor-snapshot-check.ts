@@ -9,6 +9,7 @@ import {
   freezeScheduledMonitorGroupSnapshot,
   parseScheduledMonitorGroupSnapshot,
   parseScheduledMonitorSnapshot,
+  ScheduledMonitorRunError,
   type ScheduledMonitorCheck,
   type ScheduledMonitorGroupSnapshot,
 } from '../domain/scheduled-monitor-run';
@@ -77,12 +78,13 @@ export async function assertScheduledMonitorLedger(
       (row.state !== 'running' ||
         row.business_completed_at !== null ||
         row.completed_at !== null ||
-        row.cancel_requested_at !== null ||
-        row.fresh !== true)) ||
+        row.cancel_requested_at !== null)) ||
     (options.active === false &&
       !['business-completed', 'completed'].includes(String(row.state)))
   )
     throw new VariantCheckError('snapshot-changed');
+  if (options.active !== false && row.fresh !== true)
+    throw new ScheduledMonitorRunError('expired');
   let storedJob: ScheduledMonitorJob;
   let snapshots: ScheduledMonitorGroupSnapshot[];
   try {

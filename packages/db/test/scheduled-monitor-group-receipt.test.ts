@@ -156,4 +156,51 @@ describe('scheduled monitor business transaction helpers', () => {
     ).rejects.toMatchObject({ code: 'identity' });
     expect(db.execute).toHaveBeenCalledTimes(1);
   });
+
+  it('classifies an expired receipt write as an expired run', async () => {
+    const job = scheduledJob();
+    const [snapshot] = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup()],
+      [scheduledMember()],
+    );
+    const operation = scheduledMonitorGroupOperation(job, snapshot);
+    const db = {
+      execute: vi.fn().mockResolvedValueOnce({
+        rows: [{ ...ledgerRow(job, [snapshot]), fresh: false }],
+      }),
+    };
+    await expect(
+      writeScheduledMonitorGroupReceipt(
+        db as never,
+        'primary',
+        operation,
+        result(snapshot.group.id, snapshot.members[0].id),
+        () => {},
+      ),
+    ).rejects.toMatchObject({ code: 'expired' });
+    expect(db.execute).toHaveBeenCalledOnce();
+  });
+
+  it('classifies an expired active snapshot check separately from identity drift', async () => {
+    const job = scheduledJob();
+    const [snapshot] = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup()],
+      [scheduledMember()],
+    );
+    const db = {
+      execute: vi.fn().mockResolvedValueOnce({
+        rows: [{ ...ledgerRow(job, [snapshot]), fresh: false }],
+      }),
+    };
+    await expect(
+      assertScheduledMonitorSnapshot(
+        db as never,
+        { job, group: snapshot },
+        () => {},
+      ),
+    ).rejects.toMatchObject({ code: 'expired' });
+    expect(db.execute).toHaveBeenCalledOnce();
+  });
 });

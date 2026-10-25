@@ -85,6 +85,8 @@ function common(data: NotificationData) {
     : notificationTime();
   let text = `【${time}】【${countryName}】\n\n`;
   text += `已检查分组数量：${totalGroups}，异常分组数量：${brokenGroups}，异常ASIN数量：${brokenASINs.length}\n\n`;
+  if (data.notificationTruncated)
+    text += '通知明细已按容量限制截断，异常分类统计仍为完整汇总。\n\n';
   const total = brokenASINs.length;
   if (total > 0) {
     text += '异常分类统计：\n';

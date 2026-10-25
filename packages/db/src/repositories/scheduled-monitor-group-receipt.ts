@@ -137,10 +137,10 @@ async function assertWriteRun(
     !row ||
     row.job_digest !== operation.jobDigest ||
     row.state !== 'running' ||
-    row.cancel_requested_at !== null ||
-    row.fresh !== true
+    row.cancel_requested_at !== null
   )
     throw new ScheduledMonitorRunError('identity');
+  if (row.fresh !== true) throw new ScheduledMonitorRunError('expired');
   try {
     const job = parseScheduledMonitorJob(row.job);
     if (

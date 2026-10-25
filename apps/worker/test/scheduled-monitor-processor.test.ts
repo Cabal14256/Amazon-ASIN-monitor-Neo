@@ -6,7 +6,7 @@ import {
   scheduledMonitorTaskId,
   type ScheduledMonitorRun,
 } from '@asin-monitor/db';
-import { UnrecoverableError, type Job } from 'bullmq';
+import { DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createScheduledMonitorProcessor,
@@ -20,18 +20,24 @@ const plan = {
   intervalMinutes: 15 as const,
   batchConfig: { batchIndex: 0, totalBatches: 1 },
 };
-const jobData = (): ScheduledMonitorJob => ({
-  ...plan,
-  version: 1,
-  source: 'scheduled',
-  taskType: 'scheduled-monitor',
-  actor: { kind: 'system', purpose: 'scheduled-monitor' },
-  taskId: scheduledMonitorTaskId(plan),
-  jobId: buildScheduledMonitorJobId(plan),
-  requestedAt: '2030-09-27T00:01:00.000Z',
-  createdAt: '2030-09-27T00:01:00.000Z',
-  expiresAt: '2030-09-27T01:00:00.000Z',
-});
+const jobData = (
+  domain: ScheduledMonitorJob['domain'] = 'primary',
+  country: ScheduledMonitorJob['country'] = 'US',
+): ScheduledMonitorJob => {
+  const selectedPlan = { ...plan, domain, country };
+  return {
+    ...selectedPlan,
+    version: 1,
+    source: 'scheduled',
+    taskType: 'scheduled-monitor',
+    actor: { kind: 'system', purpose: 'scheduled-monitor' },
+    taskId: scheduledMonitorTaskId(selectedPlan),
+    jobId: buildScheduledMonitorJobId(selectedPlan),
+    requestedAt: '2030-09-27T00:01:00.000Z',
+    createdAt: '2030-09-27T00:01:00.000Z',
+    expiresAt: '2030-09-27T01:00:00.000Z',
+  };
+};
 
 function group(ordinal = 0) {
   return {
@@ -43,8 +49,10 @@ function group(ordinal = 0) {
 function fixture(
   state: ScheduledMonitorRun['state'] = 'pending',
   patch: Partial<ScheduledMonitorRun> = {},
+  domain: ScheduledMonitorJob['domain'] = 'primary',
+  country: ScheduledMonitorJob['country'] = 'US',
 ) {
-  const data = jobData();
+  const data = jobData(domain, country);
   let run: ScheduledMonitorRun = {
     job: data,
     jobDigest: 'a'.repeat(64),
@@ -69,6 +77,11 @@ function fixture(
   );
   const deliverNotifications = vi.fn(async () => undefined);
   const enqueueFollowUp = vi.fn(async () => undefined);
+  const competitorMonitorEnabled = vi.fn(
+    async (_unit?: {
+      competitorMonitorConfiguration?: () => Promise<string | null | undefined>;
+    }) => true,
+  );
   const completeBusiness = vi.fn(async (_job: unknown, result: unknown) => {
     run = {
       ...run,
@@ -109,6 +122,7 @@ function fixture(
     shutdownSignal: new AbortController().signal,
     assertJobLock: vi.fn(async () => undefined),
     enqueueFollowUp,
+    competitorMonitorEnabled,
     deliverNotifications,
     maxAgeMs: 25 * 60 * 1000,
   };
@@ -123,6 +137,7 @@ function fixture(
   return {
     data,
     run: () => run,
+    options,
     job,
     processor,
     ledger,
@@ -133,6 +148,7 @@ function fixture(
     finishWithoutBusiness,
     deliverNotifications,
     enqueueFollowUp,
+    competitorMonitorEnabled,
   };
 }
 
@@ -176,6 +192,87 @@ describe('scheduled monitor processor', () => {
     expect(f.ledger.start).not.toHaveBeenCalled();
   });
 
+  it('delays scheduled competitor work while the shared monitor switch is off', async () => {
+    const f = fixture('pending', {}, 'competitor', 'UK');
+    f.competitorMonitorEnabled.mockResolvedValue(false);
+    const moveToDelayed = vi.fn(async () => undefined);
+    const delayedJob = { ...f.job, moveToDelayed } as Job;
+    await expect(f.processor(delayedJob, 'lock')).rejects.toBeInstanceOf(
+      DelayedError,
+    );
+    expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'lock');
+    expect(f.ledger.accept).not.toHaveBeenCalled();
+    expect(f.checkGroup).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the competitor switch inside the business transaction guard', async () => {
+    const f = fixture('pending', {}, 'competitor', 'UK');
+    f.competitorMonitorEnabled.mockImplementation(async (unit) => !unit);
+    f.options.competitorPipeline = {
+      checkGroup: async (_groupId, context) => {
+        await context.authorize({
+          competitorMonitorConfiguration: async () => 'false',
+        } as never);
+        return { isBroken: false, brokenASINs: [] } as never;
+      },
+    };
+    const moveToDelayed = vi.fn(async () => undefined);
+    const delayedJob = { ...f.job, moveToDelayed } as Job;
+    await expect(f.processor(delayedJob, 'lock')).rejects.toBeInstanceOf(
+      DelayedError,
+    );
+    expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'lock');
+    expect(f.completeBusiness).not.toHaveBeenCalled();
+    expect(f.ledger.complete).not.toHaveBeenCalled();
+  });
+
+  it('does not create a US competitor follow-up when the switch is off', async () => {
+    const f = fixture();
+    f.competitorMonitorEnabled.mockResolvedValue(false);
+    await expect(f.processor(f.job, 'lock')).resolves.toMatchObject({
+      state: 'completed',
+    });
+    expect(f.completeBusiness).toHaveBeenCalledWith(
+      f.data,
+      expect.anything(),
+      false,
+      expect.any(AbortSignal),
+    );
+    expect(f.enqueueFollowUp).not.toHaveBeenCalled();
+  });
+
+  it('drains an in-flight heartbeat before committing business completion', async () => {
+    const f = fixture();
+    let started!: () => void;
+    let release!: () => void;
+    const completionStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const completionGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.completeBusiness.mockImplementation(async (_job, result) => {
+      f.ledger.read.mockResolvedValue({
+        ...f.run(),
+        state: 'business-completed',
+      });
+      started();
+      await completionGate;
+      return {
+        ...f.run(),
+        state: 'business-completed',
+        result: result as ScheduledMonitorRun['result'],
+      };
+    });
+    const processing = f.processor(f.job, 'lock');
+    await completionStarted;
+    await vi.advanceTimersByTimeAsync(2000);
+    release();
+    await expect(processing).resolves.toMatchObject({ state: 'completed' });
+    expect(f.deliverNotifications).toHaveBeenCalledOnce();
+    expect(f.complete).toHaveBeenCalledOnce();
+  });
+
   it('recovers an existing receipt without repeating upstream work', async () => {
     const result = { isBroken: true, brokenASINs: [{ asin: 'B000000001' }] };
     const f = fixture('running');
@@ -217,6 +314,28 @@ describe('scheduled monitor processor', () => {
       state: 'completed',
     });
     expect(f.enqueueFollowUp).toHaveBeenCalledTimes(2);
+    expect(f.complete).toHaveBeenCalledOnce();
+  });
+
+  it('does not enqueue a persisted US follow-up after the shared switch closes', async () => {
+    const child = { ...jobData('competitor'), country: 'US' as const };
+    const f = fixture('business-completed', { followUpJob: child });
+    f.competitorMonitorEnabled.mockResolvedValue(false);
+    await expect(f.processor(f.job, 'lock')).resolves.toMatchObject({
+      state: 'completed',
+    });
+    expect(f.enqueueFollowUp).not.toHaveBeenCalled();
+    expect(f.complete).toHaveBeenCalledOnce();
+  });
+
+  it('finishes committed competitor recovery while the shared switch is off', async () => {
+    const f = fixture('business-completed', {}, 'competitor', 'US');
+    f.competitorMonitorEnabled.mockResolvedValue(false);
+    await expect(f.processor(f.job, 'lock')).resolves.toMatchObject({
+      state: 'completed',
+    });
+    expect(f.checkGroup).not.toHaveBeenCalled();
+    expect(f.deliverNotifications).toHaveBeenCalledOnce();
     expect(f.complete).toHaveBeenCalledOnce();
   });
 
