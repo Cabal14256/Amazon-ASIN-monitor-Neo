@@ -420,6 +420,9 @@ export class VariantCheckPipeline {
       if ('completed' in initial) return initial.completed;
       const snapshot = initial.snapshot;
       await scope.guard();
+      const monitor =
+        operation?.taskType === 'monitor' ||
+        context.scheduledMonitor !== undefined;
       let observations =
         this.batchThreshold > 0 &&
         !context.forceRefresh &&
@@ -427,7 +430,7 @@ export class VariantCheckPipeline {
           ? await this.observeHybrid(snapshot, context, scope)
           : await this.observeGroup(snapshot, context, scope);
       const monitorDeferred = new Set<string>();
-      if (operation?.taskType === 'monitor') {
+      if (monitor) {
         for (const observation of observations)
           if (observation.kind === 'deferred')
             monitorDeferred.add(observation.asinId);
@@ -576,7 +579,8 @@ export class VariantCheckPipeline {
         checkpoint: () => scope.guard(),
         onProgress: context.onProgress,
         onDeferred:
-          context.operation?.taskType === 'monitor'
+          context.operation?.taskType === 'monitor' ||
+          context.scheduledMonitor !== undefined
             ? (index) => deferredIndexes.add(index)
             : undefined,
       },

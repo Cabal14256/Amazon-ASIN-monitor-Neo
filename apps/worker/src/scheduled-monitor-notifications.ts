@@ -71,6 +71,8 @@ function aggregateResult(
       0,
     );
     if (
+      groupNotifyEnabled !== 0 &&
+      groupNotifyEnabled !== false &&
       budget.items + 2 <= NOTIFICATION_MAX_ITEMS &&
       budget.textBytes + groupDetailBytes <= NOTIFICATION_MAX_TEXT_BYTES - 256
     ) {
@@ -80,7 +82,7 @@ function aggregateResult(
       summary.brokenGroupDetails.push(detail);
       budget.items += 2;
       budget.textBytes += groupDetailBytes;
-    } else {
+    } else if (groupNotifyEnabled !== 0 && groupNotifyEnabled !== false) {
       summary.notificationTruncated = true;
     }
   }
@@ -232,7 +234,15 @@ export async function deliverScheduledMonitorNotifications(
     run.job,
     await summaryFor(run, ledger, signal, checkpoint),
   );
-  if (!summary.brokenASINs?.length) return;
+  if (
+    (run.job.domain === 'competitor' && !summary.brokenASINs?.length) ||
+    (run.job.domain === 'primary' &&
+      (summary.brokenGroups ?? 0) > 0 &&
+      !summary.brokenASINs?.length &&
+      !summary.brokenGroupDetails?.length &&
+      !summary.notificationTruncated)
+  )
+    return;
   let claimAttempted = false;
   let claimState: 'new' | 'claimed' | 'sent' | 'failed' | undefined;
   const claimForSend = async () => {

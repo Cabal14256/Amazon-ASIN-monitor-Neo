@@ -8,6 +8,7 @@ import type {
 import {
   competitorMonitorSnapshotDigest,
   createVariantCheckOperation,
+  freezeScheduledMonitorSnapshot,
   PgCompetitorCheckRepository,
 } from '@asin-monitor/db';
 import {
@@ -21,6 +22,11 @@ import {
 import { EventEmitter } from 'node:events';
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from '../../db/test/helpers/scheduled-monitor-fixtures';
 import {
   CompetitorCheckPipeline,
   type CompetitorCheckContext,
@@ -438,6 +444,41 @@ describe('competitor check pipeline', () => {
       { asin: 'B000000001', country: 'US', owner: 'competitor' },
       expect.any(AbortSignal),
     );
+  });
+
+  it('retries scheduled competitor deferred checks without a public monitor operation', async () => {
+    const f = fixture();
+    const job = scheduledJob('competitor');
+    const [groupSnapshot] = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup('competitor', 'cg1')],
+      [1, 2, 3].map((index) =>
+        scheduledMember('competitor', 'cg1', `ca${index}`),
+      ),
+    );
+    f.unit.assertScheduledMonitorGroup = vi.fn(async () => undefined);
+    f.unit.recordScheduledMonitorGroupReceipt = vi.fn(async () => undefined);
+    f.checker.check.mockImplementation(async (code, _country, options) => {
+      if (code === 'B000000001' && !options?.forceRefresh)
+        throw new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
+      return catalogResult(code, true);
+    });
+    await f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      forceRefresh: false,
+      scheduledMonitor: { job, group: groupSnapshot },
+    });
+    expect(f.checker.check).toHaveBeenCalledWith(
+      'B000000001',
+      'US',
+      expect.objectContaining({ forceRefresh: true, owner: 'competitor' }),
+    );
+    expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
+      { kind: 'checked' },
+      { kind: 'checked' },
+      { kind: 'checked' },
+    ]);
+    expect(f.unit.recordScheduledMonitorGroupReceipt).toHaveBeenCalledOnce();
   });
   it('commits a final deferred upstream failure only after its bounded second check', async () => {
     const f = fixture(),

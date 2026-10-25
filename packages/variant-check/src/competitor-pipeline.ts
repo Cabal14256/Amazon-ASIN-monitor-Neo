@@ -481,9 +481,12 @@ export class CompetitorCheckPipeline {
       if ('completed' in initial)
         return initial.completed as CompetitorGroupCheckData;
       const snapshot: CompetitorGroupCheckSnapshot = initial.snapshot;
-      const monitor = context.operation?.taskType === 'competitor-monitor';
+      const monitorOperation =
+        context.operation?.taskType === 'competitor-monitor';
+      const monitor =
+        monitorOperation || context.scheduledMonitor !== undefined;
       if (
-        monitor &&
+        monitorOperation &&
         (context.forceRefresh ||
           !context.snapshotDigest ||
           !/^[a-f0-9]{64}$/.test(context.snapshotDigest) ||
@@ -628,7 +631,7 @@ export class CompetitorCheckPipeline {
             snapshot,
             finalObservations,
             () => scope.guard(unit),
-            monitor
+            monitorOperation
               ? {
                   operation: context.operation!,
                   snapshotDigest: context.snapshotDigest!,

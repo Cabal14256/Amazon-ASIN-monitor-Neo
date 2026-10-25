@@ -88,7 +88,7 @@ describe('scheduled monitor notification adapter', () => {
       groupSnapshot: { id: 'g1', country: 'US', name: 'G1' },
     });
     await deliverScheduledMonitorNotifications(
-      run,
+      { ...run, job: { ...job, domain: 'competitor' } },
       new AbortController().signal,
       async () => undefined,
       {
@@ -97,6 +97,27 @@ describe('scheduled monitor notification adapter', () => {
       },
     );
     expect(f.ledger.claimNotification).not.toHaveBeenCalled();
+  });
+
+  it('delivers a primary confirmation when all groups are healthy', async () => {
+    const f = fixture({
+      isBroken: false,
+      brokenASINs: [],
+      groupSnapshot: { id: 'g1', country: 'US', name: 'G1' },
+    });
+    await deliverScheduledMonitorNotifications(
+      run,
+      new AbortController().signal,
+      async () => undefined,
+      { ledgerFor: () => f.ledger, notifications: f.notifications },
+    );
+    expect(f.ledger.claimNotification).toHaveBeenCalledOnce();
+    expect(f.ledger.completeNotification).toHaveBeenCalledWith(
+      job,
+      'US',
+      true,
+      expect.any(AbortSignal),
+    );
   });
 
   it('does not notify a group or member whose frozen switch is disabled', async () => {

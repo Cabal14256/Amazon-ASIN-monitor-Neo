@@ -276,12 +276,6 @@ describe.skipIf(
     await competitorPool.query(
       "INSERT INTO competitor_asins(id,asin,name,country,brand,variant_group_id,create_time,update_time) VALUES('a-normal','B000000001','Normal','US','Fixture','c-one','2026-01-01','2026-01-01'),('a-broken','B000000002','Broken','US','Fixture','c-one','2026-01-01','2026-01-01')",
     );
-    await f.pool.query(
-      "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture')",
-    );
-    await f.pool.query(
-      "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled')",
-    );
     const cache = new RedisCatalogCheckStore(f.redis, getNeoQueuePrefix(f.env));
     try {
       const signal = new AbortController().signal;
@@ -708,6 +702,12 @@ ${extra}
   }
 
   it('executes a private scheduled US run and its stable competitor follow-up on compiled BullMQ Worker', async () => {
+    await f.pool.query(
+      "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture')",
+    );
+    await f.pool.query(
+      "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled')",
+    );
     await start('', false, true);
     const job = scheduledJob();
     const queued = await scheduledQueue.add('scheduled-monitor', job, {
