@@ -120,6 +120,34 @@ describe('scheduled monitor notification adapter', () => {
     );
   });
 
+  it('delivers a primary alert for a broken empty group', async () => {
+    const f = fixture({
+      isBroken: true,
+      brokenASINs: [],
+      groupSnapshot: {
+        id: 'g1',
+        country: 'US',
+        name: 'Empty broken group',
+        feishuNotifyEnabled: 1,
+        children: [],
+      },
+    });
+    await deliverScheduledMonitorNotifications(
+      run,
+      new AbortController().signal,
+      async () => undefined,
+      { ledgerFor: () => f.ledger, notifications: f.notifications },
+    );
+    expect(f.notifications.withCountryDelivery).toHaveBeenCalledOnce();
+    expect(f.ledger.claimNotification).toHaveBeenCalledOnce();
+    expect(f.ledger.completeNotification).toHaveBeenCalledWith(
+      job,
+      'US',
+      true,
+      expect.any(AbortSignal),
+    );
+  });
+
   it('does not notify a group or member whose frozen switch is disabled', async () => {
     const f = fixture({
       isBroken: true,
