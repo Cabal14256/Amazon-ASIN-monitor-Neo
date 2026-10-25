@@ -94,6 +94,7 @@ export function snapshotNotification(value: unknown): NotificationData {
     const item = record(v);
     return { ...group(item), asin: text(item.asin), brand: text(item.brand) };
   });
+  result.totalBrokenASINs = count(row.totalBrokenASINs);
   if (row.notificationTruncated !== undefined) {
     if (typeof row.notificationTruncated !== 'boolean') return fail();
     result.notificationTruncated = row.notificationTruncated;

@@ -217,6 +217,7 @@ describe('scheduled monitor notification adapter', () => {
     ).resolves.toBeUndefined();
     expect(delivered.notificationTruncated).toBe(true);
     expect(delivered.brokenASINs.length).toBeLessThan(10_000);
+    expect(delivered.totalBrokenASINs).toBe(10_008);
     expect(
       delivered.brokenGroupNames.length +
         delivered.brokenGroupDetails.length +

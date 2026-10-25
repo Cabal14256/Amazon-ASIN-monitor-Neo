@@ -100,6 +100,21 @@ function aggregateResult(
     groupNotifyEnabled === false
   )
     return;
+  for (const item of broken) {
+    const row = record(item);
+    if (typeof row.asin !== 'string')
+      throw new Error('SCHEDULED_MONITOR_NOTIFICATION_INVALID');
+    const child = Array.isArray(snapshot.children)
+      ? snapshot.children
+          .map(record)
+          .find((candidate) => candidate.asin === row.asin)
+      : undefined;
+    if (
+      child?.feishuNotifyEnabled !== 0 &&
+      child?.feishuNotifyEnabled !== false
+    )
+      summary.totalBrokenASINs = (summary.totalBrokenASINs ?? 0) + 1;
+  }
   const children = Array.isArray(snapshot.children) ? snapshot.children : [];
   summary.brokenASINs ??= [];
   for (const rawItem of broken) {
@@ -152,6 +167,7 @@ async function summaryFor(
     brokenGroupNames: [],
     brokenGroupDetails: [],
     brokenASINs: [],
+    totalBrokenASINs: 0,
     brokenByType: {},
     checkTime: run.job.createdAt,
   };

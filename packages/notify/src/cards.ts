@@ -73,6 +73,7 @@ function common(data: NotificationData) {
     totalGroups = 0,
     brokenGroups = 0,
     brokenASINs = [],
+    totalBrokenASINs = brokenASINs.length,
     brokenByType,
     checkTime,
   } = data;
@@ -84,7 +85,10 @@ function common(data: NotificationData) {
       : checkTime
     : notificationTime();
   let text = `【${time}】【${countryName}】\n\n`;
-  text += `已检查分组数量：${totalGroups}，异常分组数量：${brokenGroups}，异常ASIN数量：${brokenASINs.length}\n\n`;
+  const asinCount = data.notificationTruncated
+    ? `异常ASIN数量：${totalBrokenASINs}（展示${brokenASINs.length}条）`
+    : `异常ASIN数量：${totalBrokenASINs}`;
+  text += `已检查分组数量：${totalGroups}，异常分组数量：${brokenGroups}，${asinCount}\n\n`;
   if (data.notificationTruncated)
     text += '通知明细已按容量限制截断，异常分类统计仍为完整汇总。\n\n';
   const total = brokenASINs.length;
