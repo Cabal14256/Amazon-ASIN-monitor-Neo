@@ -95,6 +95,12 @@ function commitMayHaveSucceeded(error: unknown): boolean {
   );
 }
 
+function errorReason(error: unknown): string {
+  if (error instanceof ScheduledMonitorRunError) return error.code;
+  if (error instanceof Error) return error.message.slice(0, 120);
+  return 'unknown_error';
+}
+
 class ScheduledMonitorCompetitorDisabled extends Error {}
 
 /** Private system consumer. It never writes Redis task metadata or uses the
@@ -403,6 +409,7 @@ export function createScheduledMonitorProcessor(
         reason: uncertain
           ? 'scheduled_monitor_commit_unconfirmed'
           : 'scheduled_monitor_attempt_interrupted',
+        error: errorReason(error),
       });
       throw error;
     } finally {
