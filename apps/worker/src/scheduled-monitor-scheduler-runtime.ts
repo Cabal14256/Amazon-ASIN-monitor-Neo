@@ -74,7 +74,11 @@ export async function dispatchScheduledMonitorTick(
   );
   let admitted = 0;
   for (const item of dispatches) {
-    if (!(await options.assertLease())) break;
+    if (!(await options.assertLease())) {
+      if (admitted > 0)
+        throw new Error('SCHEDULED_MONITOR_LEASE_LOST_DURING_DISPATCH');
+      return 0;
+    }
     await options.scheduledQueue.add('scheduled-monitor', item.job, {
       jobId: item.job.jobId,
       delay: item.delayMs,
@@ -105,36 +109,55 @@ export async function startScheduledMonitorScheduler(
     defaultJobOptions: SCHEDULED_MONITOR_JOB_OPTIONS,
   });
   let lease: SchedulerLease | undefined;
-  const worker = new Worker(
-    SCHEDULED_MONITOR_TICK_QUEUE,
-    async (job: Job) => {
-      if (job.name !== SCHEDULED_MONITOR_TICK_JOB)
-        throw new Error('SCHEDULED_MONITOR_SCHEDULER_JOB_INVALID');
-      await dispatchScheduledMonitorTick({
-        env,
-        scheduledQueue,
-        configRepository,
-        competitorEnabled: options.competitorEnabled,
-        assertLease: () =>
-          lease?.assertCurrentOwner() ?? Promise.resolve(false),
-      });
-    },
-    {
-      connection,
-      prefix: getNeoQueuePrefix(env),
-      concurrency: 1,
-      autorun: false,
-    },
-  );
-  await schedulerQueue.waitUntilReady();
-  await worker.waitUntilReady();
   let closing = false;
-  lease = new SchedulerLease(
-    control,
-    `${getNeoQueuePrefix(env)}:scheduler:scheduled-monitor`,
-    () =>
-      schedulerQueue
-        .upsertJobScheduler(
+  let worker: Worker | undefined;
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
+  const initialize = async () => {
+    await schedulerQueue.waitUntilReady();
+    if (closing) throw new Error('SCHEDULED_MONITOR_SCHEDULER_STARTUP_ABORTED');
+    worker = new Worker(
+      SCHEDULED_MONITOR_TICK_QUEUE,
+      async (job: Job) => {
+        if (job.name !== SCHEDULED_MONITOR_TICK_JOB)
+          throw new Error('SCHEDULED_MONITOR_SCHEDULER_JOB_INVALID');
+        const plannedAt = job.opts.prevMillis;
+        if (!Number.isSafeInteger(plannedAt) || plannedAt! <= 0)
+          throw new Error('SCHEDULED_MONITOR_TICK_TIMESTAMP_INVALID');
+        await dispatchScheduledMonitorTick({
+          env,
+          scheduledQueue,
+          configRepository,
+          competitorEnabled: options.competitorEnabled,
+          assertLease: () =>
+            lease?.assertCurrentOwner() ?? Promise.resolve(false),
+          nowMs: plannedAt!,
+        });
+      },
+      {
+        connection,
+        prefix: getNeoQueuePrefix(env),
+        concurrency: 1,
+        autorun: false,
+      },
+    );
+    worker.on('error', () =>
+      logger.warn('定时监控调度消费者连接异常', {
+        reason: 'scheduled_monitor_scheduler_worker_error',
+      }),
+    );
+    await worker.waitUntilReady();
+    if (closing) throw new Error('SCHEDULED_MONITOR_SCHEDULER_STARTUP_ABORTED');
+    lease = new SchedulerLease(
+      control,
+      `${getNeoQueuePrefix(env)}:scheduler:scheduled-monitor`,
+      async () => {
+        if (!env.SCHEDULER_ENABLED) {
+          await schedulerQueue.removeJobScheduler(
+            SCHEDULED_MONITOR_SCHEDULER_ID,
+          );
+          return;
+        }
+        await schedulerQueue.upsertJobScheduler(
           SCHEDULED_MONITOR_SCHEDULER_ID,
           { every: SCHEDULED_MONITOR_TICK_EVERY_MS },
           {
@@ -142,16 +165,37 @@ export async function startScheduledMonitorScheduler(
             data: { schemaVersion: 1 },
             opts: SCHEDULED_MONITOR_JOB_OPTIONS,
           },
-        )
-        .then(() => undefined),
-    logger,
-    () =>
-      schedulerQueue
-        .removeJobScheduler(SCHEDULED_MONITOR_SCHEDULER_ID)
-        .then(() => undefined),
-  );
-  if (env.SCHEDULER_ENABLED) await lease.start();
-  void worker.run().catch(() => {
+        );
+      },
+      logger,
+      () =>
+        schedulerQueue
+          .removeJobScheduler(SCHEDULED_MONITOR_SCHEDULER_ID)
+          .then(() => undefined),
+    );
+    await lease.start();
+  };
+  try {
+    await Promise.race([
+      initialize(),
+      new Promise<never>((_resolve, reject) => {
+        startupTimer = setTimeout(
+          () =>
+            reject(new Error('SCHEDULED_MONITOR_SCHEDULER_STARTUP_TIMEOUT')),
+          5000,
+        );
+      }),
+    ]);
+  } catch {
+    closing = true;
+    await lease?.stop();
+    await Promise.allSettled([worker?.close(true), schedulerQueue.close()]);
+    throw new Error('Scheduled monitor scheduler initialization failed');
+  } finally {
+    if (startupTimer) clearTimeout(startupTimer);
+  }
+  const activeWorker = worker!;
+  void activeWorker.run().catch(() => {
     if (!closing) {
       logger.error('定时监控调度消费者停止运行', {
         reason: 'scheduled_monitor_scheduler_stopped',
@@ -162,12 +206,12 @@ export async function startScheduledMonitorScheduler(
   let closed: Promise<void> | undefined;
   return {
     queue: schedulerQueue,
-    worker,
+    worker: activeWorker,
     close() {
       closing = true;
       closed ??= (async () => {
-        await lease!.stop();
-        await worker.close();
+        await lease?.stop();
+        await activeWorker.close();
         await schedulerQueue.close();
       })();
       return closed;

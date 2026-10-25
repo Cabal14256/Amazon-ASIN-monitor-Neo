@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import type { Env } from '@asin-monitor/config';
+import { describe, expect, it, vi } from 'vitest';
+import { dispatchScheduledMonitorTick } from '../src/scheduled-monitor-scheduler-runtime';
 import {
   buildScheduledMonitorDispatches,
   parseScheduledMonitorConfig,
@@ -43,6 +45,29 @@ describe('scheduled monitor scheduler policy', () => {
         env,
       ),
     ).toEqual(env);
+    expect(
+      parseScheduledMonitorConfig(
+        [
+          {
+            configKey: 'COMPETITOR_MONITOR_ENABLED',
+            configValue: 'invalid-setting',
+          },
+        ],
+        env,
+      ).competitorEnabled,
+    ).toBe(env.competitorEnabled);
+    expect(
+      parseScheduledMonitorConfig(
+        [
+          {
+            configKey: 'COMPETITOR_MONITOR_ENABLED',
+            configValue: 'not-a-flag',
+          },
+          { configKey: 'MONITOR_US_SCHEDULE_MINUTES', configValue: '' },
+        ],
+        env,
+      ),
+    ).toEqual(env);
   });
 
   it('does not dispatch when disabled or between interval boundaries', () => {
@@ -70,6 +95,40 @@ describe('scheduled monitor scheduler policy', () => {
         Date.parse('2026-10-25T10:00:00.000Z'),
         '2026-10-25T10:00:00.000Z',
         60,
+      ),
+    ).toBe(true);
+  });
+
+  it('builds a dispatch from a persisted minute tick, not a 1ms-late processing clock', async () => {
+    const f = Date.parse('2026-10-25T10:00:00.000Z');
+    const queue = {
+      add: vi.fn(async (_name: string, data: { jobId: string }) => data),
+    };
+    const runtimeEnv = {
+      SCHEDULER_ENABLED: true,
+      COMPETITOR_MONITOR_ENABLED: env.competitorEnabled,
+      MONITOR_US_SCHEDULE_MINUTES: env.usIntervalMinutes,
+      MONITOR_EU_SCHEDULE_MINUTES: env.euIntervalMinutes,
+      MONITOR_BATCH_COUNT: env.totalBatches,
+    } as Env;
+    await expect(
+      dispatchScheduledMonitorTick({
+        env: runtimeEnv,
+        configRepository: { readConfiguration: vi.fn(async () => []) },
+        competitorEnabled: { value: true },
+        scheduledQueue: queue,
+        assertLease: async () => true,
+        nowMs: f,
+      }),
+    ).resolves.toBe(11);
+    const processingNow = f + 1;
+    const retried = buildScheduledMonitorDispatches(processingNow, env);
+    expect(retried.map((item) => item.job.jobId)).toEqual(
+      queue.add.mock.calls.map((call) => (call[1] as { jobId: string }).jobId),
+    );
+    expect(
+      retried.every(
+        (item) => item.job.requestedAt === '2026-10-25T10:00:00.000Z',
       ),
     ).toBe(true);
   });

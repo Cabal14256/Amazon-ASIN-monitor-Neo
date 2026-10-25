@@ -4,6 +4,7 @@ import {
   type ScheduledMonitorPlan,
 } from '@asin-monitor/contracts';
 import {
+  competitorMonitorEnabled,
   scheduledMonitorBatchIndex,
   scheduledMonitorTaskId,
 } from '@asin-monitor/db';
@@ -102,14 +103,10 @@ export function parseScheduledMonitorConfig(
 ): ScheduledMonitorConfig {
   return {
     enabled: env.enabled,
-    competitorEnabled:
-      value(rows, 'COMPETITOR_MONITOR_ENABLED') === undefined
-        ? env.competitorEnabled
-        : ['1', 'true', 'yes', 'on'].includes(
-            String(value(rows, 'COMPETITOR_MONITOR_ENABLED'))
-              .trim()
-              .toLowerCase(),
-          ),
+    competitorEnabled: competitorMonitorEnabled(
+      value(rows, 'COMPETITOR_MONITOR_ENABLED'),
+      env.competitorEnabled,
+    ),
     usIntervalMinutes: interval(
       value(rows, 'MONITOR_US_SCHEDULE_MINUTES'),
       env.usIntervalMinutes ?? 30,
@@ -183,11 +180,12 @@ export function buildScheduledMonitorDispatches(
   if (!Number.isSafeInteger(nowMs) || nowMs <= 0)
     throw new RangeError('Invalid scheduled monitor clock');
   const now = new Date(nowMs);
-  if (now.getUTCSeconds() !== 0 || now.getUTCMilliseconds() !== 0) return [];
-  const requestedAt = now.toISOString();
+  const requestedAt = new Date(
+    Math.floor(nowMs / 60_000) * 60_000,
+  ).toISOString();
   const due: { us: boolean; eu: boolean } = {
-    us: new Date(nowMs).getUTCMinutes() % config.usIntervalMinutes === 0,
-    eu: new Date(nowMs).getUTCMinutes() % config.euIntervalMinutes === 0,
+    us: now.getUTCMinutes() % config.usIntervalMinutes === 0,
+    eu: now.getUTCMinutes() % config.euIntervalMinutes === 0,
   };
   const usSlot = slot(nowMs, config.usIntervalMinutes);
   const euSlot = slot(nowMs, config.euIntervalMinutes);
@@ -244,8 +242,6 @@ export function shouldDispatchAt(
   const now = new Date(nowMs);
   return (
     Number.isFinite(parsed) &&
-    now.getUTCSeconds() === 0 &&
-    now.getUTCMilliseconds() === 0 &&
     now.getUTCMinutes() % intervalMinutes === 0 &&
     Math.floor(nowMs / interval) === Math.floor(parsed / interval)
   );

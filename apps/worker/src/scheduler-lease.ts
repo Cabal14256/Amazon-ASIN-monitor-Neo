@@ -18,8 +18,10 @@ export interface SchedulerLeaseRedis {
 }
 
 const RENEW = `if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE',KEYS[1],ARGV[2]) end return 0`;
+const PIN_FOR_CLEANUP = `if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE',KEYS[1],ARGV[2]) end return 0`;
 const RELEASE = `if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0`;
 const LEASE_MS = 15_000;
+const CLEANUP_LEASE_MS = 60_000;
 const REFRESH_MS = 5_000;
 
 /** The control Redis client must use finite command timeouts and no offline queue. */
@@ -28,6 +30,7 @@ export class SchedulerLease {
   private timer?: ReturnType<typeof setInterval>;
   private pending?: Promise<void>;
   private stopped = true;
+  private stopping = false;
   private ownsLease = false;
   private installed = false;
   constructor(
@@ -39,7 +42,7 @@ export class SchedulerLease {
   ) {}
 
   async assertCurrentOwner(): Promise<boolean> {
-    if (this.stopped || !this.ownsLease) return false;
+    if (this.stopped || this.stopping || !this.ownsLease) return false;
     try {
       const owner = await this.redis.get(this.key);
       this.ownsLease = owner === this.token;
@@ -55,6 +58,7 @@ export class SchedulerLease {
   start(): Promise<void> {
     if (!this.stopped) return this.pending ?? Promise.resolve();
     this.stopped = false;
+    this.stopping = false;
     this.timer = setInterval(() => {
       void this.refresh();
     }, REFRESH_MS);
@@ -69,6 +73,7 @@ export class SchedulerLease {
     return this.pending;
   }
   private async poll() {
+    if (this.stopping && !this.ownsLease) return;
     try {
       if (this.ownsLease) {
         this.ownsLease =
@@ -84,6 +89,7 @@ export class SchedulerLease {
         return;
       }
       if (this.stopped) return;
+      if (this.stopping) return;
       if (!this.installed) {
         // Stable BullMQ scheduler IDs make installation idempotent, including
         // an in-flight command that settles after this lease has expired.
@@ -99,18 +105,33 @@ export class SchedulerLease {
     }
   }
   async stop(): Promise<void> {
-    this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+    if (this.stopped) return;
+    this.stopping = true;
     await this.pending;
-    if (this.ownsLease && this.cleanupSchedules) {
-      try {
-        await this.cleanupSchedules();
-      } catch {
-        this.log.warn('调度计划清理失败，将保留至下一次租约同步', {
-          reason: 'scheduler_cleanup_failed',
-        });
+    let pinned = false;
+    try {
+      if (this.ownsLease && this.cleanupSchedules) {
+        pinned =
+          (await this.redis.eval(
+            PIN_FOR_CLEANUP,
+            1,
+            this.key,
+            this.token,
+            CLEANUP_LEASE_MS,
+          )) === 1;
+        this.ownsLease = pinned;
+        if (pinned) await this.cleanupSchedules();
       }
+    } catch {
+      this.log.warn('调度计划关闭清理失败', {
+        reason: 'scheduler_cleanup_failed',
+      });
+    } finally {
+      this.stopped = true;
+      this.stopping = false;
+      if (this.timer) clearInterval(this.timer);
+      this.timer = undefined;
+      await this.pending;
     }
     try {
       await this.redis.eval(RELEASE, 1, this.key, this.token);
