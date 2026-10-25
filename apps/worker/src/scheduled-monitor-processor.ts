@@ -161,7 +161,13 @@ export function createScheduledMonitorProcessor(
       heartbeat.unref();
     };
     const checkpoint = async (): Promise<void> => {
-      await check(activeRun!);
+      // Pipeline commit guards run while the business transaction holds the
+      // ledger row lock. Reading the same ledger row from another connection
+      // here would self-deadlock; the transaction-side snapshot assertion has
+      // already locked and validated cancellation/freshness. Redis job-lock
+      // and shutdown checks remain safe during that critical section.
+      signal.throwIfAborted();
+      await options.assertJobLock(bullJob, token);
     };
 
     let run: ScheduledMonitorRun;

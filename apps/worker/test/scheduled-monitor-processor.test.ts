@@ -61,7 +61,12 @@ function fixture(
     ...patch,
   };
   const receipt = vi.fn(async () => undefined as unknown);
-  const checkGroup = vi.fn(async () => ({ isBroken: false, brokenASINs: [] }));
+  const checkGroup = vi.fn(
+    async (_groupId: string, context: { checkpoint: () => Promise<void> }) => {
+      await context.checkpoint();
+      return { isBroken: false, brokenASINs: [] };
+    },
+  );
   const deliverNotifications = vi.fn(async () => undefined);
   const enqueueFollowUp = vi.fn(async () => undefined);
   const completeBusiness = vi.fn(async (_job: unknown, result: unknown) => {

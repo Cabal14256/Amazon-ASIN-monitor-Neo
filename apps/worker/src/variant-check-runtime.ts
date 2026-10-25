@@ -43,6 +43,7 @@ import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { createScheduledMonitorProcessor } from './scheduled-monitor-processor';
+import { deliverScheduledMonitorNotifications } from './scheduled-monitor-notifications';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantCheckProcessor } from './variant-check-processor';
 
@@ -439,6 +440,19 @@ export async function startVariantCheckRuntime(
           enqueueFollowUp: async (child) => {
             await queue.add('scheduled-monitor', child, { jobId: child.jobId });
           },
+          deliverNotifications: (run, signal, checkpoint) =>
+            deliverScheduledMonitorNotifications(
+              run,
+              signal,
+              checkpoint ?? (async () => undefined),
+              {
+                ledgerFor: (domain) =>
+                  domain === 'primary'
+                    ? scheduledPrimaryRepository!
+                    : scheduledCompetitorRepository!,
+                notifications: notifications!,
+              },
+            ),
         });
         const worker = new Worker(SCHEDULED_MONITOR_PHYSICAL_QUEUE, processor, {
           connection,
