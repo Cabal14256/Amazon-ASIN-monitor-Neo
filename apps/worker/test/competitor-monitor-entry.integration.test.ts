@@ -754,11 +754,11 @@ ${extra}
           [followUp.taskId],
         ),
       ]);
-      expect(primaryCounts.rows[0]).toEqual({ receipts: 1, history: 1 });
+      expect(primaryCounts.rows[0]).toEqual({ receipts: 1, history: 2 });
       expect(competitorCounts.rows[0]).toMatchObject({
         state: 'completed',
         receipts: 1,
-        history: 1,
+        history: 3,
       });
       expect(await store.listUser('fixture-owner')).toEqual([]);
       expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);

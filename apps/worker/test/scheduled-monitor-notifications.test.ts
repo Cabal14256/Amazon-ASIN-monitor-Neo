@@ -54,6 +54,39 @@ describe('scheduled monitor notification adapter', () => {
     );
   });
 
+  it('uses the committed child snapshot brand when the receipt omits it', async () => {
+    const f = fixture({
+      isBroken: true,
+      brokenASINs: [{ asin: 'B000000001' }],
+      groupSnapshot: {
+        id: 'g1',
+        country: 'US',
+        name: 'G1',
+        children: [
+          {
+            asin: 'B000000001',
+            brand: 'Committed brand',
+            feishuNotifyEnabled: 1,
+          },
+        ],
+      },
+    });
+    let delivered: any;
+    f.notifications.withCountryDelivery.mockImplementationOnce(
+      async (_domain, _country, summary, send) => {
+        delivered = summary;
+        return send(async () => ({ success: true, skipped: false }));
+      },
+    );
+    await deliverScheduledMonitorNotifications(
+      run,
+      new AbortController().signal,
+      async () => undefined,
+      { ledgerFor: () => f.ledger, notifications: f.notifications },
+    );
+    expect(delivered.brokenASINs[0].brand).toBe('Committed brand');
+  });
+
   it('keeps a claimed notification when the external ACK is uncertain', async () => {
     const f = fixture({
       isBroken: true,

@@ -131,7 +131,7 @@ function aggregateResult(
       continue;
     const item = {
       asin: row.asin,
-      brand: text(row.brand),
+      brand: text(row.brand) ?? text(child?.brand),
       variantGroupId: group.group.id,
       groupName: text(snapshot.name) ?? group.group.name,
       statusSource: text(row.statusSource),
