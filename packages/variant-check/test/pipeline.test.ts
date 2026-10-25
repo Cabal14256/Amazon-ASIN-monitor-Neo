@@ -17,11 +17,6 @@ import {
 import { EventEmitter } from 'node:events';
 import type { Pool } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  scheduledGroup,
-  scheduledJob,
-  scheduledMember,
-} from '../../db/test/helpers/scheduled-monitor-fixtures';
 import type { CatalogHybridOptions } from '../src/hybrid';
 import {
   VariantCheckCommitUncertainError,
@@ -35,6 +30,11 @@ import {
   type VariantCheckUnit,
 } from '../src/types';
 import { asin, checkedAt, deferred, flush, group, product } from './fixtures';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from './scheduled-monitor-fixtures';
 
 function fixture(
   count = 1,
@@ -861,14 +861,15 @@ describe('Primary variant business pipeline', () => {
   it('retries scheduled primary deferred checks without a public monitor operation', async () => {
     const f = setup(1);
     const job = scheduledJob('primary');
-    const [groupSnapshot] = freezeScheduledMonitorSnapshot(
+    const groupSnapshot = freezeScheduledMonitorSnapshot(
       job,
       [scheduledGroup('primary', 'g1')],
       [scheduledMember('primary', 'g1', 'a1')],
-    );
+    )[0]!;
+    const recordReceipt = vi.fn(async () => undefined);
     Object.assign(f.unit, {
       assertScheduledMonitorGroup: vi.fn(async () => undefined),
-      recordScheduledMonitorGroupReceipt: vi.fn(async () => undefined),
+      recordScheduledMonitorGroupReceipt: recordReceipt,
     });
     f.check
       .mockRejectedValueOnce(
@@ -880,14 +881,14 @@ describe('Primary variant business pipeline', () => {
       forceRefresh: false,
       scheduledMonitor: { job, group: groupSnapshot },
     });
-    expect(f.check.mock.calls.map((call) => call[2].forceRefresh)).toEqual([
+    expect(f.check.mock.calls.map((call) => call[2]?.forceRefresh)).toEqual([
       false,
       true,
     ]);
     expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
       { kind: 'checked' },
     ]);
-    expect(f.unit.recordScheduledMonitorGroupReceipt).toHaveBeenCalledOnce();
+    expect(recordReceipt).toHaveBeenCalledOnce();
   });
 
   it('checks outside transactions, reauthorizes locked writes, and returns the complete result only after commit', async () => {

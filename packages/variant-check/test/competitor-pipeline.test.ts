@@ -23,14 +23,14 @@ import { EventEmitter } from 'node:events';
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  scheduledGroup,
-  scheduledJob,
-  scheduledMember,
-} from '../../db/test/helpers/scheduled-monitor-fixtures';
-import {
   CompetitorCheckPipeline,
   type CompetitorCheckContext,
 } from '../src/competitor-pipeline';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from './scheduled-monitor-fixtures';
 
 const before = new Date('2026-01-01T00:00:00.000Z');
 const checkedAt = new Date('2026-09-12T00:00:00.000Z');
