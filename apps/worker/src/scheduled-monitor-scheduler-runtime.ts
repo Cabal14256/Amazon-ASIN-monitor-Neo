@@ -62,6 +62,38 @@ function rowsToConfig(
   return parseScheduledMonitorConfig(rows, initialConfig(env));
 }
 
+export async function dispatchScheduledMonitorTick(
+  options: ScheduledMonitorTickProducerOptions,
+): Promise<number> {
+  const rows = await options.configRepository.readConfiguration();
+  const config = rowsToConfig(rows, options.env);
+  options.competitorEnabled.value = config.competitorEnabled;
+  const dispatches = buildScheduledMonitorDispatches(
+    options.nowMs ?? Date.now(),
+    config,
+  );
+  let admitted = 0;
+  for (const item of dispatches) {
+    if (!(await options.assertLease())) break;
+    await options.scheduledQueue.add('scheduled-monitor', item.job, {
+      jobId: item.job.jobId,
+      delay: item.delayMs,
+      ...SCHEDULED_MONITOR_JOB_OPTIONS,
+    });
+    admitted++;
+  }
+  return admitted;
+}
+
+export interface ScheduledMonitorTickProducerOptions {
+  env: Env;
+  scheduledQueue: Pick<Queue, 'add'>;
+  configRepository: Pick<PgSpApiConfigurationRepository, 'readConfiguration'>;
+  competitorEnabled: { value: boolean };
+  assertLease: () => Promise<boolean>;
+  nowMs?: number;
+}
+
 export async function startScheduledMonitorScheduler(
   options: ScheduledMonitorSchedulerOptions,
 ): Promise<ScheduledMonitorSchedulerRuntime> {
@@ -72,23 +104,20 @@ export async function startScheduledMonitorScheduler(
     prefix: getNeoQueuePrefix(env),
     defaultJobOptions: SCHEDULED_MONITOR_JOB_OPTIONS,
   });
-  const dispatch = async () => {
-    const rows = await configRepository.readConfiguration();
-    const config = rowsToConfig(rows, env);
-    options.competitorEnabled.value = config.competitorEnabled;
-    for (const item of buildScheduledMonitorDispatches(Date.now(), config))
-      await scheduledQueue.add('scheduled-monitor', item.job, {
-        jobId: item.job.jobId,
-        delay: item.delayMs,
-        ...SCHEDULED_MONITOR_JOB_OPTIONS,
-      });
-  };
+  let lease: SchedulerLease | undefined;
   const worker = new Worker(
     SCHEDULED_MONITOR_TICK_QUEUE,
     async (job: Job) => {
       if (job.name !== SCHEDULED_MONITOR_TICK_JOB)
         throw new Error('SCHEDULED_MONITOR_SCHEDULER_JOB_INVALID');
-      await dispatch();
+      await dispatchScheduledMonitorTick({
+        env,
+        scheduledQueue,
+        configRepository,
+        competitorEnabled: options.competitorEnabled,
+        assertLease: () =>
+          lease?.assertCurrentOwner() ?? Promise.resolve(false),
+      });
     },
     {
       connection,
@@ -100,7 +129,7 @@ export async function startScheduledMonitorScheduler(
   await schedulerQueue.waitUntilReady();
   await worker.waitUntilReady();
   let closing = false;
-  const lease = new SchedulerLease(
+  lease = new SchedulerLease(
     control,
     `${getNeoQueuePrefix(env)}:scheduler:scheduled-monitor`,
     () =>
@@ -137,7 +166,7 @@ export async function startScheduledMonitorScheduler(
     close() {
       closing = true;
       closed ??= (async () => {
-        await lease.stop();
+        await lease!.stop();
         await worker.close();
         await schedulerQueue.close();
       })();

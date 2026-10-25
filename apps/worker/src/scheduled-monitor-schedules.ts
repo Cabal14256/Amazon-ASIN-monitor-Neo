@@ -10,6 +10,8 @@ import {
 
 export const SCHEDULED_MONITOR_SCHEDULER_ID =
   'neo-scheduled-monitor-dispatch-v1';
+export const SCHEDULED_MONITOR_SELECTOR = 'scheduled-monitor';
+export const SCHEDULED_MONITOR_BUSINESS_QUEUE = 'scheduled-monitor-task-queue';
 export const SCHEDULED_MONITOR_TICK_QUEUE =
   'scheduled-monitor-scheduler-task-queue';
 export const SCHEDULED_MONITOR_TICK_JOB = 'scheduled-monitor-scheduler-tick';
@@ -35,6 +37,18 @@ export const SCHEDULED_MONITOR_EU_COUNTRIES = [
 export type ScheduledMonitorCountry =
   | (typeof SCHEDULED_MONITOR_US_COUNTRIES)[number]
   | (typeof SCHEDULED_MONITOR_EU_COUNTRIES)[number];
+
+export function isScheduledMonitorSelected(raw: string | undefined): boolean {
+  return (raw ?? '')
+    .split(',')
+    .map((token) =>
+      token
+        .trim()
+        .toLowerCase()
+        .replace(/[_\s]+/g, '-'),
+    )
+    .includes(SCHEDULED_MONITOR_SELECTOR);
+}
 
 export interface ScheduledMonitorConfig {
   enabled: boolean;
