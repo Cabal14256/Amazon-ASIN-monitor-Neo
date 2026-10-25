@@ -54,6 +54,8 @@ export interface VariantCheckContext {
   authorize(unit: VariantCheckUnit): Promise<void>;
   /** Task identity, lease, expiry and cancellation. Never log an upstream error. */
   checkpoint(): Promise<void>;
+  /** Reports actual repository transaction work until its client settles. */
+  onRepositoryWorkStateChange?(active: boolean): void;
   /** Synchronous aggregate budget reservation, while a new write can roll back.
    * Also called for recovered receipts. Must not perform external I/O. */
   validateResult?(result: VariantView | VariantGroupCheckData): void;
@@ -149,7 +151,13 @@ export class VariantCheckPipeline {
     };
     const scope: CheckScope = {
       signal: controller.signal,
-      trackWork: settlement ? (work) => settlement.track(work) : undefined,
+      trackWork: (work) => {
+        context.onRepositoryWorkStateChange?.(true);
+        settlement?.track(work);
+        void work
+          .finally(() => context.onRepositoryWorkStateChange?.(false))
+          .catch(() => {});
+      },
       stop(error) {
         controller.abort(error);
       },
@@ -244,6 +252,7 @@ export class VariantCheckPipeline {
       // can mean the COMMIT was sent and its acknowledgement was lost.
       if (readyToCommit) throw new VariantCheckCommitUncertainError();
       throw error;
+    } finally {
     }
   }
   private async read<T, R>(

@@ -46,6 +46,8 @@ export interface CompetitorCheckContext {
   snapshotDigest?: string;
   authorize(unit: CompetitorCheckUnit): Promise<void>;
   checkpoint(): Promise<void>;
+  /** Reports actual repository transaction work until its clients settle. */
+  onRepositoryWorkStateChange?(active: boolean): void;
   onProgress?(completed: number, total: number): Promise<void> | void;
 }
 interface Scope {
@@ -210,7 +212,13 @@ export class CompetitorCheckPipeline {
     let confirmation: { value: T } | undefined;
     const scope: Scope = {
       signal: controller.signal,
-      trackWork: settlement ? (work) => settlement.track(work) : undefined,
+      trackWork: (work) => {
+        context.onRepositoryWorkStateChange?.(true);
+        settlement?.track(work);
+        void work
+          .finally(() => context.onRepositoryWorkStateChange?.(false))
+          .catch(() => {});
+      },
       started: () => {
         commitStarted = true;
       },
@@ -332,6 +340,7 @@ export class CompetitorCheckPipeline {
     } catch (error) {
       if (readyToCommit) throw new VariantCheckCommitUncertainError();
       throw error;
+    } finally {
     }
   }
   private async cleanupCache(

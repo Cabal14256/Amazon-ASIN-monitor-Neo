@@ -161,10 +161,15 @@ export function createScheduledMonitorProcessor(
     let heartbeat: ReturnType<typeof setTimeout> | undefined;
     let heartbeatCheck: Promise<void> | undefined;
     let heartbeatStopped = false;
+    let activePipelineTransactions = 0;
     let activeRun: ScheduledMonitorRun | undefined;
     const check = async (run: ScheduledMonitorRun) => {
       signal.throwIfAborted();
       await options.assertJobLock(bullJob, token);
+      if (activePipelineTransactions > 0) {
+        signal.throwIfAborted();
+        return;
+      }
       await assertCompetitorEnabled();
       const current = await ledger.read(job, signal);
       if (!current) throw new ScheduledMonitorRunError('dependency');
@@ -277,6 +282,12 @@ export function createScheduledMonitorProcessor(
                   scheduledMonitor,
                   authorize: async () => undefined,
                   checkpoint,
+                  onRepositoryWorkStateChange: (active) => {
+                    activePipelineTransactions = Math.max(
+                      0,
+                      activePipelineTransactions + (active ? 1 : -1),
+                    );
+                  },
                 })
               : await options.competitorPipeline.checkGroup(group.group.id, {
                   forceRefresh: false,
@@ -288,6 +299,12 @@ export function createScheduledMonitorProcessor(
                       throw new ScheduledMonitorCompetitorDisabled();
                   },
                   checkpoint,
+                  onRepositoryWorkStateChange: (active) => {
+                    activePipelineTransactions = Math.max(
+                      0,
+                      activePipelineTransactions + (active ? 1 : -1),
+                    );
+                  },
                 });
           const counts = resultCounts(result);
           brokenGroups += counts.brokenGroups;
