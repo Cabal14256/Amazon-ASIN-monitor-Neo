@@ -399,6 +399,7 @@ export function createScheduledMonitorProcessor(
         error instanceof ScheduledMonitorRunError &&
         ['input', 'identity', 'snapshot', 'state'].includes(error.code);
       if (finalAttempt && !uncertain && !permanent && !signal.aborted) {
+        await options.assertJobLock(bullJob, token);
         const current = await ledger.read(job, signal).catch(() => undefined);
         if (
           current &&

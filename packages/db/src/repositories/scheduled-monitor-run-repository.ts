@@ -711,6 +711,20 @@ export class PgScheduledMonitorRunRepository {
         [job.taskId, run.jobDigest, country, target],
       );
       if (updated.length !== 1) throw new ScheduledMonitorRunError('state');
+      if (sent) {
+        const historyTable =
+          this.domain === 'primary'
+            ? 'monitor_history'
+            : 'competitor_monitor_history';
+        await tx.query(
+          `UPDATE ${identifier(this.schema)}.${identifier(historyTable)}
+              SET notification_sent=true
+            WHERE monitor_task_id=$1::text
+              AND upper(rtrim(country))=$2
+              AND is_broken=true`,
+          [job.taskId, country],
+        );
+      }
     }, signal);
   }
 

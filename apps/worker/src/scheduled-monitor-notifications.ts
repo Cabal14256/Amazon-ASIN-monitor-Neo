@@ -251,7 +251,9 @@ export async function deliverScheduledMonitorNotifications(
     await summaryFor(run, ledger, signal, checkpoint),
   );
   if (
-    (run.job.domain === 'competitor' && !summary.brokenASINs?.length) ||
+    (run.job.domain === 'competitor' &&
+      !(summary.totalBrokenASINs ?? 0) &&
+      !summary.brokenASINs?.length) ||
     (run.job.domain === 'primary' &&
       (summary.brokenGroups ?? 0) > 0 &&
       !summary.brokenASINs?.length &&

@@ -102,6 +102,7 @@ function fixture(
       return run;
     },
   );
+  const assertJobLock = vi.fn(async () => undefined);
   const read = vi.fn(async () => run);
   const ledger = {
     accept: vi.fn(async () => run),
@@ -121,7 +122,7 @@ function fixture(
     primaryPipeline: { checkGroup: checkGroup as any },
     competitorPipeline: { checkGroup: checkGroup as any },
     shutdownSignal: new AbortController().signal,
-    assertJobLock: vi.fn(async () => undefined),
+    assertJobLock,
     enqueueFollowUp,
     competitorMonitorEnabled,
     deliverNotifications,
@@ -150,6 +151,7 @@ function fixture(
     deliverNotifications,
     enqueueFollowUp,
     competitorMonitorEnabled,
+    assertJobLock,
   };
 }
 
@@ -402,6 +404,23 @@ describe('scheduled monitor processor', () => {
     await expect(f.processor(f.job, 'lock')).rejects.toMatchObject({
       commitMayHaveSucceeded: true,
     });
+    expect(f.finishWithoutBusiness).not.toHaveBeenCalledWith(
+      f.data,
+      'failed',
+      expect.anything(),
+    );
+  });
+
+  it('does not finalize a failed ledger after the final attempt loses its Bull lock', async () => {
+    const f = fixture('running');
+    f.job.attemptsMade = 1;
+    f.checkGroup.mockRejectedValue(new Error('terminal fixture failure'));
+    f.assertJobLock
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new Error('SCHEDULED_MONITOR_JOB_LOCK_LOST'));
+    await expect(f.processor(f.job, 'lock')).rejects.toThrow(
+      'SCHEDULED_MONITOR_JOB_LOCK_LOST',
+    );
     expect(f.finishWithoutBusiness).not.toHaveBeenCalledWith(
       f.data,
       'failed',
