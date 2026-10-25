@@ -549,6 +549,11 @@ ${extra}
     if (child) throw new Error('Fixture Worker already started');
     output = '';
     exited = false;
+    const workerDatabaseUrl = new URL(f.env.DATABASE_URL);
+    workerDatabaseUrl.searchParams.set(
+      'options',
+      `-c search_path=${primarySchema} -c timezone=UTC`,
+    );
     child = spawn(
       process.execPath,
       ['--require', preload(extra), resolve(__dirname, '../dist/main.js')],
@@ -559,7 +564,7 @@ ${extra}
           ...process.env,
           PROCESS_ROLE: 'worker',
           AUTH_DATA_AUTHORITY: 'postgresql',
-          DATABASE_URL: f.env.DATABASE_URL,
+          DATABASE_URL: workerDatabaseUrl.toString(),
           PGOPTIONS: `-c search_path=${primarySchema} -c timezone=UTC`,
           COMPETITOR_DATABASE_URL: competitorDatabaseUrl,
           REDIS_URL: f.env.REDIS_URL,
