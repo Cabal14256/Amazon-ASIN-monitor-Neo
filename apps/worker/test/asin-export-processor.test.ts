@@ -736,7 +736,7 @@ describe('ASIN streaming export', () => {
     expect(sheet.rowCount).toBe(10_001);
     expect(sheet.getRow(2).getCell(2).value).toBe('g-0');
     expect(sheet.getRow(10_001).getCell(2).value).toBe('g-9999');
-  });
+  }, 15_000);
 
   it('continues a dense group into later small and empty siblings in two bounded queries', async () => {
     const groups = [

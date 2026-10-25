@@ -175,9 +175,11 @@ describe('ASIN export startup deadline', () => {
       await reconcile.apply(this, args);
       completedSweep();
     });
+    const cleanup = vi.spyOn(ExportArtifactStore.prototype, 'cleanup');
     const runtime = await startAsinExportRuntime(env, vi.fn());
     try {
       await firstSweep;
+      await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(3));
       expect(await artifacts.readRejectedSubmission(proof.taskId)).toEqual(
         proof,
       );

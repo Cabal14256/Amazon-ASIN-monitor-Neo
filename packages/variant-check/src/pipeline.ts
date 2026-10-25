@@ -5,6 +5,8 @@ import type {
 import {
   assertVariantCheckOperationRequest,
   parseVariantCheckOperation,
+  scheduledMonitorGroupOperation,
+  type ScheduledMonitorCheck,
   type VariantCheckOperation,
 } from '@asin-monitor/db';
 import {
@@ -45,11 +47,15 @@ export interface VariantCheckContext {
   groupAdmission?: VariantGroupAdmission;
   /** Immutable accepted job identity. Sync HTTP checks intentionally omit it. */
   operation?: VariantCheckOperation;
+  /** Private scheduled ledger identity. It is never exposed through task APIs. */
+  scheduledMonitor?: ScheduledMonitorCheck;
   /** HTTP authenticates the current session; accepted jobs verify current owner
    * authority according to their task policy. Anonymous compatibility is explicit. */
   authorize(unit: VariantCheckUnit): Promise<void>;
   /** Task identity, lease, expiry and cancellation. Never log an upstream error. */
   checkpoint(): Promise<void>;
+  /** Reports actual repository transaction work until its client settles. */
+  onRepositoryWorkStateChange?(active: boolean): void;
   /** Synchronous aggregate budget reservation, while a new write can roll back.
    * Also called for recovered receipts. Must not perform external I/O. */
   validateResult?(result: VariantView | VariantGroupCheckData): void;
@@ -145,7 +151,13 @@ export class VariantCheckPipeline {
     };
     const scope: CheckScope = {
       signal: controller.signal,
-      trackWork: settlement ? (work) => settlement.track(work) : undefined,
+      trackWork: (work) => {
+        context.onRepositoryWorkStateChange?.(true);
+        settlement?.track(work);
+        void work
+          .finally(() => context.onRepositoryWorkStateChange?.(false))
+          .catch(() => {});
+      },
       stop(error) {
         controller.abort(error);
       },
@@ -240,6 +252,7 @@ export class VariantCheckPipeline {
       // can mean the COMMIT was sent and its acknowledgement was lost.
       if (readyToCommit) throw new VariantCheckCommitUncertainError();
       throw error;
+    } finally {
     }
   }
   private async read<T, R>(
@@ -395,13 +408,30 @@ export class VariantCheckPipeline {
           groupId,
           forceRefresh: context.forceRefresh ?? false,
         });
+      if (
+        context.scheduledMonitor &&
+        (context.scheduledMonitor.job.domain !== 'primary' ||
+          context.scheduledMonitor.group.group.id !== groupId)
+      )
+        throw new VariantCheckError('invalid-input');
       const initial = await this.read<
         GroupCheckSnapshot,
         VariantGroupCheckData
-      >(scope, operation, (unit) => unit.loadGroup(groupId));
+      >(scope, operation, async (unit) => {
+        const snapshot = await unit.loadGroup(groupId);
+        if (context.scheduledMonitor) {
+          if (!unit.assertScheduledMonitorGroup)
+            throw new VariantCheckError('invalid-result');
+          await unit.assertScheduledMonitorGroup(context.scheduledMonitor);
+        }
+        return snapshot;
+      });
       if ('completed' in initial) return initial.completed;
       const snapshot = initial.snapshot;
       await scope.guard();
+      const monitor =
+        operation?.taskType === 'monitor' ||
+        context.scheduledMonitor !== undefined;
       let observations =
         this.batchThreshold > 0 &&
         !context.forceRefresh &&
@@ -409,7 +439,7 @@ export class VariantCheckPipeline {
           ? await this.observeHybrid(snapshot, context, scope)
           : await this.observeGroup(snapshot, context, scope);
       const monitorDeferred = new Set<string>();
-      if (operation?.taskType === 'monitor') {
+      if (monitor) {
         for (const observation of observations)
           if (observation.kind === 'deferred')
             monitorDeferred.add(observation.asinId);
@@ -422,8 +452,16 @@ export class VariantCheckPipeline {
       const output = await this.persist(
         scope,
         async (unit) => {
-          const committed = await unit.commitGroup(snapshot, observations, () =>
-            scope.guard(unit),
+          if (context.scheduledMonitor) {
+            if (!unit.assertScheduledMonitorGroup)
+              throw new VariantCheckError('invalid-result');
+            await unit.assertScheduledMonitorGroup(context.scheduledMonitor);
+          }
+          const committed = await unit.commitGroup(
+            snapshot,
+            observations,
+            () => scope.guard(unit),
+            context.scheduledMonitor,
           );
           const result = groupCheckResult(committed);
           if (operation?.taskType === 'monitor') {
@@ -432,6 +470,26 @@ export class VariantCheckPipeline {
             await unit.recordMonitorHistory(
               operation.taskId,
               committed,
+              result,
+            );
+          }
+          if (context.scheduledMonitor) {
+            if (!unit.recordMonitorHistory)
+              throw new VariantCheckError('invalid-result');
+            await unit.recordMonitorHistory(
+              context.scheduledMonitor.job.taskId,
+              committed,
+              result,
+            );
+          }
+          if (context.scheduledMonitor) {
+            if (!unit.recordScheduledMonitorGroupReceipt)
+              throw new VariantCheckError('invalid-result');
+            await unit.recordScheduledMonitorGroupReceipt(
+              scheduledMonitorGroupOperation(
+                context.scheduledMonitor.job,
+                context.scheduledMonitor.group,
+              ),
               result,
             );
           }
@@ -530,7 +588,8 @@ export class VariantCheckPipeline {
         checkpoint: () => scope.guard(),
         onProgress: context.onProgress,
         onDeferred:
-          context.operation?.taskType === 'monitor'
+          context.operation?.taskType === 'monitor' ||
+          context.scheduledMonitor !== undefined
             ? (index) => deferredIndexes.add(index)
             : undefined,
       },

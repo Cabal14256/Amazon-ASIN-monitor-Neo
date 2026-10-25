@@ -1,5 +1,6 @@
 import {
   createVariantCheckOperation,
+  freezeScheduledMonitorSnapshot,
   PgVariantCheckRepository,
 } from '@asin-monitor/db';
 import {
@@ -29,6 +30,11 @@ import {
   type VariantCheckUnit,
 } from '../src/types';
 import { asin, checkedAt, deferred, flush, group, product } from './fixtures';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from './scheduled-monitor-fixtures';
 
 function fixture(
   count = 1,
@@ -850,6 +856,39 @@ describe('Primary variant business pipeline', () => {
       { kind: 'checked' },
     ]);
     expect(f.cache.clearDeferred).not.toHaveBeenCalled();
+  });
+
+  it('retries scheduled primary deferred checks without a public monitor operation', async () => {
+    const f = setup(1);
+    const job = scheduledJob('primary');
+    const groupSnapshot = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup('primary', 'g1')],
+      [scheduledMember('primary', 'g1', 'a1')],
+    )[0]!;
+    const recordReceipt = vi.fn(async () => undefined);
+    Object.assign(f.unit, {
+      assertScheduledMonitorGroup: vi.fn(async () => undefined),
+      recordScheduledMonitorGroupReceipt: recordReceipt,
+    });
+    f.check
+      .mockRejectedValueOnce(
+        new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503)),
+      )
+      .mockResolvedValueOnce(product(1));
+    await f.pipeline.checkGroup('g1', {
+      ...f.context,
+      forceRefresh: false,
+      scheduledMonitor: { job, group: groupSnapshot },
+    });
+    expect(f.check.mock.calls.map((call) => call[2]?.forceRefresh)).toEqual([
+      false,
+      true,
+    ]);
+    expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
+      { kind: 'checked' },
+    ]);
+    expect(recordReceipt).toHaveBeenCalledOnce();
   });
 
   it('checks outside transactions, reauthorizes locked writes, and returns the complete result only after commit', async () => {
