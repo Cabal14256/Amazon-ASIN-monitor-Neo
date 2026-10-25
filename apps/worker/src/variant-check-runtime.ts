@@ -42,8 +42,8 @@ import { MonitorGroupAdmission } from './monitor-group-admission';
 import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
-import { createScheduledMonitorProcessor } from './scheduled-monitor-processor';
 import { deliverScheduledMonitorNotifications } from './scheduled-monitor-notifications';
+import { createScheduledMonitorProcessor } from './scheduled-monitor-processor';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantCheckProcessor } from './variant-check-processor';
 
