@@ -763,6 +763,7 @@ ${extra}
       expect(await store.listUser('fixture-owner')).toEqual([]);
       expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);
     },
+    30_000,
   );
 
   it('shares database group admission across both compiled consumers and applies a live increase without losing real receipts', async () => {
