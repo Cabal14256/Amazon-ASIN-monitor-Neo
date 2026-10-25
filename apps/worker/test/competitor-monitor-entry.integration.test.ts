@@ -703,10 +703,10 @@ ${extra}
     'executes a private scheduled US run and its stable competitor follow-up on compiled BullMQ Worker',
     async () => {
       await f.pool.query(
-        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture')",
+        "INSERT INTO variant_groups(id,name,country,site,brand,is_broken,variant_status,manual_broken,is_competitor,feishu_notify_enabled) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture',false,'NORMAL',false,false,true)",
       );
       await f.pool.query(
-        "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled')",
+        "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id,is_broken,variant_status,manual_broken,feishu_notify_enabled) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled',false,'NORMAL',false,true)",
       );
       await start('', false, true);
       const job = scheduledJob();
