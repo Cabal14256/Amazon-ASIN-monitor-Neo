@@ -53,6 +53,13 @@ type CheckQueue =
   | 'batch-check'
   | 'monitor'
   | 'competitor-monitor';
+
+function databaseSchema(url: string): string | undefined {
+  const options = new URL(url).searchParams.get('options');
+  const match = options?.match(/(?:^|\s)-c\s+search_path=([^\s]+)/);
+  const schema = match?.[1]?.replace(/^"|"$/g, '');
+  return schema && /^[A-Za-z_][A-Za-z0-9_]*$/.test(schema) ? schema : undefined;
+}
 /** Actual BullMQ consumers. All catalog/quota/task commands use a fail-fast
  * non-replaying connection; BullMQ alone owns its blocking/retry connections. */
 export async function startVariantCheckRuntime(
@@ -101,31 +108,6 @@ export async function startVariantCheckRuntime(
     ),
     statement_timeout: 1500,
   });
-  if (process.env.RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION === '1') {
-    const probe = await pool.query(
-      `SELECT current_database() AS database, current_schema() AS schema,
-              to_regclass('variant_groups')::text AS groups,
-              to_regclass('primary_scheduled_monitor_runs')::text AS ledger`,
-    );
-    const row = probe.rows[0];
-    if (
-      !row ||
-      row.schema !== process.env.NEO_SCHEDULED_MONITOR_FIXTURE_SCHEMA ||
-      !row.groups ||
-      !row.ledger
-    )
-      logger.error('定时监控集成数据库 schema 与 fixture 不匹配', {
-        database: row?.database,
-        schema: row?.schema,
-        groups: row?.groups,
-        ledger: row?.ledger,
-      });
-    else
-      logger.warn('定时监控集成数据库 schema 已验证', {
-        database: row.database,
-        schema: row.schema,
-      });
-  }
   const competitorChecks =
     scheduledMonitorEnabled ||
     selected.includes('variant-check') ||
@@ -227,9 +209,12 @@ export async function startVariantCheckRuntime(
     if (scheduledMonitorEnabled && competitorPool) {
       scheduledPrimaryRepository = new PgPrimaryScheduledMonitorRunRepository(
         pool,
+        { schema: databaseSchema(env.DATABASE_URL) },
       );
       scheduledCompetitorRepository =
-        new PgCompetitorScheduledMonitorRunRepository(competitorPool);
+        new PgCompetitorScheduledMonitorRunRepository(competitorPool, {
+          schema: databaseSchema(env.COMPETITOR_DATABASE_URL),
+        });
     }
     const configRepository = new PgSpApiConfigurationRepository(pool);
     source = new DatabaseConfigSource(environment, async (signal) =>
