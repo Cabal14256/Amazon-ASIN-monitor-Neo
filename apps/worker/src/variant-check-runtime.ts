@@ -101,6 +101,26 @@ export async function startVariantCheckRuntime(
     ),
     statement_timeout: 1500,
   });
+  if (process.env.RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION === '1') {
+    const probe = await pool.query(
+      `SELECT current_database() AS database, current_schema() AS schema,
+              to_regclass('variant_groups')::text AS groups,
+              to_regclass('primary_scheduled_monitor_runs')::text AS ledger`,
+    );
+    const row = probe.rows[0];
+    if (
+      !row ||
+      row.schema !== process.env.NEO_SCHEDULED_MONITOR_FIXTURE_SCHEMA ||
+      !row.groups ||
+      !row.ledger
+    )
+      logger.error('定时监控集成数据库 schema 与 fixture 不匹配', {
+        database: row?.database,
+        schema: row?.schema,
+        groups: row?.groups,
+        ledger: row?.ledger,
+      });
+  }
   const competitorChecks =
     scheduledMonitorEnabled ||
     selected.includes('variant-check') ||

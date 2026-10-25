@@ -575,6 +575,12 @@ ${extra}
             : dualMonitor
             ? 'monitor,competitor-monitor'
             : 'competitor-monitor',
+          RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION: scheduledMonitor
+            ? '1'
+            : undefined,
+          NEO_SCHEDULED_MONITOR_FIXTURE_SCHEMA: scheduledMonitor
+            ? primarySchema
+            : undefined,
           COMPETITOR_MONITOR_ENABLED: 'true',
           SCHEDULER_ENABLED: 'false',
           WORKER_METRICS_ENABLED: 'true',
