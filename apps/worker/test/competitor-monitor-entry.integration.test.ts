@@ -53,9 +53,7 @@ import {
  * Catalog checker boundary. HTTPS delivery is local and rejects every other
  * transport destination. This suite never contacts live Amazon or Feishu. */
 describe.skipIf(
-  (process.env.RUN_INTEGRATION_TESTS !== 'true' &&
-    process.env.RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION !== '1') ||
-    process.platform === 'win32',
+  process.env.RUN_INTEGRATION_TESTS !== 'true' || process.platform === 'win32',
 )('compiled competitor monitor with owned receipts and country claims', () => {
   let f: Awaited<ReturnType<typeof maintenanceFixture>>;
   let competitorPool: ReturnType<typeof createPgPool> | undefined;
@@ -701,68 +699,71 @@ ${extra}
     };
   }
 
-  it('executes a private scheduled US run and its stable competitor follow-up on compiled BullMQ Worker', async () => {
-    await f.pool.query(
-      "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture')",
-    );
-    await f.pool.query(
-      "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled')",
-    );
-    await start('', false, true);
-    const job = scheduledJob();
-    const queued = await scheduledQueue.add('scheduled-monitor', job, {
-      jobId: job.jobId,
-    });
-    await expect(
-      queued.waitUntilFinished(scheduledEvents, 30_000),
-    ).resolves.toMatchObject({
-      state: 'completed',
-    });
-    const primary = (
+  it.skipIf(process.env.RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION !== '1')(
+    'executes a private scheduled US run and its stable competitor follow-up on compiled BullMQ Worker',
+    async () => {
       await f.pool.query(
-        'SELECT state,follow_up_job FROM primary_scheduled_monitor_runs WHERE task_id=$1',
-        [job.taskId],
-      )
-    ).rows[0];
-    expect(primary?.state).toBe('completed');
-    expect(primary?.follow_up_job).toMatchObject({
-      domain: 'competitor',
-      country: 'US',
-      plannedSlot: job.plannedSlot,
-      batchConfig: job.batchConfig,
-    });
-    const followUp = primary.follow_up_job as ScheduledMonitorJob;
-    await eventually(
-      async () => Boolean(await scheduledQueue.getJob(followUp.jobId)),
-      10_000,
-    );
-    const followUpQueueJob = await scheduledQueue.getJob(followUp.jobId);
-    await expect(
-      followUpQueueJob!.waitUntilFinished(scheduledEvents, 30_000),
-    ).resolves.toMatchObject({ state: 'completed' });
-    const [primaryCounts, competitorCounts] = await Promise.all([
-      f.pool.query(
-        `SELECT (SELECT count(*)::int FROM primary_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
+        "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture')",
+      );
+      await f.pool.query(
+        "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled')",
+      );
+      await start('', false, true);
+      const job = scheduledJob();
+      const queued = await scheduledQueue.add('scheduled-monitor', job, {
+        jobId: job.jobId,
+      });
+      await expect(
+        queued.waitUntilFinished(scheduledEvents, 30_000),
+      ).resolves.toMatchObject({
+        state: 'completed',
+      });
+      const primary = (
+        await f.pool.query(
+          'SELECT state,follow_up_job FROM primary_scheduled_monitor_runs WHERE task_id=$1',
+          [job.taskId],
+        )
+      ).rows[0];
+      expect(primary?.state).toBe('completed');
+      expect(primary?.follow_up_job).toMatchObject({
+        domain: 'competitor',
+        country: 'US',
+        plannedSlot: job.plannedSlot,
+        batchConfig: job.batchConfig,
+      });
+      const followUp = primary.follow_up_job as ScheduledMonitorJob;
+      await eventually(
+        async () => Boolean(await scheduledQueue.getJob(followUp.jobId)),
+        10_000,
+      );
+      const followUpQueueJob = await scheduledQueue.getJob(followUp.jobId);
+      await expect(
+        followUpQueueJob!.waitUntilFinished(scheduledEvents, 30_000),
+      ).resolves.toMatchObject({ state: 'completed' });
+      const [primaryCounts, competitorCounts] = await Promise.all([
+        f.pool.query(
+          `SELECT (SELECT count(*)::int FROM primary_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
                 (SELECT count(*)::int FROM monitor_history WHERE monitor_task_id=$1) AS history`,
-        [job.taskId],
-      ),
-      competitorPool!.query(
-        `SELECT state,
+          [job.taskId],
+        ),
+        competitorPool!.query(
+          `SELECT state,
                 (SELECT count(*)::int FROM competitor_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
                 (SELECT count(*)::int FROM competitor_monitor_history WHERE monitor_task_id=$1) AS history
            FROM competitor_scheduled_monitor_runs WHERE task_id=$1`,
-        [followUp.taskId],
-      ),
-    ]);
-    expect(primaryCounts.rows[0]).toEqual({ receipts: 1, history: 1 });
-    expect(competitorCounts.rows[0]).toMatchObject({
-      state: 'completed',
-      receipts: 1,
-      history: 1,
-    });
-    expect(await store.listUser('fixture-owner')).toEqual([]);
-    expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);
-  });
+          [followUp.taskId],
+        ),
+      ]);
+      expect(primaryCounts.rows[0]).toEqual({ receipts: 1, history: 1 });
+      expect(competitorCounts.rows[0]).toMatchObject({
+        state: 'completed',
+        receipts: 1,
+        history: 1,
+      });
+      expect(await store.listUser('fixture-owner')).toEqual([]);
+      expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);
+    },
+  );
 
   it('shares database group admission across both compiled consumers and applies a live increase without losing real receipts', async () => {
     await f.pool.query(
