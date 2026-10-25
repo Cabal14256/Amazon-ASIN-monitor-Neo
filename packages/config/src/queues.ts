@@ -1,7 +1,7 @@
 /**
  * 选择器名称与 Redis 中的物理队列名称分开保存。
  * 物理名称必须与旧 Bull v4 producer 一致，选择器则兼容旧
- * WORKER_ENABLED_QUEUES 的别名。
+ * WORKER_ENABLED_QUEUES 的别名。定时监控是私有系统队列，不属于此公共注册表。
  */
 export const QUEUE_DEFINITIONS = [
   {
@@ -47,6 +47,16 @@ export const QUEUE_DEFINITIONS = [
 ] as const;
 
 export const QUEUE_NAMES = QUEUE_DEFINITIONS.map(({ name }) => name);
+
+/** Private system queue. Keep it outside QUEUE_NAMES so Ops/task APIs cannot
+ * expose scheduled jobs as user-owned work. */
+export const SCHEDULED_MONITOR_QUEUE = 'scheduled-monitor' as const;
+export const SCHEDULED_MONITOR_PHYSICAL_QUEUE =
+  'scheduled-monitor-task-queue' as const;
+
+export interface ScheduledMonitorSelection {
+  enabled: boolean;
+}
 
 /** Bull4 and BullMQ never share persisted job structures during migration. */
 export function getNeoQueuePrefix(env: { BULL_PREFIX: string }): string {
@@ -129,4 +139,20 @@ export function resolveQueueSelection(raw: string | undefined): QueueSelection {
 
 export function resolveEnabledQueues(raw: string | undefined): QueueName[] {
   return resolveQueueSelection(raw).enabledQueues;
+}
+
+/** Resolve the private selector without changing public queue selection. An
+ * empty value, `all`, and `*` keep the scheduled consumer disabled by default;
+ * production code must opt in explicitly to avoid starting a system consumer
+ * during a Legacy-compatible worker rollout. */
+export function resolveScheduledMonitorSelection(
+  raw: string | undefined,
+): ScheduledMonitorSelection {
+  const tokens = (raw ?? '')
+    .split(',')
+    .map((token) => normalizeQueueToken(token))
+    .filter(Boolean);
+  return {
+    enabled: tokens.includes(SCHEDULED_MONITOR_QUEUE),
+  };
 }

@@ -528,6 +528,51 @@ export class PgScheduledMonitorRunRepository {
       return (await this.existing(tx, job))!;
     }, signal);
   }
+
+  async readGroupReceipt(
+    value: unknown,
+    ordinal: number,
+    signal?: AbortSignal,
+  ): Promise<unknown | undefined> {
+    const job = this.job(value);
+    if (!Number.isInteger(ordinal) || ordinal < 0)
+      throw new ScheduledMonitorRunError('input');
+    return this.transaction(async (tx) => {
+      const run = await this.require(tx, job);
+      const group = run.groups[ordinal];
+      if (!group) return undefined;
+      const operation = scheduledMonitorGroupOperation(job, group);
+      const rows = await tx.query(
+        `SELECT * FROM ${this.receipts} WHERE task_id=$1 AND ordinal=$2 LIMIT 2`,
+        [job.taskId, ordinal],
+      );
+      if (!rows.length) return undefined;
+      if (rows.length !== 1) throw new ScheduledMonitorRunError('identity');
+      const row = rows[0];
+      const keys: Record<string, unknown> = {
+        operation_key: operation.operationKey,
+        request_hash: operation.requestHash,
+        task_id: operation.taskId,
+        job_digest: operation.jobDigest,
+        country: operation.country,
+        group_id: operation.groupId,
+        ordinal: operation.ordinal,
+        snapshot_digest: operation.snapshotDigest,
+        result_kind: operation.resultKind,
+      };
+      for (const [key, expected] of Object.entries(keys))
+        if (row[key] !== expected)
+          throw new ScheduledMonitorRunError('identity');
+      try {
+        return decodeVariantCheckReceiptResult(
+          row.result,
+          operation.resultKind,
+        );
+      } catch {
+        throw new ScheduledMonitorRunError('identity');
+      }
+    }, signal);
+  }
   requestCancellation(
     value: unknown,
     signal?: AbortSignal,

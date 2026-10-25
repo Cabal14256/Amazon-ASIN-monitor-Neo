@@ -1,6 +1,12 @@
 import 'reflect-metadata';
 
-import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
+import {
+  loadEnv,
+  loadEnvironmentFiles,
+  resolveScheduledMonitorSelection,
+  SCHEDULED_MONITOR_PHYSICAL_QUEUE,
+  type Env,
+} from '@asin-monitor/config';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
@@ -59,6 +65,13 @@ async function startConfiguredWorker(
     maintenance: selectedMaintenance,
     intervalMaintenance: selectedIntervals,
   } = resolveWorkerSelection(env.WORKER_ENABLED_QUEUES);
+  const scheduledMonitor = resolveScheduledMonitorSelection(
+    env.WORKER_ENABLED_QUEUES,
+  );
+  const scheduledMonitorEnabled =
+    scheduledMonitor.enabled && env.AUTH_DATA_AUTHORITY === 'postgresql';
+  if (scheduledMonitor.enabled && !scheduledMonitorEnabled)
+    logger.info('定时监控未启用，当前认证权威源为 Legacy');
   const enableMaintenance =
     selectedMaintenance && env.AUTH_DATA_AUTHORITY === 'postgresql';
   const enableIntervals =
@@ -69,12 +82,21 @@ async function startConfiguredWorker(
     logger.info('认证维护未启用，当前认证权威源为 Legacy');
 
   if (unknownQueues.length > 0) {
-    logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
-      unknownQueues,
-    });
+    const publicUnknownQueues = unknownQueues.filter(
+      (value) => value.trim().toLowerCase() !== 'scheduled-monitor',
+    );
+    if (publicUnknownQueues.length > 0)
+      logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
+        unknownQueues: publicUnknownQueues,
+      });
   }
 
-  if (enabled.length === 0 && !enableMaintenance && !enableIntervals) {
+  if (
+    enabled.length === 0 &&
+    !enableMaintenance &&
+    !enableIntervals &&
+    !scheduledMonitorEnabled
+  ) {
     try {
       const stopped = waitForShutdownSignal();
       logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
@@ -119,13 +141,15 @@ async function startConfiguredWorker(
       name === 'competitor-monitor',
   );
   const variantChecks =
-    checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
+    (checkQueues.length || scheduledMonitorEnabled) &&
+    env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startVariantCheckRuntime(
           env,
           checkQueues,
           () => process.exit(1),
           process.env,
           metrics?.observer,
+          scheduledMonitorEnabled,
         )
       : undefined;
 
@@ -215,6 +239,7 @@ async function startConfiguredWorker(
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
       ...(intervals ? [MONITOR_INTERVAL_QUEUE] : []),
+      ...(scheduledMonitorEnabled ? [SCHEDULED_MONITOR_PHYSICAL_QUEUE] : []),
     ],
     queueCount:
       queues.length +

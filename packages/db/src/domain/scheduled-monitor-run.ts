@@ -151,6 +151,10 @@ export const scheduledMonitorGroupSnapshotSchema = z.discriminatedUnion(
 export type ScheduledMonitorGroupSnapshot = z.infer<
   typeof scheduledMonitorGroupSnapshotSchema
 >;
+export interface ScheduledMonitorCheck {
+  job: ScheduledMonitorJob;
+  group: ScheduledMonitorGroupSnapshot;
+}
 
 /** Canonical JSON covers raw row fields, including microseconds and status.
  * It intentionally does not normalize identifiers, countries or display text. */
@@ -231,20 +235,9 @@ export function parseScheduledMonitorSnapshot(
     members = new Set<string>();
   let count = 0;
   for (const [ordinal, snapshot] of snapshots.entries()) {
-    const { snapshotDigest, ...content } = snapshot;
     if (
-      snapshot.ordinal !== ordinal ||
-      snapshot.domain !== job.domain ||
-      snapshot.country !== job.country ||
-      country(snapshot.group.country) !== job.country ||
-      ('is_competitor' in snapshot.group &&
-        snapshot.group.is_competitor === true) ||
-      groups.has(snapshot.group.id) ||
-      scheduledMonitorGroupBatch(
-        snapshot.group.id,
-        job.batchConfig.totalBatches,
-      ) !== job.batchConfig.batchIndex ||
-      snapshotDigest !== scheduledMonitorGroupSnapshotDigest(content)
+      parseScheduledMonitorGroupSnapshot(job, snapshot).ordinal !== ordinal ||
+      groups.has(snapshot.group.id)
     )
       throw new ScheduledMonitorRunError('snapshot');
     groups.add(snapshot.group.id);
@@ -276,6 +269,72 @@ export function parseScheduledMonitorSnapshot(
     throw new ScheduledMonitorRunError('snapshot');
   return snapshots;
 }
+
+export function parseScheduledMonitorGroupSnapshot(
+  inputJob: unknown,
+  value: unknown,
+): ScheduledMonitorGroupSnapshot {
+  const job = parseScheduledMonitorJob(inputJob);
+  const parsed = scheduledMonitorGroupSnapshotSchema.safeParse(value);
+  if (!parsed.success) throw new ScheduledMonitorRunError('snapshot');
+  const snapshot = parsed.data;
+  const { snapshotDigest, ...content } = snapshot;
+  if (
+    snapshot.domain !== job.domain ||
+    snapshot.country !== job.country ||
+    country(snapshot.group.country) !== job.country ||
+    ('is_competitor' in snapshot.group &&
+      snapshot.group.is_competitor === true) ||
+    scheduledMonitorGroupBatch(
+      snapshot.group.id,
+      job.batchConfig.totalBatches,
+    ) !== job.batchConfig.batchIndex ||
+    snapshotDigest !== scheduledMonitorGroupSnapshotDigest(content) ||
+    orderedRows(snapshot.members).some(
+      (member, index) => member.id !== snapshot.members[index].id,
+    ) ||
+    snapshot.members.some(
+      (member) =>
+        member.variant_group_id !== snapshot.group.id ||
+        country(member.country) !== job.country,
+    )
+  )
+    throw new ScheduledMonitorRunError('snapshot');
+  return snapshot;
+}
+
+export function freezeScheduledMonitorGroupSnapshot(
+  inputJob: unknown,
+  ordinal: number,
+  groupRow: unknown,
+  memberRows: unknown[],
+): ScheduledMonitorGroupSnapshot {
+  const job = parseScheduledMonitorJob(inputJob);
+  if (
+    !Number.isInteger(ordinal) ||
+    ordinal < 0 ||
+    ordinal >= SCHEDULED_MONITOR_MAX_GROUPS ||
+    memberRows.length > SCHEDULED_MONITOR_MAX_MEMBERS
+  )
+    throw new ScheduledMonitorRunError('capacity');
+  const groupSchema = job.domain === 'primary' ? primaryGroup : competitorGroup;
+  const memberSchema =
+    job.domain === 'primary' ? primaryMember : competitorMember;
+  const group = groupSchema.parse(groupRow);
+  const members = orderedRows(memberRows.map((row) => memberSchema.parse(row)));
+  const content = {
+    version: 1 as const,
+    ordinal,
+    domain: job.domain,
+    country: job.country,
+    group,
+    members,
+  };
+  return parseScheduledMonitorGroupSnapshot(job, {
+    ...content,
+    snapshotDigest: scheduledMonitorGroupSnapshotDigest(content),
+  });
+}
 export function scheduledMonitorSnapshotDigest(
   job: ScheduledMonitorJob,
   snapshots: readonly ScheduledMonitorGroupSnapshot[],
@@ -294,27 +353,26 @@ export function freezeScheduledMonitorSnapshot(
   )
     throw new ScheduledMonitorRunError('capacity');
   const groupSchema = job.domain === 'primary' ? primaryGroup : competitorGroup;
-  const memberSchema =
-    job.domain === 'primary' ? primaryMember : competitorMember;
   const groups = orderedRows(groupRows.map((row) => groupSchema.parse(row)));
-  const members = orderedRows(memberRows.map((row) => memberSchema.parse(row)));
+  const members = orderedRows(
+    memberRows.map((row) =>
+      (job.domain === 'primary' ? primaryMember : competitorMember).parse(row),
+    ),
+  );
   const byGroup = new Map<string, unknown[]>();
   for (const member of members) {
     const rows = byGroup.get(member.variant_group_id) ?? [];
     rows.push(member);
     byGroup.set(member.variant_group_id, rows);
   }
-  const snapshots = groups.map((group, ordinal) => {
-    const content = {
-      version: 1 as const,
+  const snapshots = groups.map((group, ordinal) =>
+    freezeScheduledMonitorGroupSnapshot(
+      job,
       ordinal,
-      domain: job.domain,
-      country: job.country,
       group,
-      members: byGroup.get(group.id) ?? [],
-    };
-    return { ...content, snapshotDigest: sha(content) };
-  });
+      byGroup.get(group.id) ?? [],
+    ),
+  );
   if (
     snapshots.reduce((sum, snapshot) => sum + snapshot.members.length, 0) !==
     members.length
