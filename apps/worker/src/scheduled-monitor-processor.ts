@@ -173,6 +173,8 @@ export function createScheduledMonitorProcessor(
       if (current.state === 'skipped-expired')
         throw new ScheduledMonitorRunError('expired');
       if (current.state === 'completed') return current;
+      if (run.state === 'running' && current.state === 'business-completed')
+        return current;
       if (run.state === 'running' && current.state !== 'running')
         throw new ScheduledMonitorRunError('state');
       if (run.state === 'running') {

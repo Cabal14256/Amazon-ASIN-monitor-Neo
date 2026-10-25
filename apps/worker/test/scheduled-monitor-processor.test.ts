@@ -241,7 +241,7 @@ describe('scheduled monitor processor', () => {
     expect(f.enqueueFollowUp).not.toHaveBeenCalled();
   });
 
-  it('drains an in-flight heartbeat before committing business completion', async () => {
+  it('does not run a heartbeat while business completion is in flight', async () => {
     const f = fixture();
     let started!: () => void;
     let release!: () => void;
@@ -267,6 +267,36 @@ describe('scheduled monitor processor', () => {
     const processing = f.processor(f.job, 'lock');
     await completionStarted;
     await vi.advanceTimersByTimeAsync(2000);
+    release();
+    await expect(processing).resolves.toMatchObject({ state: 'completed' });
+    expect(f.deliverNotifications).toHaveBeenCalledOnce();
+    expect(f.complete).toHaveBeenCalledOnce();
+  });
+
+  it('accepts its durable business-completed transition when an in-flight heartbeat observes it', async () => {
+    const f = fixture();
+    let started!: () => void;
+    let release!: () => void;
+    const groupStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const groupGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.checkGroup.mockImplementationOnce(async (_groupId, context) => {
+      await context.checkpoint();
+      started();
+      await groupGate;
+      return { isBroken: false, brokenASINs: [] };
+    });
+    const processing = f.processor(f.job, 'lock');
+    await groupStarted;
+    f.ledger.read.mockResolvedValue({
+      ...f.run(),
+      state: 'business-completed',
+      businessCompletedAt: f.data.createdAt,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
     release();
     await expect(processing).resolves.toMatchObject({ state: 'completed' });
     expect(f.deliverNotifications).toHaveBeenCalledOnce();
