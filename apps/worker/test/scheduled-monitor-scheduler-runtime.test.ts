@@ -7,11 +7,18 @@ import {
 
 const schedulerRuntimeFixture = vi.hoisted(() => ({
   processor: undefined as
-    | ((job: {
-        name: string;
-        timestamp: number;
-        opts: { prevMillis?: number };
-      }) => Promise<void>)
+    | ((
+        job: {
+          id: string;
+          name: string;
+          timestamp: number;
+          opts: { prevMillis?: number };
+          data: Record<string, unknown>;
+          updateData(data: Record<string, unknown>): Promise<void>;
+          moveToDelayed(timestamp: number, token?: string): Promise<void>;
+        },
+        token?: string,
+      ) => Promise<void>)
     | undefined,
   queueClosed: 0,
   workerClosed: 0,
@@ -25,6 +32,11 @@ const schedulerRuntimeFixture = vi.hoisted(() => ({
 }));
 
 vi.mock('bullmq', () => ({
+  DelayedError: class extends Error {
+    constructor() {
+      super('bullmq:movedToDelayed');
+    }
+  },
   Queue: class {
     constructor(readonly name: string) {}
     async waitUntilReady() {}
@@ -66,6 +78,21 @@ const env = {
   MONITOR_EU_SCHEDULE_MINUTES: 60,
   MONITOR_BATCH_COUNT: 3,
 } as Env;
+
+function tick(plannedAt: number) {
+  const value = {
+    id: `repeat:neo-scheduled-monitor-dispatch-v1:${plannedAt}`,
+    name: 'scheduled-monitor-scheduler-tick',
+    timestamp: plannedAt + 59_900,
+    opts: { prevMillis: plannedAt },
+    data: { schemaVersion: 1 } as Record<string, unknown>,
+    updateData: vi.fn(async (data: Record<string, unknown>) => {
+      value.data = data;
+    }),
+    moveToDelayed: vi.fn(async () => undefined),
+  };
+  return value;
+}
 
 describe('scheduled monitor tick producer', () => {
   it('reads current DB config and enqueues stable primary/competitor jobs with persisted delays', async () => {
@@ -175,11 +202,9 @@ describe('scheduled monitor tick producer', () => {
       onFatal: vi.fn(),
     });
     try {
-      await schedulerRuntimeFixture.processor!({
-        name: 'scheduled-monitor-scheduler-tick',
-        timestamp: Date.parse('2026-10-25T10:00:59.900Z'),
-        opts: { prevMillis: Date.parse('2026-10-25T10:00:00.000Z') },
-      });
+      await schedulerRuntimeFixture.processor!(
+        tick(Date.parse('2026-10-25T10:00:00.000Z')),
+      );
       expect(schedulerRuntimeFixture.added).toHaveLength(11);
       expect(schedulerRuntimeFixture.repeatInstalled).toBe(1);
     } finally {
@@ -189,10 +214,86 @@ describe('scheduled monitor tick producer', () => {
     }
   });
 
+  it('reuses the config snapshot after a partial enqueue acknowledgement loss', async () => {
+    schedulerRuntimeFixture.readinessFailure = false;
+    schedulerRuntimeFixture.repeatInstalled = 0;
+    const owner = { token: null as string | null };
+    const control = {
+      get: vi.fn(async () => owner.token),
+      set: vi.fn(async (_key: string, value: string) => {
+        owner.token = value;
+        return 'OK';
+      }),
+      eval: vi.fn(async () => 1),
+    };
+    const configRepository = {
+      readConfiguration: vi
+        .fn()
+        .mockResolvedValueOnce([
+          { configKey: 'MONITOR_BATCH_COUNT', configValue: '3' },
+          { configKey: 'MONITOR_EU_SCHEDULE_MINUTES', configValue: '30' },
+        ])
+        .mockResolvedValueOnce([
+          { configKey: 'MONITOR_BATCH_COUNT', configValue: '4' },
+          { configKey: 'MONITOR_EU_SCHEDULE_MINUTES', configValue: '30' },
+        ]),
+    };
+    const submissions: string[] = [];
+    let loseFirstAck = true;
+    const scheduledQueue = {
+      add: vi.fn(async (_name: string, data: { jobId: string }) => {
+        submissions.push(data.jobId);
+        if (loseFirstAck) {
+          loseFirstAck = false;
+          throw new Error('queue admission acknowledgement lost');
+        }
+      }),
+    };
+    const runtime = await startScheduledMonitorScheduler({
+      env: {
+        ...env,
+        AUTH_DATA_AUTHORITY: 'postgresql',
+        DATABASE_URL: 'postgresql://fixture/db',
+        BULL_PREFIX: 'test',
+        DATABASE_POOL_CONNECTION_TIMEOUT_MS: 1000,
+        REDIS_URL: 'redis://127.0.0.1:6379/15',
+      } as Env,
+      connection: {},
+      control: control as never,
+      scheduledQueue,
+      configRepository,
+      competitorEnabled: { value: true },
+      onFatal: vi.fn(),
+    });
+    const scheduledTick = tick(Date.parse('2026-10-25T10:30:00.000Z'));
+    try {
+      await expect(
+        schedulerRuntimeFixture.processor!(scheduledTick),
+      ).rejects.toThrow('queue admission acknowledgement lost');
+      expect(scheduledTick.data.dispatchSnapshot).toMatchObject({
+        version: 1,
+        config: { totalBatches: 3 },
+      });
+      await schedulerRuntimeFixture.processor!(scheduledTick);
+      expect(configRepository.readConfiguration).toHaveBeenCalledOnce();
+      expect(submissions[0]).toBe(submissions[1]);
+      expect(new Set(submissions).size).toBe(11);
+      const admittedCount = submissions.length;
+      scheduledTick.data.dispatchSnapshot = { version: 2 };
+      await expect(
+        schedulerRuntimeFixture.processor!(scheduledTick),
+      ).rejects.toThrow('SCHEDULED_MONITOR_TICK_SNAPSHOT_INVALID');
+      expect(submissions).toHaveLength(admittedCount);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('fails closed when a scheduler tick has no persisted planned time', async () => {
     schedulerRuntimeFixture.readinessFailure = false;
     schedulerRuntimeFixture.added = [];
     const owner = { token: null as string | null };
+    const scheduledQueue = { add: vi.fn(async () => undefined) };
     const runtime = await startScheduledMonitorScheduler({
       env: {
         ...env,
@@ -211,7 +312,7 @@ describe('scheduled monitor tick producer', () => {
         }),
         eval: vi.fn(async () => 1),
       } as never,
-      scheduledQueue: { add: vi.fn(async () => undefined) },
+      scheduledQueue,
       configRepository: { readConfiguration: vi.fn(async () => []) },
       competitorEnabled: { value: true },
       onFatal: vi.fn(),
@@ -219,8 +320,7 @@ describe('scheduled monitor tick producer', () => {
     try {
       await expect(
         schedulerRuntimeFixture.processor!({
-          name: 'scheduled-monitor-scheduler-tick',
-          timestamp: Date.parse('2026-10-25T10:00:00.000Z'),
+          ...tick(Date.parse('2026-10-25T10:00:00.000Z')),
           opts: {},
         }),
       ).rejects.toThrow('SCHEDULED_MONITOR_TICK_TIMESTAMP_INVALID');
@@ -234,6 +334,7 @@ describe('scheduled monitor tick producer', () => {
     schedulerRuntimeFixture.repeatRemoved = 0;
     schedulerRuntimeFixture.readinessFailure = false;
     const owner = { token: null as string | null };
+    const scheduledQueue = { add: vi.fn(async () => undefined) };
     const control = {
       get: vi.fn(async () => owner.token),
       set: vi.fn(async (_key: string, value: string) => {
@@ -265,12 +366,21 @@ describe('scheduled monitor tick producer', () => {
       } as Env,
       connection: {},
       control: control as never,
-      scheduledQueue: { add: vi.fn(async () => undefined) },
+      scheduledQueue,
       configRepository: { readConfiguration: vi.fn(async () => []) },
       competitorEnabled: { value: true },
       onFatal: vi.fn(),
     });
     owner.token = 'successor-owner';
+    const tickJob = tick(Date.parse('2026-10-25T10:00:00.000Z'));
+    await expect(
+      schedulerRuntimeFixture.processor!(tickJob, 'bull-lock'),
+    ).rejects.toThrow('bullmq:movedToDelayed');
+    expect(tickJob.moveToDelayed).toHaveBeenCalledWith(
+      expect.any(Number),
+      'bull-lock',
+    );
+    expect(scheduledQueue.add).not.toHaveBeenCalled();
     await runtime.close();
     expect(owner.token).toBe('successor-owner');
     expect(schedulerRuntimeFixture.repeatRemoved).toBe(0);
