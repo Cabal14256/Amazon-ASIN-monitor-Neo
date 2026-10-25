@@ -317,14 +317,14 @@ describe('scheduled monitor processor', () => {
     expect(f.complete).toHaveBeenCalledOnce();
   });
 
-  it('does not enqueue a persisted US follow-up after the shared switch closes', async () => {
+  it('re-enqueues a persisted US follow-up so its consumer can defer while disabled', async () => {
     const child = { ...jobData('competitor'), country: 'US' as const };
     const f = fixture('business-completed', { followUpJob: child });
     f.competitorMonitorEnabled.mockResolvedValue(false);
     await expect(f.processor(f.job, 'lock')).resolves.toMatchObject({
       state: 'completed',
     });
-    expect(f.enqueueFollowUp).not.toHaveBeenCalled();
+    expect(f.enqueueFollowUp).toHaveBeenCalledWith(child);
     expect(f.complete).toHaveBeenCalledOnce();
   });
 

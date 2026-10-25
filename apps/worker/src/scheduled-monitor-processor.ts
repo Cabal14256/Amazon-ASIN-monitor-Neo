@@ -239,8 +239,7 @@ export function createScheduledMonitorProcessor(
             if (!current || current.state !== 'business-completed')
               throw new ScheduledMonitorRunError('state');
           });
-        if (run.followUpJob && (await options.competitorMonitorEnabled()))
-          await options.enqueueFollowUp(run.followUpJob);
+        if (run.followUpJob) await options.enqueueFollowUp(run.followUpJob);
         return ledger.complete(job, signal);
       } finally {
         options.shutdownSignal.removeEventListener('abort', onShutdown);
