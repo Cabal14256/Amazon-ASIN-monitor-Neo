@@ -713,11 +713,11 @@ ${extra}
       const queued = await scheduledQueue.add('scheduled-monitor', job, {
         jobId: job.jobId,
       });
-      await expect(
-        queued.waitUntilFinished(scheduledEvents, 30_000),
-      ).resolves.toMatchObject({
-        state: 'completed',
-      });
+      const parentResult = await queued.waitUntilFinished(
+        scheduledEvents,
+        30_000,
+      );
+      expect(parentResult, output).toMatchObject({ state: 'completed' });
       const primary = (
         await f.pool.query(
           'SELECT state,follow_up_job FROM primary_scheduled_monitor_runs WHERE task_id=$1',
