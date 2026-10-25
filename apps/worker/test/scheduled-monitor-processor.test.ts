@@ -3,6 +3,7 @@ import {
   type ScheduledMonitorJob,
 } from '@asin-monitor/contracts';
 import {
+  ScheduledMonitorRunError,
   scheduledMonitorTaskId,
   type ScheduledMonitorRun,
 } from '@asin-monitor/db';
@@ -381,6 +382,23 @@ describe('scheduled monitor processor', () => {
     const f = fixture('running');
     f.job.attemptsMade = 1;
     f.checkGroup.mockRejectedValue({ commitMayHaveSucceeded: true });
+    await expect(f.processor(f.job, 'lock')).rejects.toMatchObject({
+      commitMayHaveSucceeded: true,
+    });
+    expect(f.finishWithoutBusiness).not.toHaveBeenCalledWith(
+      f.data,
+      'failed',
+      expect.anything(),
+    );
+  });
+
+  it('keeps a commit uncertain when receipt reconciliation is unavailable', async () => {
+    const f = fixture('running');
+    f.job.attemptsMade = 1;
+    f.checkGroup.mockRejectedValue({ commitMayHaveSucceeded: true });
+    f.receipt
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new ScheduledMonitorRunError('dependency'));
     await expect(f.processor(f.job, 'lock')).rejects.toMatchObject({
       commitMayHaveSucceeded: true,
     });

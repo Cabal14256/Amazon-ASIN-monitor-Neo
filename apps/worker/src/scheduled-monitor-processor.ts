@@ -308,6 +308,7 @@ export function createScheduledMonitorProcessor(
               continue;
             }
           } catch (reconciliationError) {
+            if (commitMayHaveSucceeded(error)) throw error;
             if (reconciliationError instanceof ScheduledMonitorRunError)
               throw reconciliationError;
             throw error;
@@ -344,9 +345,12 @@ export function createScheduledMonitorProcessor(
         await options.enqueueFollowUp(completed.followUpJob);
       return ledger.complete(job, signal);
     } catch (error) {
-      if (error instanceof ScheduledMonitorCompetitorDisabled)
-        return deferWhileCompetitorDisabled();
       const reason = signal.reason;
+      if (
+        error instanceof ScheduledMonitorCompetitorDisabled ||
+        reason instanceof ScheduledMonitorCompetitorDisabled
+      )
+        return deferWhileCompetitorDisabled();
       const observed = isCancellation(error) || isCancellation(reason);
       const shuttingDown = options.shutdownSignal.aborted;
       if (observed && !shuttingDown) {
