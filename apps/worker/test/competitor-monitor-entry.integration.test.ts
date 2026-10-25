@@ -56,6 +56,7 @@ describe.skipIf(
   process.env.RUN_INTEGRATION_TESTS !== 'true' || process.platform === 'win32',
 )('compiled competitor monitor with owned receipts and country claims', () => {
   let f: Awaited<ReturnType<typeof maintenanceFixture>>;
+  let primarySchema = '';
   let competitorPool: ReturnType<typeof createPgPool> | undefined;
   let competitorBootstrap: ReturnType<typeof createPgPool> | undefined;
   let competitorSchema = '',
@@ -111,9 +112,8 @@ describe.skipIf(
     directory = mkdtempSync(join(tmpdir(), 'neo-competitor-monitor-entry-'));
     cards.length = 0;
     f = await maintenanceFixture();
-    const primarySchema = (
-      await f.pool.query('SELECT current_schema() AS name')
-    ).rows[0]?.name as string;
+    primarySchema = (await f.pool.query('SELECT current_schema() AS name'))
+      .rows[0]?.name as string;
     if (!/^auth_worker_67_[a-f0-9]{32}$/.test(primarySchema))
       throw new Error('Unexpected primary monitor fixture schema');
     for (const table of [
@@ -560,6 +560,7 @@ ${extra}
           PROCESS_ROLE: 'worker',
           AUTH_DATA_AUTHORITY: 'postgresql',
           DATABASE_URL: f.env.DATABASE_URL,
+          PGOPTIONS: `-c search_path=${primarySchema} -c timezone=UTC`,
           COMPETITOR_DATABASE_URL: competitorDatabaseUrl,
           REDIS_URL: f.env.REDIS_URL,
           BULL_PREFIX: f.env.BULL_PREFIX,
