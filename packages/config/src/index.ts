@@ -209,6 +209,24 @@ const envObjectSchema = z.object({
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? Math.ceil(number) : 0;
   }, z.number().int().min(0).max(5000)),
+  MONITOR_BATCH_COUNT: z.preprocess((value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 1;
+  }, z.number().int().min(1).max(1000)),
+  MONITOR_US_SCHEDULE_MINUTES: z.preprocess(
+    (value) =>
+      Number(value) === 15 || Number(value) === 30 || Number(value) === 60
+        ? Number(value)
+        : 30,
+    z.union([z.literal(15), z.literal(30), z.literal(60)]),
+  ),
+  MONITOR_EU_SCHEDULE_MINUTES: z.preprocess(
+    (value) =>
+      Number(value) === 15 || Number(value) === 30 || Number(value) === 60
+        ? Number(value)
+        : 60,
+    z.union([z.literal(15), z.literal(30), z.literal(60)]),
+  ),
   // Legacy floors positive values and otherwise uses two groups. Bound actual
   // parallel writes to the shared pipeline's eight-operation capacity.
   BATCH_CHECK_GROUP_CONCURRENCY: z.preprocess((value) => {

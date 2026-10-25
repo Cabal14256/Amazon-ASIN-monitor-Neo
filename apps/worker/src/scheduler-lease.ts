@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from './logger';
 
 export interface SchedulerLeaseRedis {
+  get(key: string): Promise<string | null>;
   set(
     key: string,
     value: string,
@@ -34,7 +35,22 @@ export class SchedulerLease {
     private readonly key: string,
     private readonly installSchedules: () => Promise<void>,
     private readonly log: Pick<typeof logger, 'warn'> = logger,
+    private readonly cleanupSchedules?: () => Promise<void>,
   ) {}
+
+  async assertCurrentOwner(): Promise<boolean> {
+    if (this.stopped || !this.ownsLease) return false;
+    try {
+      const owner = await this.redis.get(this.key);
+      this.ownsLease = owner === this.token;
+      if (!this.ownsLease) this.installed = false;
+      return this.ownsLease && !this.stopped;
+    } catch {
+      this.ownsLease = false;
+      this.installed = false;
+      return false;
+    }
+  }
 
   start(): Promise<void> {
     if (!this.stopped) return this.pending ?? Promise.resolve();
@@ -87,6 +103,15 @@ export class SchedulerLease {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     await this.pending;
+    if (this.ownsLease && this.cleanupSchedules) {
+      try {
+        await this.cleanupSchedules();
+      } catch {
+        this.log.warn('调度计划清理失败，将保留至下一次租约同步', {
+          reason: 'scheduler_cleanup_failed',
+        });
+      }
+    }
     try {
       await this.redis.eval(RELEASE, 1, this.key, this.token);
     } catch {

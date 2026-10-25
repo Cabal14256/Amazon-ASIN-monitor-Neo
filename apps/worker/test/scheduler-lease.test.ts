@@ -12,9 +12,23 @@ describe('Scheduler lease lifecycle', () => {
     vi.useRealTimers();
   });
   function fixture() {
+    let currentToken: string | null = null;
     const redis: SchedulerLeaseRedis = {
-      set: vi.fn(async () => 'OK'),
-      eval: vi.fn(async () => 1),
+      get: vi.fn(async () => currentToken),
+      set: vi.fn(async (_key: string, token: string) => {
+        currentToken = token;
+        return 'OK';
+      }),
+      eval: vi.fn(
+        async (
+          _script: string,
+          _keyCount: number,
+          _key: string,
+          token: string,
+        ) => {
+          return token === currentToken ? 1 : 0;
+        },
+      ),
     };
     const install = vi.fn(async () => undefined);
     const log = { warn: vi.fn() };
