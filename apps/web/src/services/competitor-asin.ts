@@ -12,6 +12,7 @@ import {
   competitorMoveAsinRequestSchema,
   competitorUpdateGroupRequestSchema,
   isNeoBatchDeleteId,
+  type BatchDeleteVariantGroupsRequest,
   type CompetitorAsinSource,
   type CompetitorCreateAsinRequest,
   type CompetitorGroupListData,
@@ -24,6 +25,15 @@ import {
   type CompetitorVariantGroup,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
+import { submitCatalogBatchDelete } from './catalog-batch-delete';
+
+export function batchDeleteCompetitorGroups(
+  http: Pick<HttpClient, 'request'>,
+  input: BatchDeleteVariantGroupsRequest,
+  signal?: AbortSignal,
+) {
+  return submitCatalogBatchDelete(http, 'competitor', input, signal);
+}
 
 const RESPONSE_LIMIT = 32 * 1024 * 1024;
 const GROUPS = '/api/v1/competitor/variant-groups';
