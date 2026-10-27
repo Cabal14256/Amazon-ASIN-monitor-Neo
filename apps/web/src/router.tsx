@@ -5,6 +5,7 @@ import {
   Outlet,
   redirect,
   type RouterHistory,
+  useRouterState,
 } from '@tanstack/react-router';
 import { lazy, Suspense } from 'react';
 import type { IdentityStore } from './auth/identity';
@@ -53,6 +54,13 @@ export function createAppRouter(
           throw redirect(routerDestination(decision.to));
       },
       component: function PageRoute() {
+        const search = useRouterState({
+          select: (state) => state.location.search,
+        });
+        const groupId =
+          'groupId' in search && typeof search.groupId === 'string'
+            ? search.groupId
+            : undefined;
         return (
           <RouteGate>
             <Suspense fallback={<IdentityPending />}>
@@ -65,7 +73,7 @@ export function createAppRouter(
               ) : page.path === '/home' ? (
                 <HomePage />
               ) : page.path === '/asin' ? (
-                <AsinCatalogPage />
+                <AsinCatalogPage groupId={groupId} />
               ) : page.path === '/asin-parent-query' ? (
                 <AsinParentQueryPage />
               ) : page.path === '/competitor-asin' ? (

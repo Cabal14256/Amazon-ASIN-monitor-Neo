@@ -11,6 +11,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { DatabaseModule } from './database/database.module';
 import { FeishuConfigModule } from './feishu-config/feishu-config.module';
 import { HealthModule } from './health/health.module';
+import { HomeWorkbenchModule } from './home-workbench/home-workbench.module';
 import { LoggerModule } from './logger/logger.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { MonitorHistoryModule } from './monitor/monitor-history.module';
@@ -34,6 +35,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     LoggerModule,
     DatabaseModule,
     DashboardModule,
+    HomeWorkbenchModule,
     RedisModule,
     AuthModule,
     RoleModule,
