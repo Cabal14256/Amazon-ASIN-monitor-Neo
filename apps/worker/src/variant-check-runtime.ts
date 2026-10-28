@@ -45,6 +45,10 @@ import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { deliverScheduledMonitorNotifications } from './scheduled-monitor-notifications';
 import { createScheduledMonitorProcessor } from './scheduled-monitor-processor';
+import {
+  startScheduledMonitorScheduler,
+  type ScheduledMonitorSchedulerRuntime,
+} from './scheduled-monitor-scheduler-runtime';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantCheckProcessor } from './variant-check-processor';
 
@@ -150,6 +154,8 @@ export async function startVariantCheckRuntime(
   let monitorGroupAdmission: MonitorGroupAdmission | undefined;
   let monitorHeartbeat: MonitorConsumerHeartbeat | undefined;
   let competitorMonitorHeartbeat: MonitorConsumerHeartbeat | undefined;
+  let scheduledMonitorScheduler: ScheduledMonitorSchedulerRuntime | undefined;
+  let scheduledBusinessQueue: Queue | undefined;
   let competitorMonitorRepository: PgCompetitorMonitorRepository | undefined;
   let scheduledPrimaryRepository:
     | PgPrimaryScheduledMonitorRunRepository
@@ -424,6 +430,7 @@ export async function startVariantCheckRuntime(
             removeOnFail: { age: 604800 },
           },
         });
+        scheduledBusinessQueue = queue;
         queues.push(queue);
         queue.on('error', () =>
           logger.warn('定时监控队列连接异常', {
@@ -535,6 +542,21 @@ export async function startVariantCheckRuntime(
       await competitorMonitorHeartbeat.start();
       ensureOpen();
     }
+    if (scheduledMonitorEnabled) {
+      if (!scheduledBusinessQueue)
+        throw new Error('SCHEDULED_MONITOR_BUSINESS_QUEUE_MISSING');
+      scheduledMonitorScheduler = await startScheduledMonitorScheduler({
+        env,
+        connection,
+        control,
+        scheduledQueue: scheduledBusinessQueue,
+        configRepository,
+        competitorEnabled: { value: env.COMPETITOR_MONITOR_ENABLED },
+        onFatal,
+      });
+      queues.push(scheduledMonitorScheduler.queue as Queue);
+      ensureOpen();
+    }
     const cleanup = async () => {
       if (closing || cleanupRunning) return;
       cleanupRunning = true;
@@ -581,12 +603,15 @@ export async function startVariantCheckRuntime(
         stopBusiness();
         closed ??= (async () => {
           try {
+            await scheduledMonitorScheduler?.close();
             await monitorHeartbeat?.stop();
             await competitorMonitorHeartbeat?.stop();
             await Promise.all(workers.map((worker) => worker.close()));
           } finally {
             await Promise.allSettled([
-              ...queues.map((queue) => queue.close()),
+              ...queues
+                .filter((queue) => queue !== scheduledMonitorScheduler?.queue)
+                .map((queue) => queue.close()),
               pool.end(),
               ...(competitorPool ? [competitorPool.end()] : []),
             ]);
@@ -598,12 +623,15 @@ export async function startVariantCheckRuntime(
     };
   } catch {
     stopBusiness();
+    await scheduledMonitorScheduler?.close();
     await monitorHeartbeat?.stop();
     await competitorMonitorHeartbeat?.stop();
     control.disconnect(false);
     await Promise.allSettled([
       ...workers.map((worker) => worker.close(true)),
-      ...queues.map((queue) => queue.close()),
+      ...queues
+        .filter((queue) => queue !== scheduledMonitorScheduler?.queue)
+        .map((queue) => queue.close()),
       pool.end(),
       ...(competitorPool ? [competitorPool.end()] : []),
     ]);

@@ -155,4 +155,17 @@ describe('Worker owned metrics lifecycle', () => {
     await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
     await expect(scrape()).rejects.toThrow();
   });
+  it('selects the scheduled monitor runtime under PostgreSQL authority', async () => {
+    controls.env.WORKER_ENABLED_QUEUES = 'scheduled-monitor';
+    controls.env.SCHEDULER_ENABLED = false;
+    await bootstrap();
+    expect(controls.start).toHaveBeenCalledWith(
+      controls.env,
+      [],
+      expect.any(Function),
+      expect.anything(),
+      expect.anything(),
+      true,
+    );
+  });
 });

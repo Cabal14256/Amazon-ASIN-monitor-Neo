@@ -12,9 +12,23 @@ describe('Scheduler lease lifecycle', () => {
     vi.useRealTimers();
   });
   function fixture() {
+    let currentToken: string | null = null;
     const redis: SchedulerLeaseRedis = {
-      set: vi.fn(async () => 'OK'),
-      eval: vi.fn(async () => 1),
+      get: vi.fn(async () => currentToken),
+      set: vi.fn(async (_key: string, token: string) => {
+        currentToken = token;
+        return 'OK';
+      }),
+      eval: vi.fn(
+        async (
+          _script: string,
+          _keyCount: number,
+          _key: string,
+          token: string,
+        ) => {
+          return token === currentToken ? 1 : 0;
+        },
+      ),
     };
     const install = vi.fn(async () => undefined);
     const log = { warn: vi.fn() };
@@ -112,5 +126,82 @@ describe('Scheduler lease lifecycle', () => {
     expect(f.redis.set).toHaveBeenCalledOnce();
     await f.lease.start();
     expect(f.install).toHaveBeenCalledTimes(2);
+  });
+
+  it('pins ownership through cleanup and never removes a successor schedule', async () => {
+    let currentToken: string | null = null;
+    const redis: SchedulerLeaseRedis = {
+      get: vi.fn(async () => currentToken),
+      set: vi.fn(async (_key: string, token: string) => {
+        currentToken = token;
+        return 'OK';
+      }),
+      eval: vi.fn(
+        async (script: string, _count: number, _key: string, token: string) => {
+          if (token !== currentToken) return 0;
+          if (script.includes('PEXPIRE')) return 1;
+          if (script.includes('DEL')) {
+            currentToken = null;
+            return 1;
+          }
+          return 0;
+        },
+      ),
+    };
+    const cleanup = vi.fn(async () => undefined);
+    const lease = new SchedulerLease(
+      redis,
+      'fixture:neo:scheduler:leader',
+      vi.fn(async () => undefined),
+      { warn: vi.fn() },
+      cleanup,
+    );
+    leases.push(lease);
+    await lease.start();
+    currentToken = 'successor-token';
+    await lease.stop();
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(currentToken).toBe('successor-token');
+  });
+
+  it('cleans its schedule before releasing the pinned owner lease', async () => {
+    let currentToken: string | null = null;
+    const order: string[] = [];
+    const redis: SchedulerLeaseRedis = {
+      get: vi.fn(async () => currentToken),
+      set: vi.fn(async (_key: string, token: string) => {
+        currentToken = token;
+        return 'OK';
+      }),
+      eval: vi.fn(
+        async (script: string, _count: number, _key: string, token: string) => {
+          if (token !== currentToken) return 0;
+          if (script.includes('PEXPIRE')) {
+            order.push('pin');
+            return 1;
+          }
+          if (script.includes('DEL')) {
+            order.push('release');
+            currentToken = null;
+            return 1;
+          }
+          return 0;
+        },
+      ),
+    };
+    const cleanup = vi.fn(async () => {
+      order.push('cleanup');
+    });
+    const lease = new SchedulerLease(
+      redis,
+      'fixture:neo:scheduler:leader',
+      vi.fn(async () => undefined),
+      { warn: vi.fn() },
+      cleanup,
+    );
+    leases.push(lease);
+    await lease.start();
+    await lease.stop();
+    expect(order).toEqual(['pin', 'cleanup', 'release']);
   });
 });
