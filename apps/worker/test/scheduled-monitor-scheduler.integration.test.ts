@@ -36,6 +36,23 @@ async function eventually(action: () => Promise<boolean>, timeout = 10_000) {
   throw new Error('Scheduled monitor scheduler integration timed out');
 }
 
+async function waitForRedisReady(client: Redis) {
+  if (client.status === 'wait') await client.connect();
+  if (client.status === 'ready') return;
+  await new Promise<void>((resolve, reject) => {
+    const onReady = () => {
+      client.removeListener('error', onError);
+      resolve();
+    };
+    const onError = (error: Error) => {
+      client.removeListener('ready', onReady);
+      reject(error);
+    };
+    client.once('ready', onReady);
+    client.once('error', onError);
+  });
+}
+
 describe.skipIf(!enabled)(
   'scheduled monitor scheduler on BullMQ and Redis',
   () => {
@@ -174,6 +191,7 @@ describe.skipIf(!enabled)(
       await writeBatchConfig(2);
       const server = new Redis(getWatchdogRedisOptions(connection));
       controlClients.push(server);
+      await waitForRedisReady(server);
       const info = await server.info('server');
       const version = /^redis_version:(\d+)\./m.exec(info)?.[1];
       if (!version || Number(version) < 7)
