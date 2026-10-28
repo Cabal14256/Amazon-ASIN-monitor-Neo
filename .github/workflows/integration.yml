@@ -464,6 +464,7 @@ jobs:
           done
           pnpm --filter @asin-monitor/worker... build
           RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION=1 pnpm --filter @asin-monitor/worker exec vitest run test/competitor-monitor-entry.integration.test.ts --maxWorkers=1 -t "private scheduled US run"
+          RUN_NEO_SCHEDULED_MONITOR_SCHEDULER_INTEGRATION=1 pnpm --filter @asin-monitor/worker exec vitest run test/scheduled-monitor-scheduler.integration.test.ts --pool=forks --maxWorkers=1
           for domain in primary competitor; do
             for attempt in 1 2; do
               docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-scheduled-monitor.sh "$domain" "/tmp/0016_scheduled_monitor_${domain}.rollback.sql"

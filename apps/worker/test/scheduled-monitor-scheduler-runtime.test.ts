@@ -95,6 +95,29 @@ function tick(plannedAt: number) {
 }
 
 describe('scheduled monitor tick producer', () => {
+  it('does not dispatch even an enabled persisted snapshot when scheduling is disabled', async () => {
+    const scheduledQueue = { add: vi.fn(async () => undefined) };
+    const configRepository = { readConfiguration: vi.fn(async () => []) };
+    const count = await dispatchScheduledMonitorTick({
+      env: { ...env, SCHEDULER_ENABLED: false } as Env,
+      scheduledQueue,
+      configRepository,
+      competitorEnabled: { value: true },
+      assertLease: vi.fn(async () => true),
+      configSnapshot: {
+        enabled: true,
+        competitorEnabled: true,
+        usIntervalMinutes: 15,
+        euIntervalMinutes: 30,
+        totalBatches: 1,
+      },
+      nowMs: Date.parse('2026-10-25T10:30:00.000Z'),
+    });
+    expect(count).toBe(0);
+    expect(configRepository.readConfiguration).not.toHaveBeenCalled();
+    expect(scheduledQueue.add).not.toHaveBeenCalled();
+  });
+
   it('reads current DB config and enqueues stable primary/competitor jobs with persisted delays', async () => {
     const competitorEnabled = { value: true };
     const configRepository = {
@@ -390,6 +413,8 @@ describe('scheduled monitor tick producer', () => {
     schedulerRuntimeFixture.repeatRemoved = 0;
     schedulerRuntimeFixture.readinessFailure = false;
     const owner = { token: null as string | null };
+    const scheduledQueue = { add: vi.fn(async () => undefined) };
+    const configRepository = { readConfiguration: vi.fn(async () => []) };
     const runtime = await startScheduledMonitorScheduler({
       env: {
         ...env,
@@ -409,12 +434,30 @@ describe('scheduled monitor tick producer', () => {
         }),
         eval: vi.fn(async () => 1),
       } as never,
-      scheduledQueue: { add: vi.fn(async () => undefined) },
-      configRepository: { readConfiguration: vi.fn(async () => []) },
+      scheduledQueue,
+      configRepository,
       competitorEnabled: { value: true },
       onFatal: vi.fn(),
     });
     expect(schedulerRuntimeFixture.repeatRemoved).toBe(1);
+    const staleTick = tick(Date.parse('2026-10-25T10:30:00.000Z'));
+    staleTick.data.dispatchSnapshot = {
+      version: 1,
+      tickJobId: staleTick.id,
+      plannedAt: new Date(staleTick.opts.prevMillis).toISOString(),
+      config: {
+        enabled: true,
+        competitorEnabled: true,
+        usIntervalMinutes: 30,
+        euIntervalMinutes: 60,
+        totalBatches: 1,
+      },
+    };
+    await expect(
+      schedulerRuntimeFixture.processor!(staleTick),
+    ).resolves.toBeUndefined();
+    expect(configRepository.readConfiguration).not.toHaveBeenCalled();
+    expect(scheduledQueue.add).not.toHaveBeenCalled();
     await runtime.close();
     expect(schedulerRuntimeFixture.repeatRemoved).toBe(2);
   });

@@ -55,7 +55,7 @@ export interface ScheduledMonitorSchedulerOptions {
 
 function initialConfig(env: Env): ScheduledMonitorConfig {
   return {
-    enabled: true,
+    enabled: env.SCHEDULER_ENABLED,
     competitorEnabled: env.COMPETITOR_MONITOR_ENABLED,
     usIntervalMinutes: env.MONITOR_US_SCHEDULE_MINUTES,
     euIntervalMinutes: env.MONITOR_EU_SCHEDULE_MINUTES,
@@ -73,6 +73,7 @@ function rowsToConfig(
 export async function dispatchScheduledMonitorTick(
   options: ScheduledMonitorTickProducerOptions,
 ): Promise<number> {
+  if (!options.env.SCHEDULER_ENABLED) return 0;
   const rows = options.configSnapshot
     ? undefined
     : await options.configRepository.readConfiguration();
@@ -195,6 +196,7 @@ export async function startScheduledMonitorScheduler(
         const plannedAt = job.opts.prevMillis;
         if (!Number.isSafeInteger(plannedAt) || plannedAt! <= 0)
           throw new Error('SCHEDULED_MONITOR_TICK_TIMESTAMP_INVALID');
+        if (!env.SCHEDULER_ENABLED) return;
         if (!(await lease?.assertCurrentOwner())) {
           await job.moveToDelayed(Date.now() + 5000, token);
           throw new DelayedError();
