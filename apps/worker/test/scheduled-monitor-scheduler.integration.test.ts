@@ -289,11 +289,7 @@ describe.skipIf(!enabled)(
             signalAckLoss();
             throw new Error('fixture competitor enqueue acknowledgement lost');
           }
-          if (
-            data.domain === 'competitor' &&
-            data.country === 'ES' &&
-            failCompetitorDelivery
-          ) {
+          if (data.domain === 'competitor' && failCompetitorDelivery) {
             failCompetitorDelivery = false;
             throw new Error('fixture competitor enqueue failed');
           }
@@ -363,8 +359,8 @@ describe.skipIf(!enabled)(
         plannedAt,
         scheduledConfig,
       );
-      expect(attempts).toHaveLength(34);
-      expect(attempts.slice(12, 23).map(({ delay }) => delay)).toEqual(
+      expect(attempts).toHaveLength(28);
+      expect(attempts.slice(6, 17).map(({ delay }) => delay)).toEqual(
         expected.map(({ delayMs }) => delayMs),
       );
       const nextPlannedAt = plannedAt + 30 * 60_000;
@@ -383,7 +379,7 @@ describe.skipIf(!enabled)(
         ...scheduledConfig,
         totalBatches: 4,
       });
-      expect(attempts.slice(23).map(({ delay }) => delay)).toEqual(
+      expect(attempts.slice(17).map(({ delay }) => delay)).toEqual(
         nextExpected.map(({ delayMs }) => delayMs),
       );
       const jobs = await activeBusinessQueue.getJobs([
