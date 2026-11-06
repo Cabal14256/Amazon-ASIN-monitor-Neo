@@ -118,6 +118,7 @@ export async function startVariantCheckRuntime(
   const competitorChecks =
     scheduledMonitorEnabled ||
     selected.includes('variant-check') ||
+    selected.includes('batch-check') ||
     selected.includes('competitor-monitor');
   const competitorPool =
     competitorChecks || selected.includes('monitor')
@@ -299,6 +300,7 @@ export async function startVariantCheckRuntime(
         repository: competitorRepository,
         logger,
         prefix: getNeoQueuePrefix(env),
+        batchConcurrency: env.BATCH_CHECK_GROUP_CONCURRENCY,
       });
     const business = runtime;
     const store = new RedisTaskRepository(
@@ -396,7 +398,8 @@ export async function startVariantCheckRuntime(
                   execute: (raw, context) => {
                     const data = parseVariantCheckJob(raw);
                     return data.taskSubType === 'competitor-asin-check' ||
-                      data.taskSubType === 'competitor-variant-group-check'
+                      data.taskSubType === 'competitor-variant-group-check' ||
+                      data.taskSubType === 'competitor-variant-group'
                       ? competitorRuntime!.executor.execute(data, context)
                       : business.executor.execute(data, context);
                   },

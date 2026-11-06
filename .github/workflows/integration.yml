@@ -325,6 +325,13 @@ jobs:
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT 1 FROM public.competitor_variant_check_receipts LIMIT 1"
           test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_variant_check_receipts') IS NULL")" = t
 
+      - name: Upgrade competitor batch-check root receipts twice
+        run: |
+          docker cp packages/db/docker/apply-competitor-batch-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-batch-check-receipts.sh"
+          docker cp packages/db/migrations/0018_competitor_batch_check_receipts.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0018_competitor_batch_check_receipts.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-batch-check-receipts.sh /tmp/0018_competitor_batch_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-batch-check-receipts.sh /tmp/0018_competitor_batch_check_receipts.sql
+
       - name: Upgrade competitor manual monitor storage twice before competitor schema consumers
         run: |
           docker cp packages/db/docker/apply-competitor-monitor.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-monitor.sh"
@@ -339,6 +346,9 @@ jobs:
 
       - name: Verify competitor immediate-check transactions and receipts in isolated PostgreSQL databases
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-check.integration.test.ts
+
+      - name: Verify competitor batch HTTP, receipt isolation and migration rollback on real disposable services
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-check.integration.test.ts --pool=forks --maxWorkers=1
 
       - name: Compare competitor batch creation with Legacy MySQL and verify savepoint recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-create.integration.test.ts

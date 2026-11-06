@@ -179,7 +179,10 @@ export function taskMatchesCatalogOperation(
     case 'check':
       if (task.taskType === 'batch-check')
         return (
-          identity.domain === 'asin' && task.taskSubType === 'variant-group'
+          task.taskSubType ===
+          (identity.domain === 'asin'
+            ? 'variant-group'
+            : 'competitor-variant-group')
         );
       return (
         task.taskType === 'variant-check' &&

@@ -49,6 +49,8 @@ export interface CompetitorCheckContext {
   /** Reports actual repository transaction work until its clients settle. */
   onRepositoryWorkStateChange?(active: boolean): void;
   onProgress?(completed: number, total: number): Promise<void> | void;
+  /** Batch result capacity is checked before the transaction can commit. */
+  validateResult?(value: CompetitorGroupCheckData): void;
 }
 interface Scope {
   signal: AbortSignal;
@@ -487,8 +489,11 @@ export class CompetitorCheckPipeline {
         }
         return snapshot;
       });
-      if ('completed' in initial)
-        return initial.completed as CompetitorGroupCheckData;
+      if ('completed' in initial) {
+        const result = initial.completed as CompetitorGroupCheckData;
+        context.validateResult?.(result);
+        return result;
+      }
       const snapshot: CompetitorGroupCheckSnapshot = initial.snapshot;
       const monitorOperation =
         context.operation?.taskType === 'competitor-monitor';
@@ -634,8 +639,8 @@ export class CompetitorCheckPipeline {
           return item;
         },
       );
-      const output = await this.persist(context, scope, async (unit) =>
-        groupResult(
+      const output = await this.persist(context, scope, async (unit) => {
+        const result = groupResult(
           await unit.commitGroup(
             snapshot,
             finalObservations,
@@ -649,8 +654,10 @@ export class CompetitorCheckPipeline {
             context.scheduledMonitor,
           ),
           snapshot,
-        ),
-      );
+        );
+        context.validateResult?.(result);
+        return result;
+      });
       scope.confirmed(output);
       await this.cleanupCache(
         snapshot.asins.map((row, index) => ({
