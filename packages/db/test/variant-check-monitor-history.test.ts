@@ -4,7 +4,27 @@ import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import type { CommittedGroupCheck } from '../src/domain/variant-check';
+import {
+  catalogTransactionExecution,
+  withCatalogOperationExemptExecution,
+} from '../src/repositories/catalog-operation-execution';
 import { DrizzleVariantCheckUnit } from '../src/repositories/variant-check-repository';
+
+async function scheduledHistoryFixture<T>(
+  db: unknown,
+  action: () => Promise<T>,
+) {
+  return withCatalogOperationExemptExecution('scheduled-system', async () => {
+    const execution = catalogTransactionExecution();
+    await execution.begin();
+    await execution.guard(db as never);
+    try {
+      return await action();
+    } finally {
+      await execution.settled('committed');
+    }
+  });
+}
 
 const legacy = {
   exports: {} as {
@@ -66,9 +86,11 @@ describe('monitor history country normalization', () => {
       ],
     } as unknown as CommittedGroupCheck;
 
-    await unit.recordMonitorHistory(randomUUID(), committed, {
-      isBroken: false,
-    } as never);
+    await scheduledHistoryFixture(db, () =>
+      unit.recordMonitorHistory(randomUUID(), committed, {
+        isBroken: false,
+      } as never),
+    );
 
     expect(values).toHaveBeenCalledTimes(1);
     expect(values.mock.calls[0][0]).toMatchObject([
@@ -142,10 +164,8 @@ describe('monitor history country normalization', () => {
     const values = vi.fn((rows: unknown[]) => ({
       returning: async () => rows.map((_, index) => ({ id: index + 1 })),
     }));
-    const unit = new DrizzleVariantCheckUnit(
-      { insert: () => ({ values }) } as never,
-      () => undefined,
-    );
+    const db = { insert: () => ({ values }) };
+    const unit = new DrizzleVariantCheckUnit(db as never, () => undefined);
     const asin = 'B000000001';
     const currentResult = {
       asin,
@@ -184,9 +204,11 @@ describe('monitor history country normalization', () => {
       { asin, statusSource: scenario.source },
     );
     expect(oracle.errorType).toBe(scenario.errorType);
-    await unit.recordMonitorHistory(randomUUID(), committed, {
-      isBroken: scenario.source !== 'NORMAL',
-    } as never);
+    await scheduledHistoryFixture(db, () =>
+      unit.recordMonitorHistory(randomUUID(), committed, {
+        isBroken: scenario.source !== 'NORMAL',
+      } as never),
+    );
     const row = values.mock.calls[0][0][1] as {
       isBroken: boolean;
       checkResult: {

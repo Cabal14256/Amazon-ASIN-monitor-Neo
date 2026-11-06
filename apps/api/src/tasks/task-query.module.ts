@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CatalogOperationModule } from '../catalog/catalog-operation.module';
 import { CompetitorCheckStorageModule } from '../competitor/competitor-check-storage.module';
 import { ImportStorageModule } from '../import/import-storage.module';
 import { VariantCheckStorageModule } from '../variant-check/variant-check-storage.module';
@@ -20,6 +21,7 @@ import { VariantCheckTaskResults } from './variant-check-task-results';
 @Module({
   imports: [
     AuthModule,
+    CatalogOperationModule,
     WebSocketModule,
     ImportStorageModule,
     VariantCheckStorageModule,

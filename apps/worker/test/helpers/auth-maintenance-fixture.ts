@@ -122,6 +122,15 @@ export async function maintenanceFixture(): Promise<MaintenanceFixture> {
         'utf8',
       ).replaceAll('public', schema),
     );
+    await bootstrap.query(
+      readFileSync(
+        resolve(
+          __dirname,
+          '../../../../packages/db/migrations/0017_catalog_operation_fence.sql',
+        ),
+        'utf8',
+      ).replaceAll('public', schema),
+    );
     await pool.query(
       "INSERT INTO users(id,username,password) VALUES('fixture-owner','fixture-owner','unused-fixture-hash')",
     );

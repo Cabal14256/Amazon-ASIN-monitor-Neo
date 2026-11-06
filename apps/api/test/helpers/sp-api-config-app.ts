@@ -7,6 +7,8 @@ import {
 } from '@nestjs/platform-fastify';
 import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { vi } from 'vitest';
 import { AuditModule } from '../../src/audit/audit.module';
 import { AuditService } from '../../src/audit/audit.service';
@@ -95,6 +97,25 @@ export async function spApiConfigApp(
       await bootstrap.query(
         `CREATE TABLE ${quoted}."${table}" (LIKE public."${table}" INCLUDING ALL)`,
       );
+    // Use the owned migration in this private primary schema. The catalog fence
+    // must never fall back to public tables in an HTTP integration fixture.
+    const catalogMigration = readFileSync(
+      resolve(
+        __dirname,
+        '../../../../packages/db/migrations/0017_catalog_operation_fence.sql',
+      ),
+      'utf8',
+    ).replaceAll('public', schema);
+    const catalogClient = await bootstrap.connect();
+    try {
+      await catalogClient.query(catalogMigration);
+    } catch (error) {
+      await catalogClient.query('ROLLBACK');
+      throw error;
+    } finally {
+      await catalogClient.query('RESET search_path');
+      catalogClient.release();
+    }
     await bootstrap.query(
       `CREATE VIEW ${quoted}.audit_logs_all AS SELECT * FROM ${quoted}.audit_logs`,
     );
