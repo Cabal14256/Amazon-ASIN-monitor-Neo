@@ -11,6 +11,7 @@ import type { AuthPrincipal } from '../src/auth/auth.types';
 import type { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 import { MonitorAnalyticsCache } from '../src/monitor/monitor-analytics-cache';
+import { analyticsCacheGenerationKey } from '../src/monitor/monitor-analytics-cache-control';
 import { assertMonitorJsonBounds } from '../src/monitor/monitor-analytics-result';
 import { MonitorAnalyticsService } from '../src/monitor/monitor-analytics.service';
 import type { ApplicationRedisClient } from '../src/redis/redis.service';
@@ -33,6 +34,11 @@ const query = parseMonitorAnalyticsQuery('by-time', {});
 const metricRegistries: MetricsService[] = [];
 function fixture() {
   const f = monitorAnalyticsFixture();
+  const lease = 'a'.repeat(64);
+  f.cacheModel.controls.set(analyticsCacheGenerationKey(env.BULL_PREFIX), {
+    kind: 'string',
+    value: lease,
+  });
   const metrics = new MetricsService();
   metricRegistries.push(metrics);
   const cache = new MonitorAnalyticsCache(
@@ -44,6 +50,7 @@ function fixture() {
   return {
     ...f,
     cache,
+    lease,
     metrics,
     service: new MonitorAnalyticsService(env, f.repository, cache, logger),
     principal: { userId: f.user.id, sessionId: f.session.id } as AuthPrincipal,
@@ -185,10 +192,10 @@ describe('monitor analytics response/cache resource bounds', () => {
   it('counts each timeout and capacity fallback once and ignores late valid Redis responses', async () => {
     const f = fixture();
     const warningsBefore = vi.mocked(logger.warn).mock.calls.length;
-    await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
+    await f.cache.set(query, { data: [], source: 'raw' }, Date.now(), f.lease);
     const encoded = f.values.get(f.cache.key(query))!;
-    let release!: (value: string) => void;
-    const gate = new Promise<string>((resolve) => {
+    let release!: (value: unknown[]) => void;
+    const gate = new Promise<unknown[]>((resolve) => {
       release = resolve;
     });
     f.redis.eval.mockImplementation(() => gate);
@@ -211,7 +218,7 @@ describe('monitor analytics response/cache resource bounds', () => {
       values: [{ value: 5, labels: { cache_key_prefix: 'statisticsByTime' } }],
     });
     expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
-    release(encoded);
+    release([f.lease, encoded]);
     await vi.advanceTimersByTimeAsync(0);
     expect((await f.metrics.cacheMissesTotal.get()).values[0]!.value).toBe(5);
     expect((await f.metrics.cacheHitsTotal.get()).values).toEqual([]);
@@ -238,7 +245,7 @@ describe('monitor analytics response/cache resource bounds', () => {
     { expiresAt: Number.MAX_SAFE_INTEGER },
   ])('logs a fixed reason once for invalid metadata %j', async (change) => {
     const f = fixture();
-    await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
+    await f.cache.set(query, { data: [], source: 'raw' }, Date.now(), f.lease);
     const key = f.cache.key(query);
     const payload = JSON.parse(f.values.get(key)!) as Record<string, unknown>;
     f.values.set(key, JSON.stringify({ ...payload, ...change }));
@@ -277,7 +284,8 @@ describe('monitor analytics response/cache resource bounds', () => {
     const born = Date.now() - f.cache.ttl(query.operation) - 1;
     const key = f.cache.key(query);
     const payload = {
-      version: 1,
+      version: 2,
+      generation: f.lease,
       key,
       source: 'raw',
       data: [],
@@ -305,9 +313,10 @@ describe('monitor analytics response/cache resource bounds', () => {
       query,
       { data: 'x'.repeat(3 * 1024 * 1024), source: 'raw' },
       Date.now(),
+      f.lease,
     );
     expect(f.redis.eval).not.toHaveBeenCalled();
-    await f.cache.set(query, { data: [], source: 'raw' }, Date.now());
+    await f.cache.set(query, { data: [], source: 'raw' }, Date.now(), f.lease);
     const other = parseMonitorAnalyticsQuery('by-time', { country: 'US' });
     f.values.set(f.cache.key(other), f.values.get(f.cache.key(query))!);
     expect(await f.cache.get(other)).toBeNull();
@@ -326,7 +335,7 @@ describe('monitor analytics response/cache resource bounds', () => {
       f.metrics,
     );
     expect(disabled.key(query)).not.toBe(f.cache.key(query));
-    await disabled.set(query, { data: [], source: 'raw' }, Date.now());
+    await disabled.set(query, { data: [], source: 'raw' }, Date.now(), f.lease);
     expect(await disabled.get(query)).toBeNull();
     expect(f.redis.eval).not.toHaveBeenCalled();
   });

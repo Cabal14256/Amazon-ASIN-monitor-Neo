@@ -4,11 +4,47 @@ import {
   asinExportJobDataSchema,
   asinExportTaskRequestSchema,
   createExportTaskRequestSchema,
+  variantGroupExportJobDataSchema,
+  variantGroupExportTaskRequestSchema,
 } from '../src/domains/tasks';
 
 const taskId = '10000000-0000-4000-8000-000000000166';
 
 describe('first Neo ASIN export contract', () => {
+  it('accepts only variant-group filters and immutable worker identity', () => {
+    expect(
+      variantGroupExportTaskRequestSchema.parse({
+        exportType: 'variant-group',
+        params: { country: 'US', variantStatus: 'BROKEN' },
+      }),
+    ).toEqual({
+      exportType: 'variant-group',
+      params: { country: 'US', variantStatus: 'BROKEN' },
+    });
+    expect(
+      variantGroupExportTaskRequestSchema.safeParse({
+        exportType: 'variant-group',
+        params: { layout: 'detailed' },
+      }).success,
+    ).toBe(false);
+    const job = {
+      taskId,
+      taskType: 'export',
+      taskSubType: 'variant-group',
+      exportType: 'variant-group',
+      userId: 'owner',
+      createdAt: '2026-09-27T00:00:00.000Z',
+      params: { country: 'US' },
+    };
+    expect(variantGroupExportJobDataSchema.safeParse(job).success).toBe(true);
+    expect(
+      variantGroupExportJobDataSchema.safeParse({
+        ...job,
+        taskSubType: 'asin',
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts bounded Legacy filters and defaults absent params', () => {
     expect(
       asinExportTaskRequestSchema.parse({ exportType: 'asin' }).params,

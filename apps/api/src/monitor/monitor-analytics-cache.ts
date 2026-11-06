@@ -13,18 +13,25 @@ import {
 } from '../metrics/metrics.service';
 import { ApplicationRedisClient } from '../redis/redis.service';
 import {
+  analyticsCacheGenerationKey,
+  isAnalyticsCacheGeneration,
+  LOOKUP_MONITOR_ANALYTICS_CACHE,
+  newAnalyticsCacheGeneration,
+  WRITE_MONITOR_ANALYTICS_CACHE,
+} from './monitor-analytics-cache-control';
+import {
   assertMonitorJsonBounds,
   validateMonitorAnalyticsData,
   type MonitorAnalyticsData,
 } from './monitor-analytics-result';
 
 export const MONITOR_ANALYTICS_CACHE_BYTES = 2 * 1024 * 1024;
-// STRLEN and GET share a Redis command; oversized values never cross the wire.
-export const READ_MONITOR_ANALYTICS_CACHE = `
-if redis.call('STRLEN', KEYS[1]) > tonumber(ARGV[1]) then return false end
-return redis.call('GET', KEYS[1])`;
-const WRITE_CACHE = `return redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])`;
+export const READ_MONITOR_ANALYTICS_CACHE = LOOKUP_MONITOR_ANALYTICS_CACHE;
 type CachedResult = MonitorAnalyticsData & { generatedAt: number };
+export interface MonitorAnalyticsCacheLookup {
+  cached: CachedResult | null;
+  lease: string | null;
+}
 const METRIC_PREFIXES: Partial<
   Record<MonitorAnalyticsOperation, AnalyticsCachePrefix>
 > = {
@@ -112,12 +119,17 @@ export class MonitorAnalyticsCache {
     }
   }
   async get(query: MonitorAnalyticsQuery): Promise<CachedResult | null> {
+    return (await this.lookup(query)).cached;
+  }
+  async lookup(
+    query: MonitorAnalyticsQuery,
+  ): Promise<MonitorAnalyticsCacheLookup> {
     const ttl = this.ttl(query.operation);
-    if (!ttl) return null;
+    if (!ttl) return { cached: null, lease: null };
     let hit = false;
     try {
       const cached = await this.readValidated(query, ttl);
-      hit = cached !== null;
+      hit = cached.cached !== null;
       return cached;
     } finally {
       const prefix = METRIC_PREFIXES[query.operation];
@@ -127,29 +139,39 @@ export class MonitorAnalyticsCache {
   private async readValidated(
     query: MonitorAnalyticsQuery,
     ttl: number,
-  ): Promise<CachedResult | null> {
+  ): Promise<MonitorAnalyticsCacheLookup> {
     const key = this.key(query);
     const raw = await this.attempt(() =>
       this.redis.eval(
         READ_MONITOR_ANALYTICS_CACHE,
-        [key],
-        [MONITOR_ANALYTICS_CACHE_BYTES],
+        [analyticsCacheGenerationKey(this.env.BULL_PREFIX), key],
+        [newAnalyticsCacheGeneration(), MONITOR_ANALYTICS_CACHE_BYTES],
       ),
     );
     if (
-      typeof raw !== 'string' ||
-      Buffer.byteLength(raw) > MONITOR_ANALYTICS_CACHE_BYTES
+      !Array.isArray(raw) ||
+      raw.length !== 2 ||
+      !isAnalyticsCacheGeneration(raw[0])
     )
-      return null;
+      return { cached: null, lease: null };
+    const lease = raw[0],
+      payload = raw[1];
+    if (payload === null) return { cached: null, lease };
+    if (
+      typeof payload !== 'string' ||
+      Buffer.byteLength(payload) > MONITOR_ANALYTICS_CACHE_BYTES
+    )
+      return { cached: null, lease: null };
     try {
-      const cached: unknown = JSON.parse(raw);
+      const cached: unknown = JSON.parse(payload);
       assertMonitorJsonBounds(cached, MONITOR_ANALYTICS_CACHE_BYTES);
       if (!cached || typeof cached !== 'object' || Array.isArray(cached))
         throw new Error('CACHE_INVALID_ENVELOPE');
       const row = cached as Record<string, unknown>;
       const now = Date.now();
       if (
-        row.version !== 1 ||
+        row.version !== 2 ||
+        row.generation !== lease ||
         row.key !== key ||
         typeof row.source !== 'string' ||
         !['raw', 'agg', 'agg:day-fallback'].includes(row.source) ||
@@ -164,30 +186,42 @@ export class MonitorAnalyticsCache {
       )
         throw new Error('CACHE_INVALID_METADATA');
       // Ordinary expiration is a cold miss only after envelope validation.
-      if (row.expiresAt <= now || row.generatedAt + ttl <= now) return null;
+      if (row.expiresAt <= now || row.generatedAt + ttl <= now)
+        return { cached: null, lease };
       validateMonitorAnalyticsData(query.operation, row.data);
       return {
-        data: row.data,
-        source: row.source as CachedResult['source'],
-        generatedAt: row.generatedAt,
+        lease,
+        cached: {
+          data: row.data,
+          source: row.source as CachedResult['source'],
+          generatedAt: row.generatedAt,
+        },
       };
     } catch {
       this.logger.warn('统计缓存内容无效', 'MonitorAnalyticsCache', {
         reason: 'analytics_cache_invalid',
       });
-      return null;
+      return { cached: null, lease };
     }
   }
   async set(
     query: MonitorAnalyticsQuery,
     result: MonitorAnalyticsData,
     generatedAt: number,
+    capturedLease: string | null,
   ) {
     const ttl = this.ttl(query.operation);
-    if (!ttl) return;
+    if (!ttl || !isAnalyticsCacheGeneration(capturedLease)) return;
     const key = this.key(query),
       expiresAt = generatedAt + ttl;
-    const payload = { version: 1, key, ...result, generatedAt, expiresAt };
+    const payload = {
+      version: 2,
+      generation: capturedLease,
+      key,
+      ...result,
+      generatedAt,
+      expiresAt,
+    };
     // Large valid responses are delivered whole without occupying Redis cache.
     try {
       assertMonitorJsonBounds(payload, MONITOR_ANALYTICS_CACHE_BYTES);
@@ -198,7 +232,11 @@ export class MonitorAnalyticsCache {
     const remaining = expiresAt - Date.now();
     if (remaining <= 0) return;
     await this.attempt(() =>
-      this.redis.eval(WRITE_CACHE, [key], [encoded, remaining]),
+      this.redis.eval(
+        WRITE_MONITOR_ANALYTICS_CACHE,
+        [analyticsCacheGenerationKey(this.env.BULL_PREFIX), key],
+        [capturedLease, encoded, remaining],
+      ),
     );
   }
 }

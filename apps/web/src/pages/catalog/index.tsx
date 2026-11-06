@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   RefreshCw,
   Search,
 } from 'lucide-react';
@@ -38,7 +39,7 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
-import { useTaskQuery } from '../../hooks/tasks';
+import { useCreateExportTask, useTaskQuery } from '../../hooks/tasks';
 import { ApiError } from '../../lib/http';
 import { isBulkDeleteId } from '../../services/catalog-batch-delete';
 import { isTerminalTask } from '../../services/tasks';
@@ -973,6 +974,7 @@ export function CatalogPage({
 }) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
+  const exportTask = useCreateExportTask(runtime);
   const ownerId = auth.status === 'authenticated' ? auth.identity.user.id : '';
   const peerSessionId =
     auth.status === 'authenticated' ? auth.identity.sessionId : undefined;
@@ -1948,6 +1950,29 @@ export function CatalogPage({
       current: 1,
       pageSize: query.pageSize,
     });
+  }
+  async function createVariantGroupExport() {
+    if (
+      config.id !== 'asin' ||
+      !access.canReadASIN ||
+      access.mustChangePassword
+    )
+      return;
+    try {
+      const result = await exportTask.mutateAsync({
+        exportType: 'variant-group',
+        params: {
+          keyword: query.keyword,
+          country: query.country,
+          variantStatus: query.variantStatus,
+        },
+      });
+      const message = `变体组导出任务已提交：${result.taskId}`;
+      setNotice(message);
+      announce(message);
+    } catch (error) {
+      setNotice(catalogError(error));
+    }
   }
   function changePage(next: number) {
     if (writingRef.current) return;
@@ -3017,6 +3042,20 @@ export function CatalogPage({
                     新建变体组
                   </Button>
                 )}
+                {config.id === 'asin' &&
+                  access.canReadASIN &&
+                  !access.mustChangePassword && (
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={writing || exportTask.isPending}
+                      pending={exportTask.isPending}
+                      onClick={() => void createVariantGroupExport()}
+                    >
+                      <Download aria-hidden="true" />
+                      导出变体组
+                    </Button>
+                  )}
                 <label className="flex items-center gap-2 text-xs">
                   每页{' '}
                   <select

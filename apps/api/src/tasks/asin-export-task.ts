@@ -2,6 +2,7 @@ import type { Env } from '@asin-monitor/config';
 import {
   asinExportTaskRequestSchema,
   createExportTaskRequestSchema,
+  variantGroupExportTaskRequestSchema,
 } from '@asin-monitor/contracts';
 import {
   ASIN_EXPORT_MIN_TASK_TTL_SECONDS,
@@ -67,10 +68,19 @@ export class AsinExportTaskService implements OnModuleDestroy {
     if (this.active >= 4) fail(429, '导出提交繁忙，请稍后再试');
     const request = createExportTaskRequestSchema.safeParse(raw);
     if (!request.success) fail(400, '导出参数无效');
-    if (request.data.exportType !== 'asin')
+    if (
+      request.data.exportType !== 'asin' &&
+      request.data.exportType !== 'variant-group'
+    )
       fail(501, '此导出类型尚未在 Neo 实现');
-    const parsed = asinExportTaskRequestSchema.safeParse(raw);
-    if (!parsed.success) fail(400, 'ASIN 导出筛选参数无效');
+    const exportType = request.data.exportType;
+    const parsed =
+      exportType === 'variant-group'
+        ? variantGroupExportTaskRequestSchema.safeParse(raw)
+        : asinExportTaskRequestSchema.safeParse(raw);
+    if (!parsed.success) fail(400, '导出筛选参数无效');
+    const taskTitle =
+      exportType === 'variant-group' ? '变体组导出' : 'ASIN导出';
     this.active++;
     const taskId = randomUUID();
     let submissionStarted = false;
@@ -101,8 +111,8 @@ export class AsinExportTaskService implements OnModuleDestroy {
           taskId,
           userId: principal.userId,
           taskType: 'export',
-          taskSubType: 'asin',
-          title: 'ASIN导出',
+          taskSubType: exportType,
+          title: taskTitle,
           message: '导出任务已创建，等待处理',
         },
         2,
@@ -115,19 +125,32 @@ export class AsinExportTaskService implements OnModuleDestroy {
       );
       taskCreatedAt = task.createdAt;
       enqueueAttempted = true;
-      await port.enqueue({
+      const jobIdentity = {
         taskId,
         userId: principal.userId,
         createdAt: task.createdAt,
-        taskType: 'export',
-        taskSubType: 'asin',
-        exportType: 'asin',
-        params: parsed.data.params,
+        taskType: 'export' as const,
+      };
+      if (exportType === 'variant-group')
+        await port.enqueue({
+          ...jobIdentity,
+          taskSubType: 'variant-group',
+          exportType: 'variant-group',
+          params: parsed.data.params,
+        });
+      else
+        await port.enqueue({
+          ...jobIdentity,
+          taskSubType: 'asin',
+          exportType: 'asin',
+          params: parsed.data.params,
+        });
+      this.logger.info('导出任务已创建', 'AsinExportTaskService', {
+        exportType,
       });
-      this.logger.info('ASIN 导出任务已创建', 'AsinExportTaskService');
       return {
         taskId,
-        exportType: 'asin' as const,
+        exportType,
         status: 'pending' as const,
       };
     } catch (error) {
@@ -152,7 +175,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
           taskId,
           userId: principal.userId,
           taskType: 'export' as const,
-          taskSubType: 'asin' as const,
+          taskSubType: exportType,
           createdAt: taskCreatedAt,
         };
         // A lost Redis cleanup ACK cannot change the known fact that add was
@@ -172,20 +195,26 @@ export class AsinExportTaskService implements OnModuleDestroy {
             })
             .store.mutate(
               taskId,
-              { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+              {
+                kind: 'failed',
+                message:
+                  exportType === 'variant-group'
+                    ? '变体组导出未入队，请重试'
+                    : 'ASIN 导出未入队，请重试',
+              },
               {
                 userId: principal.userId,
                 taskType: 'export',
-                taskSubType: 'asin',
+                taskSubType: exportType,
                 createdAt: taskCreatedAt,
               },
             );
           if (state?.status === 'failed')
-            throw new ExportSubmissionRejectedException(taskId, 'asin');
+            throw new ExportSubmissionRejectedException(taskId, exportType);
         } catch (failure) {
           if (failure instanceof HttpException) throw failure;
         }
-        throw new ExportSubmissionRejectedException(taskId, 'asin');
+        throw new ExportSubmissionRejectedException(taskId, exportType);
       }
       if (submissionStarted) {
         this.logger.warn('ASIN 导出任务提交未确认', 'AsinExportTaskService', {
@@ -193,7 +222,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
         });
         return {
           taskId,
-          exportType: 'asin' as const,
+          exportType,
           status: 'unknown' as const,
         };
       }

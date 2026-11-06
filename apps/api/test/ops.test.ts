@@ -15,6 +15,7 @@ import {
   withOpsRedisDeadline,
 } from '../src/ops/ops.service';
 import { ApplicationRedisClient } from '../src/redis/redis.service';
+import { analyticsCacheRedisMemoryModel } from './helpers/analytics-cache-redis-memory-model';
 import { monitorAnalyticsFixture } from './helpers/monitor-analytics-fixture';
 import { sessionApp } from './helpers/session-app';
 
@@ -77,6 +78,12 @@ describe('Neo operations HTTP', () => {
       },
     };
     const values = new Map<string, string>();
+    const cacheModel = analyticsCacheRedisMemoryModel({
+      dataValues: values,
+      legacyEval: async () => {
+        throw new Error('UNEXPECTED_LEGACY_CACHE_SCRIPT');
+      },
+    });
     redis = {
       values,
       get: async (key) => values.get(key) ?? null,
@@ -103,7 +110,8 @@ describe('Neo operations HTTP', () => {
       client: {},
       scan,
       unlink,
-      get: (key: string) => redis.get(key),
+      get: cacheModel.get,
+      eval: vi.fn(cacheModel.eval),
       setex: async (key: string, _ttl: number, value: string) => {
         values.set(key, value);
       },
