@@ -4,7 +4,11 @@ import {
   type Env,
 } from '@asin-monitor/config';
 import { batchDeleteVariantGroupsResultSchema } from '@asin-monitor/contracts';
-import { RedisTaskRepository } from '@asin-monitor/db';
+import {
+  PgCatalogOperationRepository,
+  RedisTaskRepository,
+  parseCatalogTaskBinding,
+} from '@asin-monitor/db';
 import { Queue, type Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import jwt from 'jsonwebtoken';
@@ -245,6 +249,92 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       return (await queryTask(id)).json().data;
     }
+    it('recovers a real durable drained marker after Worker restart and failed-proof delivery retry without opening new business pins', async () => {
+      await group('g-drained-marker');
+      const id = await accepted({
+        groupIds: ['g-drained-marker'],
+        asinIds: [],
+      });
+      const job = await queue.getJob(id);
+      expect(job?.opts.attempts).toBe(1);
+      const task = parseCatalogTaskBinding({
+        taskId: job!.data.taskId,
+        userId: job!.data.userId,
+        taskType: job!.data.taskType,
+        taskSubType: job!.data.taskSubType,
+        createdAt: job!.data.createdAt,
+      });
+      const catalog = new PgCatalogOperationRepository(f.pools.primaryPool);
+      const identity = await catalog.findByTask(task);
+      const originalClose = PgCatalogOperationRepository.prototype.close;
+      const pins = vi.spyOn(PgCatalogOperationRepository.prototype, 'beginPin');
+      let proofFailures = 0;
+      const close = vi
+        .spyOn(PgCatalogOperationRepository.prototype, 'close')
+        .mockImplementation(async function (
+          this: PgCatalogOperationRepository,
+          value,
+          proof,
+        ) {
+          if (
+            value.operationId === identity.operationId &&
+            proof?.source === 'worker'
+          ) {
+            proofFailures++;
+            throw new Error('synthetic terminal proof storage failure');
+          }
+          // The admission marker is committed by the actual isolated PostgreSQL
+          // transaction. Only the following proof-storage boundary is injected.
+          return originalClose.call(this, value, proof);
+        });
+      try {
+        await start();
+        await vi.waitFor(
+          async () => {
+            expect((await store.read(id))?.status).toBe('completed');
+            expect(await job!.getState()).toBe('failed');
+          },
+          { timeout: 8000, interval: 20 },
+        );
+        expect(proofFailures).toBe(3);
+        expect(await catalog.read(userId, 'asin')).toMatchObject({
+          ...identity,
+          state: 'closed',
+          terminal: null,
+          task,
+          pendingPins: 0,
+          uncertainPins: 0,
+        });
+        expect(await rows('asins')).toEqual([]);
+        expect(await rows('variant_groups')).toEqual([]);
+        expect(pins.mock.calls.length).toBeGreaterThan(0);
+        const completed = await store.read(id);
+        const businessPins = pins.mock.calls.length;
+        // Physically close the first Worker and start the compiled production
+        // entry afresh. This is an explicit failed-delivery retry, not an extra
+        // configured business attempt or automatic retry-on-restart claim.
+        await runtime!.close();
+        runtime = undefined;
+        close.mockRestore();
+        await job!.retry('failed');
+        await start();
+        await vi.waitFor(
+          async () => expect(await job!.getState()).toBe('completed'),
+          { timeout: 8000, interval: 20 },
+        );
+        expect(await catalog.read(userId, 'asin')).toBeNull();
+        expect(await store.read(id)).toEqual(completed);
+        expect(pins.mock.calls.length).toBe(businessPins);
+        expect(await rows('asins')).toEqual([]);
+        expect(await rows('variant_groups')).toEqual([]);
+        expect(fatal).not.toHaveBeenCalled();
+      } finally {
+        close.mockRestore();
+        pins.mockRestore();
+        await runtime?.close();
+        runtime = undefined;
+      }
+    });
     it('synchronously cascades selected groups, deletes direct targets, preserves history and touches remaining parents', async () => {
       await group('g1', 2);
       await group('g2', 2);

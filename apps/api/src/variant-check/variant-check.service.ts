@@ -2,6 +2,7 @@ import type { Env } from '@asin-monitor/config';
 import {
   AsinTimestampPolicyError,
   VariantCheckError,
+  withCatalogOperationExemptExecution,
   type VariantCheckRepositoryPort,
 } from '@asin-monitor/db';
 import { SpApiError } from '@asin-monitor/sp-api';
@@ -19,6 +20,10 @@ import {
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
+import {
+  ApplicationCatalogOperations,
+  type CatalogOperationSubmission,
+} from '../catalog/catalog-operation.service';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
 import { TaskQueryRuntime } from '../tasks/task-query.runtime';
@@ -65,12 +70,48 @@ export class VariantCheckService implements OnModuleDestroy {
     private readonly runtime: ApplicationVariantCheckRuntime,
     @Inject(TaskQueryRuntime) private readonly tasks: TaskQueryRuntime,
     @Inject(AppLogger) private readonly logger: AppLogger,
+    @Inject(ApplicationCatalogOperations)
+    private readonly catalog: ApplicationCatalogOperations,
   ) {}
   async execute(
     type: CheckSubType,
     request: FastifyRequest,
     reply: FastifyReply,
     id?: string,
+  ): Promise<unknown> {
+    if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
+      fail(503, '鉴权权威源尚未切换，请使用现有检查入口');
+    if (
+      type === 'parent-asin-query' &&
+      !useAsyncCheck(
+        checkRequestObject(request.body),
+        checkRequestObject(request.query),
+        !!request.auth,
+      )
+    )
+      return this.executeReserved(type, request, reply, id);
+    if (!request.auth) {
+      if (type === 'asin-check' || type === 'variant-group-check')
+        return withCatalogOperationExemptExecution('anonymous-check', () =>
+          this.executeReserved(type, request, reply, id),
+        );
+      return this.executeReserved(type, request, reply, id);
+    }
+    return this.catalog.execute(
+      request.auth,
+      'asin',
+      'check',
+      'asin:read',
+      (submission) =>
+        this.executeReserved(type, request, reply, id, submission),
+    );
+  }
+  private async executeReserved(
+    type: CheckSubType,
+    request: FastifyRequest,
+    reply: FastifyReply,
+    id?: string,
+    catalog?: CatalogOperationSubmission,
   ): Promise<unknown> {
     if (
       request.headers.origin &&
@@ -128,14 +169,18 @@ export class VariantCheckService implements OnModuleDestroy {
             throw new Error('CHECK_SUBMISSION_DEADLINE');
         });
         submission = randomUUID();
-        const task = await port.store.create({
-          taskId: submission,
-          userId: principal!.userId,
-          taskType: input.taskType,
-          taskSubType: input.taskSubType,
-          title: checkTaskTitle[type],
-          message: '检查任务已创建，等待处理',
-        });
+        catalog?.retain();
+        const task = await port.store.create(
+          {
+            taskId: submission,
+            userId: principal!.userId,
+            taskType: input.taskType,
+            taskSubType: input.taskSubType,
+            title: checkTaskTitle[type],
+            message: '检查任务已创建，等待处理',
+          },
+          catalog ? (prepared) => catalog.bindTask(prepared) : undefined,
+        );
         await port.enqueue(
           parseVariantCheckJob({
             ...input,

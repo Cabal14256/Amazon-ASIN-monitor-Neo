@@ -11,6 +11,7 @@ import type {
 import { buildScheduledMonitorJobId } from '@asin-monitor/contracts';
 import {
   createPgPool,
+  PgCatalogOperationRepository,
   RedisTaskRepository,
   scheduledMonitorTaskId,
 } from '@asin-monitor/db';
@@ -41,6 +42,7 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import { createCatalogFixtureTask } from './helpers/catalog-operation-fixture';
 import {
   assertMetricsFixtureTargets,
   availableMetricsPort,
@@ -628,7 +630,7 @@ ${extra}
   async function job(
     country: 'US' | 'DE' = 'US',
   ): Promise<CompetitorMonitorJob> {
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'competitor-monitor',
@@ -874,10 +876,16 @@ spApi.CatalogVariantChecker.prototype.check=async function(asin,country,options)
       8000,
     );
     const primaryTasks: PrimaryMonitorJob[] = [];
+    await f.pool.query(
+      "INSERT INTO users(id,username,password,status,force_password_change) VALUES('fixture-primary-peer','fixture-primary-peer','unused-fixture-hash','ACTIVE',false)",
+    );
+    await f.pool.query(
+      "INSERT INTO user_roles(user_id,role_id) VALUES('fixture-primary-peer','monitor-fixture')",
+    );
     for (let index = 0; index < 2; index++) {
-      const task = await store.create({
+      const task = await createCatalogFixtureTask(f.pool, store, {
         taskId: randomUUID(),
-        userId: 'fixture-owner',
+        userId: index === 0 ? 'fixture-owner' : 'fixture-primary-peer',
         taskType: 'monitor',
         taskSubType: 'primary',
         title: 'Fixture shared primary monitor',
@@ -957,8 +965,15 @@ spApi.CatalogVariantChecker.prototype.check=async function(asin,country,options)
         )
       ).rows,
     ).toEqual([{ runs: 2, receipts: 2, history: 4 }]);
-    for (const task of [competitorData, ...primaryTasks])
+    for (const task of [competitorData, ...primaryTasks]) {
       expect((await store.read(task.taskId))?.status).toBe('completed');
+      expect(
+        await new PgCatalogOperationRepository(f.pool).read(
+          task.userId,
+          task.taskSubType === 'primary' ? 'asin' : 'competitor',
+        ),
+      ).toBeNull();
+    }
     expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);
     expect(cards).toHaveLength(0);
     await stop();
@@ -985,6 +1000,12 @@ spApi.CatalogVariantChecker.prototype.check=async function(asin,country,options)
       },
     });
     expect((await store.read(data.taskId))?.status).toBe('completed');
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(
+        data.userId,
+        'competitor',
+      ),
+    ).toBeNull();
     const after = await scrapeWorker(metricsPort);
     expect(
       metricValue(after, 'variant_group_checks_total', {

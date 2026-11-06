@@ -321,8 +321,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     it('keeps concurrent repeated ASIN deletion idempotent', async () => {
       await group('g');
       await asin('a', 'g');
+      const firstHeaders = { ...headers };
+      await login('deleter-89');
       const responses = await Promise.all([
-        request('DELETE', '/asins/a'),
+        request('DELETE', '/asins/a', undefined, firstHeaders),
         request('DELETE', '/asins/a'),
       ]);
       expect(responses.map((r) => r.statusCode)).toEqual([200, 200]);
@@ -335,8 +337,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await group('g');
       await asin('a', 'g');
       await history('g', 'a');
-      // Separate sessions reach the business locks independently. Reusing the
-      // first session would wait earlier at AuthenticationService.touchSession.
+      // Distinct owners and sessions reach the admission and business locks
+      // independently; this checks cascade ordering rather than owner exclusion.
       const groupHeaders = { ...headers };
       await login('deleter-89');
       const oldHistory = await rows('monitor_history'),
