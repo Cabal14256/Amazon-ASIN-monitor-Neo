@@ -304,7 +304,7 @@ describe.skipIf(!enabled)(
       const runtimeB = await startRuntime(
         controlB,
         configRepository!,
-        activeBusinessQueue,
+        scheduledQueue as Pick<Queue, 'add'>,
       );
       await eventually(async () =>
         Boolean(
@@ -359,7 +359,7 @@ describe.skipIf(!enabled)(
         plannedAt,
         scheduledConfig,
       );
-      expect(attempts).toHaveLength(28);
+      expect(attempts).toHaveLength(17);
       expect(attempts.slice(6, 17).map(({ delay }) => delay)).toEqual(
         expected.map(({ delayMs }) => delayMs),
       );
@@ -375,6 +375,7 @@ describe.skipIf(!enabled)(
       expect(completedNextTick?.data).toMatchObject({
         dispatchSnapshot: { config: { totalBatches: 4 } },
       });
+      expect(attempts).toHaveLength(28);
       const nextExpected = buildScheduledMonitorDispatches(nextPlannedAt, {
         ...scheduledConfig,
         totalBatches: 4,
