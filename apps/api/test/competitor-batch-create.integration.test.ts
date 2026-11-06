@@ -2,6 +2,7 @@ import {
   competitorBatchCreateResultSchema,
   type BatchCreateAsinsData,
 } from '@asin-monitor/contracts';
+import { PgCatalogOperationRepository } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
@@ -14,8 +15,11 @@ import {
   it,
   vi,
 } from 'vitest';
+import { authorizeAdministration } from '../src/auth/administration-authorization';
+import type { AuthPrincipal } from '../src/auth/auth.types';
 import { legacyCompetitorQueryFixture } from './helpers/competitor-query-legacy';
 import { competitorWriteApp } from './helpers/competitor-write-app';
+import { taskAuthFixture } from './helpers/task-query-fixtures';
 
 const item = {
   asin: 'B000000125',
@@ -81,8 +85,26 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         await f.pools.competitorPool.query(`DELETE FROM ${table}`);
         await legacy.query(`DELETE FROM ${table}`);
       }
-      userId = randomUUID();
-      sessionId = randomUUID();
+      ({ userId, sessionId, headers } = await writer());
+      await group('g1');
+      await group('g2');
+    });
+    const request = (items: unknown[], requestHeaders = headers) =>
+      f.http.inject({
+        method: 'POST',
+        url: '/api/v1/competitor/asins/batch-create',
+        headers: requestHeaders,
+        payload: { items },
+      });
+    const read = () =>
+      f.http.inject({
+        method: 'GET',
+        url: '/api/v1/competitor/variant-groups',
+        headers,
+      });
+    async function writer() {
+      const userId = randomUUID(),
+        sessionId = randomUUID();
       f.userIds.add(userId);
       await f.pools.primaryPool.query(
         'INSERT INTO users(id,username,password,force_password_change) VALUES($1,$1,$2,false)',
@@ -96,29 +118,18 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
         [sessionId, userId],
       );
-      headers = {
-        authorization: `Bearer ${jwt.sign(
-          { userId, sessionId },
-          f.env.JWT_SECRET,
-          { expiresIn: '1h' },
-        )}`,
+      return {
+        userId,
+        sessionId,
+        headers: {
+          authorization: `Bearer ${jwt.sign(
+            { userId, sessionId },
+            f.env.JWT_SECRET,
+            { expiresIn: '1h' },
+          )}`,
+        },
       };
-      await group('g1');
-      await group('g2');
-    });
-    const request = (items: unknown[]) =>
-      f.http.inject({
-        method: 'POST',
-        url: '/api/v1/competitor/asins/batch-create',
-        headers,
-        payload: { items },
-      });
-    const read = () =>
-      f.http.inject({
-        method: 'GET',
-        url: '/api/v1/competitor/variant-groups',
-        headers,
-      });
+    }
     async function group(id: string, country = 'US') {
       const values = [id, `Group ${id}`, country, 'Parent brand'];
       await f.pools.competitorPool.query(
@@ -213,7 +224,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       await legacy.query('INSERT INTO batch_failure_fixture VALUES(?)', [asin]);
     }
-    async function blocked(client: PoolClient) {
+    async function blocked(client: PoolClient, waiters = 1) {
       await vi.waitFor(
         async () =>
           expect(
@@ -222,7 +233,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
                 'SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pg_backend_pid()=ANY(pg_blocking_pids(pid))',
               )
             ).rows[0].n,
-          ).toBeGreaterThan(0),
+          ).toBeGreaterThanOrEqual(waiters),
         { timeout: 1000, interval: 10 },
       );
     }
@@ -465,27 +476,91 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
       expect((await request([item])).statusCode).toBe(200);
     });
-    it('serializes reverse-order overlapping batches across different parents without deadlock', async () => {
+    it('rejects a batch while the same owner has an open write reservation, then recovers after exact completion', async () => {
+      const before = await snapshot(),
+        repository = new PgCatalogOperationRepository(f.pools.primaryPool);
+      const principal: AuthPrincipal = {
+        userId,
+        sessionId,
+        user: {
+          ...taskAuthFixture().user,
+          id: userId,
+          status: 'ACTIVE',
+          forcePasswordChange: false,
+        },
+      };
+      const operation = await repository.reserve(
+        { ownerId: userId, domain: 'competitor', kind: 'write' },
+        (unit) => authorizeAdministration(unit, principal, 'asin:write'),
+      );
+      const reserved = await repository.read(userId, 'competitor');
+      expect(reserved).toMatchObject({ ...operation, state: 'open' });
+      try {
+        const conflicting = await request([item]);
+        expect(conflicting.statusCode).toBe(409);
+        expect(conflicting.json()).toMatchObject({
+          success: false,
+          errorCode: 409,
+        });
+        expect(await snapshot()).toEqual(before);
+        expect(await repository.read(userId, 'competitor')).toEqual(reserved);
+      } finally {
+        // The fixture reserved admission without starting any business work.
+        // Its known completion proof releases only this exact generation.
+        await repository.close(operation, {
+          status: 'completed',
+          source: 'sync',
+        });
+        expect(await repository.release(operation)).toBe(true);
+      }
+      expect((await request([item])).statusCode).toBe(200);
+      expect((await snapshot()).asins.map((row) => row.asin)).toEqual([
+        item.asin,
+      ]);
+      expect(await repository.read(userId, 'competitor')).toBeNull();
+    });
+    it('serializes reverse-order overlapping batches from different owners and parents without deadlock', async () => {
+      const other = await writer(),
+        blocker = await f.pools.competitorPool.connect();
       const items = Array.from({ length: 20 }, (_, index) => ({
         ...item,
         asin: `B${String(index).padStart(9, '0')}`,
       }));
-      const results = await Promise.all([
-        request(items),
-        request(
-          [...items].reverse().map((row) => ({ ...row, parentId: 'g2' })),
-        ),
-      ]);
-      expect(results.map((response) => response.statusCode)).toEqual([
-        200, 200,
-      ]);
-      expect(
-        results.reduce(
-          (total, response) => total + response.json().data.successCount,
-          0,
-        ),
-      ).toBe(20);
-      expect((await snapshot()).asins).toHaveLength(20);
+      const pending: Promise<Awaited<ReturnType<typeof request>>>[] = [];
+      try {
+        await blocker.query('BEGIN');
+        // Both owners pass the admission fence independently. Hold inserts
+        // until both transactions have read the initially empty shared keys.
+        await blocker.query('LOCK TABLE competitor_asins IN SHARE MODE');
+        pending.push(
+          Promise.resolve(request(items)),
+          Promise.resolve(
+            request(
+              [...items].reverse().map((row) => ({ ...row, parentId: 'g2' })),
+              other.headers,
+            ),
+          ),
+        );
+        await blocked(blocker, 2);
+        await blocker.query('ROLLBACK');
+        const results = await Promise.all(pending);
+        expect(results.map((response) => response.statusCode)).toEqual([
+          200, 200,
+        ]);
+        for (const response of results)
+          competitorBatchCreateResultSchema.parse(response.json());
+        expect(
+          results.reduce(
+            (total, response) => total + response.json().data.successCount,
+            0,
+          ),
+        ).toBe(20);
+        expect((await snapshot()).asins).toHaveLength(20);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+        await Promise.allSettled(pending);
+      }
     });
     it('rechecks parent country after a concurrent committed change during lock wait', async () => {
       const blocker = await f.pools.competitorPool.connect();

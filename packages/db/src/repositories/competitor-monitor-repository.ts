@@ -17,6 +17,7 @@ import {
   type CompetitorMonitorNotificationCandidate,
 } from '../domain/competitor-monitor';
 import { competitorAsins, competitorVariantGroups } from '../schema-competitor';
+import { assertCatalogWriteExecution } from './catalog-operation-execution';
 import { PgCompetitorTransactions } from './competitor-transactions';
 import type { NotificationClaim } from './primary-monitor-repository';
 
@@ -116,6 +117,7 @@ export class PgCompetitorMonitorRepository {
     return this.run(
       authorize,
       async (db, ensureOpen) => {
+        assertCatalogWriteExecution(db, 'competitor', 'scheduled-system');
         const existing = await this.existing(db, job, true);
         if (existing) return existing;
         const groups = await db
@@ -290,6 +292,7 @@ export class PgCompetitorMonitorRepository {
     return this.run(
       authorize,
       async (db) => {
+        assertCatalogWriteExecution(db, 'competitor', 'scheduled-system');
         await this.notificationInputs(db, job, country, candidates);
         const inserted =
           await db.execute(sql`INSERT INTO competitor_monitor_notifications(task_id,country)
@@ -316,6 +319,7 @@ export class PgCompetitorMonitorRepository {
     return this.run(
       authorize,
       async (db) => {
+        assertCatalogWriteExecution(db, 'competitor', 'scheduled-system');
         if (
           !job.countries.includes(country) ||
           !(await this.existing(db, job, true))

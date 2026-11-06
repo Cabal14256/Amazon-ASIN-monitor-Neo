@@ -23,6 +23,7 @@ import {
   type VariantGroup,
 } from '../schema';
 import { withAuthDatabaseDeadline } from './bounded-auth-repository';
+import { catalogTransactionExecution } from './catalog-operation-execution';
 import { DrizzleRoleUnit, type RoleWriteUnit } from './role-repository';
 
 export const MAX_ASIN_QUERY_CHILDREN = 5000;
@@ -648,11 +649,13 @@ export class PgAsinExportQueryRepository
  * changes take the matching exclusive advisory lock; business row locks are
  * acquired afterwards in group -> ASIN order by the relevant unit.
  */
-export function withAsinDatabaseTransaction<T>(
+export async function withAsinDatabaseTransaction<T>(
   pool: Pool,
   operation: Parameters<typeof withAuthDatabaseDeadline<T>>[1],
   onActualWork?: (work: Promise<unknown>) => void,
 ): Promise<T> {
+  const execution = catalogTransactionExecution();
+  await execution.begin();
   return withAuthDatabaseDeadline(
     pool,
     async (db, ensureOpen) => {
@@ -663,8 +666,11 @@ export function withAsinDatabaseTransaction<T>(
         sql`SELECT pg_advisory_xact_lock_shared(1095977294,1380073795)`,
       );
       ensureOpen();
+      await execution.guard(db);
+      ensureOpen();
       return operation(db, ensureOpen);
     },
     onActualWork,
+    execution.scoped ? (outcome) => execution.settled(outcome) : undefined,
   );
 }
