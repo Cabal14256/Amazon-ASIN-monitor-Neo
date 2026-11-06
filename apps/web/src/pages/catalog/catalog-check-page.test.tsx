@@ -29,6 +29,7 @@ const taskSnapshot = vi.hoisted(() => ({
   error: null as Error | null,
 }));
 vi.mock('../../hooks/tasks', () => ({
+  useCreateExportTask: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTaskQuery: (_runtime: unknown, _id: string, enabled: boolean) => ({
     data: enabled ? taskSnapshot.data : undefined,
     isError: enabled && Boolean(taskSnapshot.error),
