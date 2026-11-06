@@ -17,6 +17,10 @@ import {
   type CompetitorSingleCheckSnapshot,
 } from '../domain/competitor-check';
 import { competitorMonitorSnapshotDigest } from '../domain/competitor-monitor';
+import type {
+  ScheduledMonitorCheck,
+  ScheduledMonitorGroupOperation,
+} from '../domain/scheduled-monitor-run';
 import { VariantCheckError } from '../domain/variant-check';
 import type { VariantCheckOperation } from '../domain/variant-check-receipt';
 import {
@@ -37,6 +41,8 @@ import {
 } from './competitor-check-receipt-repository';
 import { PgCompetitorTransactions } from './competitor-transactions';
 import { prepareCompetitorWrites } from './competitor-write-policy';
+import { writeScheduledMonitorGroupReceipt } from './scheduled-monitor-group-receipt';
+import { assertScheduledMonitorSnapshot } from './scheduled-monitor-snapshot-check';
 
 const MAX_CHILDREN = 5000;
 const sameTime = (a: Date | null, b: Date | null) =>
@@ -85,6 +91,23 @@ class DrizzleCompetitorCheckUnit {
     private readonly db: Db,
     private readonly ensureOpen: () => void,
   ) {}
+
+  assertScheduledMonitorGroup(check: ScheduledMonitorCheck): Promise<void> {
+    return assertScheduledMonitorSnapshot(this.db, check, this.ensureOpen);
+  }
+
+  recordScheduledMonitorGroupReceipt(
+    operation: ScheduledMonitorGroupOperation,
+    result: unknown,
+  ): Promise<void> {
+    return writeScheduledMonitorGroupReceipt(
+      this.db,
+      'competitor',
+      operation,
+      result,
+      this.ensureOpen,
+    );
+  }
   private async query<T>(action: () => PromiseLike<T>): Promise<T> {
     this.ensureOpen();
     const value = await action();
@@ -257,6 +280,7 @@ class DrizzleCompetitorCheckUnit {
     observations: CompetitorCheckObservation[],
     guard: () => Promise<void>,
     monitor?: { operation: VariantCheckOperation; snapshotDigest: string },
+    scheduled?: ScheduledMonitorCheck,
   ): Promise<CommittedCompetitorGroupCheck> {
     if (monitor) {
       const operation = parseVariantCheckOperation(monitor.operation);
@@ -316,11 +340,15 @@ class DrizzleCompetitorCheckUnit {
       )
     )
       throw new VariantCheckError('snapshot-changed');
+    if (scheduled) await this.assertScheduledMonitorGroup(scheduled);
     await guard();
     this.ensureOpen();
     // Legacy leaves an empty group untouched and emits no fabricated history.
     if (!current.length) {
-      if (monitor)
+      if (monitor || scheduled) {
+        const checkedAt = monitor
+          ? new Date(monitor.operation.taskCreatedAt)
+          : await this.timestamp();
         await this.query(() =>
           this.db.insert(competitorMonitorHistory).values({
             variantGroupId: group.id,
@@ -328,8 +356,8 @@ class DrizzleCompetitorCheckUnit {
             checkType: 'GROUP',
             country: group.country,
             isBroken: true,
-            checkTime: new Date(monitor.operation.taskCreatedAt),
-            monitorTaskId: monitor.operation.taskId,
+            checkTime: checkedAt,
+            monitorTaskId: monitor?.operation.taskId ?? scheduled?.job.taskId,
             checkResult: {
               totalASINs: 0,
               brokenCount: 0,
@@ -338,6 +366,7 @@ class DrizzleCompetitorCheckUnit {
             },
           }),
         );
+      }
       await guard();
       return { group, asins: [], observations: [] };
     }
@@ -411,7 +440,7 @@ class DrizzleCompetitorCheckUnit {
         country: group.country,
         isBroken: groupBroken,
         checkTime: checkedAt,
-        monitorTaskId: monitor?.operation.taskId,
+        monitorTaskId: monitor?.operation.taskId ?? scheduled?.job.taskId,
         checkResult: {
           totalASINs: current.length,
           brokenCount,
@@ -439,12 +468,12 @@ class DrizzleCompetitorCheckUnit {
               checkType: 'ASIN',
               country: row.country,
               checkTime: checkedAt,
-              monitorTaskId: monitor?.operation.taskId,
+              monitorTaskId: monitor?.operation.taskId ?? scheduled?.job.taskId,
               isBroken: row.isBroken === true,
               checkResult: {
                 asin: row.asin,
                 isBroken: row.isBroken === true,
-                ...(monitor
+                ...(monitor || scheduled
                   ? {
                       errorType: kind ?? null,
                       isDeferred: false,
@@ -499,13 +528,19 @@ export class PgCompetitorCheckRepository
             business().then((unit) => unit.purgeExpiredReceipts()),
           loadGroup: (id) => business().then((unit) => unit.loadGroup(id)),
           loadSingle: (id) => business().then((unit) => unit.loadSingle(id)),
-          commitGroup: (snapshot, values, guard, monitor) =>
+          commitGroup: (snapshot, values, guard, monitor, scheduled) =>
             business().then((unit) =>
-              unit.commitGroup(snapshot, values, guard, monitor),
+              unit.commitGroup(snapshot, values, guard, monitor, scheduled),
             ),
           commitSingle: (snapshot, value, guard) =>
             business().then((unit) =>
               unit.commitSingle(snapshot, value, guard),
+            ),
+          assertScheduledMonitorGroup: (check) =>
+            business().then((unit) => unit.assertScheduledMonitorGroup(check)),
+          recordScheduledMonitorGroupReceipt: (operation, result) =>
+            business().then((unit) =>
+              unit.recordScheduledMonitorGroupReceipt(operation, result),
             ),
         });
       },

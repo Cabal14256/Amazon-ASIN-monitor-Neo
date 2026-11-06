@@ -5,6 +5,10 @@ import type {
   CompetitorVariantGroup,
 } from '../schema-competitor';
 import type { CompetitorMonitorControlUnit } from './competitor-monitor';
+import type {
+  ScheduledMonitorCheck,
+  ScheduledMonitorGroupOperation,
+} from './scheduled-monitor-run';
 import type { VariantCheckOperation } from './variant-check-receipt';
 
 export interface CompetitorGroupCheckSnapshot {
@@ -53,7 +57,13 @@ export interface CompetitorCheckUnit extends CompetitorCheckAuthorization {
     observations: CompetitorCheckObservation[],
     guard: () => Promise<void>,
     monitor?: { operation: VariantCheckOperation; snapshotDigest: string },
+    scheduled?: ScheduledMonitorCheck,
   ): Promise<CommittedCompetitorGroupCheck>;
+  assertScheduledMonitorGroup?(check: ScheduledMonitorCheck): Promise<void>;
+  recordScheduledMonitorGroupReceipt?(
+    operation: ScheduledMonitorGroupOperation,
+    result: unknown,
+  ): Promise<void>;
   commitSingle(
     expected: CompetitorSingleCheckSnapshot,
     result: CatalogVariantResult,

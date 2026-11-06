@@ -18,6 +18,8 @@ export interface NotificationData {
   brokenGroupNames?: string[];
   brokenGroupDetails?: (NotificationGroup | null)[];
   brokenASINs?: NotificationAsin[];
+  totalBrokenASINs?: number;
+  notificationTruncated?: boolean;
   brokenByType?: Partial<
     Record<'SP_API_ERROR' | 'NOT_FOUND' | 'NO_VARIANTS', number>
   > | null;

@@ -10,6 +10,10 @@ import {
 } from '@asin-monitor/sp-api';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { Pool } from 'pg';
+import type {
+  ScheduledMonitorCheck,
+  ScheduledMonitorGroupOperation,
+} from '../domain/scheduled-monitor-run';
 import {
   VariantCheckError,
   type AsinCheckObservation,
@@ -36,6 +40,8 @@ import {
   withAsinDatabaseTransaction,
 } from './asin-query-repository';
 import { prepareAsinTimestampWrites } from './asin-timestamp-policy';
+import { writeScheduledMonitorGroupReceipt } from './scheduled-monitor-group-receipt';
+import { assertScheduledMonitorSnapshot } from './scheduled-monitor-snapshot-check';
 import {
   purgeVariantCheckReceipts,
   readVariantCheckReceipt,
@@ -69,6 +75,23 @@ export class DrizzleVariantCheckUnit
   extends DrizzleAsinQueryUnit
   implements VariantCheckUnit
 {
+  assertScheduledMonitorGroup(check: ScheduledMonitorCheck): Promise<void> {
+    return assertScheduledMonitorSnapshot(this.db, check, this.ensureOpen);
+  }
+
+  recordScheduledMonitorGroupReceipt(
+    operation: ScheduledMonitorGroupOperation,
+    result: VariantGroupCheckData,
+  ): Promise<void> {
+    return writeScheduledMonitorGroupReceipt(
+      this.db,
+      'primary',
+      operation,
+      result,
+      this.ensureOpen,
+    );
+  }
+
   readReceipt(operation: VariantCheckOperation, lock = false) {
     return readVariantCheckReceipt(this.db, this.ensureOpen, operation, lock);
   }
@@ -211,6 +234,7 @@ export class DrizzleVariantCheckUnit
     expected: GroupCheckSnapshot,
     observations: AsinCheckObservation[],
     guard: CheckCommitGuard,
+    scheduled?: ScheduledMonitorCheck,
   ): Promise<CommittedGroupCheck> {
     if (
       !Array.isArray(observations) ||
@@ -260,6 +284,7 @@ export class DrizzleVariantCheckUnit
       )
     )
       throw new VariantCheckError('snapshot-changed');
+    if (scheduled) await this.assertScheduledMonitorGroup(scheduled);
     await guard();
     this.ensureOpen();
     // Legacy's empty-group response is a read; it does not fabricate check times.

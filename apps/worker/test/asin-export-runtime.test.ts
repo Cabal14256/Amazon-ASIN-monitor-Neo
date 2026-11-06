@@ -163,19 +163,23 @@ describe('ASIN export startup deadline', () => {
     const firstSweep = new Promise<void>((resolve) => {
       completedSweep = resolve;
     });
-    const cleanup = ExportArtifactStore.prototype.cleanup;
-    let cleanupCalls = 0;
-    vi.spyOn(ExportArtifactStore.prototype, 'cleanup').mockImplementation(
-      async function (this: ExportArtifactStore, ...args) {
-        const removed = await cleanup.apply(this, args);
-        cleanupCalls += 1;
-        if (cleanupCalls === 3) completedSweep();
-        return removed;
-      },
-    );
+    const reconcile =
+      ExportArtifactStore.prototype.reconcileRejectedSubmissions;
+    vi.spyOn(
+      ExportArtifactStore.prototype,
+      'reconcileRejectedSubmissions',
+    ).mockImplementationOnce(async function (
+      this: ExportArtifactStore,
+      ...args
+    ) {
+      await reconcile.apply(this, args);
+      completedSweep();
+    });
+    const cleanup = vi.spyOn(ExportArtifactStore.prototype, 'cleanup');
     const runtime = await startAsinExportRuntime(env, vi.fn());
     try {
       await firstSweep;
+      await vi.waitFor(() => expect(cleanup).toHaveBeenCalledTimes(3));
       expect(await artifacts.readRejectedSubmission(proof.taskId)).toEqual(
         proof,
       );

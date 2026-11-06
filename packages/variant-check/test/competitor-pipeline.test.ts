@@ -8,6 +8,7 @@ import type {
 import {
   competitorMonitorSnapshotDigest,
   createVariantCheckOperation,
+  freezeScheduledMonitorSnapshot,
   PgCompetitorCheckRepository,
 } from '@asin-monitor/db';
 import {
@@ -25,6 +26,11 @@ import {
   CompetitorCheckPipeline,
   type CompetitorCheckContext,
 } from '../src/competitor-pipeline';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from './scheduled-monitor-fixtures';
 
 const before = new Date('2026-01-01T00:00:00.000Z');
 const checkedAt = new Date('2026-09-12T00:00:00.000Z');
@@ -431,12 +437,48 @@ describe('competitor check pipeline', () => {
       expect.any(Array),
       expect.any(Function),
       { operation: context.operation, snapshotDigest: context.snapshotDigest },
+      undefined,
     );
     expect(vi.mocked(f.unit.saveReceipt)).toHaveBeenCalledOnce();
     expect(f.cache.clearDeferred).toHaveBeenCalledWith(
       { asin: 'B000000001', country: 'US', owner: 'competitor' },
       expect.any(AbortSignal),
     );
+  });
+
+  it('retries scheduled competitor deferred checks without a public monitor operation', async () => {
+    const f = fixture();
+    const job = scheduledJob('competitor');
+    const [groupSnapshot] = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup('competitor', 'cg1')],
+      [1, 2, 3].map((index) =>
+        scheduledMember('competitor', 'cg1', `ca${index}`),
+      ),
+    );
+    f.unit.assertScheduledMonitorGroup = vi.fn(async () => undefined);
+    f.unit.recordScheduledMonitorGroupReceipt = vi.fn(async () => undefined);
+    f.checker.check.mockImplementation(async (code, _country, options) => {
+      if (code === 'B000000001' && !options?.forceRefresh)
+        throw new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
+      return catalogResult(code, true);
+    });
+    await f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      forceRefresh: false,
+      scheduledMonitor: { job, group: groupSnapshot },
+    });
+    expect(f.checker.check).toHaveBeenCalledWith(
+      'B000000001',
+      'US',
+      expect.objectContaining({ forceRefresh: true, owner: 'competitor' }),
+    );
+    expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
+      { kind: 'checked' },
+      { kind: 'checked' },
+      { kind: 'checked' },
+    ]);
+    expect(f.unit.recordScheduledMonitorGroupReceipt).toHaveBeenCalledOnce();
   });
   it('commits a final deferred upstream failure only after its bounded second check', async () => {
     const f = fixture(),
