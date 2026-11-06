@@ -667,11 +667,22 @@ export async function startVariantCheckRuntime(
       error && typeof error === 'object' && 'code' in error
         ? (error as { code?: unknown }).code
         : undefined;
+    const message = error instanceof Error ? error.message : '';
+    const dependencyClass = /does not exist|undefined table|relation/i.test(
+      message,
+    )
+      ? 'missing_relation'
+      : /timeout|cancelled|canceled/i.test(message)
+      ? 'database_timeout'
+      : /connection|closed|ECONN/i.test(message)
+      ? 'database_connection'
+      : 'dependency_error';
     try {
       logger.error('检查 Worker 初始化失败', {
         reason: 'variant_check_initialization_failed',
         stage: startupStage,
         error: error instanceof Error ? error.name : 'unknown_error',
+        dependencyClass,
         ...(typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code)
           ? { dependencyCode: code }
           : {}),
