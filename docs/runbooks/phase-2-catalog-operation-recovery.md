@@ -38,6 +38,8 @@ HTTP 鉴权先更新当前会话活跃时间。若原业务仍持有同一 sessi
 
 literal-check-targets 原生夹具通过正式目录保留与任务绑定 helper 准备异步 monitor/import，并在确切原执行域内调用 monitor groups；主营批量创建 unit 的模拟数据库同样声明对应目录执行域。这些夹具改动适配强制保护，未绕过生产准入。
 
+主线 #188 的私有定时监控消费者使用固定的 `scheduled-system` 执行域，覆盖整个 processor 及其主营/竞品后续任务。该豁免由内部 Worker 入口指定，不能从 HTTP 或任务 payload 选择；普通用户检查仍使用原任务绑定的目录围栏。合并后必须同时运行编译 Worker 的私有 US 定时监控与竞品 follow-up 集成，验证业务状态、历史和固定组回执实际写入，不能只验证任务被消费。
+
 - 定向 unit/HTTP：Worker catalog-operation-processor；API catalog-operation、task-cancellation、task-cancellation-settlement；DB catalog-operation-reservation。driver seam 故障测试不是原生数据库证明。
 - 生产者准备：API catalog-submission-binding.test 使用实际 ApplicationCatalogOperations、PgCatalogOperationRepository 与 RedisTaskRepository，只在 SQL/Redis transport seam 注入故障，覆盖绑定前零 EVAL 调用、后续准入、绑定 COMMIT ACK 丢失、真正 EVAL 返回零及已发 EVAL ACK 丢失。catalog-submission-binding.integration 在隔离 PostgreSQL 中验证两个 domain 的实际回滚、持久绑定和仍持锁的物理 COMMIT 与 cleanup 序列化；这八例的 Redis driver 是合成夹具，不声称真正 Redis/BullMQ 覆盖。独立 CI step 明确运行新文件，继承原 RUN_INTEGRATION_TESTS 与隔离服务配置。
 - 隔离 PostgreSQL：DB catalog-operation.integration 的两个 domain 持真实 assertPin SHARE 锁时新 reserve 返回 BUSY，原槽/pin/业务原值不变；API catalog-operation.integration 在原 4000ms 竞品业务事务期间，同 owner 第二合法 session 返回 HTTP 409、确实到达目录仲裁，同 session heartbeat 受锁返回鉴权 503 且未进入仲裁；两者均不调用第二业务事务，原槽/pin/业务值不变，原业务完成后下一写入成功。

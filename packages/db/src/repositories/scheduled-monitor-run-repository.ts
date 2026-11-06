@@ -128,6 +128,7 @@ export class PgScheduledMonitorRunRepository {
   private readonly transactions: PgScheduledMonitorTransactions;
   private readonly runs: string;
   private readonly receipts: string;
+  private readonly notifications: string;
   private readonly groupTable: string;
   private readonly memberTable: string;
   private readonly schema: string;
@@ -148,6 +149,8 @@ export class PgScheduledMonitorRunRepository {
     this.runs = qualified + identifier(`${domain}_scheduled_monitor_runs`);
     this.receipts =
       qualified + identifier(`${domain}_scheduled_monitor_group_receipts`);
+    this.notifications =
+      qualified + identifier(`${domain}_scheduled_monitor_notifications`);
     this.groupTable =
       qualified +
       identifier(
@@ -528,6 +531,203 @@ export class PgScheduledMonitorRunRepository {
       return (await this.existing(tx, job))!;
     }, signal);
   }
+
+  async readGroupReceipt(
+    value: unknown,
+    ordinal: number,
+    signal?: AbortSignal,
+  ): Promise<unknown | undefined> {
+    const job = this.job(value);
+    if (!Number.isInteger(ordinal) || ordinal < 0)
+      throw new ScheduledMonitorRunError('input');
+    return this.transaction(async (tx) => {
+      const run = await this.require(tx, job);
+      const group = run.groups[ordinal];
+      if (!group) return undefined;
+      const operation = scheduledMonitorGroupOperation(job, group);
+      const rows = await tx.query(
+        `SELECT * FROM ${this.receipts} WHERE task_id=$1 AND ordinal=$2 LIMIT 2`,
+        [job.taskId, ordinal],
+      );
+      if (!rows.length) return undefined;
+      if (rows.length !== 1) throw new ScheduledMonitorRunError('identity');
+      const row = rows[0];
+      const keys: Record<string, unknown> = {
+        operation_key: operation.operationKey,
+        request_hash: operation.requestHash,
+        task_id: operation.taskId,
+        job_digest: operation.jobDigest,
+        country: operation.country,
+        group_id: operation.groupId,
+        ordinal: operation.ordinal,
+        snapshot_digest: operation.snapshotDigest,
+        result_kind: operation.resultKind,
+      };
+      for (const [key, expected] of Object.entries(keys))
+        if (row[key] !== expected)
+          throw new ScheduledMonitorRunError('identity');
+      try {
+        return decodeVariantCheckReceiptResult(
+          row.result,
+          operation.resultKind,
+        );
+      } catch {
+        throw new ScheduledMonitorRunError('identity');
+      }
+    }, signal);
+  }
+
+  private notificationCountry(job: ScheduledMonitorJob, country: string) {
+    if (
+      typeof country !== 'string' ||
+      country !== job.country ||
+      !/^[A-Z]{2}$/.test(country)
+    )
+      throw new ScheduledMonitorRunError('identity');
+  }
+
+  async readNotification(
+    value: unknown,
+    country: string,
+    signal?: AbortSignal,
+  ): Promise<'claimed' | 'sent' | 'failed' | undefined> {
+    const job = this.job(value);
+    this.notificationCountry(job, country);
+    return this.transaction(async (tx) => {
+      await this.lock(tx, job);
+      const run = await this.existing(tx, job);
+      if (!run) throw new ScheduledMonitorRunError('identity');
+      if (!['business-completed', 'completed'].includes(run.state))
+        throw new ScheduledMonitorRunError('state');
+      const rows = await tx.query(
+        `SELECT task_id,job_digest,country,state,completed_at
+           FROM ${this.notifications}
+          WHERE task_id=$1 AND job_digest=$2 AND country=$3
+          LIMIT 2`,
+        [job.taskId, run.jobDigest, country],
+      );
+      if (!rows.length) return undefined;
+      if (rows.length !== 1) throw new ScheduledMonitorRunError('identity');
+      const row = rows[0];
+      if (
+        row.task_id !== job.taskId ||
+        row.job_digest !== run.jobDigest ||
+        row.country !== country ||
+        !['claimed', 'sent', 'failed'].includes(String(row.state)) ||
+        (row.state === 'claimed'
+          ? row.completed_at !== null
+          : row.completed_at === null)
+      )
+        throw new ScheduledMonitorRunError('identity');
+      return row.state as 'claimed' | 'sent' | 'failed';
+    }, signal);
+  }
+
+  async claimNotification(
+    value: unknown,
+    country: string,
+    signal?: AbortSignal,
+  ): Promise<'new' | 'claimed' | 'sent' | 'failed'> {
+    const job = this.job(value);
+    this.notificationCountry(job, country);
+    return this.transaction(async (tx) => {
+      const run = await this.require(tx, job);
+      if (!['business-completed', 'completed'].includes(run.state))
+        throw new ScheduledMonitorRunError('state');
+      const inserted = await tx.query(
+        `INSERT INTO ${this.notifications}
+           (task_id,job_digest,country,state,claimed_at)
+         VALUES ($1,$2,$3,'claimed',clock_timestamp())
+         ON CONFLICT (task_id,country) DO NOTHING
+         RETURNING state`,
+        [job.taskId, run.jobDigest, country],
+      );
+      if (inserted.length === 1 && inserted[0].state === 'claimed')
+        return 'new';
+      const rows = await tx.query(
+        `SELECT task_id,job_digest,country,state,completed_at
+           FROM ${this.notifications}
+          WHERE task_id=$1 AND job_digest=$2 AND country=$3
+          LIMIT 2`,
+        [job.taskId, run.jobDigest, country],
+      );
+      if (rows.length !== 1) throw new ScheduledMonitorRunError('identity');
+      const row = rows[0];
+      if (
+        row.task_id !== job.taskId ||
+        row.job_digest !== run.jobDigest ||
+        row.country !== country ||
+        !['claimed', 'sent', 'failed'].includes(String(row.state)) ||
+        (row.state === 'claimed'
+          ? row.completed_at !== null
+          : row.completed_at === null)
+      )
+        throw new ScheduledMonitorRunError('identity');
+      return row.state as 'claimed' | 'sent' | 'failed';
+    }, signal);
+  }
+
+  async completeNotification(
+    value: unknown,
+    country: string,
+    sent: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const job = this.job(value);
+    this.notificationCountry(job, country);
+    if (typeof sent !== 'boolean') throw new ScheduledMonitorRunError('input');
+    return this.transaction(async (tx) => {
+      const run = await this.require(tx, job);
+      if (!['business-completed', 'completed'].includes(run.state))
+        throw new ScheduledMonitorRunError('state');
+      const target = sent ? 'sent' : 'failed';
+      const rows = await tx.query(
+        `SELECT state,completed_at,job_digest,country
+           FROM ${this.notifications}
+          WHERE task_id=$1 AND job_digest=$2 AND country=$3
+          FOR UPDATE`,
+        [job.taskId, run.jobDigest, country],
+      );
+      if (rows.length !== 1) throw new ScheduledMonitorRunError('state');
+      const row = rows[0];
+      if (
+        row.job_digest !== run.jobDigest ||
+        row.country !== country ||
+        !['claimed', 'sent', 'failed'].includes(String(row.state))
+      )
+        throw new ScheduledMonitorRunError('identity');
+      if (row.state === target) {
+        if (row.completed_at === null)
+          throw new ScheduledMonitorRunError('state');
+        return;
+      }
+      if (row.state !== 'claimed' || row.completed_at !== null)
+        throw new ScheduledMonitorRunError('state');
+      const updated = await tx.query(
+        `UPDATE ${this.notifications}
+            SET state=$4,completed_at=clock_timestamp()
+          WHERE task_id=$1 AND job_digest=$2 AND country=$3 AND state='claimed'
+          RETURNING task_id`,
+        [job.taskId, run.jobDigest, country, target],
+      );
+      if (updated.length !== 1) throw new ScheduledMonitorRunError('state');
+      if (sent) {
+        const historyTable =
+          this.domain === 'primary'
+            ? 'monitor_history'
+            : 'competitor_monitor_history';
+        await tx.query(
+          `UPDATE ${identifier(this.schema)}.${identifier(historyTable)}
+              SET notification_sent=true
+            WHERE monitor_task_id=$1::text
+              AND upper(rtrim(country))=$2
+              AND is_broken=true`,
+          [job.taskId, country],
+        );
+      }
+    }, signal);
+  }
+
   requestCancellation(
     value: unknown,
     signal?: AbortSignal,

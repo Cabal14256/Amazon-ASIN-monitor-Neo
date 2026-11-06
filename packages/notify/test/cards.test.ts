@@ -143,5 +143,17 @@ describe.each(['primary', 'competitor'] as const)(
         brokenGroupNames: ['仅名称'],
       });
     });
+    it('explains when bounded notification details were truncated', () => {
+      const content = build({
+        country: 'US',
+        brokenGroups: 4,
+        brokenASINs: [{ asin: 'B000000001' }],
+        totalBrokenASINs: 10008,
+        notificationTruncated: true,
+      }).elements[0].text.content;
+      expect(content).toContain('通知明细已按容量限制截断');
+      expect(content).toContain('异常分类统计仍为完整汇总');
+      expect(content).toContain('异常ASIN数量：10008（展示1条）');
+    });
   },
 );

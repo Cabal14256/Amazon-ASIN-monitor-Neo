@@ -2,6 +2,7 @@ import { competitorCheckDataSchema } from '@asin-monitor/contracts';
 import {
   assertVariantCheckOperationRequest,
   competitorMonitorSnapshotDigest,
+  scheduledMonitorGroupOperation,
   VariantCheckError,
   type CommittedCompetitorGroupCheck,
   type CommittedCompetitorSingleCheck,
@@ -9,6 +10,7 @@ import {
   type CompetitorCheckRepositoryPort,
   type CompetitorCheckUnit,
   type CompetitorGroupCheckSnapshot,
+  type ScheduledMonitorCheck,
   type VariantCheckOperation,
 } from '@asin-monitor/db';
 import {
@@ -40,9 +42,12 @@ export interface CompetitorCheckContext {
   signal?: AbortSignal;
   groupAdmission?: VariantGroupAdmission;
   operation?: VariantCheckOperation;
+  scheduledMonitor?: ScheduledMonitorCheck;
   snapshotDigest?: string;
   authorize(unit: CompetitorCheckUnit): Promise<void>;
   checkpoint(): Promise<void>;
+  /** Reports actual repository transaction work until its clients settle. */
+  onRepositoryWorkStateChange?(active: boolean): void;
   onProgress?(completed: number, total: number): Promise<void> | void;
 }
 interface Scope {
@@ -207,7 +212,13 @@ export class CompetitorCheckPipeline {
     let confirmation: { value: T } | undefined;
     const scope: Scope = {
       signal: controller.signal,
-      trackWork: settlement ? (work) => settlement.track(work) : undefined,
+      trackWork: (work) => {
+        context.onRepositoryWorkStateChange?.(true);
+        settlement?.track(work);
+        void work
+          .finally(() => context.onRepositoryWorkStateChange?.(false))
+          .catch(() => {});
+      },
       started: () => {
         commitStarted = true;
       },
@@ -292,6 +303,11 @@ export class CompetitorCheckPipeline {
       const output = await this.repository.transaction(
         async (unit) => {
           await scope.guard(unit);
+          if (context.scheduledMonitor) {
+            if (!unit.assertScheduledMonitorGroup)
+              throw new VariantCheckError('invalid-result');
+            await unit.assertScheduledMonitorGroup(context.scheduledMonitor);
+          }
           if (context.operation) {
             const existing = await unit.readReceipt(context.operation, true);
             await scope.guard(unit);
@@ -301,6 +317,17 @@ export class CompetitorCheckPipeline {
           const result = bounded(await commit(unit));
           if (context.operation)
             await unit.saveReceipt(context.operation, result);
+          if (context.scheduledMonitor) {
+            if (!unit.recordScheduledMonitorGroupReceipt)
+              throw new VariantCheckError('invalid-result');
+            await unit.recordScheduledMonitorGroupReceipt(
+              scheduledMonitorGroupOperation(
+                context.scheduledMonitor.job,
+                context.scheduledMonitor.group,
+              ),
+              result,
+            );
+          }
           await scope.guard(unit);
           readyToCommit = true;
           return result;
@@ -313,6 +340,7 @@ export class CompetitorCheckPipeline {
     } catch (error) {
       if (readyToCommit) throw new VariantCheckCommitUncertainError();
       throw error;
+    } finally {
     }
   }
   private async cleanupCache(
@@ -443,16 +471,31 @@ export class CompetitorCheckPipeline {
           : {}),
       });
     }
+    if (
+      context.scheduledMonitor &&
+      (context.scheduledMonitor.job.domain !== 'competitor' ||
+        context.scheduledMonitor.group.group.id !== id)
+    )
+      throw new VariantCheckError('invalid-input');
     return this.run<CompetitorGroupCheckData>(context, async (scope) => {
-      const initial = await this.read(context, scope, (unit) =>
-        unit.loadGroup(id),
-      );
+      const initial = await this.read(context, scope, async (unit) => {
+        const snapshot = await unit.loadGroup(id);
+        if (context.scheduledMonitor) {
+          if (!unit.assertScheduledMonitorGroup)
+            throw new VariantCheckError('invalid-result');
+          await unit.assertScheduledMonitorGroup(context.scheduledMonitor);
+        }
+        return snapshot;
+      });
       if ('completed' in initial)
         return initial.completed as CompetitorGroupCheckData;
       const snapshot: CompetitorGroupCheckSnapshot = initial.snapshot;
-      const monitor = context.operation?.taskType === 'competitor-monitor';
+      const monitorOperation =
+        context.operation?.taskType === 'competitor-monitor';
+      const monitor =
+        monitorOperation || context.scheduledMonitor !== undefined;
       if (
-        monitor &&
+        monitorOperation &&
         (context.forceRefresh ||
           !context.snapshotDigest ||
           !/^[a-f0-9]{64}$/.test(context.snapshotDigest) ||
@@ -597,12 +640,13 @@ export class CompetitorCheckPipeline {
             snapshot,
             finalObservations,
             () => scope.guard(unit),
-            monitor
+            monitorOperation
               ? {
                   operation: context.operation!,
                   snapshotDigest: context.snapshotDigest!,
                 }
               : undefined,
+            context.scheduledMonitor,
           ),
           snapshot,
         ),
