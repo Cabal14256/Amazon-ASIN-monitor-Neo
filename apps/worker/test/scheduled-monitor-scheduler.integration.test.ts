@@ -419,6 +419,121 @@ describe.skipIf(!enabled)(
       ).toBeUndefined();
     }, 120_000);
 
+    it('preserves staggered jobs across a runtime restart and hot-loads interval and competitor changes only for new ticks', async () => {
+      await initQueues();
+      const activeTickQueue = tickQueue!;
+      const activeTickEvents = tickEvents!;
+      const activeBusinessQueue = businessQueue!;
+      const controlA = new Redis(getWatchdogRedisOptions(connection));
+      const controlB = new Redis(getWatchdogRedisOptions(connection));
+      controlClients.push(controlA, controlB);
+      const runtimeA = await startRuntime(
+        controlA,
+        configRepository!,
+        activeBusinessQueue,
+      );
+      const pauseGeneratedTicks = async () => {
+        await activeTickQueue.removeJobScheduler(
+          SCHEDULED_MONITOR_SCHEDULER_ID,
+        );
+        await eventually(
+          async () =>
+            (await activeTickQueue.getJobCounts('active')).active === 0,
+        );
+        for (const job of await activeTickQueue.getJobs(['wait', 'delayed']))
+          await job.remove();
+      };
+      await pauseGeneratedTicks();
+      await activeBusinessQueue.drain(true);
+      const plannedAt = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+      const firstTick = await activeTickQueue.add(
+        SCHEDULED_MONITOR_TICK_JOB,
+        { schemaVersion: 1 },
+        { jobId: `restart-${suffix}`, prevMillis: plannedAt } as never,
+      );
+      await firstTick.waitUntilFinished(activeTickEvents, 5000);
+      const expected = buildScheduledMonitorDispatches(
+        plannedAt,
+        scheduledConfig,
+      );
+      expect(expected).toHaveLength(11);
+      await runtimeA.close();
+      activeRuntimes.splice(activeRuntimes.indexOf(runtimeA), 1);
+
+      await writeBatchConfig(3);
+      await bootstrapPool!.query(
+        `UPDATE ${configSchema}.sp_api_config SET config_value = CASE config_key
+           WHEN 'MONITOR_US_SCHEDULE_MINUTES' THEN '30'
+           WHEN 'MONITOR_EU_SCHEDULE_MINUTES' THEN '60'
+           WHEN 'COMPETITOR_MONITOR_ENABLED' THEN 'false'
+           ELSE config_value END`,
+      );
+      const runtimeB = await startRuntime(
+        controlB,
+        configRepository!,
+        activeBusinessQueue,
+      );
+      await pauseGeneratedTicks();
+      // Replay the persisted tick after restarting the entire scheduler runtime.
+      // Its original snapshot must survive the new DB settings, and BullMQ must
+      // deduplicate the already persisted, staggered business deliveries.
+      await firstTick.retry('completed');
+      await firstTick.waitUntilFinished(activeTickEvents, 5000);
+      for (const { job, delayMs } of expected) {
+        const persisted = await activeBusinessQueue.getJob(job.jobId);
+        expect(persisted?.data).toEqual(job);
+        expect(persisted?.opts.delay).toBe(delayMs);
+      }
+      const replay = await activeTickQueue.getJob(firstTick.id!);
+      expect(replay?.data.dispatchSnapshot.config).toEqual(scheduledConfig);
+
+      const nextTick = await activeTickQueue.add(
+        SCHEDULED_MONITOR_TICK_JOB,
+        { schemaVersion: 1 },
+        {
+          jobId: `hot-config-${suffix}`,
+          prevMillis: plannedAt + 15 * 60_000,
+        } as never,
+      );
+      await nextTick.waitUntilFinished(activeTickEvents, 5000);
+      const current = await activeTickQueue.getJob(nextTick.id!);
+      const changedConfig: ScheduledMonitorConfig = {
+        ...scheduledConfig,
+        totalBatches: 3,
+        usIntervalMinutes: 30,
+        euIntervalMinutes: 60,
+        competitorEnabled: false,
+      };
+      expect(current?.data.dispatchSnapshot.config).toEqual(changedConfig);
+      expect(
+        buildScheduledMonitorDispatches(plannedAt + 15 * 60_000, changedConfig),
+      ).toEqual([]);
+      const nextHour = plannedAt + 3_600_000;
+      const changedTick = await activeTickQueue.add(
+        SCHEDULED_MONITOR_TICK_JOB,
+        { schemaVersion: 1 },
+        { jobId: `next-hour-${suffix}`, prevMillis: nextHour } as never,
+      );
+      await changedTick.waitUntilFinished(activeTickEvents, 5000);
+      const changed = buildScheduledMonitorDispatches(nextHour, changedConfig);
+      expect(changed).toHaveLength(6);
+      for (const { job } of changed)
+        expect((await activeBusinessQueue.getJob(job.jobId))?.data).toEqual(
+          job,
+        );
+      const jobs = await activeBusinessQueue.getJobs([
+        'wait',
+        'delayed',
+        'active',
+      ]);
+      const explicit = jobs.filter((job) =>
+        [plannedAt, nextHour].includes(Date.parse(job.data.plannedSlot)),
+      );
+      expect(explicit).toHaveLength(17);
+      await runtimeB.close();
+      activeRuntimes.splice(activeRuntimes.indexOf(runtimeB), 1);
+    }, 30_000);
+
     it('acknowledges a persisted enabled snapshot without dispatch when scheduling is disabled', async () => {
       await initQueues();
       const activeTickQueue = tickQueue!;
