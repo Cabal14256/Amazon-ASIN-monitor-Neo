@@ -1,6 +1,6 @@
 # Neo 本人任务取消（Issue #97）
 
-`POST /api/v1/tasks/:taskId/cancel` 返回冻结 TaskInfo/Result、HTTP 200 和 no-store。沿用任务查询的实时登录及 PostgreSQL 权威源门槛，不增加额外权限或强制改密限制。必须存在本人注册表记录；无记录 404，无 owner/非本人 403，已终态 400。支持旧版取消映射中的 export/import/batch-check/batch-delete/backup；variant-check 不在旧取消映射中，保持 400。
+`POST /api/v1/tasks/:taskId/cancel` 返回冻结 TaskInfo/Result、HTTP 200 和 no-store。沿用任务查询的实时登录及 PostgreSQL 权威源门槛，不增加额外权限或强制改密限制。必须存在本人注册表记录；无记录 404，无 owner/非本人 403，普通已终态 400。当前 Neo 支持 export/import/batch-check/batch-delete/backup，以及已接入的 variant-check、monitor 和 competitor-monitor。
 
 ## 队列与状态协调
 
@@ -16,9 +16,17 @@
 
 当前登录账户/会话在请求鉴权阶段实时读取；浏览器 Origin 必须匹配配置，沿用既有写接口规则，cookie 和 Bearer 均适用。本接口不持有跨 PostgreSQL/Redis 的事务锁，也不保证请求接受后撤权能撤回已经发出的 Redis 操作。队列状态与任务身份在 Redis 原子写入前再次验证。
 
-最多 8 个取消请求；复用任务请求连接的 1 秒就绪总截止、1 秒命令超时、无离线重发和关闭策略。3 秒后不启动新依赖命令，等待已发命令结束才释放容量。固定 500 提示刷新同一任务确认状态；日志不包含 driver payload、任务业务数据或用户标识。
+最多 8 个取消请求；复用任务请求连接的 1 秒就绪总截止、1 秒命令超时、无离线重发和关闭策略。TaskQueryRuntime 在 3 秒请求期限后不启动新 Redis 命令，等待已发命令结束才释放其请求容量。目录 PostgreSQL 结算在 HTTP 停止等待后仍可继续独立的最多三次存储尝试；这不延长 HTTP 期限或原业务期限，也不释放已知移除任务的结算许可。固定 500 提示刷新同一任务确认状态；日志不包含 driver payload、任务业务数据或用户标识。
 
-队列删除与注册表 CAS 是两个操作：中途失败可能留下非终态元数据而 job 已移除，重试取消会恢复为 cancelled。已过期记录不会复活，身份被复用返回 409。超时不代表撤销已完成写入，不能通过换 ID 重试制造重复任务。
+队列删除与注册表 CAS 是两个操作：中途失败可能留下非终态元数据而 job 已移除。目录任务的确切移除证明在 CAS 之前保留；不能因 deadline、CAS 错误或记录替换释放其结算容量。未确认的非终态目录记录需要人工核验，不能靠 job absent 推断物理结束。已过期记录不会复活，身份被复用返回 409。超时不代表撤销已完成写入，不能通过换 ID 重试制造重复任务。
+
+## 目录结算与恢复（Issue #224 / PR #229）
+
+目录任务在真实队列移除前申请最多八个结算许可，容量满时返回 429，保留队列及注册表原值。确切 `removed` ACK 到达后同步冻结原五字段身份的移除证明，再检查逻辑期限和写 cancelled 元数据；HTTP 结束不会释放该许可。running、absent、拒绝或移除未确认的路径只释放尚无移除证明的许可，不据此关闭 PostgreSQL 目录操作。
+
+第一次结算及显式重试各最多三次存储尝试。只有本进程持有原 taskId/userId/taskType/taskSubType/createdAt 移除证明且当前记录仍为同一 cancelled 身份，才允许幂等重试结算；不再次移除队列任务或写注册表。实际原 PostgreSQL 身份 release 确认成功后释放许可。三次未确认、pending/uncertain pin、缺失或替换身份、释放已提交但 ACK 丢失，均保守保留容量和人工核验边界；不能把 MISSING 当成成功。
+
+进程重启不保留内存移除证明。Redis cancelled、队列消失、期限经过或存储全部不可用都不能证明物理结束。恢复限制、Worker 的持久关闭标记及真实服务验收门见[目录操作恢复](phase-2-catalog-operation-recovery.md)。
 
 注册表 CAS 提交后统一发布最小变更通知，由各 API 重新读取当前状态并发送给明确的 owner；cancelling 不发送 task_cancelled。取消接口不再额外调用进程内 helper，以免重复推送。通知失败节流 warn 并保留持久化成功；去重、实时会话复核和断线 HTTP 恢复见[跨进程任务 WS](phase-2-task-websocket.md)。
 

@@ -1,10 +1,12 @@
 import type { Pool, PoolClient } from 'pg';
 import { createDb, type Db } from '../client';
+import type { CatalogPhysicalOutcome } from '../domain/catalog-operation';
 import {
   AuthRepository,
   type AuthDataRepository,
   type SessionManagementRepositoryPort,
 } from './auth-repository';
+import { observeCatalogOperationWork } from './catalog-operation-execution';
 
 export class AuthQueryTimeoutError extends Error {
   readonly code = 'AUTH_QUERY_TIMEOUT';
@@ -19,6 +21,7 @@ export async function withAuthDatabaseDeadline<T>(
   pool: Pool,
   operation: (db: Db, ensureOpen: () => void) => Promise<T>,
   onActualWork?: (work: Promise<unknown>) => void,
+  onPhysicalSettled?: (outcome: CatalogPhysicalOutcome) => Promise<void>,
 ): Promise<T> {
   // 获取连接由应用池的 connectionTimeoutMillis 约束。
   let completeActual!: () => void;
@@ -26,43 +29,87 @@ export async function withAuthDatabaseDeadline<T>(
     completeActual = resolve;
   });
   onActualWork?.(actualDone);
+  observeCatalogOperationWork(actualDone);
   let client: PoolClient;
   try {
     client = await pool.connect();
   } catch (error) {
-    completeActual();
+    // No business callback or SQL was started on this failed acquisition.
+    try {
+      await onPhysicalSettled?.('rolled-back');
+    } finally {
+      completeActual();
+    }
     throw error;
   }
   let destroyed = false;
+  let released = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let connectionError!: (error: Error) => void;
   const connectionFailure = new Promise<never>((_resolve, reject) => {
     connectionError = reject;
   });
   client.on('error', connectionError);
+  const release = (discard: boolean) => {
+    if (released) return;
+    released = true;
+    client.removeListener('error', connectionError);
+    if (discard) client.release(true);
+    else client.release();
+  };
   const destroy = () => {
     if (!destroyed) {
       destroyed = true;
-      client.release(true);
+      release(true);
     }
   };
   const ensureOpen = () => {
     if (destroyed) throw new AuthQueryTimeoutError();
   };
   try {
-    const work = (async () => {
-      await client.query('BEGIN');
-      ensureOpen();
-      await client.query('SET LOCAL statement_timeout = 1500');
-      ensureOpen();
-      const result = await operation(createDb(client), ensureOpen);
-      ensureOpen();
-      await client.query('COMMIT');
-      return result;
-    })().finally(completeActual);
     return await Promise.race([
       connectionFailure,
-      work,
+      (async () => {
+        let commitStarted = false;
+        let outcome: CatalogPhysicalOutcome = 'uncertain';
+        try {
+          await client.query('BEGIN');
+          ensureOpen();
+          await client.query('SET LOCAL statement_timeout = 1500');
+          ensureOpen();
+          const result = await operation(createDb(client), ensureOpen);
+          ensureOpen();
+          commitStarted = true;
+          await client.query('COMMIT');
+          ensureOpen();
+          outcome = 'committed';
+          // The business deadline ends at its actual COMMIT acknowledgement;
+          // pin settlement remains joined but cannot turn a commit into timeout.
+          if (timer) clearTimeout(timer);
+          timer = undefined;
+          return result;
+        } catch (error) {
+          // Destruction / an unacknowledged COMMIT is never a rollback proof.
+          if (onPhysicalSettled && !destroyed && !commitStarted) {
+            try {
+              await client.query('ROLLBACK');
+              ensureOpen();
+              outcome = 'rolled-back';
+              if (timer) clearTimeout(timer);
+              timer = undefined;
+            } catch {
+              // Durable execution pin remains uncertain.
+            }
+          }
+          throw error;
+        } finally {
+          // Return the actual SQL connection before pin settlement borrows the
+          // same pool; otherwise a fully occupied pool could deadlock here.
+          release(outcome === 'uncertain');
+          // This belongs to the ACTUAL work promise, never Promise.race/finally.
+          await onPhysicalSettled?.(outcome);
+        }
+      })().finally(completeActual),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           // 销毁独占连接以中止未决 I/O，而不是仅丢弃 Promise 的结果。
@@ -77,7 +124,7 @@ export async function withAuthDatabaseDeadline<T>(
   } finally {
     if (timer) clearTimeout(timer);
     client.removeListener('error', connectionError);
-    if (!destroyed) client.release();
+    if (!destroyed) release(false);
   }
 }
 
