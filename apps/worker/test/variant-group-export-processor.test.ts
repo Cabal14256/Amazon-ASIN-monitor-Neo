@@ -6,7 +6,8 @@ import {
 } from '@asin-monitor/db';
 import { ExportArtifactStore } from '@asin-monitor/export';
 import ExcelJS from 'exceljs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import type { WriteStream } from 'node:fs';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -15,6 +16,8 @@ import { createVariantGroupExportProcessor } from '../src/variant-group-export-p
 
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   await Promise.all(
     directories
       .splice(0)
@@ -46,6 +49,163 @@ function variantGroup(id: string, name: string, isBroken: boolean) {
 }
 
 describe('variant-group export processor', () => {
+  it.each(['deadline', 'cancellation', 'shutdown'] as const)(
+    'interrupts stalled finalization on %s and prevents late publication',
+    async (reason) => {
+      const directory = await mkdtemp(join(tmpdir(), 'neo-variant-finalize-'));
+      directories.push(directory);
+      const artifacts = new ExportArtifactStore(directory);
+      const data: VariantGroupExportJobData = {
+        taskId: '10000000-0000-4000-8000-000000000212',
+        userId: 'variant-group-export-owner',
+        taskType: 'export',
+        taskSubType: 'variant-group',
+        exportType: 'variant-group',
+        createdAt: '2026-09-27T00:00:00.000Z',
+        params: {},
+      };
+      let state: TaskState = {
+        ...data,
+        title: '变体组导出',
+        status: 'pending',
+        progress: 0,
+        message: '',
+        error: null,
+        result: null,
+        updatedAt: data.createdAt,
+        startedAt: null,
+        completedAt: null,
+        cancelRequestedAt: null,
+        cancelledAt: null,
+        revision: 0,
+      };
+      const store = {
+        read: async () => state,
+        mutate: async (
+          _taskId: string,
+          change: Parameters<typeof transitionTask>[1],
+        ) => (state = transitionTask(state, change, new Date(data.createdAt))),
+      };
+      const repository = {
+        read: async <T>(
+          run: (
+            unit: AsinExportQueryUnit,
+            ensureOpen: () => void,
+          ) => Promise<T>,
+        ) =>
+          run(
+            {
+              listExportGroups: async () => ({
+                groups: [],
+                asins: [],
+                total: 0,
+                totalASINs: 0,
+              }),
+            } as unknown as AsinExportQueryUnit,
+            () => undefined,
+          ),
+      };
+      let stream!: WriteStream;
+      const temporary = artifacts.temporary.bind(artifacts);
+      vi.spyOn(artifacts, 'temporary').mockImplementation(async (id) => {
+        const output = await temporary(id);
+        stream = output.stream;
+        return output;
+      });
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let finish!: () => void;
+      vi.spyOn(
+        ExcelJS.stream.xlsx.WorkbookWriter.prototype,
+        'commit',
+      ).mockImplementation(async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      });
+      const shutdown = new AbortController();
+      const publish = vi.spyOn(artifacts, 'publish');
+      const processor = createVariantGroupExportProcessor(
+        repository as never,
+        store as never,
+        artifacts,
+        {
+          shutdownSignal: shutdown.signal,
+          isClosing: () => false,
+          assertJobLock: async () => undefined,
+          updateProgress: async () => undefined,
+        },
+      );
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      });
+      let settled = false;
+      const attempt = processor(
+        {
+          id: data.taskId,
+          name: 'variant-group',
+          data,
+          attemptsMade: 0,
+          opts: { attempts: 1 },
+        } as never,
+        'fixture-lock',
+      ).then(
+        (result) => {
+          settled = true;
+          return result;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      try {
+        await started;
+        if (reason === 'deadline')
+          await vi.advanceTimersByTimeAsync(30 * 60_000);
+        else if (reason === 'cancellation') {
+          state = {
+            ...state,
+            status: 'cancelling',
+            cancelRequestedAt: data.createdAt,
+          };
+          await vi.advanceTimersByTimeAsync(1000);
+        } else shutdown.abort();
+        await vi.waitFor(() => expect(settled).toBe(true), {
+          timeout: 2000,
+          interval: 10,
+        });
+        const result = await attempt;
+        if (reason === 'cancellation')
+          expect(result).toMatchObject({ cancelled: true });
+        else
+          expect(result).toMatchObject({
+            message: 'VARIANT_GROUP_EXPORT_ATTEMPT_FAILED',
+          });
+        expect(stream.destroyed).toBe(true);
+        expect(stream.closed).toBe(true);
+        expect(state.status).toBe(
+          reason === 'cancellation'
+            ? 'cancelled'
+            : reason === 'deadline'
+            ? 'failed'
+            : 'processing',
+        );
+        expect(await readdir(directory)).toEqual([]);
+      } finally {
+        finish?.();
+        if (stream && !stream.destroyed) stream.destroy();
+        await attempt;
+      }
+      await Promise.resolve();
+      expect(publish).not.toHaveBeenCalled();
+      expect(await artifacts.read(data.taskId)).toBeNull();
+    },
+  );
+
   it('writes the Legacy task workbook from one bounded group snapshot', async () => {
     const directory = await mkdtemp(
       join(tmpdir(), 'neo-variant-group-export-'),

@@ -14,6 +14,7 @@ import {
 import { ExportArtifactError, ExportArtifactStore } from '@asin-monitor/export';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { finished } from 'node:stream/promises';
+import { abortableExport } from './abortable-export';
 import { createBoundedExportWorkbook } from './bounded-export-workbook';
 import { logger } from './logger';
 import {
@@ -338,8 +339,10 @@ export function createVariantGroupExportProcessor(
         }
       }, controller.signal);
       await check();
-      await writer.workbook.commit();
-      await finished(outputStream);
+      await abortableExport(controller.signal, async () => {
+        await writer!.workbook.commit();
+        await finished(outputStream!);
+      });
       await check();
       const artifact = await artifacts.publish(
         data.taskId,
