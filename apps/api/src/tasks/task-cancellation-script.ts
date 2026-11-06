@@ -70,6 +70,11 @@ if ARGV[5] == 'competitor-monitor' and (
    data.taskId ~= ARGV[1] or data.taskType ~= ARGV[5] or
    data.taskSubType ~= 'competitor' or meta.taskSubType ~= 'competitor' or
    redis.call('HGET', KEYS[1], 'name') ~= 'competitor-monitor') then return 4 end
+if ARGV[5] == 'batch-check' and (
+   meta.taskSubType ~= ARGV[11] or data.taskType ~= 'batch-check' or
+   data.taskSubType ~= ARGV[11] or
+   (ARGV[11] ~= 'variant-group' and ARGV[11] ~= 'competitor-variant-group') or
+   redis.call('HGET', KEYS[1], 'name') ~= 'batch-check') then return 4 end
 local prefix = ARGV[3]
 for _, suffix in ipairs({'completed', 'failed', 'delayed', 'prioritized', 'waiting-children', 'repeat'}) do
   checkType(prefix .. suffix, 'zset')
