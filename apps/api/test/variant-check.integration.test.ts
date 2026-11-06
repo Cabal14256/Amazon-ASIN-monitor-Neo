@@ -4,7 +4,11 @@ import {
   type Env,
 } from '@asin-monitor/config';
 import { wsMessageSchema, type WsMessage } from '@asin-monitor/contracts';
-import { RedisTaskRepository, taskNotificationChannel } from '@asin-monitor/db';
+import {
+  PgCatalogOperationRepository,
+  RedisTaskRepository,
+  taskNotificationChannel,
+} from '@asin-monitor/db';
 import type { HttpInput, HttpResponse } from '@asin-monitor/sp-api';
 import {
   FastifyAdapter,
@@ -21,6 +25,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   it,
@@ -202,8 +207,12 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           ).toEqual([taskNotificationChannel(prefix), 2]),
         { timeout: 5000 },
       );
-      owner = await login();
     }, 20_000);
+    beforeEach(async () => {
+      // Lost completion acknowledgements deliberately retain the prior owner's
+      // durable reservation. Each independent scenario uses its own account.
+      owner = await login();
+    });
     afterEach(async () => {
       await runtime?.close();
       runtime = undefined;
@@ -368,6 +377,33 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       ).toBeLessThan(1000);
       return result;
     }
+    async function retainedGate(
+      id: string,
+      child: { asin: string; id: string },
+    ) {
+      const repository = new PgCatalogOperationRepository(f.pools.primaryPool);
+      const before = await repository.read(owner.userId, 'asin');
+      expect(before).toMatchObject({
+        ownerId: owner.userId,
+        kind: 'check',
+        state: 'open',
+        task: { taskId: id },
+        pendingPins: 0,
+        uncertainPins: 0,
+      });
+      // Readable/recovered metadata alone cannot prove physical settlement or
+      // authorize another mutation by the original owner.
+      const blocked = await post(`/asins/${child.id}/check`);
+      expect(blocked.statusCode, blocked.body.slice(0, 1000)).toBe(409);
+      expect(blocked.json().data?.taskId).toBeUndefined();
+      expect(await repository.read(owner.userId, 'asin')).toEqual(before);
+      expect(await history(child.id)).toHaveLength(1);
+      expect(
+        transport.request.mock.calls.filter(([input]) =>
+          input.url.pathname.endsWith(child.asin),
+        ),
+      ).toHaveLength(1);
+    }
     async function connect(index: number, account = owner) {
       const client = new Client(
         await (index === 0 ? f.app : second!).getUrl(),
@@ -530,6 +566,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             expect((await get(id, '/download')).statusCode).toBe(409);
             expect(await store.read(id)).toEqual(before);
             expect(await history(child.id)).toHaveLength(1);
+            await retainedGate(id, child);
             return;
           }
           const recovered = await get(id);
@@ -537,6 +574,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           expect(recovered.json().data.status).toBe('completed');
           await complete(id);
           expect(await history(child.id)).toHaveLength(1);
+          await retainedGate(id, child);
         } finally {
           mutation.mockRestore();
         }

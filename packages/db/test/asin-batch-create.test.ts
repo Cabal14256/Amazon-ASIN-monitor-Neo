@@ -5,6 +5,7 @@ import type { Db } from '../src/client';
 import { prepareBatchAsins } from '../src/domain/asin-batch-create';
 import { DrizzleAsinWriteUnit } from '../src/repositories/asin-write-repository';
 import { CompetitorBatchCreateUnit } from '../src/repositories/competitor-batch-create-unit';
+import { withFixtureCatalogOperation } from './catalog-operation-fixture';
 
 const item = (index = 1, parentId = 'g') => ({
   asin: `B${String(index).padStart(9, '0')}`,
@@ -52,7 +53,12 @@ function writer(
     update: () => ({ set: () => ({ where: async () => undefined }) }),
   } as unknown as Db;
   return {
-    unit: new DrizzleAsinWriteUnit(db, () => undefined),
+    unit: {
+      batchCreateAsins: (rows: unknown[]) =>
+        withFixtureCatalogOperation(db, 'asin', () =>
+          new DrizzleAsinWriteUnit(db, () => undefined).batchCreateAsins(rows),
+        ),
+    },
     execute,
     values,
     events,
@@ -84,10 +90,9 @@ describe('primary HTTP batch parent identity and locked readable capacity', () =
       throw new Error('Frozen mismatch must not write');
     });
     const db = { select: selected, insert } as unknown as Db;
-    const result = await new CompetitorBatchCreateUnit(
-      db,
-      () => undefined,
-    ).create(rows);
+    const result = await withFixtureCatalogOperation(db, 'competitor', () =>
+      new CompetitorBatchCreateUnit(db, () => undefined).create(rows),
+    );
     expect(result).toEqual(legacy.result);
     expect(selected).toHaveBeenCalledTimes(1);
     expect(insert).not.toHaveBeenCalled();

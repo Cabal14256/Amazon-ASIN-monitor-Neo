@@ -8,6 +8,8 @@ import {
   createPgPool,
   encodeTaskNotification,
   monitorEventChannel,
+  parseCatalogTaskBinding,
+  PgCatalogOperationRepository,
   RedisMonitorEventRepository,
   RedisTaskRepository,
   taskNotificationChannel,
@@ -479,12 +481,39 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             },
             { timeout: 10000, interval: 20 },
           );
-          const task = await store.create({
-            taskId: randomUUID(),
-            userId: owner.userId,
-            taskType: queueName,
-            taskSubType: domain,
-          });
+          const catalog = new PgCatalogOperationRepository(f.pools.primaryPool);
+          const taskId = randomUUID();
+          // Fixture-owned producer admission preserves the production ordering:
+          // reserve -> immutable binding -> Redis EVAL -> BullMQ enqueue.
+          // The compiled Worker still checks the real owner's permissions.
+          const operation = await catalog.reserve(
+            {
+              ownerId: owner.userId,
+              domain: competitor ? 'competitor' : 'asin',
+              kind: 'monitor',
+              expectedTaskId: taskId,
+            },
+            async () => undefined,
+          );
+          const task = await store.create(
+            {
+              taskId,
+              userId: owner.userId,
+              taskType: queueName,
+              taskSubType: domain,
+            },
+            (prepared) =>
+              catalog.bindTask(
+                operation,
+                parseCatalogTaskBinding({
+                  taskId: prepared.taskId,
+                  userId: prepared.userId,
+                  taskType: prepared.taskType,
+                  taskSubType: prepared.taskSubType,
+                  createdAt: prepared.createdAt,
+                }),
+              ),
+          );
           const job = {
             taskId: task.taskId,
             userId: task.userId,
@@ -518,6 +547,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
               expect((await store.read(task.taskId))?.status, output).toBe(
                 'completed',
               );
+              expect(
+                await catalog.read(operation.ownerId, operation.domain),
+                output,
+              ).toBeNull();
               for (const client of [a, b, foreign]) {
                 const messages = monitor(client);
                 expect(

@@ -1,7 +1,11 @@
 import {
   createPgPool,
   createVariantCheckOperation,
+  PgCatalogOperationRepository,
   PgPrimaryMonitorRepository,
+  withCatalogOperationExecution,
+  type CatalogOperationIdentity,
+  type CatalogTaskBinding,
 } from '@asin-monitor/db';
 import {
   catalogNotFoundResult,
@@ -13,6 +17,7 @@ import { resolve } from 'node:path';
 import type { Pool } from 'pg';
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -31,6 +36,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
   'Primary variant checks / actual PostgreSQL atomic writes',
   () => {
     let admin: Pool, pool: Pool, repository: PgVariantCheckRepository;
+    let catalog: PgCatalogOperationRepository;
+    let catalogIdentity: CatalogOperationIdentity;
+    let catalogTask: CatalogTaskBinding | undefined;
     const schema = `variant105_${randomUUID().replace(/-/g, '')}`;
     const guard = async () => undefined;
     const product = (index = 1, hasVariants = true) =>
@@ -79,6 +87,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await pool.query(
         'CREATE TABLE monitor_history (LIKE public.monitor_history INCLUDING ALL)',
       );
+      await pool.query('CREATE TABLE users (LIKE public.users INCLUDING ALL)');
       const upgrade = readFileSync(
         resolve(
           __dirname,
@@ -103,11 +112,28 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           'utf8',
         ).replaceAll('public', schema);
         await connection.query(monitorUpgrade);
+        const catalogUpgrade = readFileSync(
+          resolve(
+            __dirname,
+            '../../db/migrations/0017_catalog_operation_fence.sql',
+          ),
+          'utf8',
+        ).replaceAll('public', schema);
+        await connection.query(catalogUpgrade);
       } finally {
         await connection.query(`SET search_path TO ${schema}`);
         connection.release();
       }
       repository = new PgVariantCheckRepository(pool);
+      catalog = new PgCatalogOperationRepository(pool);
+      // These are trusted library atomicity fixtures, not HTTP/queue admission.
+      // Each real transaction uses the same real private-schema operation and
+      // mandatory SQL pin/guard; no production optional bypass or mock fence.
+      const transaction = repository.transaction.bind(repository);
+      repository.transaction = (action) =>
+        withCatalogOperationExecution(catalog, catalogIdentity, () =>
+          transaction(action),
+        );
     });
     afterAll(async () => {
       await pool?.end();
@@ -119,6 +145,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       }
     });
     beforeEach(async () => {
+      catalogTask = undefined;
+      catalogIdentity = await catalog.reserve(
+        { ownerId: 'fixture-owner', domain: 'asin', kind: 'check' },
+        guard,
+      );
       await pool.query(
         'ALTER TABLE asins ENABLE TRIGGER trg_asins_update_time',
       );
@@ -131,6 +162,20 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       await pool.query(
         "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id,create_time,update_time) VALUES ('a1','B000000001','First','US','amazon.com','Fixture','g1','2026-01-01','2026-01-01'),('a2','B000000002','Second','US','amazon.com','Fixture','g1','2026-01-02','2026-01-02')",
       );
+    });
+    afterEach(async () => {
+      if (!catalogIdentity) return;
+      expect(await catalog.read('fixture-owner', 'asin')).toMatchObject({
+        pendingPins: 0,
+        uncertainPins: 0,
+      });
+      await catalog.close(
+        catalogIdentity,
+        catalogTask
+          ? { source: 'worker', status: 'completed', task: catalogTask }
+          : { source: 'sync', status: 'completed' },
+      );
+      expect(await catalog.release(catalogIdentity)).toBe(true);
     });
     const load = () => repository.transaction((unit) => unit.loadSingle('a1'));
     const group = () => repository.transaction((unit) => unit.loadGroup('g1'));
@@ -170,7 +215,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       };
     };
     it('keeps the primary monitor snapshot and GROUP/ASIN history once across a retried group operation', async () => {
-      const monitor = new PgPrimaryMonitorRepository(pool);
+      const storage = new PgPrimaryMonitorRepository(pool);
       const now = new Date();
       const taskId = randomUUID();
       const job = {
@@ -181,6 +226,40 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         createdAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + 3600000).toISOString(),
         countries: ['US' as const],
+      };
+      // The monitor fixture has its actual immutable producer identity rather
+      // than borrowing the generic check operation used by the other cases.
+      await catalog.close(catalogIdentity, {
+        source: 'sync',
+        status: 'completed',
+      });
+      expect(await catalog.release(catalogIdentity)).toBe(true);
+      catalogIdentity = await catalog.reserve(
+        { ownerId: job.userId, domain: 'asin', kind: 'monitor' },
+        guard,
+      );
+      catalogTask = {
+        taskId,
+        userId: job.userId,
+        taskType: job.taskType,
+        taskSubType: job.taskSubType,
+        createdAt: job.createdAt,
+      };
+      await catalog.bindTask(catalogIdentity, catalogTask);
+      const monitor = {
+        groups: (input: typeof job) =>
+          withCatalogOperationExecution(catalog, catalogIdentity, () =>
+            storage.groups(input),
+          ),
+        claimNotification: (id: string, country: string) =>
+          withCatalogOperationExecution(catalog, catalogIdentity, () =>
+            storage.claimNotification(id, country),
+          ),
+        completeNotification: (id: string, country: string, sent: boolean) =>
+          withCatalogOperationExecution(catalog, catalogIdentity, () =>
+            storage.completeNotification(id, country, sent),
+          ),
+        purgeExpiredRuns: () => storage.purgeExpiredRuns(),
       };
       const groups = await monitor.groups(job);
       expect(groups).toEqual([
