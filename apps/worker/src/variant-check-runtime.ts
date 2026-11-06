@@ -663,11 +663,18 @@ export async function startVariantCheckRuntime(
       },
     };
   } catch (error) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
     try {
       logger.error('检查 Worker 初始化失败', {
         reason: 'variant_check_initialization_failed',
         stage: startupStage,
         error: error instanceof Error ? error.name : 'unknown_error',
+        ...(typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code)
+          ? { dependencyCode: code }
+          : {}),
       });
     } catch {
       // Startup diagnostics cannot prevent owned resources from closing.
