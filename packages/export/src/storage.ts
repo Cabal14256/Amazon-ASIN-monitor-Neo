@@ -2,9 +2,8 @@ import {
   asinExportArtifactSchema,
   asinExportJobDataSchema,
   createExportTaskRequestSchema,
+  EXPORT_TYPES,
   type AsinExportArtifact,
-  type AsinExportJobData,
-  type CreateExportTaskRequest,
 } from '@asin-monitor/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -37,19 +36,16 @@ const rejectionPattern = /^export-rejected-([0-9a-f-]{36})\.json$/;
 const rejectionPartialPattern =
   /^export-rejected-([0-9a-f-]{36})\.([0-9a-f-]{36})\.journal$/;
 const rejectionIdentitySchema = asinExportJobDataSchema
-  .pick({
-    taskId: true,
-    userId: true,
-    createdAt: true,
-    taskType: true,
-    taskSubType: true,
-  })
+  .pick({ taskId: true, userId: true, createdAt: true, taskType: true })
   .extend({ taskSubType: createExportTaskRequestSchema.shape.exportType })
   .strict();
-export type ExportRejectionIdentity = Pick<
-  AsinExportJobData,
-  'taskId' | 'userId' | 'createdAt' | 'taskType'
-> & { taskSubType: CreateExportTaskRequest['exportType'] };
+export type ExportRejectionIdentity = {
+  taskId: string;
+  userId: string;
+  createdAt: string;
+  taskType: 'export';
+  taskSubType: (typeof EXPORT_TYPES)[number];
+};
 const missing = (error: unknown) =>
   (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 
