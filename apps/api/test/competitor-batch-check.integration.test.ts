@@ -173,7 +173,7 @@ describe.skipIf(
         f.pools.competitorPool,
       );
       queue = new Queue('batch-check-task-queue', {
-      connection: f.redis.client as unknown as ConnectionOptions,
+        connection: f.redis.client as unknown as ConnectionOptions,
         prefix: getNeoQueuePrefix(f.env),
       });
       events = new QueueEvents('batch-check-task-queue', {
@@ -319,7 +319,13 @@ describe.skipIf(
         },
       );
       const collect = (value: Buffer) => {
-        output = (output + value.toString()).slice(-64_000);
+        const safe = value
+          .toString()
+          .replaceAll(f.env.DATABASE_URL, '[primary-ci-database]')
+          .replaceAll(f.env.COMPETITOR_DATABASE_URL, '[competitor-ci-database]')
+          .replaceAll(f.env.REDIS_URL, '[redis-db-15]')
+          .replaceAll(f.env.JWT_SECRET, '[fixture-jwt-key]');
+        output = (output + safe).slice(-64_000);
       };
       child.stdout!.on('data', collect);
       child.stderr!.on('data', collect);
@@ -332,7 +338,7 @@ describe.skipIf(
       await eventually(async () => {
         if (exited)
           throw new Error(
-            'Compiled batch fixture Worker exited before readiness',
+            `Compiled batch fixture Worker exited before readiness: ${output}`,
           );
         return /registeredProcessors:\s*1/.test(output);
       }, 15_000);
@@ -400,7 +406,7 @@ describe.skipIf(
         headers,
         payload: {},
       });
-      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.statusCode, cancelled.body).toBe(200);
       expect(cancelled.json().data.status).toBe('cancelled');
       expect(await queue.getJob(id)).toBeUndefined();
       expect((await get(id, '/download')).statusCode).toBe(409);

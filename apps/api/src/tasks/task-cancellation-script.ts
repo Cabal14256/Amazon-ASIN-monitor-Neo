@@ -71,9 +71,9 @@ if ARGV[5] == 'competitor-monitor' and (
    data.taskSubType ~= 'competitor' or meta.taskSubType ~= 'competitor' or
    redis.call('HGET', KEYS[1], 'name') ~= 'competitor-monitor') then return 4 end
 if ARGV[5] == 'batch-check' and (
-   meta.taskSubType ~= ARGV[11] or data.taskType ~= 'batch-check' or
-   data.taskSubType ~= ARGV[11] or
-   (ARGV[11] ~= 'variant-group' and ARGV[11] ~= 'competitor-variant-group') or
+   meta.taskSubType ~= ARGV[7] or data.taskType ~= 'batch-check' or
+   data.taskSubType ~= ARGV[7] or
+   (ARGV[7] ~= 'variant-group' and ARGV[7] ~= 'competitor-variant-group') or
    redis.call('HGET', KEYS[1], 'name') ~= 'batch-check') then return 4 end
 local prefix = ARGV[3]
 for _, suffix in ipairs({'completed', 'failed', 'delayed', 'prioritized', 'waiting-children', 'repeat'}) do
@@ -142,6 +142,7 @@ export async function cancelQueuedTask(
     task.userId,
     task.taskType,
     task.createdAt,
+    task.taskSubType ?? '',
   );
   switch (outcome) {
     case 1:

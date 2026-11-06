@@ -347,9 +347,6 @@ jobs:
       - name: Verify competitor immediate-check transactions and receipts in isolated PostgreSQL databases
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-check.integration.test.ts
 
-      - name: Verify competitor batch HTTP, receipt isolation and migration rollback on real disposable services
-        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-check.integration.test.ts --pool=forks --maxWorkers=1
-
       - name: Compare competitor batch creation with Legacy MySQL and verify savepoint recovery
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-create.integration.test.ts
 
@@ -438,6 +435,9 @@ jobs:
 
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
+
+      - name: Verify competitor batch HTTP, receipt isolation and migration rollback on real disposable services
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-check.integration.test.ts --pool=forks --maxWorkers=1
 
       - name: Run compiled primary monitor consumer with owned tasks and PostgreSQL history
         run: pnpm --filter @asin-monitor/worker exec vitest run test/primary-monitor-entry.integration.test.ts
