@@ -1,7 +1,12 @@
-import { createServer, type RequestListener, type Server } from 'node:http';
+import http, {
+  createServer,
+  type RequestListener,
+  type Server,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NodeHttpTransport } from '../src/transport';
+import { createWorkSettlement } from '../src/work-settlement';
 import { deferred } from './fixtures';
 
 let server: Server;
@@ -15,6 +20,7 @@ beforeEach(async () => {
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const transport of transports.splice(0)) transport.close();
   server.closeAllConnections();
   await new Promise<void>((resolve, reject) =>
@@ -36,6 +42,81 @@ const input = (signal = new AbortController().signal) => ({
 });
 
 describe('real bounded Node HTTP I/O (loopback fixtures only)', () => {
+  it('does not retain physical ownership when native request creation throws synchronously', async () => {
+    const transport = setup();
+    const stop = new AbortController();
+    const settlement = createWorkSettlement(stop.signal);
+    vi.spyOn(http, 'request').mockImplementationOnce(() => {
+      throw new Error('fixture creation failure');
+    });
+    await expect(transport.request(input(stop.signal))).rejects.toMatchObject({
+      code: 'HTTP_ERROR',
+    });
+    await settlement.drain();
+    await expect(transport.request(input())).resolves.toHaveProperty(
+      'body',
+      '{"ok":true}',
+    );
+  });
+  it('retains tracked physical ownership until the real ClientRequest close event is delivered', async () => {
+    const transport = setup({ maxInFlight: 1 });
+    const began = deferred<void>();
+    const closed = deferred<void>();
+    let deliverClose!: () => void;
+    const nativeRequest = http.request.bind(http);
+    vi.spyOn(http, 'request').mockImplementationOnce(
+      (...args: Parameters<typeof http.request>) => {
+        const request = nativeRequest(...args);
+        const nativeEmit = request.emit.bind(request);
+        vi.spyOn(request, 'emit').mockImplementation(
+          (event: string | symbol, ...values: unknown[]) => {
+            if (event !== 'close') return nativeEmit(event, ...values);
+            deliverClose = () => {
+              nativeEmit(event, ...values);
+            };
+            closed.resolve();
+            return true;
+          },
+        );
+        return request;
+      },
+    );
+    handler = (_req, res) => {
+      res.writeHead(200);
+      res.flushHeaders();
+      began.resolve();
+    };
+    const stop = new AbortController();
+    const settlement = createWorkSettlement(stop.signal);
+    const outcome = transport
+      .request(input(stop.signal))
+      .catch((error: unknown) => error);
+    await began.promise;
+    stop.abort();
+    expect(await outcome).toMatchObject({ code: 'CANCELLED' });
+    await closed.promise;
+    let drained = false;
+    const actualDone = settlement.drain().then(() => {
+      drained = true;
+    });
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      await expect(transport.request(input())).rejects.toMatchObject({
+        code: 'CAPACITY',
+      });
+    } finally {
+      deliverClose();
+      await actualDone;
+    }
+    expect(drained).toBe(true);
+    handler = (_req, res) => res.end('{}');
+    await expect(transport.request(input())).resolves.toHaveProperty(
+      'body',
+      '{}',
+    );
+  });
   it('returns JSON and safe raw headers and supports pooled requests', async () => {
     const transport = setup();
     handler = (req, res) => {

@@ -17,9 +17,8 @@ import { OpsService } from '../src/ops/ops.service';
 import type { ApplicationRedisClient } from '../src/redis/redis.service';
 import { monitorAnalyticsFixture } from './helpers/monitor-analytics-fixture';
 
-// Existing product imports only: an original RED must be a behavioral assertion,
-// not an import failure for a future generation/control module. This fixture
-// models Redis execution order; real Lua CAS requires the separate native oracle.
+// Keep the original four business assertions. The shared memory port models
+// execution order; real Lua CAS requires the separate native oracle.
 const env = loadEnv({
   DATABASE_URL: 'postgresql://localhost/analytics_clear_255',
   COMPETITOR_DATABASE_URL:
@@ -103,7 +102,7 @@ async function fixture() {
         return result;
       },
     ),
-    get: vi.fn(async (key: string) => f.values.get(key) ?? null),
+    get: vi.fn(f.cacheModel.get),
     setex: vi.fn(async (key: string, _ttl: number, value: string) => {
       f.values.set(key, value);
     }),

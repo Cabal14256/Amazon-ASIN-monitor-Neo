@@ -8,18 +8,29 @@ import type {
 import {
   competitorMonitorSnapshotDigest,
   createVariantCheckOperation,
+  freezeScheduledMonitorSnapshot,
+  PgCompetitorCheckRepository,
 } from '@asin-monitor/db';
 import {
   CatalogDeferredError,
   catalogNotFoundResult,
+  CatalogVariantChecker,
+  RedisCatalogCheckStore,
   SpApiError,
   type CatalogVariantResult,
 } from '@asin-monitor/sp-api';
+import { EventEmitter } from 'node:events';
+import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CompetitorCheckPipeline,
   type CompetitorCheckContext,
 } from '../src/competitor-pipeline';
+import {
+  scheduledGroup,
+  scheduledJob,
+  scheduledMember,
+} from './scheduled-monitor-fixtures';
 
 const before = new Date('2026-01-01T00:00:00.000Z');
 const checkedAt = new Date('2026-09-12T00:00:00.000Z');
@@ -188,6 +199,168 @@ function monitorContext(f: ReturnType<typeof fixture>): CompetitorCheckContext {
 }
 
 describe('competitor check pipeline', () => {
+  it('retains the competitor group permit through a cancelled real repository late pool acquisition', async () => {
+    const f = fixture();
+    const client = Object.assign(new EventEmitter(), {
+      query: vi.fn(),
+      release: vi.fn(),
+    });
+    let settle!: () => void;
+    const primary = {
+      connect: vi.fn(
+        () =>
+          new Promise<PoolClient>((resolve) => {
+            settle = () => resolve(client as unknown as PoolClient);
+          }),
+      ),
+    };
+    const competitor = { connect: vi.fn() };
+    const repository = new PgCompetitorCheckRepository(
+      primary as unknown as Pool,
+      competitor as unknown as Pool,
+    );
+    const pipeline = new CompetitorCheckPipeline(
+      repository,
+      f.checker,
+      f.cache,
+      f.logger,
+    );
+    const release = vi.fn();
+    const stop = new AbortController();
+    const work = pipeline.checkGroup('cg1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    const flush = async () => {
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+    };
+    try {
+      await flush();
+      expect(primary.connect).toHaveBeenCalledOnce();
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(client.query).not.toHaveBeenCalled();
+      expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+      expect(competitor.connect).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await flush();
+      pipeline.close();
+      repository.close();
+      f.pipeline.close();
+    }
+  });
+  it('retains the competitor group permit through real catalog scheduler and Redis I/O after cancellation', async () => {
+    const f = fixture();
+    let settle!: () => void;
+    const wire = new Promise<null>((resolve) => {
+      settle = () => resolve(null);
+    });
+    const evalCommand = vi.fn(() => wire);
+    const store = new RedisCatalogCheckStore(
+      { status: 'ready', eval: evalCommand },
+      'competitor-settlement-fixture',
+    );
+    const checker = new CatalogVariantChecker({
+      store,
+      standard: {
+        call: async () => {
+          throw new Error('unexpected upstream');
+        },
+      },
+      legacy: {
+        call: async () => {
+          throw new Error('unexpected fallback');
+        },
+      },
+      html: {
+        checkVariants: async () => {
+          throw new Error('unexpected HTML');
+        },
+      },
+      isEnabled: async () => false,
+      risk: { recordCheck: vi.fn() },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    f.checker.check.mockImplementation(
+      (...args: Parameters<CatalogVariantChecker['check']>) =>
+        checker.check(...args),
+    );
+    const release = vi.fn();
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      forceRefresh: false,
+      signal: stop.signal,
+      groupAdmission: { acquire: async () => release },
+    });
+    void work.catch(() => {});
+    const flush = async () => {
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+    };
+    try {
+      await flush();
+      expect(evalCommand).toHaveBeenCalledTimes(3);
+      stop.abort();
+      await expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+      await flush();
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await flush();
+      expect(release).toHaveBeenCalledOnce();
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await flush();
+      checker.close();
+      store.close();
+      f.pipeline.close();
+    }
+  });
+  it('retains shared group admission until cancelled noncooperative competitor work actually settles', async () => {
+    const f = fixture();
+    let settle!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    f.checker.check.mockImplementation(async (code: string) => {
+      await blocked;
+      return catalogResult(code, true);
+    });
+    const release = vi.fn();
+    const acquire = vi.fn(async () => release);
+    const stop = new AbortController();
+    const work = f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      signal: stop.signal,
+      groupAdmission: { acquire },
+    } as CompetitorCheckContext);
+    void work.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(f.checker.check).toHaveBeenCalledTimes(3));
+      expect(acquire).toHaveBeenCalledTimes(1);
+      stop.abort();
+      await expect(work).rejects.toThrow('CANCELLED');
+      expect(release).not.toHaveBeenCalled();
+      settle();
+      await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+      expect(f.unit.commitGroup).not.toHaveBeenCalled();
+    } finally {
+      stop.abort();
+      settle();
+      await work.catch(() => {});
+      f.pipeline.close();
+    }
+  });
   it('clears only the old deferred item after a normal force-refresh recovery without invalidating its successful cache', async () => {
     const f = fixture(),
       context = monitorContext(f);
@@ -264,12 +437,48 @@ describe('competitor check pipeline', () => {
       expect.any(Array),
       expect.any(Function),
       { operation: context.operation, snapshotDigest: context.snapshotDigest },
+      undefined,
     );
     expect(vi.mocked(f.unit.saveReceipt)).toHaveBeenCalledOnce();
     expect(f.cache.clearDeferred).toHaveBeenCalledWith(
       { asin: 'B000000001', country: 'US', owner: 'competitor' },
       expect.any(AbortSignal),
     );
+  });
+
+  it('retries scheduled competitor deferred checks without a public monitor operation', async () => {
+    const f = fixture();
+    const job = scheduledJob('competitor');
+    const [groupSnapshot] = freezeScheduledMonitorSnapshot(
+      job,
+      [scheduledGroup('competitor', 'cg1')],
+      [1, 2, 3].map((index) =>
+        scheduledMember('competitor', 'cg1', `ca${index}`),
+      ),
+    );
+    f.unit.assertScheduledMonitorGroup = vi.fn(async () => undefined);
+    f.unit.recordScheduledMonitorGroupReceipt = vi.fn(async () => undefined);
+    f.checker.check.mockImplementation(async (code, _country, options) => {
+      if (code === 'B000000001' && !options?.forceRefresh)
+        throw new CatalogDeferredError(new SpApiError('HTTP_ERROR', 503));
+      return catalogResult(code, true);
+    });
+    await f.pipeline.checkGroup('cg1', {
+      ...f.context,
+      forceRefresh: false,
+      scheduledMonitor: { job, group: groupSnapshot },
+    });
+    expect(f.checker.check).toHaveBeenCalledWith(
+      'B000000001',
+      'US',
+      expect.objectContaining({ forceRefresh: true, owner: 'competitor' }),
+    );
+    expect(f.unit.commitGroup.mock.calls[0][1]).toMatchObject([
+      { kind: 'checked' },
+      { kind: 'checked' },
+      { kind: 'checked' },
+    ]);
+    expect(f.unit.recordScheduledMonitorGroupReceipt).toHaveBeenCalledOnce();
   });
   it('commits a final deferred upstream failure only after its bounded second check', async () => {
     const f = fixture(),

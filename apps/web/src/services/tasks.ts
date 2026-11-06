@@ -1,4 +1,5 @@
 import {
+  asinExportArtifactSchema,
   createExportTaskRequestSchema,
   createExportTaskResultSchema,
   taskInfoResultSchema,
@@ -9,6 +10,8 @@ import {
   type TaskListQuery,
   type WsMessage,
 } from '@asin-monitor/contracts';
+import type { DownloadSink } from '../lib/download-stream';
+import { FILE_SAVE_BLOB_MAX_BYTES } from '../lib/file-save';
 import { ApiError, type HttpClient } from '../lib/http';
 import type { RealtimeClient } from '../lib/realtime';
 
@@ -24,6 +27,38 @@ export const isTaskMessage = (message: WsMessage) =>
 
 // Check results can reach 32 MiB before the HTTP envelope and task metadata.
 const TASK_READ_RESPONSE_LIMIT = 40 * 1024 * 1024;
+// Matches the API task-download ASIN workbook stream deadline.
+const ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
+const XLSX_MIME =
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Only the completed task's own validated ASIN workbook can be offered. */
+export function asinExportDownloadFilename(task: TaskInfo): string | null {
+  if (
+    task.status !== 'completed' ||
+    task.taskType !== 'export' ||
+    task.taskSubType !== 'asin' ||
+    !isValidTaskId(task.taskId) ||
+    task.downloadUrl !==
+      `/api/v1/tasks/${encodeURIComponent(task.taskId)}/download` ||
+    !task.result ||
+    typeof task.result !== 'object' ||
+    Array.isArray(task.result)
+  )
+    return null;
+  const result = task.result as Record<string, unknown>;
+  const artifact = asinExportArtifactSchema.safeParse(result.artifact);
+  return artifact.success &&
+    artifact.data.taskId === task.taskId &&
+    result.exportType === 'asin' &&
+    result.mimeType === XLSX_MIME &&
+    result.fileSizeBytes === artifact.data.bytes &&
+    typeof result.filename === 'string' &&
+    /^ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/.test(result.filename) &&
+    task.filename === result.filename
+    ? result.filename
+    : null;
+}
 
 /** Same constraints used by every task URL and response receipt. */
 export function isValidTaskId(taskId: string): boolean {
@@ -156,6 +191,65 @@ export class TaskApi {
   /** Authenticated transfer also works for legacy Bearer sessions. */
   async download(taskId: string, signal?: AbortSignal): Promise<Blob> {
     return this.http.download(`${taskPath(taskId)}/download`, signal);
+  }
+
+  async downloadAsinExport(task: TaskInfo, signal?: AbortSignal) {
+    const filename = asinExportDownloadFilename(task);
+    if (!filename) throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
+    const result = task.result as { fileSizeBytes: number };
+    const expectedBytes = result.fileSizeBytes;
+    if (expectedBytes > FILE_SAVE_BLOB_MAX_BYTES)
+      throw new ApiError(
+        'INVALID_INPUT',
+        '此导出文件超过 32 MiB 内存下载上限，请使用支持选择保存位置的 Chrome / Edge 浏览器，或缩小导出范围',
+      );
+    const blob = await this.http.download(
+      `${taskPath(task.taskId)}/download`,
+      signal,
+      { timeoutMs: ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS, maxBytes: expectedBytes },
+    );
+    if (blob.type !== XLSX_MIME || blob.size !== expectedBytes)
+      throw new ApiError(
+        'INVALID_RESPONSE',
+        '导出文件类型或大小与任务回执不符',
+      );
+    return { blob, filename };
+  }
+  /** The complete supported 256 MiB workbook goes directly to a file sink. */
+  async downloadAsinExportTo(
+    task: TaskInfo,
+    sink: DownloadSink,
+    signal?: AbortSignal,
+  ) {
+    const filename = asinExportDownloadFilename(task);
+    if (!filename) throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
+    const expectedBytes = (task.result as { fileSizeBytes: number })
+      .fileSizeBytes;
+    const bytes = await this.http.downloadTo(
+      `${taskPath(task.taskId)}/download`,
+      sink,
+      {
+        signal,
+        timeoutMs: ASIN_EXPORT_DOWNLOAD_TIMEOUT_MS,
+        maxBytes: expectedBytes,
+        minBytes: expectedBytes,
+        expectedType: XLSX_MIME,
+        prefixBytes: 4,
+        validatePrefix(prefix) {
+          if (
+            prefix[0] !== 80 ||
+            prefix[1] !== 75 ||
+            prefix[2] !== 3 ||
+            prefix[3] !== 4
+          )
+            throw new ApiError(
+              'INVALID_RESPONSE',
+              '导出文件不是预期的 XLSX 归档',
+            );
+        },
+      },
+    );
+    return { filename, bytes };
   }
 
   /** Stops local waiting only; server cancellation is the explicit cancel() action. */

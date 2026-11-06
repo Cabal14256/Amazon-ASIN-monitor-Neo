@@ -66,7 +66,7 @@ export function getQueuePolicy(name: QueueName, env: Env) {
   // Keep the original request identity available while metadata can be read.
   // Explicit job removal can still erase it; absence is never non-execution proof.
   const checkRetention =
-    name === 'variant-check' || name === 'batch-check'
+    name === 'variant-check' || name === 'batch-check' || name === 'export'
       ? env.TASK_META_TTL_SECONDS
       : 0;
   const defaultJobOptions = {

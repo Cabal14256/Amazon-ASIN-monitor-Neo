@@ -131,7 +131,7 @@ describe('competitor catalog transport', () => {
         jsonResponse({
           success: true,
           errorCode: 0,
-          data: String(url).includes('/competitor-group-1')
+          data: new URL(String(url)).pathname.endsWith('/detail')
             ? group
             : {
                 list: [group],
@@ -158,7 +158,7 @@ describe('competitor catalog transport', () => {
         'https://app.test/api/v1/competitor/variant-groups?keyword=B00RIVAL00&country=DE&variantStatus=BROKEN&current=1&pageSize=20',
       );
       expect(fetcher.mock.calls[1][0]).toBe(
-        'https://app.test/api/v1/competitor/variant-groups/competitor-group-1',
+        'https://app.test/api/v1/competitor/catalog/variant-groups/detail?groupId=competitor-group-1',
       );
     },
   );
@@ -184,8 +184,13 @@ describe('competitor catalog transport', () => {
       signal,
     );
     expect(request).toHaveBeenCalledWith(
-      '/api/v1/competitor/variant-groups/competitor-group-1',
-      { signal, timeoutMs: 30_000, maxResponseBytes: 32 * 1024 * 1024 },
+      '/api/v1/competitor/catalog/variant-groups/detail',
+      {
+        query: { groupId: group.id },
+        signal,
+        timeoutMs: 30_000,
+        maxResponseBytes: 32 * 1024 * 1024,
+      },
       expect.anything(),
     );
   });
@@ -299,10 +304,21 @@ describe('competitor catalog transport', () => {
       'a\u007fb',
       '🔎'.repeat(51),
     ]) {
-      await expect(getCompetitorGroup(http, id)).rejects.toMatchObject({
+      await expect(deleteCompetitorAsin(http, id)).rejects.toMatchObject({
         kind: 'INVALID_INPUT',
       });
-      await expect(deleteCompetitorAsin(http, id)).rejects.toMatchObject({
+    }
+    for (const id of [
+      '',
+      'a\tb',
+      'a\nb',
+      'a\u0000b',
+      'a\u007fb',
+      'a\u0085b',
+      '\ud800',
+      '🔎'.repeat(51),
+    ]) {
+      await expect(getCompetitorGroup(http, id)).rejects.toMatchObject({
         kind: 'INVALID_INPUT',
       });
     }
@@ -386,7 +402,7 @@ describe('competitor catalog transport', () => {
         ]),
       ).toEqual([
         ['GET', '/api/v1/competitor/variant-groups'],
-        ['GET', groupPath],
+        ['GET', '/api/v1/competitor/catalog/variant-groups/detail'],
         ['PUT', groupPath],
         ['DELETE', groupPath],
         ['POST', '/api/v1/competitor/asins'],
@@ -394,6 +410,9 @@ describe('competitor catalog transport', () => {
         ['POST', `${childPath}/move`],
         ['DELETE', childPath],
       ]);
+      expect(
+        new URL(String(fetcher.mock.calls[1][0])).searchParams.get('groupId'),
+      ).toBe(groupId);
       expect(JSON.parse(String(fetcher.mock.calls[3][1]?.body))).toEqual({
         expectedChildIds: [childId],
         expectedSource: groupInput,
@@ -425,8 +444,11 @@ describe('competitor catalog transport', () => {
     const http = client('/api', fetcher);
     await expect(getCompetitorGroup(http, id)).resolves.toMatchObject({ id });
     expect(new URL(String(fetcher.mock.calls[0][0])).pathname).toBe(
-      `/api/v1/competitor/variant-groups/${encodeURIComponent(id)}`,
+      '/api/v1/competitor/catalog/variant-groups/detail',
     );
+    expect(
+      new URL(String(fetcher.mock.calls[0][0])).searchParams.get('groupId'),
+    ).toBe(id);
   });
 
   it('rejects a success envelope without write data and budgets full group responses', async () => {

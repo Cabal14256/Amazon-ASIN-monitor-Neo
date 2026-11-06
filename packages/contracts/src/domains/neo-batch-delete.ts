@@ -1,24 +1,11 @@
 import { z } from 'zod';
+import { isNeoCatalogId } from './neo-catalog-id';
 
 export const NEO_BATCH_DELETE_MAX_TARGETS = 1000;
 
 /** A migrated catalog ID is a literal key, including every whitespace character.
  * Reject values PostgreSQL cannot encode and bound by database codepoints. */
-export function isNeoBatchDeleteId(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0) return false;
-  let length = 0;
-  for (const character of value) {
-    const point = character.codePointAt(0)!;
-    if (
-      ++length > 50 ||
-      point <= 0x1f ||
-      (point >= 0x7f && point <= 0x9f) ||
-      (point >= 0xd800 && point <= 0xdfff)
-    )
-      return false;
-  }
-  return true;
-}
+export const isNeoBatchDeleteId = isNeoCatalogId;
 
 export const neoBatchDeleteIdSchema = z.string().refine(isNeoBatchDeleteId, {
   message: '删除 ID 必须为 1 至 50 码点的原始可编码字符串',

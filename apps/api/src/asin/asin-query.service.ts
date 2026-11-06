@@ -15,6 +15,7 @@ import {
   parseAsinGroupId,
   parseAsinGroupQuery,
 } from './asin-query-values';
+import { parseCatalogLiteralDetailQuery } from './catalog-literal-detail-query';
 
 export const ASIN_QUERY_REPOSITORY = Symbol('ASIN_QUERY_REPOSITORY');
 function fail(status: number, message: string): never {
@@ -83,6 +84,16 @@ export class AsinQueryService {
   detail(principal: AuthPrincipal, groupId: unknown) {
     return this.read(principal, 'detail', async (unit) => {
       const result = await unit.detail(parseAsinGroupId(groupId));
+      if (!result.groups.length) fail(404, '变体组不存在');
+      return mapAsinQueryGroups(result)[0];
+    });
+  }
+  literalDetail(principal: AuthPrincipal, url: string) {
+    return this.read(principal, 'detail', async (unit) => {
+      const result = await unit.detail(
+        parseCatalogLiteralDetailQuery(url),
+        'literal',
+      );
       if (!result.groups.length) fail(404, '变体组不存在');
       return mapAsinQueryGroups(result)[0];
     });

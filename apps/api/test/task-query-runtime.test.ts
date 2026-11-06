@@ -33,6 +33,22 @@ describe('task request Redis lifetime / real loopback transport', () => {
     const runtime = new TaskQueryRuntime(env, logger as unknown as AppLogger);
     const started = performance.now();
     try {
+      const onCreateWriteStarted = vi.fn();
+      await expect(
+        runtime
+          .openExport(() => undefined, onCreateWriteStarted)
+          .store.createLimitedExport(
+            {
+              taskId: '10000000-0000-4000-8000-000000000166',
+              userId: 'owner',
+              taskType: 'export',
+              taskSubType: 'asin',
+            },
+            2,
+            100,
+          ),
+      ).rejects.toThrow();
+      expect(onCreateWriteStarted).not.toHaveBeenCalled();
       await expect(
         runtime.open(() => undefined).store.read('task-95'),
       ).rejects.toThrow();

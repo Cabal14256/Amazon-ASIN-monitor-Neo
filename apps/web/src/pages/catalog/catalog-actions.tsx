@@ -82,6 +82,8 @@ function title(action: CatalogAction): string {
       return '删除变体组';
     case 'create-asin':
       return '添加组内 ASIN';
+    case 'batch-create-asins':
+      return '批量添加组内 ASIN';
     case 'edit-asin':
       return '编辑 ASIN';
     case 'move-asin':
@@ -305,6 +307,8 @@ export function CatalogActionPanel({
           claim = beginWrite(action);
           mutationAttempted = true;
           switch (action.type) {
+            case 'batch-create-asins':
+              throw new ApiError('INVALID_INPUT', '请使用批量添加表单');
             case 'create-group':
               if (config.id === 'competitor')
                 await config.writes!.createGroup(http, {

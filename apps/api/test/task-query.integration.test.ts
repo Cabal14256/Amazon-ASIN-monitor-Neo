@@ -5,6 +5,7 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
+  asinExportJobDataSchema,
   competitorMonitorJobSchema,
   taskInfoResultSchema,
   taskListResultSchema,
@@ -66,6 +67,10 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             },
           }),
       });
+      // The task query fixture keeps its own schema and never falls back to public receipts.
+      await f.pools.primaryPool.query(
+        'CREATE TABLE variant_check_receipts (LIKE public.variant_check_receipts INCLUDING ALL)',
+      );
       runtime = f.app.get(TaskQueryRuntime);
       redis = new Redis(env.REDIS_URL, {
         lazyConnect: true,
@@ -357,6 +362,62 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       );
       expect((await get('suspended')).statusCode).toBe(403);
     });
+    it('reports an accepted completed ASIN export cancellation without missing metadata recreation', async () => {
+      const id = randomUUID();
+      const queue = await queueFor('export');
+      const data = asinExportJobDataSchema.parse({
+        taskId: id,
+        taskType: 'export',
+        taskSubType: 'asin',
+        exportType: 'asin',
+        userId: owner.userId,
+        createdAt: new Date().toISOString(),
+        params: {},
+      });
+      await queue.add('asin', data, {
+        jobId: id,
+        removeOnComplete: false,
+        removeOnFail: false,
+      });
+      const worker = new Worker(queue.name, undefined, {
+        autorun: false,
+        prefix: getNeoQueuePrefix(env),
+        connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+      });
+      worker.on('error', () => undefined);
+      try {
+        await worker.waitUntilReady();
+        const job = await worker.getNextJob('fixture-export-cancel-lock-166', {
+          block: false,
+        });
+        expect(job?.id).toBe(id);
+        await job!.moveToCompleted(
+          { cancelled: true },
+          'fixture-export-cancel-lock-166',
+          false,
+        );
+      } finally {
+        await worker.close(true);
+      }
+      expect(await store.read(id)).toBeNull();
+      const response = await get(id);
+      expect(response.statusCode).toBe(200);
+      taskInfoResultSchema.parse(response.json());
+      expect(response.json().data).toMatchObject({
+        taskId: id,
+        taskType: 'export',
+        taskSubType: 'asin',
+        status: 'cancelled',
+        downloadUrl: null,
+        filename: null,
+        canCancel: false,
+      });
+      expect(await store.read(id)).toBeNull();
+      const retained = await queue.getJob(id);
+      expect(await retained!.getState()).toBe('completed');
+      expect(retained!.data).toEqual(data);
+      expect(retained!.returnvalue).toEqual({ cancelled: true });
+    });
     it.each(TASK_QUERY_QUEUES)(
       'reads an owned %s job when registry is absent without recreating metadata',
       async (type) => {
@@ -532,6 +593,82 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect((await get(id)).json().data.status).toBe('cancelled');
       expect(await redis.get(metaKey(id))).toBe(before);
     });
+    it.each(['variant-check', 'batch-check'] as const)(
+      'keeps a historical %s queue target readable before and after failure',
+      async (type) => {
+        const id = randomUUID();
+        // Failed check reconciliation probes for a receipt under current read permission.
+        await f.pools.primaryPool.query(
+          "INSERT INTO role_permissions(role_id,permission_id) SELECT 'reader-71',id FROM permissions WHERE code='asin:read' ON CONFLICT DO NOTHING",
+        );
+        await f.pools.primaryPool.query(
+          "INSERT INTO user_roles(user_id,role_id) VALUES($1,'reader-71')",
+          [owner.userId],
+        );
+        const taskSubType =
+          type === 'variant-check' ? 'asin-check' : 'variant-group';
+        const task = await store.create({
+          taskId: id,
+          userId: owner.userId,
+          taskType: type,
+          taskSubType,
+        });
+        const queue = await queueFor(type);
+        await queue.add(
+          type,
+          {
+            taskId: id,
+            userId: owner.userId,
+            taskType: type,
+            taskSubType,
+            createdAt: task.createdAt,
+            expiresAt: new Date(
+              Date.parse(task.createdAt) + 7 * 86400_000,
+            ).toISOString(),
+            params:
+              type === 'variant-check'
+                ? { asinId: 'x'.repeat(75), forceRefresh: true }
+                : { groupIds: ['x'.repeat(75)], forceRefresh: true },
+          },
+          { jobId: id, removeOnFail: false },
+        );
+        expect((await get(id)).json().data.status).toBe('pending');
+        expect((await list()).json().data).toEqual([
+          expect.objectContaining({ taskId: id, status: 'pending' }),
+        ]);
+        const worker = new Worker(queue.name, undefined, {
+          autorun: false,
+          prefix: getNeoQueuePrefix(env),
+          connection: { url: env.REDIS_URL, maxRetriesPerRequest: null },
+        });
+        worker.on('error', () => undefined);
+        try {
+          await worker.waitUntilReady();
+          const active = await worker.getNextJob('fixture-old-check-lock', {
+            block: false,
+          });
+          expect(active?.id).toBe(id);
+          await active!.moveToFailed(
+            new Error('private historical target'),
+            'fixture-old-check-lock',
+            false,
+          );
+        } finally {
+          await worker.close(true);
+        }
+        const detail = await get(id);
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().data).toMatchObject({
+          taskId: id,
+          status: 'failed',
+        });
+        expect((await list()).json().data).toEqual([
+          expect.objectContaining({ taskId: id, status: 'failed' }),
+        ]);
+        expect(await store.read(id)).toMatchObject({ status: 'failed' });
+        expect(detail.body).not.toContain('private historical target');
+      },
+    );
     it('reconciles a real failed job with a fixed public error', async () => {
       await create('job-failed');
       await complete('job-failed', null, true);

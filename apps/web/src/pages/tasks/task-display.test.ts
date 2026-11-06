@@ -44,6 +44,69 @@ const report = {
 };
 
 describe('task center display boundaries', () => {
+  it('offers only a task-bound completed ASIN XLSX artifact with current read permission', () => {
+    const result = {
+      exportType: 'asin',
+      filename: 'ASIN数据_2026-10-07.xlsx',
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      fileSizeBytes: 4,
+      artifact: {
+        taskId: importId,
+        key: `export-${importId}.xlsx`,
+        bytes: 4,
+        sha256: 'a'.repeat(64),
+      },
+    };
+    const exported = task({
+      taskId: importId,
+      taskType: 'export',
+      taskSubType: 'asin',
+      status: 'completed',
+      filename: result.filename,
+      downloadUrl: `/api/v1/tasks/${importId}/download`,
+      result,
+    });
+    expect(hasTaskDownload(exported, true)).toBe(true);
+    expect(hasTaskDownload(exported, false)).toBe(false);
+    for (const patch of [
+      { status: 'processing' },
+      { status: 'failed' },
+      { status: 'cancelled' },
+      { taskSubType: 'monitor-history' },
+      { filename: 'other.xlsx' },
+      {
+        downloadUrl: `https://untrusted.test/api/v1/tasks/${importId}/download`,
+      },
+      {
+        result: {
+          ...result,
+          artifact: {
+            ...result.artifact,
+            taskId: '123e4567-e89b-42d3-a456-426614174001',
+          },
+        },
+      },
+      {
+        result: {
+          ...result,
+          artifact: { ...result.artifact, key: '../outside.xlsx' },
+        },
+      },
+      {
+        result: {
+          ...result,
+          artifact: { ...result.artifact, sha256: 'invalid' },
+        },
+      },
+      { result: { ...result, fileSizeBytes: 5 } },
+      { result: { ...result, filename: '../ASIN数据_2026-10-07.xlsx' } },
+      { result: { ...result, mimeType: 'application/json' } },
+      { result: null },
+    ])
+      expect(hasTaskDownload({ ...exported, ...patch }, true)).toBe(false);
+  });
+
   it.each(['pending', 'processing'] as const)(
     'allows the owned %s monitor task cancellation advertised by the API',
     (status) => {

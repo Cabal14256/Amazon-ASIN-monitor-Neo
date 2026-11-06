@@ -13,6 +13,7 @@ import { abortError, SpApiError, waitFor } from './errors';
 import { normalizeProductAsin } from './html-variants';
 import type { QuotaRedisPort } from './quota-redis';
 import { getRegionByCountry, normalizeCountry } from './request';
+import { inheritWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 export const CATALOG_CACHE_MAX_ENTRIES = 256;
 export const CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024;
@@ -137,6 +138,7 @@ export class RedisCatalogCheckStore implements CatalogCheckStore {
     if (this.redis.status !== 'ready') throw new SpApiError('DEPENDENCY_ERROR');
     if (this.active.size >= 64) throw new SpApiError('CAPACITY');
     const controller = new AbortController();
+    inheritWorkSettlement(signal, controller.signal);
     this.active.add(controller);
     const abort = () => controller.abort(new SpApiError('CANCELLED'));
     signal.addEventListener('abort', abort, { once: true });
@@ -166,6 +168,7 @@ export class RedisCatalogCheckStore implements CatalogCheckStore {
         signal.removeEventListener('abort', abort);
         this.active.delete(controller);
       });
+    trackWorkSettlement(controller.signal, work);
     return waitFor(work, controller.signal);
   }
   async read(

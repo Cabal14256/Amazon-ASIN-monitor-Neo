@@ -110,7 +110,13 @@ function fixture(
       },
     ),
   };
+  const metrics = { recordGroup: vi.fn(), recordRun: vi.fn() };
+  const publishMonitor = vi.fn(
+    async (_task: TaskState, _sequence: number, _message: unknown) => {},
+  );
   const processor = createPrimaryMonitorProcessor({
+    metrics,
+    ...{ monitorEvents: { publish: publishMonitor } },
     pipeline: { checkGroup },
     repository: { groups, claimNotification, completeNotification },
     store,
@@ -133,6 +139,7 @@ function fixture(
     data,
     job,
     processor,
+    metrics,
     order,
     groups,
     checkGroup,
@@ -140,6 +147,7 @@ function fixture(
     completeNotification,
     sendCountry,
     store,
+    publishMonitor,
     requestCancellation: () => {
       state = transitionTask(state, { kind: 'cancel-request' }, new Date());
     },
@@ -157,6 +165,188 @@ describe('primary monitor BullMQ processor', () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+  it('records only normal group returns and counts a failed attempt before retry', async () => {
+    const f = fixture();
+    f.checkGroup.mockRejectedValueOnce(new Error('dependency unavailable'));
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+    expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+    expect(f.metrics.recordRun).toHaveBeenCalledWith({
+      type: 'monitor_task',
+      durationSec: expect.any(Number),
+    });
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+      totalChecked: 2,
+    });
+    expect(
+      f.metrics.recordGroup.mock.calls.map(([input]) => [
+        input.region,
+        input.isBroken,
+      ]),
+    ).toEqual([
+      ['US', false],
+      ['DE', true],
+    ]);
+    expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+  });
+  it('retains the previous normal group metric when a later group fails, and counts replay calls on retry', async () => {
+    const f = fixture();
+    f.checkGroup
+      .mockResolvedValueOnce(result('g1', false))
+      .mockRejectedValueOnce(new Error('dependency unavailable'));
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+    expect(f.metrics.recordGroup).toHaveBeenCalledTimes(1);
+    await f.processor(f.job, 'fixture-lock');
+    expect(
+      f.metrics.recordGroup.mock.calls.map(([input]) => input.region),
+    ).toEqual(['US', 'US', 'DE']);
+    expect(f.metrics.recordRun).toHaveBeenCalledTimes(2);
+  });
+  it('counts cancelled valid attempts without inventing a normal group, and skips invalid jobs', async () => {
+    const f = fixture();
+    f.requestCancellation();
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toEqual({
+      cancelled: true,
+    });
+    expect(f.metrics.recordGroup).not.toHaveBeenCalled();
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+    f.job.name = 'substituted';
+    await expect(f.processor(f.job, 'fixture-lock')).rejects.toThrow();
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+  });
+  it('isolates throwing observers from business completion and later attempts', async () => {
+    const f = fixture();
+    f.metrics.recordGroup.mockImplementation(() => {
+      throw new Error('observer failed');
+    });
+    f.metrics.recordRun.mockImplementation(() => {
+      throw new Error('observer failed');
+    });
+    await expect(f.processor(f.job, 'fixture-lock')).resolves.toMatchObject({
+      totalChecked: 2,
+      totalBroken: 1,
+    });
+    expect(f.state.status).toBe('completed');
+    expect(f.sendCountry).toHaveBeenCalledTimes(2);
+    expect(f.publishMonitor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: 'completed' }),
+      7000,
+      expect.objectContaining({ type: 'monitor_complete', success: true }),
+    );
+  });
+  it('publishes Legacy started, per-country group progress and full committed completion', async () => {
+    const f = fixture();
+    await f.processor(f.job, 'fixture-lock');
+    expect(f.publishMonitor.mock.calls).toHaveLength(4);
+    expect(f.publishMonitor.mock.calls[0]).toEqual([
+      expect.objectContaining({ status: 'processing', taskId: f.data.taskId }),
+      0,
+      expect.objectContaining({
+        type: 'monitor_progress',
+        status: 'started',
+        countries: ['US', 'DE'],
+        batchInfo: null,
+      }),
+    ]);
+    expect(f.publishMonitor.mock.calls[1]).toEqual([
+      expect.objectContaining({ status: 'processing' }),
+      1,
+      expect.objectContaining({
+        type: 'monitor_progress',
+        status: 'progress',
+        country: 'US',
+        current: 1,
+        total: 1,
+        progress: 100,
+      }),
+    ]);
+    expect(f.publishMonitor.mock.calls[3]).toEqual([
+      expect.objectContaining({ status: 'completed' }),
+      7000,
+      expect.objectContaining({
+        type: 'monitor_complete',
+        success: true,
+        duration: expect.stringMatching(/^\d+\.\d{2}$/),
+        totalChecked: 2,
+        countryResults: {
+          US: expect.objectContaining({
+            country: 'US',
+            checkedGroupKeys: ['group:g1'],
+            asinClassifications: {},
+          }),
+          DE: expect.objectContaining({
+            country: 'DE',
+            brokenGroupNames: ['Group g2'],
+            brokenGroupDetails: expect.any(Array),
+            brokenASINs: expect.any(Array),
+            brokenByType: { SP_API_ERROR: 0, NOT_FOUND: 0, NO_VARIANTS: 1 },
+          }),
+        },
+      }),
+    ]);
+  });
+  it('keeps primary progress at every tenth and final group before the check, separately from task progress', async () => {
+    const f = fixture();
+    f.data.countries = ['US'];
+    f.groups.mockResolvedValue(
+      Array.from({ length: 21 }, (_, i) => ({
+        country: 'US',
+        groupId: `g-${i + 1}`,
+      })),
+    );
+    const cadence: string[] = [];
+    f.publishMonitor.mockImplementation(async (_task, _sequence, message) => {
+      const m = message as { status?: string; current?: number };
+      if (m.status === 'progress') cadence.push(`event:${m.current}`);
+    });
+    f.checkGroup.mockImplementation(async (id) => {
+      cadence.push(`check:${id}`);
+      return {
+        ...result(id, false),
+        groupSnapshot: { ...result(id, false).groupSnapshot, country: 'US' },
+      };
+    });
+    await f.processor(f.job, 'fixture-lock');
+    expect(cadence.filter((item) => item.startsWith('event:'))).toEqual([
+      'event:10',
+      'event:20',
+      'event:21',
+    ]);
+    for (const current of [10, 20, 21])
+      expect(cadence.indexOf(`event:${current}`)).toBeLessThan(
+        cadence.indexOf(`check:g-${current}`),
+      );
+    expect(
+      f.store.mutate.mock.calls.filter(
+        ([, change]) => change.kind === 'progress',
+      ),
+    ).toHaveLength(21);
+  });
+  it('does not publish completion for cancelled or partial failed work, while advisory failure leaves committed business successful', async () => {
+    const cancelled = fixture();
+    cancelled.requestCancellation();
+    await cancelled.processor(cancelled.job, 'fixture-lock');
+    expect(cancelled.publishMonitor).not.toHaveBeenCalled();
+    const partial = fixture();
+    partial.checkGroup.mockRejectedValueOnce(new Error('private failure'));
+    await expect(
+      partial.processor(partial.job, 'fixture-lock'),
+    ).rejects.toThrow('监控任务未完成');
+    expect(
+      partial.publishMonitor.mock.calls.some(
+        ([, , m]) => (m as { type: string }).type === 'monitor_complete',
+      ),
+    ).toBe(false);
+    const healthy = fixture();
+    healthy.publishMonitor.mockRejectedValue(
+      new Error('private realtime outage'),
+    );
+    await expect(
+      healthy.processor(healthy.job, 'fixture-lock'),
+    ).resolves.toMatchObject({ success: true });
+    expect(healthy.state.status).toBe('completed');
+    expect(healthy.metrics.recordGroup).toHaveBeenCalledTimes(2);
+    expect(healthy.metrics.recordRun).toHaveBeenCalledOnce();
   });
   it('accepts a job one millisecond before its expiry', async () => {
     const f = fixture();
@@ -475,6 +665,14 @@ describe('primary monitor BullMQ processor', () => {
     expect(
       f.store.mutate.mock.calls.map(([, change]) => change.kind),
     ).toContain('cancelled');
+    expect(f.metrics.recordGroup).toHaveBeenCalledTimes(2);
+    expect(f.metrics.recordRun).toHaveBeenCalledOnce();
+    expect(
+      f.publishMonitor.mock.calls.some(
+        ([, , message]) =>
+          (message as { type: string }).type === 'monitor_complete',
+      ),
+    ).toBe(false);
   });
   it('isolates a deleted group but does not notify or report partial work as success', async () => {
     const f = fixture();

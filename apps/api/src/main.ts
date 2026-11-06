@@ -1,16 +1,14 @@
 import 'reflect-metadata';
 
 import { NestFactory } from '@nestjs/core';
-import {
-  FastifyAdapter,
-  type NestFastifyApplication,
-} from '@nestjs/platform-fastify';
+import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 
 import { loadEnv, loadEnvironmentFiles, type Env } from '@asin-monitor/config';
 import { AppModule } from './app.module';
 import { AuditService } from './audit/audit.service';
 import { ENV } from './config/config.module';
 import { HealthErrorStatsService } from './health/health.service';
+import { createHttpAdapter } from './http-adapter';
 import { configureHttpApp } from './http-app';
 import { AppLogger } from './logger/app-logger.service';
 import { createNestLoggerAdapter } from './logger/nest-logger.adapter';
@@ -28,12 +26,7 @@ async function bootstrap(): Promise<void> {
   const adapterEnv = loadEnv();
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({
-      logger: false,
-      ...(adapterEnv.TRUST_PROXY === undefined
-        ? {}
-        : { trustProxy: adapterEnv.TRUST_PROXY }),
-    }),
+    createHttpAdapter(adapterEnv),
     { bufferLogs: true },
   );
 

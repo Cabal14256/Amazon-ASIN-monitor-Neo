@@ -1,10 +1,17 @@
 import 'reflect-metadata';
 
-import { loadEnv, loadEnvironmentFiles } from '@asin-monitor/config';
+import {
+  loadEnv,
+  loadEnvironmentFiles,
+  resolveScheduledMonitorSelection,
+  SCHEDULED_MONITOR_PHYSICAL_QUEUE,
+  type Env,
+} from '@asin-monitor/config';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 
 import { startAsinBatchDeleteRuntime } from './asin-batch-delete-runtime';
+import { startAsinExportRuntime } from './asin-export-runtime';
 import { startAsinImportRuntime } from './asin-import-runtime';
 import { startAuthMaintenanceRuntime } from './auth-maintenance-runtime';
 import {
@@ -13,6 +20,7 @@ import {
 } from './auth-maintenance-schedules';
 import { waitForShutdownSignal } from './idle';
 import { logger } from './logger';
+import { startWorkerMetrics, type WorkerMetricsRuntime } from './metrics';
 import { startMonitorIntervalRuntime } from './monitor-interval-runtime';
 import { MONITOR_INTERVAL_QUEUE } from './monitor-interval-schedules';
 import { attachQueueErrorLogger, attachRedisErrorLogger } from './queue-events';
@@ -29,15 +37,41 @@ import { createSingleFlightCheck, RedisWatchdog } from './watchdog';
  * D4 认证维护、主营/竞品批量删除、主营导入及变体检查已注册 Processor。
  * BullMQ 自管连接（传 ConnectionOptions），看门狗使用独立 ioredis 实例。
  */
-async function bootstrap(): Promise<void> {
+export async function bootstrap(): Promise<void> {
   loadEnvironmentFiles();
   const env = loadEnv();
+  // Bind before any Redis runtime/consumer; an enabled but unavailable scrape
+  // port is a configuration error, not a reason to consume without metrics.
+  const metrics = await startWorkerMetrics(env);
+  try {
+    await startConfiguredWorker(env, metrics);
+  } catch (error) {
+    try {
+      await metrics?.close();
+    } catch {
+      logger.warn('启动失败后关闭 Worker 指标端口失败');
+    }
+    throw error;
+  }
+}
+
+async function startConfiguredWorker(
+  env: Env,
+  metrics: WorkerMetricsRuntime | undefined,
+): Promise<void> {
   const {
     enabledQueues: enabled,
     unknownQueues,
     maintenance: selectedMaintenance,
     intervalMaintenance: selectedIntervals,
   } = resolveWorkerSelection(env.WORKER_ENABLED_QUEUES);
+  const scheduledMonitor = resolveScheduledMonitorSelection(
+    env.WORKER_ENABLED_QUEUES,
+  );
+  const scheduledMonitorEnabled =
+    scheduledMonitor.enabled && env.AUTH_DATA_AUTHORITY === 'postgresql';
+  if (scheduledMonitor.enabled && !scheduledMonitorEnabled)
+    logger.info('定时监控未启用，当前认证权威源为 Legacy');
   const enableMaintenance =
     selectedMaintenance && env.AUTH_DATA_AUTHORITY === 'postgresql';
   const enableIntervals =
@@ -48,16 +82,29 @@ async function bootstrap(): Promise<void> {
     logger.info('认证维护未启用，当前认证权威源为 Legacy');
 
   if (unknownQueues.length > 0) {
-    logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
-      unknownQueues,
-    });
+    const publicUnknownQueues = unknownQueues.filter(
+      (value) => value.trim().toLowerCase() !== 'scheduled-monitor',
+    );
+    if (publicUnknownQueues.length > 0)
+      logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
+        unknownQueues: publicUnknownQueues,
+      });
   }
 
-  if (enabled.length === 0 && !enableMaintenance && !enableIntervals) {
-    const stopped = waitForShutdownSignal();
-    logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
-    const signal = await stopped;
-    logger.info('空闲 Worker 收到停止信号', { signal });
+  if (
+    enabled.length === 0 &&
+    !enableMaintenance &&
+    !enableIntervals &&
+    !scheduledMonitorEnabled
+  ) {
+    try {
+      const stopped = waitForShutdownSignal();
+      logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
+      const signal = await stopped;
+      logger.info('空闲 Worker 收到停止信号', { signal });
+    } finally {
+      await metrics?.close();
+    }
     return;
   }
 
@@ -76,6 +123,10 @@ async function bootstrap(): Promise<void> {
     enabled.includes('import') && env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startAsinImportRuntime(env, () => process.exit(1))
       : undefined;
+  const asinExport =
+    enabled.includes('export') && env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startAsinExportRuntime(env, () => process.exit(1))
+      : undefined;
   const checkQueues = enabled.filter(
     (
       name,
@@ -90,13 +141,22 @@ async function bootstrap(): Promise<void> {
       name === 'competitor-monitor',
   );
   const variantChecks =
-    checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
-      ? await startVariantCheckRuntime(env, checkQueues, () => process.exit(1))
+    (checkQueues.length || scheduledMonitorEnabled) &&
+    env.AUTH_DATA_AUTHORITY === 'postgresql'
+      ? await startVariantCheckRuntime(
+          env,
+          checkQueues,
+          () => process.exit(1),
+          process.env,
+          metrics?.observer,
+          scheduledMonitorEnabled,
+        )
       : undefined;
 
   const queues = enabled
     .filter((name) => !(batchDelete && name === 'batch-delete'))
     .filter((name) => !(asinImport && name === 'import'))
+    .filter((name) => !(asinExport && name === 'export'))
     .filter(
       (name) =>
         !(
@@ -126,6 +186,7 @@ async function bootstrap(): Promise<void> {
       ...(intervals ? [intervals.queue] : []),
       ...(batchDelete ? [batchDelete.queue] : []),
       ...(asinImport ? [asinImport.queue] : []),
+      ...(asinExport ? [asinExport.queue] : []),
       ...(variantChecks ? variantChecks.queues : []),
     ].map((queue) => createSingleFlightCheck(() => queue.getJobCounts())),
   });
@@ -144,7 +205,9 @@ async function bootstrap(): Promise<void> {
         ...(intervals ? [intervals] : []),
         ...(batchDelete ? [batchDelete] : []),
         ...(asinImport ? [asinImport] : []),
+        ...(asinExport ? [asinExport] : []),
         ...(variantChecks ? [variantChecks] : []),
+        ...(metrics ? [metrics] : []),
       ],
       watchdogRedis,
     });
@@ -156,7 +219,7 @@ async function bootstrap(): Promise<void> {
   // A supervisor may stop us immediately after observing this readiness log.
   logger.info('Worker 已启动', {
     mode:
-      batchDelete || asinImport || variantChecks
+      batchDelete || asinImport || asinExport || variantChecks
         ? 'business-worker'
         : maintenance
         ? 'auth-maintenance'
@@ -168,6 +231,7 @@ async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
+      Number(!!asinExport) +
       (variantChecks?.workers.length ?? 0),
     prefix: getNeoQueuePrefix(env),
     enabledQueues: enabled,
@@ -175,6 +239,7 @@ async function bootstrap(): Promise<void> {
       ...enabled.map(getPhysicalQueueName),
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
       ...(intervals ? [MONITOR_INTERVAL_QUEUE] : []),
+      ...(scheduledMonitorEnabled ? [SCHEDULED_MONITOR_PHYSICAL_QUEUE] : []),
     ],
     queueCount:
       queues.length +
@@ -182,6 +247,7 @@ async function bootstrap(): Promise<void> {
       Number(!!intervals) +
       Number(!!batchDelete) +
       Number(!!asinImport) +
+      Number(!!asinExport) +
       (variantChecks?.queues.length ?? 0),
     schedulerEnabled: !!(maintenance || intervals) && env.SCHEDULER_ENABLED,
   });

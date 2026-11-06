@@ -17,6 +17,7 @@ import type {
   Region,
   Transport,
 } from './types';
+import { trackWorkSettlement } from './work-settlement';
 
 export interface SpApiRuntimeOptions {
   env: {
@@ -28,6 +29,7 @@ export interface SpApiRuntimeOptions {
   repository: {
     readConfiguration(
       signal: AbortSignal,
+      onActualWork?: (work: Promise<unknown>) => void,
     ): Promise<readonly { configKey: string; configValue: unknown }[]>;
   };
   source: ConfigSource;
@@ -111,7 +113,10 @@ export class SpApiRuntime {
   ): Promise<boolean> {
     this.ensureAvailable();
     if (signal.aborted) throw abortError(signal);
-    const rows = await this.options.repository.readConfiguration(signal);
+    const rows = await this.options.repository.readConfiguration(
+      signal,
+      (work) => trackWorkSettlement(signal, work),
+    );
     this.ensureAvailable();
     if (signal.aborted) throw abortError(signal);
     if (!Array.isArray(rows) || rows.length > 200)

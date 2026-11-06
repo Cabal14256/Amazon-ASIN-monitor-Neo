@@ -1,7 +1,10 @@
 import { z } from 'zod';
+import { neoCatalogIdSchema } from './neo-catalog-id';
 import { parentAsinCodeSchema } from './variantCheck';
 
-const identifier = z
+/** The queue may still contain jobs admitted by the earlier private schema.
+ * Its string length is UTF-16 units, unlike the current 50-code-point catalog key. */
+const persistedIdentifier = z
   .string()
   .min(1)
   .max(100)
@@ -17,75 +20,81 @@ const identity = {
   expiresAt: z.string().datetime(),
 };
 /** Private BullMQ payload. Queue kind and business subtype remain distinct. */
-export const variantCheckJobSchema = z.discriminatedUnion('taskSubType', [
-  z
-    .object({
-      ...identity,
-      taskType: z.literal('variant-check'),
-      taskSubType: z.literal('asin-check'),
-      params: z
-        .object({ asinId: identifier, forceRefresh: z.boolean() })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...identity,
-      taskType: z.literal('variant-check'),
-      taskSubType: z.literal('variant-group-check'),
-      params: z
-        .object({ groupId: identifier, forceRefresh: z.boolean() })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...identity,
-      taskType: z.literal('variant-check'),
-      taskSubType: z.literal('competitor-asin-check'),
-      params: z
-        .object({ asinId: identifier, forceRefresh: z.boolean() })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...identity,
-      taskType: z.literal('variant-check'),
-      taskSubType: z.literal('competitor-variant-group-check'),
-      params: z
-        .object({ groupId: identifier, forceRefresh: z.boolean() })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...identity,
-      taskType: z.literal('variant-check'),
-      taskSubType: z.literal('parent-asin-query'),
-      params: z
-        .object({
-          asins: z.array(parentAsinCodeSchema).min(1).max(1000),
-          country: z.string().min(1).max(10),
-        })
-        .strict(),
-    })
-    .strict(),
-  z
-    .object({
-      ...identity,
-      taskType: z.literal('batch-check'),
-      taskSubType: z.literal('variant-group'),
-      params: z
-        .object({
-          groupIds: z.array(identifier).min(1).max(1000),
-          forceRefresh: z.boolean(),
-          country: z.string().max(10).optional(),
-        })
-        .strict(),
-    })
-    .strict(),
-]);
+const createVariantCheckJobSchema = (identifier: z.ZodType<string>) =>
+  z.discriminatedUnion('taskSubType', [
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('variant-check'),
+        taskSubType: z.literal('asin-check'),
+        params: z
+          .object({ asinId: identifier, forceRefresh: z.boolean() })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('variant-check'),
+        taskSubType: z.literal('variant-group-check'),
+        params: z
+          .object({ groupId: identifier, forceRefresh: z.boolean() })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('variant-check'),
+        taskSubType: z.literal('competitor-asin-check'),
+        params: z
+          .object({ asinId: identifier, forceRefresh: z.boolean() })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('variant-check'),
+        taskSubType: z.literal('competitor-variant-group-check'),
+        params: z
+          .object({ groupId: identifier, forceRefresh: z.boolean() })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('variant-check'),
+        taskSubType: z.literal('parent-asin-query'),
+        params: z
+          .object({
+            asins: z.array(parentAsinCodeSchema).min(1).max(1000),
+            country: z.string().min(1).max(10),
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('batch-check'),
+        taskSubType: z.literal('variant-group'),
+        params: z
+          .object({
+            groupIds: z.array(identifier).min(1).max(1000),
+            forceRefresh: z.boolean(),
+            country: z.string().max(10).optional(),
+          })
+          .strict(),
+      })
+      .strict(),
+  ]);
+export const variantCheckJobSchema =
+  createVariantCheckJobSchema(neoCatalogIdSchema);
+/** Read-only compatibility for BullMQ jobs stored before the catalog ID gate. */
+export const persistedVariantCheckJobSchema =
+  createVariantCheckJobSchema(persistedIdentifier);
 export type VariantCheckJobData = z.infer<typeof variantCheckJobSchema>;
 
 /** Complete results live in PostgreSQL; this small reference fits task metadata

@@ -32,6 +32,8 @@ Neo 角色列表、详情、权限分组、权限分配及角色下拉接口已�
 
 D4 会话清理与审计归档见[数据层说明](./docs/runbooks/phase-2-auth-maintenance-data.md)和[Worker 调度运行说明](./docs/runbooks/phase-2-auth-maintenance-worker.md)。新审计查询依赖 `0003` 冷热统一视图，最终快照导入后须先执行 `corepack pnpm db:upgrade:auth-maintenance` 再部署 API；维护专用 Worker 使用 `WORKER_ENABLED_QUEUES=maintenance`，停止已有计划需按运行说明显式暂停队列并删除计划。
 
+Neo 手动主营/竞品监控的 Worker → Redis → 多 API 实时进度、完整完成消息、会话验证与容量边界见[监控实时消息运行说明](./docs/runbooks/phase-2-monitor-live-events.md)。
+
 ## 功能概览
 
 - **ASIN 与变体组管理**：创建、编辑、移动、批量删除以及 Excel 导入/导出。

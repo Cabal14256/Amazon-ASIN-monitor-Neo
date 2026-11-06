@@ -6,8 +6,10 @@ import {
   type MonitorAnalyticsQuery,
   type MonitorAnalyticsQueryRepositoryPort,
   type MonitorAnalyticsQueryUnit,
+  type RoleWriteUnit,
 } from '@asin-monitor/db';
 import { vi } from 'vitest';
+import { analyticsCacheRedisMemoryModel } from './analytics-cache-redis-memory-model';
 
 export function monitorAnalyticsFixture() {
   const user: AuthUserRecord = {
@@ -38,7 +40,13 @@ export function monitorAnalyticsFixture() {
   };
   const permissions = ['monitor:read', 'analytics:read'];
   const metrics = finalizeDurationMetrics(createDurationMetricsAccumulator());
-  const unit: MonitorAnalyticsQueryUnit = {
+  const unit: MonitorAnalyticsQueryUnit & RoleWriteUnit = {
+    listRoles: vi.fn(async () => []),
+    findRole: vi.fn(async () => undefined),
+    listPermissions: vi.fn(async () => []),
+    listRolePermissions: vi.fn(async () => []),
+    usersWithRole: vi.fn(async () => []),
+    replacePermissions: vi.fn(async () => {}),
     lockOperator: vi.fn(async () => user),
     lockSession: vi.fn(async () => session),
     operatorPermissionCodes: vi.fn(async () => permissions),
@@ -128,22 +136,27 @@ export function monitorAnalyticsFixture() {
     revokeOwnedSession: vi.fn(async () => true),
   };
   const values = new Map<string, string>();
+  const cacheModel = analyticsCacheRedisMemoryModel({
+    dataValues: values,
+    legacyEval: async () => {
+      throw new Error('UNEXPECTED_LEGACY_CACHE_SCRIPT');
+    },
+  });
   const redis = {
-    get: vi.fn(async () => null),
+    get: vi.fn(cacheModel.get),
     setex: vi.fn(),
     del: vi.fn(),
-    eval: vi.fn(
-      async (script: string, keys: string[], args: (string | number)[]) => {
-        if (script.includes('STRLEN')) {
-          const value = values.get(keys[0]);
-          return value && Buffer.byteLength(value) <= Number(args[0])
-            ? value
-            : null;
-        }
-        values.set(keys[0], String(args[0]));
-        return 'OK';
-      },
-    ),
+    eval: vi.fn(cacheModel.eval),
   };
-  return { user, session, permissions, unit, repository, auth, redis, values };
+  return {
+    user,
+    session,
+    permissions,
+    unit,
+    repository,
+    auth,
+    redis,
+    values,
+    cacheModel,
+  };
 }

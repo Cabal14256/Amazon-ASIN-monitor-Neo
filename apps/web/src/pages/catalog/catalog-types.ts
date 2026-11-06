@@ -1,4 +1,5 @@
 import type {
+  BatchCreateAsinsData,
   CompetitorAsinSource,
   CompetitorCreateAsinRequest,
   CompetitorGroupSource,
@@ -12,6 +13,7 @@ import type {
   VariantGroupUpsertRequest,
 } from '@asin-monitor/contracts';
 import type { HttpClient } from '../../lib/http';
+import type { AsinBatchCreateInput } from '../../services/asin-batch-create';
 
 type Flag = 0 | 1 | boolean | null;
 
@@ -76,6 +78,7 @@ export interface CatalogListData {
 
 export type CatalogAction =
   | { type: 'create-group' }
+  | { type: 'batch-create-asins'; group: CatalogGroup }
   | {
       type:
         | 'edit-group'
@@ -147,6 +150,11 @@ export type CatalogCheckResult =
   | { kind: 'result'; result: unknown };
 
 export interface CatalogWrites {
+  batchCreateAsins?: (
+    http: Pick<HttpClient, 'request'>,
+    input: AsinBatchCreateInput,
+    signal?: AbortSignal,
+  ) => Promise<BatchCreateAsinsData>;
   createGroup: (
     http: Pick<HttpClient, 'request'>,
     input: VariantGroupUpsertRequest,

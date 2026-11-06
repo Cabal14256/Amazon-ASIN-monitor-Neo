@@ -5,6 +5,10 @@ import type {
 } from '@asin-monitor/sp-api';
 import type { AsinQueryUnit } from '../repositories/asin-query-repository';
 import type { Asin, VariantGroup } from '../schema';
+import type {
+  ScheduledMonitorCheck,
+  ScheduledMonitorGroupOperation,
+} from './scheduled-monitor-run';
 import type { VariantCheckOperation } from './variant-check-receipt';
 
 export interface GroupCheckSnapshot {
@@ -40,6 +44,7 @@ export interface VariantCheckUnit extends AsinQueryUnit {
     expected: GroupCheckSnapshot,
     observations: AsinCheckObservation[],
     guard: CheckCommitGuard,
+    scheduled?: ScheduledMonitorCheck,
   ): Promise<CommittedGroupCheck>;
   commitSingle(
     expected: SingleCheckSnapshot,
@@ -52,9 +57,17 @@ export interface VariantCheckUnit extends AsinQueryUnit {
     committed: CommittedGroupCheck,
     result: VariantGroupCheckData,
   ): Promise<void>;
+  assertScheduledMonitorGroup?(check: ScheduledMonitorCheck): Promise<void>;
+  recordScheduledMonitorGroupReceipt?(
+    operation: ScheduledMonitorGroupOperation,
+    result: VariantGroupCheckData,
+  ): Promise<void>;
 }
 export interface VariantCheckRepositoryPort {
-  transaction<T>(action: (unit: VariantCheckUnit) => Promise<T>): Promise<T>;
+  transaction<T>(
+    action: (unit: VariantCheckUnit) => Promise<T>,
+    onActualWork?: (work: Promise<unknown>) => void,
+  ): Promise<T>;
 }
 export class VariantCheckError extends Error {
   constructor(

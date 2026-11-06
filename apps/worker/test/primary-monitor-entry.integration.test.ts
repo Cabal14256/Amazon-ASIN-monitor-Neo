@@ -33,6 +33,12 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import {
+  assertMetricsFixtureTargets,
+  availableMetricsPort,
+  metricValue,
+  scrapeWorker,
+} from './helpers/metrics-fixture';
 
 describe.skipIf(
   process.env.RUN_INTEGRATION_TESTS !== 'true' || process.platform === 'win32',
@@ -47,7 +53,10 @@ describe.skipIf(
   let exited = false,
     output = '';
   const taskIds: string[] = [];
+  let metricsPort = 0;
   beforeEach(async () => {
+    assertMetricsFixtureTargets();
+    metricsPort = await availableMetricsPort();
     f = await maintenanceFixture();
     const schema = (await f.pool.query('SELECT current_schema() AS schema'))
       .rows[0].schema as string;
@@ -188,6 +197,42 @@ describe.skipIf(
     });
     return `https://127.0.0.1:${(webhook.address() as AddressInfo).port}/hook`;
   }
+  it('scrapes a real idle entry without Redis and shuts down the owned HTTP socket', async () => {
+    child = spawn(process.execPath, [resolve(__dirname, '../dist/main.js')], {
+      cwd: resolve(__dirname, '..'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        AUTH_DATA_AUTHORITY: 'postgresql',
+        DATABASE_URL: f.env.DATABASE_URL,
+        COMPETITOR_DATABASE_URL: f.env.COMPETITOR_DATABASE_URL,
+        REDIS_URL: 'redis://127.0.0.1:1/15',
+        WORKER_ENABLED_QUEUES: 'off',
+        WORKER_METRICS_ENABLED: 'true',
+        WORKER_METRICS_HOST: '127.0.0.1',
+        WORKER_METRICS_PORT: String(metricsPort),
+        SCHEDULER_ENABLED: 'false',
+        LOG_LEVEL: 'INFO',
+      },
+    });
+    const collect = (chunk: Buffer) => {
+      output = (output + chunk.toString()).slice(-64_000);
+    };
+    child.stdout!.on('data', collect);
+    child.stderr!.on('data', collect);
+    child.once('exit', () => {
+      exited = true;
+    });
+    await eventually(async () => {
+      if (exited) throw new Error('Idle metrics fixture exited before scrape');
+      if (!output.includes('Worker 未启用任何队列')) return false;
+      return (await scrapeWorker(metricsPort)).includes('amazon_asin_monitor_');
+    }, 15_000);
+    expect(output).not.toContain('Redis 连续');
+    child.kill('SIGTERM');
+    await eventually(async () => exited, 12_000);
+    await expect(scrapeWorker(metricsPort)).rejects.toThrow();
+  });
   it('keeps another live consumer ready and removes the last owner immediately', async () => {
     const key = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
     const a = new MonitorConsumerHeartbeat(f.redis, key);
@@ -213,6 +258,41 @@ describe.skipIf(
     }
   });
   it('processes a six-country request through the real queue and writes only selected country history', async () => {
+    await f.pool.query(
+      "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('metrics-normal','B000000001','Normal','US','amazon.com','Fixture','g-us')",
+    );
+    const cache = new RedisCatalogCheckStore(f.redis, getNeoQueuePrefix(f.env));
+    try {
+      const identity = {
+        asin: 'B000000001',
+        country: 'US' as const,
+        owner: 'primary' as const,
+      };
+      const signal = new AbortController().signal;
+      const claim = await cache.claim(identity, signal);
+      await cache.write(
+        identity,
+        claim,
+        parseCatalogVariantResult(
+          {
+            asin: 'B000000001',
+            relationships: [
+              {
+                relationships: [
+                  { type: 'VARIATION', childAsins: ['B000000003'] },
+                ],
+              },
+            ],
+          },
+          identity.asin,
+        ),
+        600,
+        signal,
+      );
+    } finally {
+      cache.close();
+    }
+
     child = spawn(process.execPath, [resolve(__dirname, '../dist/main.js')], {
       cwd: resolve(__dirname, '..'),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -226,6 +306,9 @@ describe.skipIf(
         BULL_PREFIX: f.env.BULL_PREFIX,
         WORKER_ENABLED_QUEUES: 'monitor',
         SCHEDULER_ENABLED: 'false',
+        WORKER_METRICS_ENABLED: 'true',
+        WORKER_METRICS_HOST: '127.0.0.1',
+        WORKER_METRICS_PORT: String(metricsPort),
         LOG_LEVEL: 'INFO',
       },
     });
@@ -245,6 +328,7 @@ describe.skipIf(
         )) === '1'
       );
     }, 15_000);
+    const before = await scrapeWorker(metricsPort);
     const store = new RedisTaskRepository(f.redis, f.env);
     const task = await store.create({
       taskId: randomUUID(),
@@ -272,10 +356,14 @@ describe.skipIf(
     const history = await f.pool.query(
       'SELECT country,check_type,monitor_task_id FROM monitor_history ORDER BY id',
     );
-    expect(history.rows).toEqual([
-      { country: 'DE', check_type: 'GROUP', monitor_task_id: task.taskId },
-      { country: 'US', check_type: 'GROUP', monitor_task_id: task.taskId },
-    ]);
+    expect(history.rows).toHaveLength(3);
+    expect(history.rows).toEqual(
+      expect.arrayContaining([
+        { country: 'DE', check_type: 'GROUP', monitor_task_id: task.taskId },
+        { country: 'US', check_type: 'GROUP', monitor_task_id: task.taskId },
+        { country: 'US', check_type: 'ASIN', monitor_task_id: task.taskId },
+      ]),
+    );
     expect(
       (
         await f.pool.query(
@@ -283,8 +371,107 @@ describe.skipIf(
         )
       ).rows[0].count,
     ).toBe(2);
+    const after = await scrapeWorker(metricsPort);
+    expect(
+      metricValue(after, 'variant_group_checks_total', {
+        region: 'US',
+        result: 'ok',
+      }) -
+        metricValue(before, 'variant_group_checks_total', {
+          region: 'US',
+          result: 'ok',
+        }),
+    ).toBe(1);
+    expect(
+      metricValue(after, 'variant_group_checks_total', {
+        region: 'DE',
+        result: 'broken',
+      }),
+    ).toBe(1);
+    for (const region of ['US', 'DE']) {
+      expect(
+        metricValue(after, 'variant_group_check_duration_seconds_count', {
+          region,
+        }),
+      ).toBe(1);
+      expect(
+        metricValue(after, 'variant_group_check_duration_seconds_sum', {
+          region,
+        }),
+      ).toBeGreaterThan(0);
+      expect(
+        metricValue(after, 'variant_group_check_duration_seconds_bucket', {
+          le: '+Inf',
+          region,
+        }),
+      ).toBe(1);
+    }
+    expect(
+      metricValue(after, 'scheduler_runs_total', { type: 'monitor_task' }),
+    ).toBe(1);
+    const failed = await store.create({
+      taskId: randomUUID(),
+      userId: 'fixture-owner',
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      title: 'Expired metrics fixture',
+    });
+    taskIds.push(failed.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const failedJob = await queue.add(
+      'primary-monitor',
+      {
+        ...job,
+        taskId: failed.taskId,
+        createdAt: failed.createdAt,
+        expiresAt: new Date(Date.parse(failed.createdAt) + 1).toISOString(),
+        countries: ['US'],
+      },
+      { jobId: failed.taskId, attempts: 1 },
+    );
+    await expect(failedJob.waitUntilFinished(events, 10_000)).rejects.toThrow();
+    const cancelled = await store.create({
+      taskId: randomUUID(),
+      userId: 'fixture-owner',
+      taskType: 'monitor',
+      taskSubType: 'primary',
+      title: 'Cancelled metrics fixture',
+    });
+    taskIds.push(cancelled.taskId);
+    await store.mutate(cancelled.taskId, { kind: 'cancel-request' });
+    const cancelledJob = await queue.add(
+      'primary-monitor',
+      {
+        ...job,
+        taskId: cancelled.taskId,
+        createdAt: cancelled.createdAt,
+        expiresAt: new Date(
+          Date.parse(cancelled.createdAt) + 3600_000,
+        ).toISOString(),
+        countries: ['US'],
+      },
+      { jobId: cancelled.taskId, attempts: 1 },
+    );
+    expect(await cancelledJob.waitUntilFinished(events, 10_000)).toEqual({
+      cancelled: true,
+    });
+    const ended = await scrapeWorker(metricsPort);
+    expect(
+      metricValue(ended, 'scheduler_runs_total', { type: 'monitor_task' }),
+    ).toBe(3);
+    expect(
+      metricValue(ended, 'scheduler_run_duration_seconds_count', {
+        type: 'monitor_task',
+      }),
+    ).toBe(3);
+    expect(
+      metricValue(ended, 'variant_group_check_duration_seconds_count', {
+        region: 'US',
+      }),
+    ).toBe(1);
     child.kill('SIGTERM');
     await eventually(async () => exited, 12_000);
+    await expect(scrapeWorker(metricsPort)).rejects.toThrow();
     const key = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
     expect(await f.redis.exists(key, `${key}:owners`)).toBe(0);
   });
@@ -350,6 +537,9 @@ describe.skipIf(
         BULL_PREFIX: f.env.BULL_PREFIX,
         WORKER_ENABLED_QUEUES: 'monitor',
         SCHEDULER_ENABLED: 'false',
+        WORKER_METRICS_ENABLED: 'true',
+        WORKER_METRICS_HOST: '127.0.0.1',
+        WORKER_METRICS_PORT: String(metricsPort),
         LOG_LEVEL: 'INFO',
         NODE_EXTRA_CA_CERTS: certificateFiles!.certificate,
       },

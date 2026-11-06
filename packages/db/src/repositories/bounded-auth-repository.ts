@@ -18,9 +18,21 @@ export class AuthQueryTimeoutError extends Error {
 export async function withAuthDatabaseDeadline<T>(
   pool: Pool,
   operation: (db: Db, ensureOpen: () => void) => Promise<T>,
+  onActualWork?: (work: Promise<unknown>) => void,
 ): Promise<T> {
   // 获取连接由应用池的 connectionTimeoutMillis 约束。
-  const client: PoolClient = await pool.connect();
+  let completeActual!: () => void;
+  const actualDone = new Promise<void>((resolve) => {
+    completeActual = resolve;
+  });
+  onActualWork?.(actualDone);
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    completeActual();
+    throw error;
+  }
   let destroyed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let connectionError!: (error: Error) => void;
@@ -38,18 +50,19 @@ export async function withAuthDatabaseDeadline<T>(
     if (destroyed) throw new AuthQueryTimeoutError();
   };
   try {
+    const work = (async () => {
+      await client.query('BEGIN');
+      ensureOpen();
+      await client.query('SET LOCAL statement_timeout = 1500');
+      ensureOpen();
+      const result = await operation(createDb(client), ensureOpen);
+      ensureOpen();
+      await client.query('COMMIT');
+      return result;
+    })().finally(completeActual);
     return await Promise.race([
       connectionFailure,
-      (async () => {
-        await client.query('BEGIN');
-        ensureOpen();
-        await client.query('SET LOCAL statement_timeout = 1500');
-        ensureOpen();
-        const result = await operation(createDb(client), ensureOpen);
-        ensureOpen();
-        await client.query('COMMIT');
-        return result;
-      })(),
+      work,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           // 销毁独占连接以中止未决 I/O，而不是仅丢弃 Promise 的结果。

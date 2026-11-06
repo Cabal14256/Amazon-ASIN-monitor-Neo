@@ -75,12 +75,14 @@ export async function legacyAnalyticsFixture() {
     ): Promise<Rows> =>
       (await connection.query<RowDataPacket[]>(statement, params))[0];
     let captured: Rows[] = [];
+    let lastStatement: { statement: string; params: unknown[] } | undefined;
     const dependencies: Record<string, unknown> = {
       '../config/database': {
         getPoolStatus: () => ({}),
         query: async (statement: string, params: unknown[]) => {
           const rows = await query(statement, params);
           captured.push(rows);
+          lastStatement = { statement, params };
           return rows;
         },
       },
@@ -165,6 +167,17 @@ export async function legacyAnalyticsFixture() {
       ...loaded,
       query,
       close,
+      async diagnoseDurationSourceRows(params: object) {
+        const previousStatement = lastStatement;
+        const rows = await loaded.model.getDurationSourceRowsFromRaw(params);
+        if (!lastStatement || lastStatement === previousStatement)
+          throw new Error('Legacy duration source SQL was not captured');
+        const plan = await query(
+          `EXPLAIN ${lastStatement.statement}`,
+          lastStatement.params,
+        );
+        return { rows, plan };
+      },
       refreshIntervals: (options?: object) =>
         intervalService.refreshMonitorHistoryStatusIntervals(options),
       async abnormal(params: object, interval: boolean) {

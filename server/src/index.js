@@ -1,6 +1,7 @@
 process.env.TZ = process.env.TZ || 'Asia/Shanghai';
 
 const express = require('express');
+const { installBodyParsers } = require('./middleware/bodyParsers');
 const cors = require('cors');
 require('dotenv').config();
 const logger = require('./utils/logger');
@@ -127,8 +128,7 @@ try {
   // compression包未安装，跳过
 }
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+installBodyParsers(app);
 
 // Prometheus 监控
 app.use(metricsMiddleware);

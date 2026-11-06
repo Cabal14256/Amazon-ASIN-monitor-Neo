@@ -24,6 +24,7 @@ import type {
   ResponseMetadata,
   Transport,
 } from './types';
+import { inheritWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 export interface CallOptions {
   priority?: Priority;
@@ -94,6 +95,7 @@ export class SpApiClient {
     if (typeof payload !== 'string' || Buffer.byteLength(payload) > 1024 * 1024)
       throw new SpApiError('BODY_TOO_LARGE');
     const controller = new AbortController();
+    inheritWorkSettlement(options.signal, controller.signal);
     const abort = () => controller.abort(new SpApiError('CANCELLED'));
     if (options.signal?.aborted) abort();
     else options.signal?.addEventListener('abort', abort, { once: true });
@@ -240,6 +242,7 @@ export class SpApiClient {
         options.signal?.removeEventListener('abort', abort);
         this.controllers.delete(controller);
       });
+    trackWorkSettlement(signal, work);
     return waitFor(work, signal);
   }
   private now(): number {

@@ -5,6 +5,8 @@ export type CatalogSafetyGate =
       detailId: string | null;
       createUncertain: boolean;
       operationId?: string;
+      batchCreate?: boolean;
+      batchCreateOwner?: string;
     }
   | { phase: 'inspection'; operationId?: string };
 
@@ -59,15 +61,49 @@ export function readCatalogSafetyGate(
       (gate.detailId !== null &&
         (typeof gate.detailId !== 'string' ||
           [...gate.detailId].length > 50)) ||
-      typeof gate.createUncertain !== 'boolean'
+      typeof gate.createUncertain !== 'boolean' ||
+      (gate.batchCreate !== undefined && typeof gate.batchCreate !== 'boolean')
     )
       throw new Error('invalid');
+    let batchCreateOwner: string | undefined;
+    if (gate.batchCreateOwner !== undefined) {
+      try {
+        if (
+          typeof gate.batchCreateOwner !== 'string' ||
+          gate.batchCreateOwner.length > 1000
+        )
+          throw new Error('invalid');
+        const origin: unknown = JSON.parse(gate.batchCreateOwner);
+        if (
+          !Array.isArray(origin) ||
+          origin.length !== 3 ||
+          origin[0] !== source ||
+          source !== 'asin' ||
+          origin[1] !== owner ||
+          (origin[2] !== null && typeof origin[2] !== 'string')
+        )
+          throw new Error('invalid');
+        batchCreateOwner = gate.batchCreateOwner;
+      } catch {
+        return {
+          phase: 'refresh',
+          message:
+            '原会话回执绑定无效，写入保护仍保留。请核实原操作，勿重发成功项。',
+          detailId: gate.detailId,
+          createUncertain: false,
+          batchCreate: true,
+          ...operationId,
+        };
+      }
+    }
     return {
       phase: 'refresh',
       message: gate.message,
       detailId: gate.detailId,
       createUncertain: gate.createUncertain,
       ...operationId,
+      ...(gate.batchCreate === true ? { batchCreate: true } : {}),
+      ...(batchCreateOwner ? { batchCreateOwner } : {}),
     };
   } catch {
     try {
