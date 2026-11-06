@@ -70,7 +70,7 @@ if ARGV[5] == 'competitor-monitor' and (
    data.taskId ~= ARGV[1] or data.taskType ~= ARGV[5] or
    data.taskSubType ~= 'competitor' or meta.taskSubType ~= 'competitor' or
    redis.call('HGET', KEYS[1], 'name') ~= 'competitor-monitor') then return 4 end
-if ARGV[5] == 'batch-check' and (
+if ARGV[5] == 'batch-check' and ARGV[7] ~= '' and (
    meta.taskSubType ~= ARGV[7] or data.taskType ~= 'batch-check' or
    data.taskSubType ~= ARGV[7] or
    (ARGV[7] ~= 'variant-group' and ARGV[7] ~= 'competitor-variant-group') or
