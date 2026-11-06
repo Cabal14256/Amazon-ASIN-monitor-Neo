@@ -20,7 +20,10 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The full dual-database suite plus scheduler restart verification can exceed
+    # 15 minutes including service boot and teardown. Test assertions and the
+    # separate sub-600s promotion target remain unchanged.
+    timeout-minutes: 20
 
     services:
       redis:
@@ -479,6 +482,7 @@ jobs:
           done
           pnpm --filter @asin-monitor/worker... build
           RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION=1 pnpm --filter @asin-monitor/worker exec vitest run test/competitor-monitor-entry.integration.test.ts --maxWorkers=1 -t "private scheduled US run"
+          RUN_NEO_SCHEDULED_MONITOR_SCHEDULER_INTEGRATION=1 pnpm --filter @asin-monitor/worker exec vitest run test/scheduled-monitor-scheduler.integration.test.ts --pool=forks --maxWorkers=1
           for domain in primary competitor; do
             for attempt in 1 2; do
               docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-scheduled-monitor.sh "$domain" "/tmp/0016_scheduled_monitor_${domain}.rollback.sql"
@@ -559,7 +563,7 @@ jobs:
             echo "## Integration CI"
             echo "- Result: ${{ job.status }}"
             echo "- Test-step duration after services became ready: ${duration_seconds}s"
-            echo "- Infrastructure timeout: 15m; this only bounds the job and does not change test assertions or the promotion target"
+            echo "- Infrastructure timeout: 20m; this only bounds the job and does not change test assertions or the promotion target"
             echo "- Promotion threshold: 10 consecutive successful runs whose total Actions startedAt-to-updatedAt duration is under 600s"
             echo "- The test-step duration above excludes service setup and teardown; use the Actions run timestamps for total duration"
           } >> "$GITHUB_STEP_SUMMARY"

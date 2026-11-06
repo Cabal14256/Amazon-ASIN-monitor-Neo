@@ -249,7 +249,9 @@ async function startConfiguredWorker(
       Number(!!asinImport) +
       Number(!!asinExport) +
       (variantChecks?.queues.length ?? 0),
-    schedulerEnabled: !!(maintenance || intervals) && env.SCHEDULER_ENABLED,
+    schedulerEnabled:
+      !!(maintenance || intervals || scheduledMonitorEnabled) &&
+      env.SCHEDULER_ENABLED,
   });
 }
 
