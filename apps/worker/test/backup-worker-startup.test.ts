@@ -269,8 +269,13 @@ describe('production worker bootstrap isolates backup retention admission', () =
       );
       expect(dependencies.waitForShutdownSignal).not.toHaveBeenCalled();
       expect(dependencies.createQueue).not.toHaveBeenCalled();
+      const signal = vi
+        .mocked(process.on)
+        .mock.calls.find(([event]) => event === 'SIGTERM')?.[1];
+      expect(signal).toBeTypeOf('function');
+      signal!();
       const resources = dependencies.shutdownWorker.mock.calls[0]?.[0];
-      expect(resources.extraClosers).toHaveLength(ttl === '604800' ? 2 : 1);
+      expect(resources.queues).toHaveLength(ttl === '604800' ? 2 : 1);
     },
   );
 
