@@ -6,6 +6,7 @@ import {
   type QuotaRedisPort,
   type SpApiRuntime,
 } from '@asin-monitor/sp-api';
+import { CompetitorBatchCheckExecutor } from './competitor-batch-executor';
 import { CompetitorCheckPipeline } from './competitor-pipeline';
 import type { CheckExecutionContext } from './executor';
 import {
@@ -24,11 +25,13 @@ export interface CompetitorCheckRuntimeOptions {
   redis: Pick<QuotaRedisPort, 'status' | 'eval'>;
   prefix: string;
   logger: Logger;
+  batchConcurrency?: number;
 }
 /** Dedicated competitor identity, with the same shared Catalog and quota
  * primitives used by primary checks. */
 export class CompetitorCheckRuntime {
   readonly pipeline: CompetitorCheckPipeline;
+  readonly batch: CompetitorBatchCheckExecutor;
   readonly executor: {
     execute: (
       raw: unknown,
@@ -54,9 +57,22 @@ export class CompetitorCheckRuntime {
       this.store,
       options.logger,
     );
+    this.batch = new CompetitorBatchCheckExecutor(
+      options.repository,
+      this.pipeline,
+      options.batchConcurrency ?? 2,
+    );
     this.executor = {
       execute: async (raw, context) => {
         const data = parseVariantCheckJob(raw);
+        if (data.taskSubType === 'competitor-variant-group')
+          return this.batch.execute(data, {
+            forceRefresh: data.params.forceRefresh,
+            signal: context.signal,
+            checkpoint: context.checkpoint,
+            authorize: async () => context.checkpoint(),
+            onProgress: context.onProgress,
+          });
         if (
           data.taskSubType !== 'competitor-asin-check' &&
           data.taskSubType !== 'competitor-variant-group-check'
@@ -79,6 +95,7 @@ export class CompetitorCheckRuntime {
     };
   }
   close() {
+    this.batch.close();
     this.pipeline.close();
     this.checker.close();
     this.store.close();

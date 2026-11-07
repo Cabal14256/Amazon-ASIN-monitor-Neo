@@ -384,18 +384,25 @@ export const competitorCheckResultSchema = resultSchema(
 );
 
 /** 竞对批量检查：同步结果或异步受理 */
-export const competitorBatchCheckSyncDataSchema = z.object({
-  total: z.number(),
-  results: z.array(
-    z
-      .object({
-        groupId: z.string(),
-        success: z.boolean(),
-        error: z.string().optional(),
-      })
-      .passthrough(),
-  ),
-});
+export const competitorBatchCheckSyncDataSchema = z
+  .object({
+    total: z.number().int().min(0).max(1000),
+    results: z
+      .array(
+        z
+          .object({
+            groupId: z.string(),
+            success: z.boolean(),
+            error: z.string().optional(),
+          })
+          .passthrough(),
+      )
+      .max(1000),
+  })
+  .refine(
+    (value) => value.total === value.results.length,
+    '竞品批量检查结果数量不一致',
+  );
 export const competitorBatchCheckResultSchema = resultSchema(
   z.union([competitorBatchCheckSyncDataSchema, variantCheckTaskDataSchema]),
 );

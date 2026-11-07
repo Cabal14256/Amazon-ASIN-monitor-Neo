@@ -39,7 +39,11 @@ export function variantCheckJobOperation(
   groupIndex?: number,
 ): VariantCheckOperation {
   const kind =
-    data.taskSubType === 'competitor-asin-check'
+    data.taskSubType === 'competitor-variant-group'
+      ? groupIndex === undefined
+        ? 'competitor-batch'
+        : 'competitor-group'
+      : data.taskSubType === 'competitor-asin-check'
       ? 'competitor-asin'
       : data.taskSubType === 'competitor-variant-group-check'
       ? 'competitor-group'
@@ -52,14 +56,17 @@ export function variantCheckJobOperation(
       : 'batch';
   if (
     groupIndex !== undefined &&
-    (data.taskSubType !== 'variant-group' ||
+    ((data.taskSubType !== 'variant-group' &&
+      data.taskSubType !== 'competitor-variant-group') ||
       !Number.isInteger(groupIndex) ||
       groupIndex < 0 ||
       groupIndex >= data.params.groupIds.length)
   )
     throw new VariantCheckError('invalid-input');
   const request =
-    data.taskSubType === 'variant-group' && groupIndex !== undefined
+    (data.taskSubType === 'variant-group' ||
+      data.taskSubType === 'competitor-variant-group') &&
+    groupIndex !== undefined
       ? {
           groupId: data.params.groupIds[groupIndex],
           forceRefresh: data.params.forceRefresh,

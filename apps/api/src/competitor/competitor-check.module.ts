@@ -53,6 +53,7 @@ import { CompetitorCheckService } from './competitor-check.service';
           spApi,
           redis: redis.client,
           prefix: getNeoQueuePrefix(env),
+          batchConcurrency: env.BATCH_CHECK_GROUP_CONCURRENCY,
           logger: {
             debug: (message, context) =>
               log.debug(message, 'CompetitorCheckRuntime', context),

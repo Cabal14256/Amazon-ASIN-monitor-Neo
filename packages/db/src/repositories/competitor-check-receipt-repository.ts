@@ -16,7 +16,11 @@ export async function readCompetitorCheckReceipt(
   lock: boolean,
 ): Promise<unknown | undefined> {
   const operation = parseVariantCheckOperation(value);
-  if (!['competitor-asin', 'competitor-group'].includes(operation.resultKind))
+  if (
+    !['competitor-asin', 'competitor-group', 'competitor-batch'].includes(
+      operation.resultKind,
+    )
+  )
     throw new VariantCheckError('invalid-input');
   ensureOpen();
   if (lock) {
@@ -91,7 +95,11 @@ export async function saveCompetitorCheckReceipt(
   output: unknown,
 ): Promise<void> {
   const operation = parseVariantCheckOperation(value);
-  if (!['competitor-asin', 'competitor-group'].includes(operation.resultKind))
+  if (
+    !['competitor-asin', 'competitor-group', 'competitor-batch'].includes(
+      operation.resultKind,
+    )
+  )
     throw new VariantCheckError('invalid-input');
   const result = decodeVariantCheckReceiptResult(output, operation.resultKind);
   ensureOpen();

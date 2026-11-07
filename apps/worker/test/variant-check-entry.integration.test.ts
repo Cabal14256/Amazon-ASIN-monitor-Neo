@@ -178,6 +178,15 @@ describe.skipIf(
         'utf8',
       ).replaceAll('public', competitorSchema),
     );
+    await competitorPool.query(
+      readFileSync(
+        resolve(
+          __dirname,
+          '../../../packages/db/migrations/0018_competitor_batch_check_receipts.sql',
+        ),
+        'utf8',
+      ).replaceAll('public', competitorSchema),
+    );
     store = new RedisTaskRepository(f.redis, f.env);
     repository = new PgVariantCheckRepository(f.pool);
     competitorRepository = new PgCompetitorCheckRepository(
@@ -268,6 +277,8 @@ describe.skipIf(
     }
   });
   async function start(selected = 'variant-check,batch-check') {
+    exited = false;
+    output = '';
     child = spawn(process.execPath, [resolve(__dirname, '../dist/main.js')], {
       cwd: resolve(__dirname, '..'),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -573,6 +584,60 @@ describe.skipIf(
       'legacy-fixture',
     ]);
   }, 30_000);
+  it('routes a batch-only competitor task through the compiled Worker and replays its root after restart', async () => {
+    await competitorPool!.query(
+      "INSERT INTO competitor_variant_groups(id,name,country,brand) VALUES(' cg1 ','Padded competitor','US','Fixture'),('cg1','Literal neighbour','US','Fixture')",
+    );
+    const job = await data('batch-check', 'competitor-variant-group', {
+      groupIds: [' cg1 ', 'cg1', ' cg1 '],
+      forceRefresh: false,
+    });
+    await start('batch-check');
+    const reference = await enqueue(job);
+    expect(reference).toMatchObject({ resultKind: 'competitor-batch' });
+    const task = (await store.read(job.taskId))!;
+    expect(task.status).toBe('completed');
+    const result = await competitorRepository.transaction((unit) =>
+      unit.readReceipt(variantCheckResultOperation(task, reference)),
+    );
+    expect(result).toMatchObject({
+      total: 3,
+      successCount: 3,
+      results: [{ groupId: ' cg1 ' }, { groupId: 'cg1' }, { groupId: ' cg1 ' }],
+    });
+    expect(
+      (
+        await f.pool.query(
+          'SELECT count(*)::int AS n FROM variant_check_receipts',
+        )
+      ).rows[0].n,
+    ).toBe(0);
+    const before = (
+      await competitorPool!.query(
+        'SELECT operation_key,completed_at,result FROM competitor_variant_check_receipts ORDER BY operation_key',
+      )
+    ).rows;
+    expect(before).toHaveLength(4);
+    child!.kill('SIGTERM');
+    await eventually(async () => exited, 12_000);
+    await start('batch-check');
+    const queued = await queues.get('batch-check')!.getJob(job.taskId);
+    await queued!.retry('completed');
+    await queued!.waitUntilFinished(events.get('batch-check')!, 10_000);
+    expect(
+      (
+        await competitorPool!.query(
+          'SELECT operation_key,completed_at,result FROM competitor_variant_check_receipts ORDER BY operation_key',
+        )
+      ).rows,
+    ).toEqual(before);
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(
+        job.userId,
+        'competitor',
+      ),
+    ).toBeNull();
+  }, 60_000);
   it('starts monitor and both check queues together, routes each database receipt and removes readiness on shutdown', async () => {
     const schema = (await f.pool.query('SELECT current_schema() AS schema'))
       .rows[0].schema as string;

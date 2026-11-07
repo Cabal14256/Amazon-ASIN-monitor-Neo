@@ -251,6 +251,186 @@ export class CompetitorCheckService implements OnModuleDestroy {
       this.active.delete(controller);
     }
   }
+  async executeBatch(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<unknown> {
+    if (this.env.AUTH_DATA_AUTHORITY !== 'postgresql')
+      fail(503, '鉴权权威源尚未切换，请使用现有检查入口');
+    if (!request.auth) fail(401, '请先登录');
+    return this.catalog.execute(
+      request.auth,
+      'competitor',
+      'check',
+      'asin:read',
+      (catalog) => this.executeBatchReserved(request, reply, catalog),
+    );
+  }
+  private async executeBatchReserved(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    catalog: CatalogOperationSubmission,
+  ): Promise<unknown> {
+    if (
+      request.headers.origin &&
+      request.headers.origin !== this.env.CORS_ORIGIN
+    )
+      fail(403, '不允许的请求来源');
+    if (this.closed) fail(503, '竞品检查服务正在停止');
+    if (this.active.size >= 4) fail(429, '竞品检查繁忙，请稍后再试');
+    const controller = new AbortController();
+    this.active.add(controller);
+    const abort = () => controller.abort();
+    const close = () => {
+      if (!reply.raw.writableEnded) abort();
+    };
+    request.raw.once('aborted', abort);
+    reply.raw.once('close', close);
+    const timer = setTimeout(abort, 900_000);
+    timer.unref();
+    let submission: string | undefined;
+    let finished = false;
+    try {
+      const body = checkRequestObject(request.body),
+        query = checkRequestObject(request.query);
+      const parsed = variantCheckJobSchema.options[6].shape.params.safeParse({
+        groupIds: body.groupIds,
+        forceRefresh: body.forceRefresh !== false,
+        ...(body.country === undefined ? {} : { country: body.country }),
+      });
+      if (!parsed.success) throw new VariantCheckError('invalid-input');
+      const params = parsed.data,
+        principal = request.auth!;
+      const scope = {
+        forceRefresh: params.forceRefresh,
+        signal: controller.signal,
+        checkpoint: async () => {
+          controller.signal.throwIfAborted();
+          if (finished) throw new Error('COMPETITOR_CHECK_REQUEST_FINISHED');
+        },
+        authorize: async (
+          unit: Parameters<typeof authorizeAdministration>[0],
+        ) => {
+          await authorizeAdministration(unit, principal, 'asin:read');
+          controller.signal.throwIfAborted();
+        },
+      };
+      // Missing/changed groups are individual batch results, not a request-wide
+      // preflight failure. Only current authority is checked before admission.
+      await this.repository.transaction(
+        (unit) => scope.authorize(unit),
+        controller.signal,
+      );
+      if (
+        useAsyncCheck(body, query, true) ||
+        params.groupIds.length > this.env.BATCH_CHECK_SYNC_MAX_GROUPS
+      ) {
+        // Validate the complete immutable request before retaining a catalog
+        // reservation or creating/binding durable task metadata.
+        const createdAt = new Date().toISOString();
+        const prepared = parseVariantCheckJob({
+          taskId: randomUUID(),
+          userId: principal.userId,
+          taskType: 'batch-check',
+          taskSubType: 'competitor-variant-group',
+          params,
+          createdAt,
+          expiresAt: new Date(
+            Date.parse(createdAt) + this.env.TASK_META_TTL_SECONDS * 1000,
+          ).toISOString(),
+        });
+        const deadline = performance.now() + 3000;
+        const port = this.tasks.openCheck(() => {
+          controller.signal.throwIfAborted();
+          if (finished || performance.now() >= deadline)
+            throw new Error('COMPETITOR_CHECK_SUBMISSION_DEADLINE');
+        });
+        submission = prepared.taskId;
+        catalog.retain();
+        const task = await port.store.create(
+          {
+            taskId: submission,
+            userId: principal.userId,
+            taskType: 'batch-check',
+            taskSubType: 'competitor-variant-group',
+            title: '竞品批量变体检查',
+            message: '竞品批量检查任务已创建，等待处理',
+          },
+          (prepared) => catalog.bindTask(prepared),
+        );
+        await port.enqueue(
+          parseVariantCheckJob({
+            taskId: task.taskId,
+            userId: task.userId,
+            taskType: 'batch-check',
+            taskSubType: 'competitor-variant-group',
+            params,
+            createdAt: task.createdAt,
+            expiresAt: new Date(
+              Date.parse(task.createdAt) +
+                this.env.TASK_META_TTL_SECONDS * 1000,
+            ).toISOString(),
+          }),
+        );
+        this.logger.info('竞品批量检查任务已创建', 'CompetitorCheckService', {
+          groups: params.groupIds.length,
+        });
+        return {
+          taskId: task.taskId,
+          status: 'pending',
+          total: params.groupIds.length,
+        };
+      }
+      return await this.runtime.batch.checkGroups(
+        params.groupIds,
+        scope,
+        this.env.BATCH_CHECK_SYNC_CONCURRENCY,
+      );
+    } catch (error) {
+      if (submission) {
+        this.logger.warn(
+          '竞品批量检查任务提交结果未确认',
+          'CompetitorCheckService',
+          { reason: 'competitor_batch_check_enqueue_unconfirmed' },
+        );
+        throw new VariantCheckSubmissionError(submission);
+      }
+      if (error instanceof HttpException) throw error;
+      if (error instanceof VariantCheckError)
+        fail(
+          error.code === 'invalid-input'
+            ? 400
+            : error.code === 'capacity'
+            ? 429
+            : 500,
+          error.message,
+        );
+      if (error instanceof CompetitorTransactionError)
+        fail(
+          error.code === 'capacity' ? 429 : 503,
+          '竞品检查暂不可用，请核实检查结果',
+        );
+      if (error instanceof VariantCheckCommitUncertainError)
+        fail(503, error.message);
+      if (controller.signal.aborted)
+        fail(408, '检查已中断或超时，请核实竞品检查历史');
+      if (error instanceof SpApiError)
+        fail(
+          error.code === 'CAPACITY' ? 429 : 503,
+          '竞品检查上游暂不可用，请稍后重试',
+        );
+      this.logger.error('竞品批量检查失败', 'CompetitorCheckService', {
+        reason: 'competitor_batch_check_failed',
+      });
+      fail(500, '竞品批量检查失败');
+    } finally {
+      finished = true;
+      clearTimeout(timer);
+      request.raw.off('aborted', abort);
+      reply.raw.off('close', close);
+      this.active.delete(controller);
+    }
+  }
   onModuleDestroy() {
     this.closed = true;
     for (const controller of this.active) controller.abort();
