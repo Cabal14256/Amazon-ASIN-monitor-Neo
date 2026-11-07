@@ -550,6 +550,7 @@ describe('backup command boundary', () => {
 
   it.each([
     ['postgresql://backup@localhost/main?database=competitor', 'main'],
+    ['postgresql://backup@localhost/dbname=competitor', 'dbname=competitor'],
     ['postgresql://backup@localhost/competitor?database=main', 'competitor'],
     [
       'postgresql://backup@localhost/finance%2F2026?database=other',

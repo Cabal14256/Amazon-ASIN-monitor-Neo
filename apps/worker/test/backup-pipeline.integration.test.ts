@@ -312,7 +312,9 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     it('restores a literal conninfo-looking database name without touching the reinterpreted database', async () => {
       const literalName = `dbname=${scratchName}`;
       const url = new URL(scratchUrl);
-      url.pathname = `/${encodeURIComponent(literalName)}`;
+      // '=' is a legal pathname character. The installed pg parser preserves
+      // percent escapes in database names, so use the actual literal spelling.
+      url.pathname = `/${literalName}`;
       let literalPool: ReturnType<typeof createPgPool> | undefined;
       let created = false;
       const sentinel = `literal_database_${scratchName.slice(-12)}`;
