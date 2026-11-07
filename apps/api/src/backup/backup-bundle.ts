@@ -122,19 +122,25 @@ export async function backupBundle(
     checkDeadline();
     // Freeze the directory entry as well: Windows has no O_NOFOLLOW, so fstat
     // must reject a changed inode before any bytes are read from the handle.
-    const entry = await lstat(path);
+    const entry = await lstat(path, { bigint: true });
     if (!entry.isFile()) throw new Error('BACKUP_BUNDLE_INVALID');
     file = await open(
       path,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      fsConstants.O_RDONLY |
+        (fsConstants.O_NOFOLLOW ?? 0) |
+        (fsConstants.O_NONBLOCK ?? 0),
     );
     const details = await file.stat();
+    const identity = await file.stat({ bigint: true });
     if (
       !details.isFile() ||
       details.size < 5 ||
       details.size > (options.maxBytes ?? 1_099_511_627_776) ||
-      entry.dev !== details.dev ||
-      entry.ino !== details.ino
+      entry.dev !== identity.dev ||
+      entry.ino !== identity.ino ||
+      entry.size !== identity.size ||
+      entry.mtimeNs !== identity.mtimeNs ||
+      entry.ctimeNs !== identity.ctimeNs
     )
       throw new Error('BACKUP_BUNDLE_INVALID');
     const header = Buffer.alloc(5);

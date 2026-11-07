@@ -58,8 +58,22 @@ export async function inspectBackupFile(path: string) {
   const details = await lstat(path);
   if (!details.isFile() || details.size < 5)
     throw new InvalidBackupArtifact('BACKUP_ARTIFACT_INVALID');
-  const file = await open(path, 'r');
+  const file = await open(
+    path,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      (fsConstants.O_NONBLOCK ?? 0),
+  );
   try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.size < 5 ||
+      opened.dev !== details.dev ||
+      opened.ino !== details.ino ||
+      opened.size !== details.size
+    )
+      throw new InvalidBackupArtifact('BACKUP_ARTIFACT_INVALID');
     const header = Buffer.alloc(5);
     const { bytesRead } = await file.read(header, 0, header.length, 0);
     if (bytesRead !== 5 || header.toString('ascii') !== 'PGDMP')

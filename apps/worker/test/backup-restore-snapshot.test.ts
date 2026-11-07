@@ -9,6 +9,7 @@ import {
   type TaskState,
 } from '@asin-monitor/db';
 import { UnrecoverableError, type Job } from 'bullmq';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -42,6 +43,7 @@ const dependencies = vi.hoisted(() => ({
     | 'digest'
     | undefined,
   sourceReads: 0,
+  fifoAtRead: 0,
   snapshotReads: 0,
   closeAttempts: 0,
   failedHandle: undefined as import('node:fs/promises').FileHandle | undefined,
@@ -58,6 +60,17 @@ vi.mock('node:fs/promises', async (original) => {
   return {
     ...fs,
     open: async (...args: Parameters<typeof fs.open>) => {
+      const readMode = args[1] === 'r' || typeof args[1] === 'number';
+      const sourceRead =
+        String(args[0]).includes('neo-backup-snapshot-test-') &&
+        String(args[0]).endsWith('.dump') &&
+        readMode
+          ? ++dependencies.sourceReads
+          : 0;
+      if (sourceRead && sourceRead === dependencies.fifoAtRead) {
+        await fs.rename(args[0], `${String(args[0])}.fifo-original`);
+        execFileSync('mkfifo', [String(args[0])]);
+      }
       const file = await fs.open(...args);
       if (String(args[0]).includes('neo-backup-restore-') && args[1] === 'wx') {
         dependencies.snapshotPath = String(args[0]);
@@ -74,7 +87,10 @@ vi.mock('node:fs/promises', async (original) => {
           },
         });
       }
-      if (String(args[0]).includes('neo-backup-restore-') && args[1] === 'r') {
+      if (
+        String(args[0]).includes('neo-backup-restore-') &&
+        (args[1] === 'r' || typeof args[1] === 'number')
+      ) {
         const read = file.read.bind(file);
         Object.assign(file, {
           read: async (
@@ -90,12 +106,10 @@ vi.mock('node:fs/promises', async (original) => {
         });
       }
       const isSnapshot = String(args[0]).includes('neo-backup-restore-');
-      const sourceRead =
-        String(args[0]).includes('neo-backup-snapshot-test-') && args[1] === 'r'
-          ? ++dependencies.sourceReads
-          : 0;
       const snapshotRead =
-        isSnapshot && args[1] === 'r' ? ++dependencies.snapshotReads : 0;
+        isSnapshot && (args[1] === 'r' || typeof args[1] === 'number')
+          ? ++dependencies.snapshotReads
+          : 0;
       const stage =
         sourceRead === 2
           ? 'source-copy'
@@ -164,6 +178,16 @@ afterEach(async () => {
 
 describe('restore consumes the verified archive snapshot', () => {
   it.each([
+    ...(process.platform === 'win32'
+      ? []
+      : [1, 2].map((fifoAtRead) => ({
+          scope: 'selective' as const,
+          attack: 'fifo-swap' as const,
+          cleanupFails: false,
+          holdWrite: false,
+          holdRead: false,
+          fifoAtRead,
+        }))),
     ...(['selective', 'full', 'timescale'] as const).flatMap((scope) =>
       (['pathname-replacement', 'same-inode-write'] as const).map((attack) => ({
         scope,
@@ -228,6 +252,8 @@ describe('restore consumes the verified archive snapshot', () => {
         'cancelBeforeRestore' in inputCase && inputCase.cancelBeforeRestore;
       const closeFailure =
         'closeFailure' in inputCase ? inputCase.closeFailure : undefined;
+      const fifoAtRead = 'fifoAtRead' in inputCase ? inputCase.fifoAtRead : 0;
+      dependencies.fifoAtRead = fifoAtRead;
       directory = await mkdtemp(join(tmpdir(), 'neo-backup-snapshot-test-'));
       const taskId = '10000000-0000-4000-8000-000000000171';
       const filename = 'backup_20260927-020000-abcdef01-primary.dump';
@@ -413,6 +439,7 @@ describe('restore consumes the verified archive snapshot', () => {
             updateProgress: async (_job, value) => {
               if (value !== 5 || attacked) return;
               attacked = true;
+              if (fifoAtRead) return;
               if (cancelBeforeRestore) {
                 state = transitionTask(
                   state,
@@ -442,6 +469,13 @@ describe('restore consumes the verified archive snapshot', () => {
           () => undefined,
           () => undefined,
         );
+        if (fifoAtRead) {
+          await expect(execution).rejects.toThrow();
+          expect(state.status).toBe('failed');
+          expect(dependencies.spawn).not.toHaveBeenCalled();
+          expect(dependencies.sourceReads).toBe(fifoAtRead);
+          return;
+        }
         if (closeFailure) {
           const failure = await execution.catch((error: Error) => error);
           expect(failure).toBeInstanceOf(UnrecoverableError);

@@ -913,10 +913,25 @@ async function assertCustomDump(path: string, maxBytes: number) {
   const details = await lstat(path);
   if (!details.isFile() || details.size < 5 || details.size > maxBytes)
     throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
-  const file = await open(path, 'r');
+  const file = await open(
+    path,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      (fsConstants.O_NONBLOCK ?? 0),
+  );
   let validationError: unknown;
   let closeFailure: unknown;
   try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.size < 5 ||
+      opened.size > maxBytes ||
+      opened.dev !== details.dev ||
+      opened.ino !== details.ino ||
+      opened.size !== details.size
+    )
+      throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
     const header = Buffer.alloc(5);
     const { bytesRead } = await file.read(header, 0, header.length, 0);
     if (bytesRead !== 5 || header.toString('ascii') !== 'PGDMP')
@@ -989,7 +1004,12 @@ async function copyRestoreSnapshot(
   let source: FileHandle | undefined;
   let snapshot: FileHandle | undefined;
   try {
-    source = await open(sourcePath, 'r');
+    source = await open(
+      sourcePath,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_NOFOLLOW ?? 0) |
+        (fsConstants.O_NONBLOCK ?? 0),
+    );
     const details = await source.stat();
     if (!details.isFile() || details.size < 5 || details.size > input.maxBytes)
       throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
@@ -1050,7 +1070,19 @@ async function copyRestoreSnapshot(
   try {
     await assertCustomDump(snapshotPath, input.maxBytes);
     input.signal.throwIfAborted();
-    verified = await open(snapshotPath, 'r');
+    verified = await open(
+      snapshotPath,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_NOFOLLOW ?? 0) |
+        (fsConstants.O_NONBLOCK ?? 0),
+    );
+    const verifiedDetails = await verified.stat();
+    if (
+      !verifiedDetails.isFile() ||
+      verifiedDetails.size < 5 ||
+      verifiedDetails.size > input.maxBytes
+    )
+      throw new BackupCommandError('BACKUP_ARTIFACT_INVALID');
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let offset = 0;
     let sinceCheckpoint = 0;

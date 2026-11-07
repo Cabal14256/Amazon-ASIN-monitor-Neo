@@ -6,6 +6,7 @@
   },
   "include": [
     "test/backup-bundle.test.ts",
+    "test/backup-dump-open.test.ts",
     "test/backup-bundle-snapshot.test.ts",
     "test/backup-download-lease.test.ts",
     "test/backup-service.test.ts",
