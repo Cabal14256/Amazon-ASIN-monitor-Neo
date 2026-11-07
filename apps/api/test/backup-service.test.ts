@@ -62,6 +62,8 @@ vi.mock('node:fs/promises', async (original) => {
         const handle = await Reflect.apply(fs.open, fs, args);
         if (archiveFailure.phase === 'read')
           return {
+            stat: (...statArgs: Parameters<typeof handle.stat>) =>
+              Reflect.apply(handle.stat, handle, statArgs),
             read: async () => {
               throw archiveFailure.error;
             },
