@@ -27,6 +27,7 @@ import {
   writeImportGate,
 } from '../asin/asin-import-gate';
 import { AsinImportPanel } from '../asin/asin-import-panel';
+import { catalogSafetyKey } from '../catalog/catalog-safety-gate';
 import CompetitorAsinCatalogPage from './index';
 
 // Only replace layout; the catalog, import panel, Query, TaskApi and HttpClient are real.
@@ -300,11 +301,11 @@ describe('competitor CSV/XLSX import mounted transport', () => {
       competitorId,
     );
     expect(navigator.locks.request).toHaveBeenCalledWith(
-      importGateKey('asin', 'operator'),
+      catalogSafetyKey('operator', 'asin'),
       expect.any(Function),
     );
     expect(navigator.locks.request).toHaveBeenCalledWith(
-      importGateKey('competitor', 'operator'),
+      catalogSafetyKey('operator', 'competitor'),
       expect.any(Function),
     );
     await act(async () =>

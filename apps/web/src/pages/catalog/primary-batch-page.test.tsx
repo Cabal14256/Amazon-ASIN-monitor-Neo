@@ -33,6 +33,7 @@ import {
   readAsinBatchReceipt,
   saveAsinBatchReceipt,
 } from '../asin/asin-batch-receipt';
+import { importGateKey } from '../asin/asin-import-gate';
 import { ASIN_CATALOG } from '../asin/config';
 import { COMPETITOR_CATALOG } from '../competitor-asin/config';
 import { catalogSafetyKey } from './catalog-safety-gate';
@@ -1669,7 +1670,13 @@ describe('actual primary batch-create catalog integration', () => {
       const heldRead = stage === 'held-GET' ? f.holdNextRead() : undefined;
       const before = catalogReads();
       fireEvent.click(inspect);
-      await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+      await waitFor(() =>
+        expect(lock.mock.calls.map(([key]) => key)).toEqual(
+          stage === 'queued'
+            ? [guardKey]
+            : [guardKey, importGateKey('asin', 'operator')],
+        ),
+      );
       if (heldRead)
         await waitFor(() => expect(catalogReads()).toBeGreaterThan(before));
 
