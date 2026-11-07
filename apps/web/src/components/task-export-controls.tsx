@@ -8,6 +8,7 @@ import { isTerminalTask, isValidTaskId } from '../services/tasks';
 import { Button } from './ui/button';
 
 type ExportType =
+  | 'asin'
   | 'competitor-asin'
   | 'competitor-variant-group'
   | 'parent-asin-query';
@@ -17,7 +18,7 @@ export interface TaskExportChoice {
   params: Record<string, unknown>;
 }
 interface TaskExportControlsProps {
-  namespace: 'competitor-export' | 'parent-asin-export';
+  namespace: 'primary-asin-export' | 'competitor-export' | 'parent-asin-export';
   choices: readonly [TaskExportChoice, ...TaskExportChoice[]];
   disabled: boolean;
 }

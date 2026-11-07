@@ -97,6 +97,7 @@ import type {
   CatalogQuery,
 } from './catalog-types';
 import { CompetitorExportControls } from './competitor-export';
+import { PrimaryAsinExportControls } from './primary-export';
 
 const PAGE_SIZES = [1, 10, 20, 50, 100] as const;
 const CHILD_PAGE_SIZE = 50;
@@ -2685,6 +2686,12 @@ export function CatalogPage({
         </CatalogRefreshContext.Provider>
         {config.id === 'competitor' && (
           <CompetitorExportControls
+            query={query}
+            disabled={writing || groups.isPending || !!groups.error}
+          />
+        )}
+        {config.id === 'asin' && (
+          <PrimaryAsinExportControls
             query={query}
             disabled={writing || groups.isPending || !!groups.error}
           />
