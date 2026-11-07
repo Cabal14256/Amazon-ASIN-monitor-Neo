@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/parent-asin-export-legacy.test.ts",
+    "test/parent-asin-export-recovery.test.ts",
+    "test/helpers/parent-asin-export-fixture.ts"
+  ]
+}

@@ -602,32 +602,35 @@ describe('Redis task registry behavior', () => {
     });
   });
 
-  it('captures and indexes the actual variant-group export identity', async () => {
-    const { repository, redis } = fixture();
-    const prepared = vi.fn();
-    const variantInput = {
-      taskId: '10000000-0000-4000-8000-000000000167',
-      userId: 'owner-a',
-      taskType: 'export',
-      taskSubType: 'variant-group',
-    };
+  it.each(['variant-group', 'parent-asin-query'] as const)(
+    'captures and indexes the actual %s export identity',
+    async (taskSubType) => {
+      const { repository, redis } = fixture();
+      const prepared = vi.fn();
+      const variantInput = {
+        taskId: '10000000-0000-4000-8000-000000000167',
+        userId: 'owner-a',
+        taskType: 'export',
+        taskSubType,
+      };
 
-    const task = await repository.createLimitedExport(
-      variantInput,
-      2,
-      100,
-      prepared,
-    );
+      const task = await repository.createLimitedExport(
+        variantInput,
+        2,
+        100,
+        prepared,
+      );
 
-    expect(task).toMatchObject({ taskSubType: 'variant-group' });
-    expect(prepared).toHaveBeenCalledWith({
-      ...variantInput,
-      createdAt: task.createdAt,
-    });
-    const [script, keyCount] = redis.eval.mock.calls[0]!;
-    expect(keyCount).toBe(4);
-    expect(script).toContain("task.taskSubType == 'variant-group'");
-  });
+      expect(task).toMatchObject({ taskSubType });
+      expect(prepared).toHaveBeenCalledWith({
+        ...variantInput,
+        createdAt: task.createdAt,
+      });
+      const [script, keyCount] = redis.eval.mock.calls[0]!;
+      expect(keyCount).toBe(4);
+      expect(script).toContain(`task.taskSubType == '${taskSubType}'`);
+    },
+  );
 
   it('preserves an accepted monitor cancellation against a racing final completion', async () => {
     const { repository } = fixture();

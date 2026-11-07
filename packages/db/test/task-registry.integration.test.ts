@@ -73,74 +73,93 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
     expect(await other.listUser('foreign')).toEqual([]);
     expect(await redis.get(legacy)).toBe('unchanged');
   });
-  it('atomically admits only two exports per owner across repository instances', async () => {
-    const owner = `export-owner-${randomUUID()}`;
-    keys.add(userKey(owner));
-    keys.add(`${prefix}:neo:task:export:${encodeURIComponent(owner)}`);
-    const first = {
-      taskId: randomUUID(),
-      userId: owner,
-      taskType: 'export',
-      taskSubType: 'variant-group',
-    };
-    keys.add(metaKey(first.taskId));
-    await repository.createLimitedExport(first, 2);
-    const inputs = Array.from({ length: 2 }, () => ({
-      taskId: randomUUID(),
-      userId: owner,
-      taskType: 'export',
-      taskSubType: 'asin',
-    }));
-    inputs.forEach((input) => keys.add(metaKey(input.taskId)));
-    const results = await Promise.allSettled(
-      inputs.map((input, index) =>
-        (index % 2 ? other : repository).createLimitedExport(input, 2),
-      ),
-    );
-    expect(
-      results.filter((result) => result.status === 'fulfilled'),
-    ).toHaveLength(1);
-    expect(
-      results.filter((result) => result.status === 'rejected'),
-    ).toHaveLength(1);
-    expect(
-      results.find((result) => result.status === 'rejected'),
-    ).toMatchObject({ reason: { code: 'TASK_EXPORT_LIMIT' } });
-    await repository.mutate(first.taskId, { kind: 'completed' });
-    const fourth = {
-      taskId: randomUUID(),
-      userId: owner,
-      taskType: 'export',
-      taskSubType: 'asin',
-    };
-    keys.add(metaKey(fourth.taskId));
-    await expect(other.createLimitedExport(fourth, 2)).resolves.toMatchObject({
-      taskId: fourth.taskId,
-    });
-  });
-  it('atomically caps ASIN exports across owners and API replicas', async () => {
+  it.each(['variant-group', 'parent-asin-query'] as const)(
+    'atomically admits only two exports per owner with a %s seed across repository instances',
+    async (taskSubType) => {
+      const owner = `export-owner-${randomUUID()}`;
+      keys.add(userKey(owner));
+      keys.add(`${prefix}:neo:task:export:${encodeURIComponent(owner)}`);
+      const first = {
+        taskId: randomUUID(),
+        userId: owner,
+        taskType: 'export',
+        taskSubType,
+      };
+      keys.add(metaKey(first.taskId));
+      await repository.createLimitedExport(first, 2);
+      const inputs = Array.from({ length: 2 }, () => ({
+        taskId: randomUUID(),
+        userId: owner,
+        taskType: 'export',
+        taskSubType: 'asin',
+      }));
+      inputs.forEach((input) => keys.add(metaKey(input.taskId)));
+      const results = await Promise.allSettled(
+        inputs.map((input, index) =>
+          (index % 2 ? other : repository).createLimitedExport(input, 2),
+        ),
+      );
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      expect(
+        results.filter((result) => result.status === 'rejected'),
+      ).toHaveLength(1);
+      expect(
+        results.find((result) => result.status === 'rejected'),
+      ).toMatchObject({ reason: { code: 'TASK_EXPORT_LIMIT' } });
+      await repository.mutate(first.taskId, { kind: 'completed' });
+      const fourth = {
+        taskId: randomUUID(),
+        userId: owner,
+        taskType: 'export',
+        taskSubType: 'asin',
+      };
+      keys.add(metaKey(fourth.taskId));
+      await expect(other.createLimitedExport(fourth, 2)).resolves.toMatchObject(
+        {
+          taskId: fourth.taskId,
+        },
+      );
+    },
+  );
+  it('atomically caps all five export kinds across owners and API replicas, retaining the parent seed', async () => {
     const globalPrefix = `${prefix}-global`;
     const globalConfig = { ...config, BULL_PREFIX: globalPrefix };
     const first = new RedisTaskRepository(redis, globalConfig);
     const second = new RedisTaskRepository(peer, globalConfig);
     const indexKey = `${globalPrefix}:neo:task:export-global:asin`;
     keys.add(indexKey);
-    const inputs = Array.from({ length: 6 }, (_, index) => ({
+    const kinds = [
+      'parent-asin-query',
+      'asin',
+      'variant-group',
+      'competitor-asin',
+      'competitor-variant-group',
+      'asin',
+    ];
+    const inputs = kinds.map((taskSubType, index) => ({
       taskId: randomUUID(),
       userId: `global-owner-${index}`,
       taskType: 'export',
-      taskSubType: 'asin',
+      taskSubType,
     }));
     for (const input of inputs) {
       keys.add(`${globalPrefix}:neo:task:meta:${input.taskId}`);
       keys.add(`${globalPrefix}:neo:task:user:${input.userId}`);
       keys.add(`${globalPrefix}:neo:task:export:${input.userId}`);
     }
-    const results = await Promise.allSettled(
-      inputs.map((input, index) =>
-        (index % 2 ? second : first).createLimitedExport(input, 2, 3),
-      ),
-    );
+    const seed = await first.createLimitedExport(inputs[0]!, 2, 3);
+    const results = [
+      { status: 'fulfilled' as const, value: seed },
+      ...(await Promise.allSettled(
+        inputs
+          .slice(1)
+          .map((input, index) =>
+            (index % 2 ? second : first).createLimitedExport(input, 2, 3),
+          ),
+      )),
+    ];
     const admitted = results.filter((result) => result.status === 'fulfilled');
     expect(admitted).toHaveLength(3);
     const rejected = results.filter((result) => result.status === 'rejected');

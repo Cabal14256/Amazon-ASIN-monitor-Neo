@@ -4,6 +4,7 @@ import {
 } from './catalog-checker';
 import { abortError, SpApiError, waitFor } from './errors';
 import { normalizeCountry } from './request';
+import { inheritWorkSettlement, trackWorkSettlement } from './work-settlement';
 
 export interface ParentAsinQueryItem {
   asin: string;
@@ -64,6 +65,7 @@ export class CatalogParentQuery {
       900_000,
     );
     const signal = controller.signal;
+    inheritWorkSettlement(options.signal, signal);
     const ensureActive = () => {
       if (signal.aborted) throw abortError(signal);
     };
@@ -201,6 +203,7 @@ export class CatalogParentQuery {
         options.signal?.removeEventListener('abort', abort);
         this.active.delete(controller);
       });
+    trackWorkSettlement(options.signal, work);
     return waitFor(work, signal);
   }
   close(): void {

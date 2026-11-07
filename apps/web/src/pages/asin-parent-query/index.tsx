@@ -1,6 +1,6 @@
 import type { ParentAsinQueryItem } from '@asin-monitor/contracts';
-import { Download, Eraser, Play, RefreshCw } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Eraser, Play, RefreshCw } from 'lucide-react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
 import { AppShell } from '../../components/app-shell';
@@ -17,16 +17,15 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
-import { formatBeijingDate } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 import {
-  parentQueryCsv,
   parseParentAsins,
   parseParentQueryItems,
   queryParentAsins,
   validParentAsins,
 } from '../../services/parent-query';
 import { TaskCompletionError } from '../../services/tasks';
+import { ParentAsinExportControls } from './export-controls';
 
 const countries = [
   ['US', '美国'],
@@ -91,14 +90,33 @@ function Results({ items }: { items: ParentAsinQueryItem[] }) {
 
 export default function AsinParentQueryPage() {
   const { runtime } = useAuth();
+  const auth = useIdentity();
+  const revision = useSyncExternalStore(
+    runtime.subscribeSession,
+    () => runtime.session.revision,
+  );
+  const scope =
+    auth.status === 'authenticated'
+      ? [
+          auth.identity.user.id,
+          auth.identity.sessionId,
+          createAccess(auth.identity).canReadASIN,
+          createAccess(auth.identity).mustChangePassword,
+        ]
+      : [auth.status];
+  return <ParentQueryWorkspace key={JSON.stringify([...scope, revision])} />;
+}
+
+function ParentQueryWorkspace() {
+  const { runtime } = useAuth();
   const identity = useIdentity();
   const canRead =
     identity.status === 'authenticated' &&
-    createAccess(identity.identity).canReadASIN;
+    createAccess(identity.identity).canReadASIN &&
+    !createAccess(identity.identity).mustChangePassword;
   const [input, setInput] = useState('');
   const [country, setCountry] = useState('US');
   const [items, setItems] = useState<ParentAsinQueryItem[]>([]);
-  const [resultCountry, setResultCountry] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -120,7 +138,6 @@ export default function AsinParentQueryPage() {
     }
     setPending(true);
     setError(null);
-    setResultCountry(null);
     const ignoredMessage = invalid
       ? `已忽略 ${invalid} 个格式无效的输入。`
       : null;
@@ -146,7 +163,6 @@ export default function AsinParentQueryPage() {
           throw new ApiError('INVALID_RESPONSE', '父体查询任务结果无效');
         setItems(parseParentQueryItems(task.result));
       }
-      setResultCountry(country);
       setMessage(
         ignoredMessage ? `${ignoredMessage} 查询完成。` : '查询完成。',
       );
@@ -162,22 +178,6 @@ export default function AsinParentQueryPage() {
       setProgress(null);
       if (waitController.current === controller) waitController.current = null;
     }
-  }
-
-  function exportResults() {
-    if (!items.length || pending) return;
-    setError(null);
-    const url = URL.createObjectURL(
-      new Blob([parentQueryCsv(items, resultCountry ?? country)], {
-        type: 'text/csv;charset=utf-8',
-      }),
-    );
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `asin-parent-query-${formatBeijingDate(new Date())}.csv`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    setMessage('结果已导出。');
   }
 
   return (
@@ -204,7 +204,6 @@ export default function AsinParentQueryPage() {
                 onClick={() => {
                   setInput('');
                   setItems([]);
-                  setResultCountry(null);
                   setError(null);
                   setMessage(null);
                 }}
@@ -260,17 +259,12 @@ export default function AsinParentQueryPage() {
                 <Play aria-hidden="true" />
                 查询父体
               </Button>
-              {items.length > 0 && (
-                <Button
-                  variant="secondary"
-                  disabled={pending}
-                  onClick={exportResults}
-                >
-                  <Download aria-hidden="true" />
-                  导出 CSV
-                </Button>
-              )}
             </div>
+            <ParentAsinExportControls
+              input={input}
+              country={country}
+              disabled={pending}
+            />
             {pending && <Progress value={progress} label="任务进度" />}
             {message && (
               <p

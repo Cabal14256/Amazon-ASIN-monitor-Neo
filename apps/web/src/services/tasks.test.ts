@@ -149,13 +149,20 @@ describe('task API boundary', () => {
       });
     expect(f.fetcher).not.toHaveBeenCalled();
   });
-  it.each(['competitor-asin', 'competitor-variant-group'] as const)(
+  it.each([
+    'competitor-asin',
+    'competitor-variant-group',
+    'parent-asin-query',
+  ] as const)(
     'downloads a validated %s XLSX and rejects receipt substitution',
     async (kind) => {
       const f = setup('/api/');
-      const filename = `${
-        kind === 'competitor-asin' ? '竞品ASIN' : '竞品变体组'
-      }数据_2026-10-07.xlsx`;
+      const filename =
+        kind === 'parent-asin-query'
+          ? 'ASIN父变体查询结果_2026-10-07.xlsx'
+          : `${
+              kind === 'competitor-asin' ? '竞品ASIN' : '竞品变体组'
+            }数据_2026-10-07.xlsx`;
       const original = variantGroupExportTask();
       const task = {
         ...original,

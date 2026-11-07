@@ -114,6 +114,43 @@ describe('ASIN export producer', () => {
       }),
     );
   });
+  it('canonicalizes parent export text and keeps shared admission and live authority', async () => {
+    const result = await service().create(principal, {
+      exportType: 'parent-asin-query',
+      params: {
+        asins: ' b000000001,invalid\nB000000002,B000000001',
+        country: ' uk ',
+      },
+    });
+    expect(authorizeAdministration).toHaveBeenCalledWith(
+      {},
+      principal,
+      'asin:read',
+    );
+    expect(createLimitedExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskSubType: 'parent-asin-query',
+        title: '父变体查询结果导出',
+      }),
+      2,
+      100,
+      expect.any(Function),
+    );
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: result.taskId,
+        userId: principal.userId,
+        createdAt,
+        taskType: 'export',
+        taskSubType: 'parent-asin-query',
+        exportType: 'parent-asin-query',
+        params: {
+          asins: ['B000000001', 'B000000002', 'B000000001'],
+          country: 'UK',
+        },
+      }),
+    );
+  });
   it.each(['competitor-asin', 'competitor-variant-group'] as const)(
     'admits %s through the same authorization and shared active limits',
     async (exportType) => {

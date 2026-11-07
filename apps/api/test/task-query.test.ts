@@ -69,50 +69,51 @@ describe('own task query HTTP and bounded reconciliation', () => {
       url: `/api/v1${path}`,
       headers: requestHeaders,
     });
-  describe.each(['competitor-asin', 'competitor-variant-group'] as const)(
-    '%s immutable queue reconciliation',
-    (taskSubType) => {
-      it.each(['createdAt', 'taskSubType'] as const)(
-        'rejects a changed %s before registry mutation',
-        async (field) => {
-          task = taskFixture({ taskSubType });
-          rows = [task];
-          queue = {
-            ...task,
-            status: 'completed',
-            result: { exportType: taskSubType },
-            [field]:
-              field === 'createdAt'
-                ? '2026-09-02T00:00:00.000Z'
-                : 'variant-group',
-          };
-          expect((await get()).statusCode).toBe(500);
-          expect(port.store.mutate).not.toHaveBeenCalled();
-          expect(task.status).toBe('pending');
-        },
-      );
-      it('includes the subtype in the valid completion CAS identity', async () => {
+  describe.each([
+    'competitor-asin',
+    'competitor-variant-group',
+    'parent-asin-query',
+  ] as const)('%s immutable queue reconciliation', (taskSubType) => {
+    it.each(['createdAt', 'taskSubType'] as const)(
+      'rejects a changed %s before registry mutation',
+      async (field) => {
         task = taskFixture({ taskSubType });
         rows = [task];
         queue = {
           ...task,
           status: 'completed',
           result: { exportType: taskSubType },
+          [field]:
+            field === 'createdAt'
+              ? '2026-09-02T00:00:00.000Z'
+              : 'variant-group',
         };
-        expect((await get()).json().data.status).toBe('completed');
-        expect(port.store.mutate).toHaveBeenCalledWith(
-          task.taskId,
-          expect.objectContaining({ kind: 'completed' }),
-          {
-            userId: taskUserId,
-            taskType: 'export',
-            taskSubType,
-            createdAt: task.createdAt,
-          },
-        );
-      });
-    },
-  );
+        expect((await get()).statusCode).toBe(500);
+        expect(port.store.mutate).not.toHaveBeenCalled();
+        expect(task.status).toBe('pending');
+      },
+    );
+    it('includes the subtype in the valid completion CAS identity', async () => {
+      task = taskFixture({ taskSubType });
+      rows = [task];
+      queue = {
+        ...task,
+        status: 'completed',
+        result: { exportType: taskSubType },
+      };
+      expect((await get()).json().data.status).toBe('completed');
+      expect(port.store.mutate).toHaveBeenCalledWith(
+        task.taskId,
+        expect.objectContaining({ kind: 'completed' }),
+        {
+          userId: taskUserId,
+          taskType: 'export',
+          taskSubType,
+          createdAt: task.createdAt,
+        },
+      );
+    });
+  });
   it.each(['cancelling', 'cancelled', 'failed'] as const)(
     'recovers a published create receipt from %s without leaking internal proof in actual HTTP',
     async (status) => {

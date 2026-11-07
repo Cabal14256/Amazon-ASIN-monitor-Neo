@@ -20,12 +20,18 @@ import {
   createAsinExportProcessor,
 } from './asin-export-processor';
 import { logger } from './logger';
+import { createParentAsinExportProcessor } from './parent-asin-export-processor';
+import { createParentAsinExportQuery } from './parent-asin-export-query';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantGroupExportProcessor } from './variant-group-export-processor';
 
-export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
+export async function startAsinExportRuntime(
+  env: Env,
+  onFatal: () => void,
+  environment: Readonly<Record<string, unknown>> = process.env,
+) {
   if (env.AUTH_DATA_AUTHORITY !== 'postgresql')
     throw new Error('ASIN export requires PostgreSQL authority');
   if (env.TASK_META_TTL_SECONDS < ASIN_EXPORT_MIN_TASK_TTL_SECONDS)
@@ -75,6 +81,12 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     }),
   );
   const competitorRepository = new PgCompetitorExportRepository(competitorPool);
+  const parentQueries = createParentAsinExportQuery(
+    env,
+    pool,
+    control,
+    environment,
+  );
   const store = new RedisTaskRepository(
     control,
     env,
@@ -149,8 +161,7 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
             },
           },
         );
-        const competitorOptions = {
-          competitor: true,
+        const liveExportOptions = {
           authorize: async (userId: string) =>
             authorization.read(async (unit) => {
               const user = await unit.lockOperator(userId);
@@ -187,18 +198,26 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
           competitorRepository,
           store,
           artifacts,
-          competitorOptions,
+          { ...liveExportOptions, competitor: true },
         );
         const competitorGroupProcessor = createVariantGroupExportProcessor(
           competitorRepository,
           store,
           artifacts,
-          competitorOptions,
+          { ...liveExportOptions, competitor: true },
+        );
+        const parentAsinProcessor = createParentAsinExportProcessor(
+          parentQueries,
+          store,
+          artifacts,
+          liveExportOptions,
         );
         worker = new Worker(
           getPhysicalQueueName('export'),
           (job, token) =>
-            job.name === 'competitor-asin'
+            job.name === 'parent-asin-query'
+              ? parentAsinProcessor(job, token)
+              : job.name === 'competitor-asin'
               ? competitorAsinProcessor(job, token)
               : job.name === 'competitor-variant-group'
               ? competitorGroupProcessor(job, token)
@@ -326,6 +345,7 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
       close(): Promise<void> {
         closing = true;
         shutdown.abort();
+        parentQueries.close();
         if (cleanupTimer) clearInterval(cleanupTimer);
         void artifacts.closeRejectionCursor().catch(() => {
           logger.warn('ASIN 导出目录游标关闭未确认', {
@@ -347,6 +367,7 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
   } catch {
     closing = true;
     shutdown.abort();
+    parentQueries.close();
     if (cleanupTimer) clearInterval(cleanupTimer);
     control.disconnect(false);
     await Promise.allSettled([

@@ -95,6 +95,7 @@ export class TaskDownloadService implements OnModuleDestroy {
           'variant-group',
           'competitor-asin',
           'competitor-variant-group',
+          'parent-asin-query',
         ].includes(task.taskSubType || '')
       ) {
         const artifact = asinExportArtifactSchema.safeParse(result.artifact);
@@ -103,7 +104,9 @@ export class TaskDownloadService implements OnModuleDestroy {
           artifact.data.taskId !== task.taskId ||
           typeof result.filename !== 'string' ||
           !(
-            task.taskSubType === 'competitor-variant-group'
+            task.taskSubType === 'parent-asin-query'
+              ? /^ASIN父变体查询结果_\d{4}-\d{2}-\d{2}\.xlsx$/
+              : task.taskSubType === 'competitor-variant-group'
               ? /^竞品变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/
               : task.taskSubType === 'competitor-asin'
               ? /^竞品ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/
