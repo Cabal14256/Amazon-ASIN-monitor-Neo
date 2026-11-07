@@ -44,9 +44,11 @@ export async function enqueueScheduledBackups(
   key: string,
   store: Pick<RedisTaskRepository, 'create' | 'read'>,
   queue: Pick<Queue, 'add'>,
+  checkpoint: () => Promise<void> = async () => undefined,
 ): Promise<void> {
   const targets: BackupTarget[] = ['primary', 'competitor'];
   for (const target of targets) {
+    await checkpoint();
     const taskId = scheduledBackupTaskId(prefix, key, target);
     let task;
     try {
@@ -80,6 +82,7 @@ export async function enqueueScheduledBackups(
       createdAt: task.createdAt,
       params: {},
     });
+    await checkpoint();
     await queue.add('create', data, { jobId: taskId });
   }
 }
@@ -131,27 +134,48 @@ export async function startBackupRuntime(env: Env, onFatal: () => void) {
   let worker: Worker | undefined;
   let scheduler: SchedulerLease | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
-  let scheduleRunning = false;
+  let scheduleWork: Promise<void> | undefined;
   let lastScheduleKey: string | undefined;
   const shutdown = new AbortController();
-  const schedule = async () => {
-    if (closing || scheduleRunning || !scheduler?.isOwner()) return;
-    scheduleRunning = true;
-    try {
+  const ensureScheduling = async () => {
+    if (
+      closing ||
+      shutdown.signal.aborted ||
+      !(await scheduler?.assertCurrentOwner()) ||
+      closing
+    )
+      throw new Error('BACKUP_SCHEDULER_NOT_OWNER');
+  };
+  const schedule = (): Promise<void> => {
+    if (closing || scheduleWork || !scheduler?.isOwner())
+      return scheduleWork ?? Promise.resolve();
+    scheduleWork = (async () => {
+      await ensureScheduling();
       const config = await configRepository.transaction((unit) => unit.get());
+      await ensureScheduling();
       if (!config.enabled) return;
       const key = backupScheduleKey(config);
       if (!key || key === lastScheduleKey) return;
-      await enqueueScheduledBackups(env.BULL_PREFIX, key, store, queue);
+      await enqueueScheduledBackups(
+        env.BULL_PREFIX,
+        key,
+        store,
+        queue,
+        ensureScheduling,
+      );
       lastScheduleKey = key;
       logger.info('自动备份任务已创建', { schedule: key });
-    } catch {
-      logger.warn('自动备份计划同步失败，将在下一分钟重试', {
-        reason: 'backup_schedule_failed',
+    })()
+      .catch(() => {
+        if (!closing)
+          logger.warn('自动备份计划同步失败，将重试', {
+            reason: 'backup_schedule_failed',
+          });
+      })
+      .finally(() => {
+        scheduleWork = undefined;
       });
-    } finally {
-      scheduleRunning = false;
-    }
+    return scheduleWork;
   };
   try {
     await control.connect();
@@ -211,6 +235,7 @@ export async function startBackupRuntime(env: Env, onFatal: () => void) {
         if (timer) clearInterval(timer);
         closed ??= (async () => {
           await scheduler?.stop();
+          await scheduleWork;
           await worker!.close();
           await Promise.allSettled([queue.close(), pool.end()]);
           control.disconnect(false);
@@ -223,6 +248,7 @@ export async function startBackupRuntime(env: Env, onFatal: () => void) {
     shutdown.abort();
     if (timer) clearInterval(timer);
     await scheduler?.stop();
+    await scheduleWork;
     await Promise.allSettled([worker?.close(true), queue.close(), pool.end()]);
     control.disconnect(false);
     throw new Error('Backup runtime initialization failed');

@@ -11,6 +11,8 @@
     "test/backup-pipeline.integration.test.ts",
     "test/backup-processor.test.ts",
     "test/backup-restore-snapshot.test.ts",
+    "test/backup-scheduler-lifecycle.test.ts",
+    "test/backup-scheduler.integration.test.ts",
     "test/backup-timescale-cleanup.test.ts"
   ]
 }
