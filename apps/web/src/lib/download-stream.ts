@@ -19,7 +19,8 @@ export function validStreamOptions(options: DownloadStreamOptions): boolean {
   return (
     Number.isSafeInteger(options.maxBytes) &&
     options.maxBytes >= 1 &&
-    options.maxBytes <= 256 * 1024 * 1024 &&
+    // Backup archives may include a full PostgreSQL dump plus bounded metadata.
+    options.maxBytes <= 1024 ** 4 + 16 * 1024 * 1024 + 4096 &&
     Number.isSafeInteger(options.minBytes) &&
     options.minBytes >= 1 &&
     options.minBytes <= options.maxBytes &&
@@ -63,7 +64,7 @@ export async function writeDownloadStream(
   let prefixOffset = 0,
     prefixChecked = prefixSize === 0,
     bytes = 0,
-    reads = 0;
+    emptyReads = 0;
   const check = () => {
     if (signal.aborted) throw signal.reason;
     if (performance.now() >= deadline)
@@ -83,10 +84,17 @@ export async function writeDownloadStream(
         !ArrayBuffer.isView(part.value) ||
         Object.prototype.toString.call(part.value) !== '[object Uint8Array]' ||
         part.value.byteLength > 8 * 1024 * 1024 ||
-        ++reads > 200_000 ||
         bytes + part.value.byteLength > options.maxBytes
       )
         throw new ApiError('INVALID_RESPONSE', '下载文件超过有界流大小限制');
+      // Valid chunk sizes depend on the network. The byte/deadline budgets
+      // bound progressing streams; only repeated empty reads need a count cap.
+      if (part.value.byteLength === 0) {
+        if (++emptyReads > 200_000)
+          throw new ApiError('INVALID_RESPONSE', '下载流没有字节进展');
+        continue;
+      }
+      emptyReads = 0;
       bytes += part.value.byteLength;
       if (!prefixChecked) {
         const count = Math.min(
