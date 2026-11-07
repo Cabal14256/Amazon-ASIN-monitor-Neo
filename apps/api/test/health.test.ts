@@ -22,6 +22,9 @@ import { AppLogger } from '../src/logger/app-logger.service';
 import { MetricsService } from '../src/metrics/metrics.service';
 import { RateLimitService } from '../src/rate-limit/rate-limit.service';
 import { ApplicationRedisClient } from '../src/redis/redis.service';
+import { registerDatabaseMetricsNative } from './helpers/database-metrics-native';
+
+registerDatabaseMetricsNative();
 
 const validEnv = {
   DATABASE_URL: 'postgresql://localhost/amazon_asin_monitor',
