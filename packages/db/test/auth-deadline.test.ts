@@ -22,6 +22,106 @@ function fixture() {
   return { pool, client };
 }
 describe('bounded PostgreSQL authentication operations', () => {
+  it('waits for delayed pin settlement after a confirmed COMMIT without a business timeout', async () => {
+    vi.useFakeTimers();
+    const { pool, client } = fixture();
+    let finish!: () => void;
+    const settled = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    let done = false;
+    const work = withAuthDatabaseDeadline(
+      pool,
+      async () => 'committed-value',
+      undefined,
+      settled,
+    ).then((value) => {
+      done = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledWith('committed');
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(done).toBe(false);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith();
+    finish();
+    await expect(work).resolves.toBe('committed-value');
+  });
+  it('settles only after actual COMMIT and returns its client before borrowing a pin-settlement connection', async () => {
+    const { pool, client } = fixture();
+    const settled = vi.fn(async (outcome) => {
+      expect(outcome).toBe('committed');
+      expect(client.query).toHaveBeenCalledWith('COMMIT');
+      expect(client.release).toHaveBeenCalledExactlyOnceWith();
+    });
+    await withAuthDatabaseDeadline(pool, async () => 'ok', undefined, settled);
+    expect(settled).toHaveBeenCalledTimes(1);
+  });
+  it('keeps an in-flight COMMIT pin pending past the outer deadline, then records uncertainty only after it settles', async () => {
+    vi.useFakeTimers();
+    const { pool, client } = fixture();
+    let commitAck!: () => void;
+    const original = client.query.getMockImplementation()!;
+    client.query.mockImplementation(async (...args) =>
+      args[0] === 'COMMIT'
+        ? new Promise((resolve) => {
+            commitAck = () => resolve({ rows: [] });
+          })
+        : original(...args),
+    );
+    let finishSettlement!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      finishSettlement = resolve;
+    });
+    const settled = vi.fn(async () => settlement);
+    let actualSettled = false;
+    const onActualWork = vi.fn((work: Promise<unknown>) => {
+      void work.then(() => {
+        actualSettled = true;
+      });
+    });
+    const task = withAuthDatabaseDeadline(
+      pool,
+      async () => 'ok',
+      onActualWork,
+      settled,
+    );
+    const rejected = expect(task).rejects.toBeInstanceOf(AuthQueryTimeoutError);
+    await vi.advanceTimersByTimeAsync(2000);
+    await rejected;
+    expect(settled).not.toHaveBeenCalled();
+    expect(onActualWork).toHaveBeenCalledTimes(1);
+    expect(actualSettled).toBe(false);
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+    commitAck();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledExactlyOnceWith('uncertain');
+    expect(actualSettled).toBe(false);
+    finishSettlement();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(actualSettled).toBe(true);
+    expect(client.query).not.toHaveBeenCalledWith('ROLLBACK');
+  });
+  it('requires a real ROLLBACK acknowledgement for definite business failure', async () => {
+    const { pool, client } = fixture();
+    const settled = vi.fn(async () => undefined);
+    await expect(
+      withAuthDatabaseDeadline(
+        pool,
+        async () => {
+          throw new Error('known failure');
+        },
+        undefined,
+        settled,
+      ),
+    ).rejects.toThrow('known failure');
+    expect(client.query).toHaveBeenCalledWith('ROLLBACK');
+    expect(settled).toHaveBeenCalledExactlyOnceWith('rolled-back');
+    expect(client.release).toHaveBeenCalledExactlyOnceWith();
+  });
   it('prevents a late password hash from issuing any account writes after the transaction deadline', async () => {
     vi.useFakeTimers();
     const { pool, client } = fixture();

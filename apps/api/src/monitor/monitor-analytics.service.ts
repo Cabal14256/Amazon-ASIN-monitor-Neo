@@ -194,7 +194,10 @@ export class MonitorAnalyticsService {
             // cache an implicit "current month" under an unchanging key.
           }
           const bypass = this.bypass(operation, bypassHeader);
-          const cached = bypass ? null : await this.cache.get(query);
+          const lookup = bypass
+            ? { cached: null, lease: null }
+            : await this.cache.lookup(query);
+          const cached = lookup.cached;
           ensureOpen();
           if (cached)
             return encodeMonitorAnalyticsResult(
@@ -214,7 +217,8 @@ export class MonitorAnalyticsService {
             false,
             ensureOpen,
           );
-          if (!bypass) await this.cache.set(query, result, generatedAt);
+          if (!bypass)
+            await this.cache.set(query, result, generatedAt, lookup.lease);
           ensureOpen();
           return encoded;
         });

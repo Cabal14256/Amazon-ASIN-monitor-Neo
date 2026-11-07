@@ -182,7 +182,8 @@ export class VariantCheckExecutor {
     const data = parseVariantCheckJob(raw);
     if (
       data.taskSubType === 'competitor-asin-check' ||
-      data.taskSubType === 'competitor-variant-group-check'
+      data.taskSubType === 'competitor-variant-group-check' ||
+      data.taskSubType === 'competitor-variant-group'
     )
       throw new VariantCheckError('invalid-input');
     const operation = variantCheckJobOperation(data);

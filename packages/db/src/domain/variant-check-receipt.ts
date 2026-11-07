@@ -1,5 +1,6 @@
 import {
   batchCheckSyncDataSchema,
+  competitorBatchCheckSyncDataSchema,
   competitorCheckDataSchema,
   parentAsinQueryItemSchema,
   variantGroupCheckDataSchema,
@@ -51,6 +52,7 @@ const operationSchema = z
       'variant-group-check',
       'competitor-asin-check',
       'competitor-variant-group-check',
+      'competitor-variant-group',
       'parent-asin-query',
       'variant-group',
       'primary',
@@ -66,6 +68,7 @@ const operationSchema = z
       'batch',
       'competitor-asin',
       'competitor-group',
+      'competitor-batch',
     ]),
     expiresAt: z.string().datetime(),
   })
@@ -114,7 +117,9 @@ function canonicalRequest(value: unknown): string {
     throw new VariantCheckError('invalid-input');
   };
   const json = JSON.stringify(visit(value, 0));
-  if (Buffer.byteLength(json) > 128 * 1024)
+  // 1000 literal catalog IDs can each contain 50 four-byte Unicode scalars.
+  // Keep the digest bounded without rejecting a contract-valid batch.
+  if (Buffer.byteLength(json) > 256 * 1024)
     throw new VariantCheckError('invalid-input');
   return json;
 }
@@ -151,12 +156,16 @@ export function parseVariantCheckOperation(
       'variant-check/parent-asin-query/parent',
       'batch-check/variant-group/group',
       'batch-check/variant-group/batch',
+      'batch-check/competitor-variant-group/competitor-group',
+      'batch-check/competitor-variant-group/competitor-batch',
       'monitor/primary/group',
       'competitor-monitor/competitor/competitor-group',
     ].includes(pair) ||
     (result.taskType === 'monitor' || result.taskType === 'competitor-monitor'
       ? !/^monitor-[a-f0-9]{24}$/.test(result.step)
-      : result.resultKind === 'group' && result.taskType === 'batch-check'
+      : (result.resultKind === 'group' ||
+          result.resultKind === 'competitor-group') &&
+        result.taskType === 'batch-check'
       ? result.step === 'result'
       : result.step !== 'result')
   )
@@ -188,6 +197,8 @@ export function decodeVariantCheckReceiptResult(
     const schema =
       kind === 'competitor-asin' || kind === 'competitor-group'
         ? competitorCheckDataSchema
+        : kind === 'competitor-batch'
+        ? competitorBatchCheckSyncDataSchema
         : kind === 'asin'
         ? variantViewSchema
         : kind === 'group'

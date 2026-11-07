@@ -22,6 +22,14 @@ import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
 import { AppLogger } from '../logger/app-logger.service';
+import {
+  AnalyticsCacheClearBudget,
+  analyticsCacheGenerationKey,
+  CAPTURE_MONITOR_ANALYTICS_GENERATION,
+  newAnalyticsCacheGeneration,
+  parseAnalyticsCacheCapture,
+  ROTATE_MONITOR_ANALYTICS_GENERATION,
+} from '../monitor/monitor-analytics-cache-control';
 import { ApplicationRedisClient } from '../redis/redis.service';
 
 const ANALYTICS_PREFIX = 'analytics:v1:';
@@ -185,19 +193,26 @@ export class OpsService {
 
   // SCAN runs as separate bounded Redis commands. Never traverse the whole keyspace
   // in one Lua script, which would block all other Redis clients.
-  private async scanAnalyticsKeys(deadline: number) {
+  private async scanAnalyticsKeys(
+    deadline: number,
+    budget?: AnalyticsCacheClearBudget,
+  ) {
     const keys = new Set<string>();
     const prefix = this.analyticsPrefix;
     const pattern = `${escapeRedisGlob(prefix)}*`;
     let cursor = '0';
     for (let page = 0; page < MAX_CACHE_SCAN_PAGES; page++) {
-      if (Date.now() >= deadline) return { keys: [...keys], complete: false };
+      if (budget) budget.remaining();
+      else if (Date.now() >= deadline)
+        return { keys: [...keys], complete: false };
       let nextCursor: string;
       let pageKeys: string[];
       try {
-        [nextCursor, pageKeys] = await withOpsRedisDeadline(deadline, () =>
-          this.redis.scan(cursor, pattern, CACHE_SCAN_COUNT),
-        );
+        const operation = () =>
+          this.redis.scan(cursor, pattern, CACHE_SCAN_COUNT);
+        [nextCursor, pageKeys] = await (budget
+          ? budget.run(operation)
+          : withOpsRedisDeadline(deadline, operation));
       } catch (error) {
         if (error instanceof OpsRedisDeadlineError)
           return { keys: [...keys], complete: false };
@@ -286,7 +301,21 @@ export class OpsService {
     await this.authorize(principal, ['settings:write']);
     try {
       const deadline = Date.now() + MAX_CACHE_OPERATION_MS;
-      const scan = await this.scanAnalyticsKeys(deadline);
+      const budget = new AnalyticsCacheClearBudget();
+      const generationKey = analyticsCacheGenerationKey(this.env.BULL_PREFIX);
+      const captured = parseAnalyticsCacheCapture(
+        await budget.run(() =>
+          this.redis.eval(
+            CAPTURE_MONITOR_ANALYTICS_GENERATION,
+            [generationKey],
+            [newAnalyticsCacheGeneration()],
+          ),
+        ),
+      );
+      if (!captured) return fail(503, '分析缓存控制状态不可用');
+      // Frozen once after capture ACK, including all already-spent local time.
+      const fixedDeadline = budget.fixedServerDeadline(captured.serverTime);
+      const scan = await this.scanAnalyticsKeys(deadline, budget);
       if (!scan.complete) {
         this.logger.warn('分析缓存清理范围超限', 'OpsService', {
           reason: 'analytics_cache_scan_limit',
@@ -299,21 +328,31 @@ export class OpsService {
         offset < scan.keys.length;
         offset += CACHE_SCAN_COUNT
       ) {
-        if (Date.now() >= deadline) fail(503, '分析缓存清理超时，请重试');
-        removed += await withOpsRedisDeadline(deadline, () =>
+        removed += await budget.run(() =>
           this.redis.unlink(
             ...scan.keys.slice(offset, offset + CACHE_SCAN_COUNT),
           ),
         );
       }
       const clearedAt = new Date().toISOString();
-      await withOpsRedisDeadline(deadline, () =>
-        this.redis.setex(
-          this.lastClearedAtKey,
-          LAST_CLEARED_AT_TTL_SECONDS,
-          clearedAt,
+      const fresh = newAnalyticsCacheGeneration();
+      if (fresh === captured.generation) fail(503, '分析缓存控制状态不可用');
+      const rotated = await budget.run(() =>
+        this.redis.eval(
+          ROTATE_MONITOR_ANALYTICS_GENERATION,
+          [generationKey, this.lastClearedAtKey],
+          [
+            captured.generation,
+            fresh,
+            clearedAt,
+            LAST_CLEARED_AT_TTL_SECONDS,
+            fixedDeadline,
+          ],
         ),
       );
+      if (rotated === 0) fail(409, '分析缓存清理发生冲突，请重试');
+      if (rotated !== 1) fail(503, '分析缓存清理未完成，请重试');
+      budget.remaining();
       this.logger.info('分析缓存已清理', 'OpsService', {
         removed,
       });

@@ -1,6 +1,6 @@
 # Neo 定时监控契约、固定分批与私有账本基础
 
-关联 Issue #204。本次为 #188 的执行与恢复、#189 的调度器提供可独立验证的基础：严格内部契约、稳定任务身份、Legacy 分批策略和双 PostgreSQL 账本。没有实现 Repository 状态转换、业务消费者、repeat job 或生产投递；现有手动任务继续使用各自的用户身份、权限与任务查询。
+关联 Issue #204。本次为 #188 的执行与恢复、#189 的调度器提供可独立验证的基础：严格内部契约、稳定任务身份、Legacy 分批策略和双 PostgreSQL 账本。#188 已接入私有 BullMQ 消费者、账本恢复、逐组收据和业务事务桥接；#189 的 repeat job、US/EU 计划与频率热加载仍未启用。现有手动任务继续使用各自的用户身份、权限与任务查询。
 
 ## 稳定身份与目录
 
@@ -9,7 +9,14 @@
 - 首次任务严格超过 25 分钟才过期，等于边界仍可执行；手动任务不使用该规则。缺少可信时间的 scheduled 任务失败关闭。先使用规范的 `requestedAt`，否则只能使用实际 Bull 入队时间；此 helper 不授予重试更新时钟的权限。
 - batch 为 epoch slot 的规范 modulo；组归属为原始 UTF-8 ID 的无符号 IEEE CRC32。不得 trim、改大小写或 Unicode normalize。契约 interval 限于 15/30/60 分钟，batch 数为 1–1000。
 - 目录排序为 `create_time ASC NULLS FIRST,id COLLATE "C"`。原生文本保留六位微秒，不能经 ORM Date/getTime 排序；读取时使用 `to_char(create_time,'YYYY-MM-DD HH24:MI:SS.US')`。固定 ordinal 与组 ID 在同一任务内分别唯一。
-- 账本限制一次目录为 1000 组、20000 成员、16 MiB JSON；结果上限 32 MiB。这些存储约束不等于冻结目录或业务恢复已经接线。
+- 账本限制一次目录为 1000 组、20000 成员、16 MiB JSON；结果上限 32 MiB。执行消费者在事务内重新锁定并校验账本和冻结快照，已提交的组收据会在重试时跳过。
+
+## #188 执行消费者
+
+- Worker 仅在 `WORKER_ENABLED_QUEUES` 显式包含 `scheduled-monitor` 且 PostgreSQL 为权威源时注册私有 `scheduled-monitor-task-queue`；该队列不进入公共队列选择、Ops 概览或普通任务列表。
+- 消费者先以完整 job digest 接收/启动 run，再按冻结 ordinal 读取收据。缺少收据的组调用现有 primary/competitor Pipeline，并在同一业务事务写状态、历史和 `*_scheduled_monitor_group_receipts`；提交确认丢失时只对账，不盲目重抓。
+- `cancelRequestedAt`、25 分钟 freshness、Worker 锁丢失和 shutdown 会停止新的组检查。US 主营完成后，follow-up child 由账本保存并使用原始稳定 job ID 投递；投递 ACK 不确定时保留 `business-completed`，下一次只恢复投递与完成。
+- `apps/worker/test/scheduled-monitor-processor.test.ts` 覆盖过期、取消、收据恢复、最终失败保护、身份不匹配和 follow-up ACK 丢失。真实 PostgreSQL/Redis/Worker 集成仍须显式启用并记录证据。
 
 ## 双库升级
 
@@ -74,4 +81,4 @@ corepack pnpm --filter db exec vitest run test/scheduled-monitor-policy.test.ts 
 corepack pnpm --filter db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism
 ```
 
-后续 #188 还需真实 BullMQ/Redis/双 PG 编译入口，覆盖首次过期不读取外部服务且不写业务、首次冻结与稳定目录、取消/租约、故障重启恢复、发送 ACK 丢失，以及 US 父任务完成后只恢复原 child。#189 才注册调度与频率热更新。基础测试不能替代生产数据对拍、灰度、旧 Bull drain、性能和 Legacy 退役 gate。
+剩余 #188 门禁是隔离真实 BullMQ/Redis/双 PG 执行，覆盖首次过期不读取外部服务且不写业务、首次冻结与稳定目录、取消/租约、故障重启恢复、发送 ACK 丢失，以及 US 父任务完成后只恢复原 child。#189 才注册调度与频率热更新。基础测试不能替代生产数据对拍、灰度、旧 Bull drain、性能和 Legacy 退役 gate。

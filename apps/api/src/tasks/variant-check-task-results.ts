@@ -88,7 +88,8 @@ export class VariantCheckTaskResults {
       };
       const result =
         operation.resultKind === 'competitor-asin' ||
-        operation.resultKind === 'competitor-group'
+        operation.resultKind === 'competitor-group' ||
+        operation.resultKind === 'competitor-batch'
           ? await this.competitorRepository.transaction(read)
           : await this.repository.transaction(read);
       if (result === undefined) {

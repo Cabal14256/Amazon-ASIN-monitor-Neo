@@ -89,6 +89,20 @@ const createVariantCheckJobSchema = (identifier: z.ZodType<string>) =>
           .strict(),
       })
       .strict(),
+    z
+      .object({
+        ...identity,
+        taskType: z.literal('batch-check'),
+        taskSubType: z.literal('competitor-variant-group'),
+        params: z
+          .object({
+            groupIds: z.array(identifier).min(1).max(1000),
+            forceRefresh: z.boolean(),
+            country: z.string().max(10).optional(),
+          })
+          .strict(),
+      })
+      .strict(),
   ]);
 export const variantCheckJobSchema =
   createVariantCheckJobSchema(neoCatalogIdSchema);
@@ -113,6 +127,7 @@ export const variantCheckResultReferenceSchema = z
       'batch',
       'competitor-asin',
       'competitor-group',
+      'competitor-batch',
     ]),
   })
   .strict();

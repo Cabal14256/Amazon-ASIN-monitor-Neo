@@ -1,3 +1,4 @@
+import { loadEnv } from '@asin-monitor/config';
 import {
   monitorAnalyticsDataSchemas,
   timescaleAggregateEvidenceManifest,
@@ -5,16 +6,72 @@ import {
 import {
   MONITOR_ANALYTICS_OPERATIONS,
   parseMonitorAnalyticsQuery,
+  PgMonitorAnalyticsQueryRepository,
   type MonitorAnalyticsOperation,
+  type MonitorAnalyticsQueryRepositoryPort,
+  type MonitorAnalyticsQueryUnit,
 } from '@asin-monitor/db';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import { ApplicationDatabasePools } from '../src/database/database.service';
+import { AppLogger } from '../src/logger/app-logger.service';
 import { MonitorAnalyticsCache } from '../src/monitor/monitor-analytics-cache';
+import { MONITOR_ANALYTICS_REPOSITORY } from '../src/monitor/monitor-analytics.service';
 import { MonitorHistoryModule } from '../src/monitor/monitor-history.module';
+import { OpsModule } from '../src/ops/ops.module';
+import { ApplicationRedisClient } from '../src/redis/redis.service';
+import { boundedRedisRespGate } from './helpers/bounded-redis-resp-gate';
 import { legacyAnalyticsHttpFixture } from './helpers/monitor-analytics-legacy-http';
 import { spApiConfigApp } from './helpers/sp-api-config-app';
+
+function assertFenceDisposableTargets() {
+  if (
+    process.env.RUN_INTEGRATION_TESTS !== 'true' ||
+    process.env.INTEGRATION_ALLOW_DROP_DATABASES !== 'true' ||
+    process.env.TIMESCALE_PERFORMANCE_DISPOSABLE_DATABASE !==
+      'amazon_asin_monitor_ci'
+  )
+    throw new Error(
+      'Analytics fence requires explicitly disposable CI targets',
+    );
+  const expected = [
+    ['DATABASE_URL', 'postgresql:', '5432', '/amazon_asin_monitor_ci'],
+    [
+      'COMPETITOR_DATABASE_URL',
+      'postgresql:',
+      '5432',
+      '/amazon_competitor_monitor_ci',
+    ],
+    ['REDIS_URL', 'redis:', '6379', '/15'],
+  ] as const;
+  for (const [name, protocol, port, pathname] of expected) {
+    const target = new URL(process.env[name] ?? '');
+    if (
+      target.protocol !== protocol ||
+      target.hostname !== '127.0.0.1' ||
+      target.port !== port ||
+      target.pathname !== pathname ||
+      target.search ||
+      target.hash ||
+      target.password ||
+      target.username !== (name === 'REDIS_URL' ? '' : 'postgres')
+    )
+      throw new Error(
+        'Analytics fence target is not the exact disposable CI endpoint',
+      );
+  }
+}
 
 describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
   'all analytics HTTP / Legacy MySQL + PostgreSQL + Redis',
@@ -45,6 +102,7 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         throw new Error(
           'Analytics HTTP requires explicitly disposable CI databases',
         );
+      assertFenceDisposableTargets();
       // Freeze the Legacy process convention independently of the host default.
       previousTimezone = process.env.TZ;
       process.env.TZ = 'Asia/Shanghai';
@@ -181,7 +239,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
             if (!key.startsWith(`${prefix}:neo:analytics:v1:`))
               throw new Error('Unsafe analytics fixture cache owner');
           }
-          if (cacheKeys.size) await f.redis.del(...cacheKeys);
+          await f.redis.del(
+            ...cacheKeys,
+            `${prefix}:neo:ops:analytics-cache:generation`,
+            `${prefix}:neo:ops:analytics-cache:last-cleared-at`,
+          );
           await f.close();
         }
       } finally {
@@ -526,5 +588,459 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       expect(corrected.meta.source).toBe('raw');
       expect(corrected.data).not.toEqual(before.data);
     });
+  },
+);
+
+describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
+  'analytics clear fence / independent real PostgreSQL and Redis API instances',
+  () => {
+    type App = Awaited<ReturnType<typeof spApiConfigApp>>;
+    type Gate = Awaited<ReturnType<typeof boundedRedisRespGate>>;
+    type Hold = ReturnType<Gate['arm']>;
+    type DurationResult = Awaited<
+      ReturnType<MonitorAnalyticsQueryUnit['duration']>
+    >;
+    type ApiResponse = {
+      statusCode: number;
+      body: string;
+      json(): { data: Record<string, unknown>; meta: { cacheHit: boolean } };
+    };
+    const suffix = randomUUID().replace(/-/g, '');
+    const prefix = `analytics-fence-${suffix}`;
+    const group = `fence255-${suffix}`;
+    const asin = `fence255-${suffix}`;
+    const code = `B${suffix.slice(0, 9)}`;
+    const generationKey = `${prefix}:neo:ops:analytics-cache:generation`;
+    const lastClearedKey = `${prefix}:neo:ops:analytics-cache:last-cleared-at`;
+    const range = {
+      startTime: '1971-05-09 00:00:00',
+      endTime: '1971-05-09 23:59:59',
+    };
+    const query = parseMonitorAnalyticsQuery('all-countries-summary', range);
+    const apps: App[] = [];
+    const gates: Gate[] = [];
+    const holds: Hold[] = [];
+    const pending = new Set<Promise<unknown>>();
+    const dataKeys = new Set<string>();
+    const restores: (() => void)[] = [];
+    let a: App, b: App, gateA: Gate, gateB: Gate;
+    let observer: ApplicationRedisClient | undefined;
+    let headersA: { authorization: string },
+      headersB: { authorization: string };
+    function signal<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((accept) => {
+        resolve = accept;
+      });
+      return { promise, resolve };
+    }
+    let sqlGate:
+      | {
+          arrived: ReturnType<typeof signal<DurationResult>>;
+          release: ReturnType<typeof signal<void>>;
+        }
+      | undefined;
+    const activeSqlGates = new Set<NonNullable<typeof sqlGate>>();
+    const track = <T>(request: PromiseLike<T>): Promise<T> => {
+      const work = Promise.resolve(request);
+      pending.add(work);
+      void work.finally(() => pending.delete(work)).catch(() => undefined);
+      return work;
+    };
+    function arm(
+      gate: Gate,
+      marker: 'capture' | 'fill' | 'rotate',
+      mode: 'before-command' | 'after-reply' = 'before-command',
+    ) {
+      const hold = gate.arm((arguments_) => {
+        if (arguments_[0]?.toString('ascii').toUpperCase() !== 'EVAL')
+          return false;
+        const script = arguments_[1]?.toString('utf8');
+        return (
+          script?.startsWith(`-- neo-analytics-cache-${marker}:v2\n`) ===
+            true &&
+          arguments_[3]?.toString('utf8') === generationKey &&
+          (marker !== 'fill' ||
+            arguments_[4]
+              ?.toString('utf8')
+              .startsWith(`${prefix}:neo:analytics:v1:`) === true)
+        );
+      }, mode);
+      holds.push(hold);
+      return hold;
+    }
+    async function seedPrincipal(app: App) {
+      const userId = randomUUID(),
+        sessionId = randomUUID();
+      app.userIds.add(userId);
+      await app.pools.primaryPool.query(
+        "INSERT INTO role_permissions(role_id,permission_id) SELECT 'writer-71',id FROM permissions WHERE code IN ('monitor:read','analytics:read') ON CONFLICT DO NOTHING",
+      );
+      await app.pools.primaryPool.query(
+        'INSERT INTO users(id,username,password,force_password_change) VALUES($1,$1,$2,false)',
+        [userId, 'fixture-unused-hash'],
+      );
+      await app.pools.primaryPool.query(
+        "INSERT INTO user_roles(user_id,role_id) VALUES($1,'writer-71')",
+        [userId],
+      );
+      await app.pools.primaryPool.query(
+        "INSERT INTO sessions(id,user_id,expires_at) VALUES($1,$2,'2099-01-01 08:00:00')",
+        [sessionId, userId],
+      );
+      return {
+        authorization: `Bearer ${jwt.sign(
+          { userId, sessionId },
+          app.env.JWT_SECRET,
+          { expiresIn: '1h' },
+        )}`,
+      };
+    }
+    const read = (app: App, headers: { authorization: string }) =>
+      track<ApiResponse>(
+        app.http.inject({
+          method: 'GET',
+          url: `/api/v1/monitor-history/statistics/all-countries-summary?${new URLSearchParams(
+            range,
+          )}`,
+          headers,
+        }),
+      );
+    const clear = (app: App, headers: { authorization: string }) =>
+      track<ApiResponse>(
+        app.http.inject({
+          method: 'POST',
+          url: '/api/v1/ops/analytics/cache/clear',
+          headers,
+        }),
+      );
+    async function token() {
+      const value = await observer!.get(generationKey);
+      expect(typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)).toBe(
+        true,
+      );
+      expect(await observer!.client.pttl(generationKey)).toBe(-1);
+      return value!;
+    }
+    async function freshDatabase() {
+      await a.pools.primaryPool.query(
+        "INSERT INTO public.monitor_history(variant_group_id,asin_id,asin_code,country,check_type,is_broken,check_time) VALUES($1,$2,$3,'US','ASIN',true,'1971-05-09 02:00:00')",
+        [group, asin, code],
+      );
+    }
+    function expectData(
+      response: Awaited<ReturnType<typeof read>>,
+      checks: number,
+      cacheHit: boolean,
+    ) {
+      expect(response.statusCode, response.body).toBe(200);
+      const body = response.json();
+      monitorAnalyticsDataSchemas['all-countries-summary'].parse(body.data);
+      expect(body.data.totalChecks).toBe(checks);
+      expect(body.meta.cacheHit).toBe(cacheHit);
+      return body;
+    }
+    beforeAll(async () => {
+      // Validate targets before listening or constructing any PG/Redis provider.
+      assertFenceDisposableTargets();
+      const base = loadEnv(process.env);
+      gateA = await boundedRedisRespGate(base.REDIS_URL);
+      gates.push(gateA);
+      gateB = await boundedRedisRespGate(base.REDIS_URL);
+      gates.push(gateB);
+      a = await spApiConfigApp({
+        imports: [MonitorHistoryModule, OpsModule],
+        env: {
+          BULL_PREFIX: prefix,
+          REDIS_URL: gateA.url,
+          HEALTH_PROBE_TIMEOUT_MS: 15000,
+          ANALYTICS_AGG_ENABLED: false,
+          ANALYTICS_STATUS_INTERVAL_ENABLED: false,
+        },
+        configure: (builder) =>
+          builder.overrideProvider(MONITOR_ANALYTICS_REPOSITORY).useFactory({
+            inject: [ApplicationDatabasePools],
+            factory: (pools: ApplicationDatabasePools) => {
+              const real = new PgMonitorAnalyticsQueryRepository(
+                pools.primaryPool,
+                {
+                  aggregateEnabled: false,
+                  intervalEnabled: false,
+                  onAggregateFallback: () => undefined,
+                  onIntervalFallback: () => undefined,
+                },
+              );
+              const decorated: MonitorAnalyticsQueryRepositoryPort = {
+                read<T>(
+                  action: (unit: MonitorAnalyticsQueryUnit) => Promise<T>,
+                ) {
+                  return real.read((unit) =>
+                    action({
+                      // Explicit delegation keeps real prototype methods and every
+                      // authorization/advisory-lock/transaction/deadline operation.
+                      lockOperator: (...arguments_) =>
+                        unit.lockOperator(...arguments_),
+                      lockSession: (...arguments_) =>
+                        unit.lockSession(...arguments_),
+                      operatorPermissionCodes: (...arguments_) =>
+                        unit.operatorPermissionCodes(...arguments_),
+                      counts: (...arguments_) => unit.counts(...arguments_),
+                      peak: (...arguments_) => unit.peak(...arguments_),
+                      period: (...arguments_) => unit.period(...arguments_),
+                      abnormal: (...arguments_) => unit.abnormal(...arguments_),
+                      duration: async (normalized) => {
+                        const result = await unit.duration(normalized);
+                        const owned = sqlGate;
+                        if (
+                          owned &&
+                          normalized.operation === 'all-countries-summary'
+                        ) {
+                          sqlGate = undefined;
+                          owned.arrived.resolve(result);
+                          await owned.release.promise;
+                          activeSqlGates.delete(owned);
+                        }
+                        return result;
+                      },
+                    }),
+                  );
+                },
+              };
+              return decorated;
+            },
+          }),
+      });
+      apps.push(a);
+      b = await spApiConfigApp({
+        imports: [MonitorHistoryModule, OpsModule],
+        env: {
+          BULL_PREFIX: prefix,
+          REDIS_URL: gateB.url,
+          HEALTH_PROBE_TIMEOUT_MS: 15000,
+          ANALYTICS_AGG_ENABLED: false,
+          ANALYTICS_STATUS_INTERVAL_ENABLED: false,
+        },
+      });
+      apps.push(b);
+      expect(a.schema === b.schema).toBe(false);
+      expect(a.redis === b.redis).toBe(false);
+      expect(a.pools.primaryPool === b.pools.primaryPool).toBe(false);
+      for (const app of apps) {
+        expect(
+          (
+            await app.pools.primaryPool.query(
+              'SELECT current_database() AS name',
+            )
+          ).rows[0].name,
+        ).toBe('amazon_asin_monitor_ci');
+        const evaluate = app.redis.eval.bind(app.redis);
+        const spy = vi
+          .spyOn(app.redis, 'eval')
+          .mockImplementation(async (script, keys, arguments_) => {
+            for (const key of keys)
+              if (key.startsWith(`${prefix}:neo:analytics:v1:`))
+                dataKeys.add(key);
+            return evaluate(script, keys, arguments_);
+          });
+        restores.push(() => spy.mockRestore());
+      }
+      observer = new ApplicationRedisClient(
+        { ...base, HEALTH_PROBE_TIMEOUT_MS: 15000 },
+        a.app.get(AppLogger),
+      );
+      await observer.ping();
+      const clientInfo = String(await observer.client.call('CLIENT', 'INFO'));
+      expect(/(?:^|\s)db=15(?:\s|$)/.test(clientInfo)).toBe(true);
+      headersA = await seedPrincipal(a);
+      headersB = await seedPrincipal(b);
+      await a.pools.primaryPool.query(
+        "INSERT INTO public.variant_groups(id,name,country,site,brand) VALUES($1,'Fence fixture','US','fence','fence')",
+        [group],
+      );
+      await a.pools.primaryPool.query(
+        "INSERT INTO public.asins(id,asin,variant_group_id,asin_type,country,site,brand,name) VALUES($1,$2,$3,'MAIN_LINK','US','fence','fence','Fence fixture')",
+        [asin, code, group],
+      );
+      dataKeys.add(a.app.get(MonitorAnalyticsCache).key(query));
+    }, 30000);
+    beforeEach(async () => {
+      await observer!.del(...dataKeys, generationKey, lastClearedKey);
+      await a.pools.primaryPool.query(
+        'DELETE FROM public.monitor_history WHERE variant_group_id=$1 AND asin_id=$2',
+        [group, asin],
+      );
+      await a.pools.primaryPool.query(
+        "INSERT INTO public.monitor_history(variant_group_id,asin_id,asin_code,country,check_type,is_broken,check_time) VALUES($1,$2,$3,'US','ASIN',false,'1971-05-09 00:00:00'),($1,$2,$3,'US','ASIN',false,'1971-05-09 01:00:00')",
+        [group, asin, code],
+      );
+    });
+    afterEach(async () => {
+      sqlGate?.release.resolve();
+      sqlGate = undefined;
+      for (const sql of activeSqlGates) sql.release.resolve();
+      activeSqlGates.clear();
+      await Promise.all(holds.splice(0).map((hold) => hold.destroy()));
+      await Promise.allSettled([...pending]);
+    });
+    afterAll(async () => {
+      // Cleanup always releases transports before waiting for real transactions.
+      sqlGate?.release.resolve();
+      sqlGate = undefined;
+      for (const sql of activeSqlGates) sql.release.resolve();
+      activeSqlGates.clear();
+      await Promise.all(holds.splice(0).map((hold) => hold.destroy()));
+      await Promise.allSettled([...pending]);
+      const failures: unknown[] = [];
+      const clean = async (action: () => Promise<unknown>) => {
+        try {
+          await action();
+        } catch (error) {
+          failures.push(error);
+        }
+      };
+      if (a) {
+        await clean(() =>
+          a.pools.primaryPool.query(
+            'DELETE FROM public.monitor_history WHERE variant_group_id=$1 AND asin_id=$2',
+            [group, asin],
+          ),
+        );
+        await clean(() =>
+          a.pools.primaryPool.query(
+            'DELETE FROM public.monitor_history_status_interval WHERE variant_group_id=$1 AND asin_id=$2',
+            [group, asin],
+          ),
+        );
+        await clean(() =>
+          a.pools.primaryPool.query(
+            'DELETE FROM public.monitor_interval_dirty WHERE asin_key=ANY($1::varchar[])',
+            [[code, `ID#${asin}`]],
+          ),
+        );
+        await clean(() =>
+          a.pools.primaryPool.query(
+            'DELETE FROM public.asins WHERE id=$1 AND variant_group_id=$2',
+            [asin, group],
+          ),
+        );
+        await clean(() =>
+          a.pools.primaryPool.query(
+            'DELETE FROM public.variant_groups WHERE id=$1',
+            [group],
+          ),
+        );
+      }
+      if (observer)
+        await clean(() =>
+          observer!.del(...dataKeys, generationKey, lastClearedKey),
+        );
+      for (const restore of restores) restore();
+      for (const app of [...apps].reverse()) await clean(() => app.close());
+      observer?.onModuleDestroy();
+      for (const gate of gates) await clean(() => gate.close());
+      vi.restoreAllMocks();
+      if (failures.length)
+        throw new Error('Analytics fence fixture cleanup failed');
+    }, 30000);
+
+    it('fences genuine late SQL delivery after another API has authorized and cleared', async () => {
+      const firstClearCommand = arm(gateB, 'capture');
+      const clearing = clear(b, headersB);
+      // Receiving capture proves B's real role transaction has COMMITted.
+      // Starting A first would block B behind A's global shared admin lock.
+      await firstClearCommand.held;
+      const sql = {
+        arrived: signal<DurationResult>(),
+        release: signal<void>(),
+      };
+      sqlGate = sql;
+      activeSqlGates.add(sql);
+      const reading = read(a, headersA);
+      try {
+        const genuinelyRead = await sql.arrived.promise;
+        expect(
+          (genuinelyRead.data as Record<string, unknown>).totalChecks,
+        ).toBe(2);
+        firstClearCommand.forward();
+        expect((await clearing).statusCode).toBe(200);
+        await freshDatabase();
+      } finally {
+        sql.release.resolve();
+      }
+      const old = expectData(await reading, 2, false);
+      const fresh = expectData(await read(b, headersB), 3, false);
+      expect(fresh.data).not.toEqual(old.data);
+      expect(expectData(await read(a, headersA), 3, true).data).toEqual(
+        fresh.data,
+      );
+    }, 20000);
+
+    it('rejects a real fill EVAL transmitted only after cache timeout, PG commit and another API clear', async () => {
+      const fill = arm(gateA, 'fill');
+      const reading = read(a, headersA);
+      await fill.held;
+      const before = await token();
+      // Wait for the real 500ms fallback and PgMonitorAnalyticsDeadline COMMIT;
+      // the underlying Redis command still owns its admission and is not canceled.
+      const old = expectData(await reading, 2, false);
+      expect((await clear(b, headersB)).statusCode).toBe(200);
+      expect((await token()) !== before).toBe(true);
+      await freshDatabase();
+      fill.forward();
+      expect(await fill.executed).toBe(0);
+      await fill.ackForwarded;
+      const fresh = expectData(await read(b, headersB), 3, false);
+      expect(fresh.data).not.toEqual(old.data);
+      expect(expectData(await read(a, headersA), 3, true).data).toEqual(
+        fresh.data,
+      );
+    }, 20000);
+
+    it('rejects final Lua at the real Redis server deadline without changing generation or last-clear proof', async () => {
+      expectData(await read(a, headersA), 2, false);
+      const before = await token();
+      expect(await observer!.get(lastClearedKey)).toBeNull();
+      const final = arm(gateB, 'rotate');
+      const clearing = clear(b, headersB);
+      const arguments_ = await final.held;
+      const fixedDeadline = Number(arguments_.at(-1)!.toString('ascii'));
+      expect(Number.isSafeInteger(fixedDeadline)).toBe(true);
+      expect((await clearing).statusCode).toBe(503);
+      await vi.waitFor(
+        async () => {
+          const time = await observer!.client.time();
+          expect(
+            Number(time[0]) * 1000 + Math.floor(Number(time[1]) / 1000),
+          ).toBeGreaterThanOrEqual(fixedDeadline);
+        },
+        { timeout: 1000, interval: 20 },
+      );
+      final.forward();
+      expect(await final.executed).toBe(-1);
+      await final.ackForwarded;
+      expect((await token()) === before).toBe(true);
+      expect(await observer!.get(lastClearedKey)).toBeNull();
+    }, 20000);
+
+    it('reports lost final ACK as unknown 503 while retaining the actual successful rotation and fresh retry', async () => {
+      expectData(await read(a, headersA), 2, false);
+      const before = await token();
+      const final = arm(gateB, 'rotate', 'after-reply');
+      const clearing = clear(b, headersB);
+      await final.held;
+      expect(await final.executed).toBe(1);
+      const changed = await token();
+      expect(changed !== before).toBe(true);
+      expect((await clearing).statusCode).toBe(503);
+      expect((await token()) === changed).toBe(true);
+      expect(await observer!.get(lastClearedKey)).not.toBeNull();
+      // The success reply is discarded, never replayed or interpreted as undo.
+      await final.destroy();
+      expect((await clear(a, headersA)).statusCode).toBe(200);
+      const retried = await token();
+      expect(retried !== changed && retried !== before).toBe(true);
+      expectData(await read(a, headersA), 2, false);
+      expectData(await read(a, headersA), 2, true);
+    }, 20000);
   },
 );

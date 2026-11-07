@@ -16,6 +16,8 @@ export async function readVariantCheckReceipt(
   lock: boolean,
 ): Promise<unknown | undefined> {
   const operation = parseVariantCheckOperation(value);
+  if (operation.resultKind.startsWith('competitor-'))
+    throw new VariantCheckError('invalid-input');
   ensureOpen();
   if (lock) {
     // Serialize retries of this operation before business group/ASIN row locks.
@@ -85,6 +87,8 @@ export async function saveVariantCheckReceipt(
   output: unknown,
 ): Promise<void> {
   const operation = parseVariantCheckOperation(value);
+  if (operation.resultKind.startsWith('competitor-'))
+    throw new VariantCheckError('invalid-input');
   const result = decodeVariantCheckReceiptResult(output, operation.resultKind);
   ensureOpen();
   const alive = await db.execute(

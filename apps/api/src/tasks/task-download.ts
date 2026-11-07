@@ -88,13 +88,26 @@ export class TaskDownloadService implements OnModuleDestroy {
         !Array.isArray(task.result)
           ? (task.result as Record<string, unknown>)
           : {};
-      if (task.taskType === 'export' && task.taskSubType === 'asin') {
+      if (
+        task.taskType === 'export' &&
+        ['asin', 'variant-group'].includes(task.taskSubType || '')
+      ) {
         const artifact = asinExportArtifactSchema.safeParse(result.artifact);
         if (
           !artifact.success ||
           artifact.data.taskId !== task.taskId ||
           typeof result.filename !== 'string' ||
-          !/^ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/.test(result.filename)
+          !(
+            task.taskSubType === 'variant-group'
+              ? /^变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/
+              : /^ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/
+          ).test(result.filename) ||
+          (task.taskSubType === 'variant-group' &&
+            (result.exportType !== 'variant-group' ||
+              result.mimeType !==
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+              result.fileSizeBytes !== artifact.data.bytes ||
+              task.filename !== result.filename))
         )
           fail(404, '任务结果文件不存在或已过期');
         // Task ownership alone does not retain a revoked read grant.
@@ -119,9 +132,13 @@ export class TaskDownloadService implements OnModuleDestroy {
         reply.header('X-Content-Type-Options', 'nosniff');
         reply.header(
           'Content-Disposition',
-          `attachment; filename="asin-export-${
-            task.taskId
-          }.xlsx"; filename*=UTF-8''${encodeURIComponent(result.filename)}`,
+          `attachment; filename="${
+            task.taskSubType === 'variant-group'
+              ? 'variant-group-export'
+              : 'asin-export'
+          }-${task.taskId}.xlsx"; filename*=UTF-8''${encodeURIComponent(
+            result.filename,
+          )}`,
         );
         reply.header('Content-Length', artifact.data.bytes);
         await reply.send(createReadStream(path, { signal: controller.signal }));

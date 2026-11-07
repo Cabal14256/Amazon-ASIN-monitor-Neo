@@ -62,6 +62,9 @@ services:
       - ./packages/db/docker/apply-competitor-check-receipts.sh:/opt/asin-monitor/apply-competitor-check-receipts.sh:ro
       - ./packages/db/migrations/0014_competitor_check_receipts.sql:/opt/asin-monitor/0014_competitor_check_receipts.sql:ro
       - ./packages/db/migrations/0014_competitor_check_receipts.rollback.sql:/opt/asin-monitor/0014_competitor_check_receipts.rollback.sql:ro
+      - ./packages/db/docker/apply-competitor-batch-check-receipts.sh:/opt/asin-monitor/apply-competitor-batch-check-receipts.sh:ro
+      - ./packages/db/migrations/0018_competitor_batch_check_receipts.sql:/opt/asin-monitor/0018_competitor_batch_check_receipts.sql:ro
+      - ./packages/db/migrations/0018_competitor_batch_check_receipts.rollback.sql:/opt/asin-monitor/0018_competitor_batch_check_receipts.rollback.sql:ro
       # Competitor manual monitor owns its separate catalog and delivery receipt.
       - ./packages/db/docker/apply-competitor-monitor.sh:/opt/asin-monitor/apply-competitor-monitor.sh:ro
       - ./packages/db/migrations/0015_competitor_monitor.sql:/opt/asin-monitor/0015_competitor_monitor.sql:ro
@@ -72,6 +75,10 @@ services:
       - ./packages/db/migrations/0016_scheduled_monitor_primary.rollback.sql:/opt/asin-monitor/0016_scheduled_monitor_primary.rollback.sql:ro
       - ./packages/db/migrations/0016_scheduled_monitor_competitor.sql:/opt/asin-monitor/0016_scheduled_monitor_competitor.sql:ro
       - ./packages/db/migrations/0016_scheduled_monitor_competitor.rollback.sql:/opt/asin-monitor/0016_scheduled_monitor_competitor.rollback.sql:ro
+      # Catalog operation fencing is an explicit primary-only upgrade before Neo producers.
+      - ./packages/db/docker/apply-catalog-operation-fence.sh:/opt/asin-monitor/apply-catalog-operation-fence.sh:ro
+      - ./packages/db/migrations/0017_catalog_operation_fence.sql:/opt/asin-monitor/0017_catalog_operation_fence.sql:ro
+      - ./packages/db/migrations/0017_catalog_operation_fence.rollback.sql:/opt/asin-monitor/0017_catalog_operation_fence.rollback.sql:ro
     healthcheck:
       test:
         ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
