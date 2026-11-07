@@ -281,11 +281,11 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     );
     it('streams more than 50 groups and 5000 members without losing the original child snapshot', async () => {
       await f.pools.competitorPool
-        .query(`INSERT INTO competitor_variant_groups(id,name,country,create_time)
-        SELECT 'dense-'||lpad(n::text,3,'0'),'Dense '||n,'GB','2026-09-28 00:00:00.123456' FROM generate_series(0,50) n`);
+        .query(`INSERT INTO competitor_variant_groups(id,name,country,brand,create_time)
+        SELECT 'dense-'||lpad(n::text,3,'0'),'Dense '||n,'GB','Fixture','2026-09-28 00:00:00.123456' FROM generate_series(0,50) n`);
       await f.pools.competitorPool
-        .query(`INSERT INTO competitor_asins(id,asin,name,asin_type,country,variant_group_id,create_time)
-        SELECT 'dense-child-'||lpad(n::text,5,'0'),'B'||lpad(n::text,9,'0'),'Dense child '||n,'MAIN_LINK','GB','dense-050',
+        .query(`INSERT INTO competitor_asins(id,asin,name,asin_type,country,brand,variant_group_id,create_time)
+        SELECT 'dense-child-'||lpad(n::text,5,'0'),'B'||lpad(n::text,9,'0'),'Dense child '||n,'MAIN_LINK','GB','Fixture','dense-050',
           CASE WHEN n=0 THEN NULL ELSE '2026-09-28 00:00:00.123456'::timestamp END FROM generate_series(0,5000) n`);
       const repository = new PgCompetitorExportRepository(
         f.pools.competitorPool,
@@ -308,8 +308,8 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
         expect(second.map((row) => row.id)).toEqual(['dense-child-05000']);
       });
       await f.pools.competitorPool
-        .query(`INSERT INTO competitor_asins(id,asin,name,asin_type,country,variant_group_id,create_time)
-        VALUES('dense-child-05000','B000005000','Dense child 5000','MAIN_LINK','GB','dense-050','2026-09-28 00:00:00.123456')`);
+        .query(`INSERT INTO competitor_asins(id,asin,name,asin_type,country,brand,variant_group_id,create_time)
+        VALUES('dense-child-05000','B000005000','Dense child 5000','MAIN_LINK','GB','Fixture','dense-050','2026-09-28 00:00:00.123456')`);
       if (!worker) await start();
       const submitted = await post('competitor-asin', { country: 'GB' });
       expect(submitted.statusCode).toBe(200);
