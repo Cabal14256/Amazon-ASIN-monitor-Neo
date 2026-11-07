@@ -17,7 +17,14 @@ export type TaskRedisPort = Pick<Redis, 'get' | 'eval' | 'zrevrange' | 'mget'>;
 export type PreparedExportTaskIdentity = Pick<
   TaskState,
   'taskId' | 'userId' | 'createdAt'
-> & { taskType: 'export'; taskSubType: 'asin' | 'variant-group' };
+> & {
+  taskType: 'export';
+  taskSubType:
+    | 'asin'
+    | 'variant-group'
+    | 'competitor-asin'
+    | 'competitor-variant-group';
+};
 export const TASK_RECORD_MAX_BYTES = 262_144;
 // A full 100-job queue can consume 100 hours with two 30-minute attempts
 // per job and one consumer. Leave room for retries and operational delay.
@@ -56,7 +63,7 @@ if limit > 0 then
       local ok, task = pcall(cjson.decode, raw)
       if not ok then return redis.error_reply('TASK_EXPORT_INDEX_INVALID') end
       live = task.userId == ARGV[11] and task.taskType == 'export' and
-        (task.taskSubType == 'asin' or task.taskSubType == 'variant-group') and
+        (task.taskSubType == 'asin' or task.taskSubType == 'variant-group' or task.taskSubType == 'competitor-asin' or task.taskSubType == 'competitor-variant-group') and
         (task.status == 'pending' or task.status == 'processing' or task.status == 'cancelling')
     end
     if live then active = active + 1
@@ -74,7 +81,7 @@ if globalLimit > 0 then
       local ok, task = pcall(cjson.decode, raw)
       if not ok then return redis.error_reply('TASK_EXPORT_GLOBAL_INDEX_INVALID') end
       live = task.taskId == id and task.taskType == 'export' and
-        (task.taskSubType == 'asin' or task.taskSubType == 'variant-group') and
+        (task.taskSubType == 'asin' or task.taskSubType == 'variant-group' or task.taskSubType == 'competitor-asin' or task.taskSubType == 'competitor-variant-group') and
         (task.status == 'pending' or task.status == 'processing' or task.status == 'cancelling')
     end
     if live then active = active + 1
@@ -206,7 +213,12 @@ export class RedisTaskRepository {
       limited ||
       (expected !== null &&
         task.taskType === 'export' &&
-        ['asin', 'variant-group'].includes(task.taskSubType ?? ''));
+        [
+          'asin',
+          'variant-group',
+          'competitor-asin',
+          'competitor-variant-group',
+        ].includes(task.taskSubType ?? ''));
     const saved = await this.redis.eval(
       COMPARE_AND_SET,
       trackExport ? 4 : 2,
@@ -278,14 +290,19 @@ export class RedisTaskRepository {
       const taskSubType = task.taskSubType;
       if (
         task.taskType !== 'export' ||
-        (taskSubType !== 'asin' && taskSubType !== 'variant-group')
+        ![
+          'asin',
+          'variant-group',
+          'competitor-asin',
+          'competitor-variant-group',
+        ].includes(taskSubType ?? '')
       )
         throw new TaskRegistryError('TASK_RECORD_INVALID');
       onPrepared({
         taskId: task.taskId,
         userId: task.userId,
         taskType: 'export',
-        taskSubType,
+        taskSubType: taskSubType as PreparedExportTaskIdentity['taskSubType'],
         createdAt: task.createdAt,
       });
     }
@@ -316,7 +333,12 @@ export class RedisTaskRepository {
   ): Promise<TaskState> {
     if (
       input.taskType !== 'export' ||
-      (input.taskSubType !== 'asin' && input.taskSubType !== 'variant-group') ||
+      ![
+        'asin',
+        'variant-group',
+        'competitor-asin',
+        'competitor-variant-group',
+      ].includes(input.taskSubType ?? '') ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
         input.taskId,
       ) ||

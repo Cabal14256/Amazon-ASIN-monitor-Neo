@@ -8,6 +8,8 @@ import {
   ASIN_EXPORT_QUERY_TIMEOUT_MS,
   createPgPool,
   PgAsinExportQueryRepository,
+  PgAsinQueryRepository,
+  PgCompetitorExportRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import { ExportArtifactStore } from '@asin-monitor/export';
@@ -58,6 +60,21 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     }),
   );
   const repository = new PgAsinExportQueryRepository(pool);
+  const authorization = new PgAsinQueryRepository(pool);
+  const competitorPool = createPgPool(env.COMPETITOR_DATABASE_URL, {
+    max: 2,
+    connectionTimeoutMillis: Math.min(
+      env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+      2000,
+    ),
+    statement_timeout: ASIN_EXPORT_QUERY_TIMEOUT_MS,
+  });
+  competitorPool.on('error', () =>
+    logger.error('竞品导出数据库连接异常', {
+      reason: 'competitor_export_database_error',
+    }),
+  );
+  const competitorRepository = new PgCompetitorExportRepository(competitorPool);
   const store = new RedisTaskRepository(
     control,
     env,
@@ -132,10 +149,60 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
             },
           },
         );
+        const competitorOptions = {
+          competitor: true,
+          authorize: async (userId: string) =>
+            authorization.read(async (unit) => {
+              const user = await unit.lockOperator(userId);
+              if (
+                !user ||
+                user.status !== 'ACTIVE' ||
+                user.forcePasswordChange ||
+                (user.lockedUntil && user.lockedUntil > new Date()) ||
+                (user.passwordExpiresAt &&
+                  user.passwordExpiresAt <= new Date()) ||
+                !(await unit.operatorPermissionCodes(userId)).includes(
+                  'asin:read',
+                )
+              )
+                throw new Error('EXPORT_AUTHORITY_REVOKED');
+            }),
+          shutdownSignal: shutdown.signal,
+          isClosing: () => closing,
+          assertJobLock: async (job: { id?: string }, token?: string) => {
+            if (
+              !token ||
+              !job.id ||
+              (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
+            )
+              throw new Error('EXPORT_JOB_LOCK_LOST');
+          },
+          updateProgress: async (job: { id?: string }, value: number) => {
+            const current = await queue.getJob(job.id!);
+            if (!current) throw new Error('EXPORT_JOB_MISSING');
+            await current.updateProgress(value);
+          },
+        };
+        const competitorAsinProcessor = createAsinExportProcessor(
+          competitorRepository,
+          store,
+          artifacts,
+          competitorOptions,
+        );
+        const competitorGroupProcessor = createVariantGroupExportProcessor(
+          competitorRepository,
+          store,
+          artifacts,
+          competitorOptions,
+        );
         worker = new Worker(
           getPhysicalQueueName('export'),
           (job, token) =>
-            job.name === 'variant-group'
+            job.name === 'competitor-asin'
+              ? competitorAsinProcessor(job, token)
+              : job.name === 'competitor-variant-group'
+              ? competitorGroupProcessor(job, token)
+              : job.name === 'variant-group'
               ? variantGroupProcessor(job, token)
               : processor(job, token),
           {
@@ -267,7 +334,11 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
         });
         closed ??= (async () => {
           await activeWorker.close();
-          await Promise.allSettled([queue.close(), pool.end()]);
+          await Promise.allSettled([
+            queue.close(),
+            pool.end(),
+            competitorPool.end(),
+          ]);
           control.disconnect(false);
         })();
         return closed;
@@ -278,7 +349,12 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
     shutdown.abort();
     if (cleanupTimer) clearInterval(cleanupTimer);
     control.disconnect(false);
-    await Promise.allSettled([worker?.close(true), queue.close(), pool.end()]);
+    await Promise.allSettled([
+      worker?.close(true),
+      queue.close(),
+      pool.end(),
+      competitorPool.end(),
+    ]);
     throw new Error('ASIN export runtime initialization failed');
   } finally {
     if (startupTimer) clearTimeout(startupTimer);

@@ -387,7 +387,7 @@ export default function TaskCenterPage() {
             controller.signal,
             currentDownload,
             async (sink, saveSignal) => {
-              if (task.taskSubType === 'variant-group') {
+              if (task.taskSubType !== 'asin') {
                 return (
                   await runtime.tasks.downloadVariantGroupExportTo(
                     task,
@@ -406,7 +406,7 @@ export default function TaskCenterPage() {
       }
       const { blob, filename } =
         task.taskType === 'export'
-          ? task.taskSubType === 'variant-group'
+          ? task.taskSubType !== 'asin'
             ? await runtime.tasks.downloadVariantGroupExport(
                 task,
                 controller.signal,

@@ -94,6 +94,37 @@ export function variantGroupExportDownloadFilename(
 }
 
 export function exportDownloadFilename(task: TaskInfo): string | null {
+  if (
+    task.taskSubType === 'competitor-asin' ||
+    task.taskSubType === 'competitor-variant-group'
+  ) {
+    if (
+      task.status !== 'completed' ||
+      task.taskType !== 'export' ||
+      !isValidTaskId(task.taskId) ||
+      task.downloadUrl !==
+        `/api/v1/tasks/${encodeURIComponent(task.taskId)}/download` ||
+      !task.result ||
+      typeof task.result !== 'object' ||
+      Array.isArray(task.result)
+    )
+      return null;
+    const result = task.result as Record<string, unknown>,
+      artifact = asinExportArtifactSchema.safeParse(result.artifact);
+    return artifact.success &&
+      artifact.data.taskId === task.taskId &&
+      artifact.data.bytes === result.fileSizeBytes &&
+      result.exportType === task.taskSubType &&
+      result.mimeType === XLSX_MIME &&
+      typeof result.filename === 'string' &&
+      (task.taskSubType === 'competitor-asin'
+        ? /^竞品ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/
+        : /^竞品变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/
+      ).test(result.filename) &&
+      task.filename === result.filename
+      ? result.filename
+      : null;
+  }
   return (
     asinExportDownloadFilename(task) ?? variantGroupExportDownloadFilename(task)
   );
@@ -292,7 +323,7 @@ export class TaskApi {
   }
 
   async downloadVariantGroupExport(task: TaskInfo, signal?: AbortSignal) {
-    const filename = variantGroupExportDownloadFilename(task);
+    const filename = exportDownloadFilename(task);
     if (!filename) throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
     const expectedBytes = (task.result as { fileSizeBytes: number })
       .fileSizeBytes;
@@ -319,7 +350,7 @@ export class TaskApi {
     sink: DownloadSink,
     signal?: AbortSignal,
   ) {
-    const filename = variantGroupExportDownloadFilename(task);
+    const filename = exportDownloadFilename(task);
     if (!filename) throw new ApiError('INVALID_INPUT', '导出任务文件标识无效');
     const expectedBytes = (task.result as { fileSizeBytes: number })
       .fileSizeBytes;

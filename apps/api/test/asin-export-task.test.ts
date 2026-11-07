@@ -114,6 +114,36 @@ describe('ASIN export producer', () => {
       }),
     );
   });
+  it.each(['competitor-asin', 'competitor-variant-group'] as const)(
+    'admits %s through the same authorization and shared active limits',
+    async (exportType) => {
+      const result = await service().create(principal, {
+        exportType,
+        params: { country: 'DE', keyword: 'raw', variantStatus: 'BROKEN' },
+      });
+      expect(result).toMatchObject({ exportType, status: 'pending' });
+      expect(createLimitedExport).toHaveBeenCalledWith(
+        expect.objectContaining({ taskSubType: exportType }),
+        2,
+        100,
+        expect.any(Function),
+      );
+      expect(enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exportType,
+          taskSubType: exportType,
+          userId: principal.userId,
+          createdAt,
+        }),
+      );
+      await expect(
+        service().create(principal, {
+          exportType,
+          params: { layout: 'detailed' },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    },
+  );
 
   it('accepts the bounded variant-group export subtype without broadening other types', async () => {
     const result = await service().create(principal, {

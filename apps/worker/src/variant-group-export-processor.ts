@@ -1,12 +1,14 @@
 import {
+  competitorVariantGroupExportJobDataSchema,
   variantGroupExportJobDataSchema,
+  type CompetitorVariantGroupExportJobData,
   type VariantGroupExportJobData,
 } from '@asin-monitor/contracts';
 import {
   MAX_ASIN_QUERY_CHILDREN,
   resolveAsinVariantStatus,
   type AsinExportChildrenCursor,
-  type AsinExportQueryRepositoryPort,
+  type CatalogExportQueryRepositoryPort,
   type RedisTaskRepository,
   type TaskMutation,
   type TaskState,
@@ -16,6 +18,10 @@ import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { finished } from 'node:stream/promises';
 import { abortableExport } from './abortable-export';
 import { createBoundedExportWorkbook } from './bounded-export-workbook';
+import {
+  COMPETITOR_GROUP_HEADER,
+  COMPETITOR_GROUP_WIDTHS,
+} from './competitor-export-rows';
 import { logger } from './logger';
 import {
   VARIANT_GROUP_EXPORT_HEADER,
@@ -32,7 +38,9 @@ const WRITER_CLOSE_TIMEOUT_MS = 5000;
 const MIME_TYPE =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const cancelledResult = { cancelled: true, message: '导出任务已取消' };
-const identity = (data: VariantGroupExportJobData) => ({
+const identity = (
+  data: VariantGroupExportJobData | CompetitorVariantGroupExportJobData,
+) => ({
   userId: data.userId,
   taskType: data.taskType,
   taskSubType: data.taskSubType,
@@ -45,6 +53,8 @@ export interface VariantGroupExportProcessorOptions {
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
   now?(): Date;
+  competitor?: boolean;
+  authorize?(userId: string): Promise<void>;
 }
 
 class TaskStopped extends Error {
@@ -65,18 +75,21 @@ function filename(at: Date) {
 }
 
 export function createVariantGroupExportProcessor(
-  repository: AsinExportQueryRepositoryPort,
+  repository: CatalogExportQueryRepositoryPort,
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
   artifacts: ExportArtifactStore,
   options: VariantGroupExportProcessorOptions,
   log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
 ): Processor<unknown, unknown, string> {
   return async (job, token) => {
-    const parsed = variantGroupExportJobDataSchema.safeParse(job.data);
+    const parsed = options.competitor
+      ? competitorVariantGroupExportJobDataSchema.safeParse(job.data)
+      : variantGroupExportJobDataSchema.safeParse(job.data);
     if (
       !parsed.success ||
       job.id !== parsed.data.taskId ||
-      job.name !== 'variant-group'
+      job.name !==
+        (options.competitor ? 'competitor-variant-group' : 'variant-group')
     )
       throw new UnrecoverableError('变体组导出任务数据无效');
     const data = parsed.data;
@@ -116,6 +129,7 @@ export function createVariantGroupExportProcessor(
       controller.signal.throwIfAborted();
       if (options.isClosing()) throw new Error('EXPORT_WORKER_STOPPING');
       await options.assertJobLock(job, token);
+      await options.authorize?.(data.userId);
       const state = verify(await store.read(data.taskId));
       if (isTerminal(state.status)) throw new TaskStopped(state);
       if (state.cancelRequestedAt || state.status === 'cancelling')
@@ -162,8 +176,10 @@ export function createVariantGroupExportProcessor(
       const state = await mutate({
         kind: 'completed',
         result: {
-          exportType: 'variant-group',
-          filename: filename(options.now?.() ?? new Date()),
+          exportType: data.exportType,
+          filename:
+            (options.competitor ? '竞品' : '') +
+            filename(options.now?.() ?? new Date()),
           mimeType: MIME_TYPE,
           fileSizeBytes: artifact.bytes,
           ...(rowCount === undefined ? {} : { rowCount }),
@@ -211,9 +227,20 @@ export function createVariantGroupExportProcessor(
       writer = createBoundedExportWorkbook(outputStream, (error) =>
         controller.abort(error),
       );
-      const sheet = writer.workbook.addWorksheet(VARIANT_GROUP_EXPORT_SHEET);
-      sheet.columns = VARIANT_GROUP_EXPORT_WIDTHS.map((width) => ({ width }));
-      writer.commitRow(sheet, VARIANT_GROUP_EXPORT_HEADER);
+      const sheet = writer.workbook.addWorksheet(
+        (options.competitor ? '竞品' : '') + VARIANT_GROUP_EXPORT_SHEET,
+      );
+      sheet.columns = (
+        options.competitor
+          ? COMPETITOR_GROUP_WIDTHS
+          : VARIANT_GROUP_EXPORT_WIDTHS
+      ).map((width) => ({ width }));
+      writer.commitRow(
+        sheet,
+        options.competitor
+          ? COMPETITOR_GROUP_HEADER
+          : VARIANT_GROUP_EXPORT_HEADER,
+      );
       await writer.drain(controller.signal);
 
       let groupsProcessed = 0;
@@ -304,7 +331,10 @@ export function createVariantGroupExportProcessor(
               )
             )
               throw new ExportCapacityError('EXPORT_CELL_LIMIT_EXCEEDED');
-            writer!.commitRow(sheet, row);
+            writer!.commitRow(
+              sheet,
+              options.competitor ? row.filter((_, index) => index !== 3) : row,
+            );
             await writer!.drain(controller.signal);
             if (rowCount % 500 === 0) await snapshotCheck();
           }

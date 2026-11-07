@@ -115,6 +115,53 @@ export const variantGroupExportJobDataSchema = z
 export type VariantGroupExportJobData = z.infer<
   typeof variantGroupExportJobDataSchema
 >;
+export const competitorCatalogExportParamsSchema = asinExportParamsSchema
+  .omit({ layout: true })
+  .default({});
+export const competitorAsinExportTaskRequestSchema = z
+  .object({
+    exportType: z.literal('competitor-asin'),
+    params: competitorCatalogExportParamsSchema,
+  })
+  .strict();
+export const competitorVariantGroupExportTaskRequestSchema = z
+  .object({
+    exportType: z.literal('competitor-variant-group'),
+    params: competitorCatalogExportParamsSchema,
+  })
+  .strict();
+export const competitorAsinExportJobDataSchema = asinExportJobDataSchema.extend(
+  {
+    exportType: z.literal('competitor-asin'),
+    taskSubType: z.literal('competitor-asin'),
+    params: competitorCatalogExportParamsSchema,
+  },
+);
+export const competitorVariantGroupExportJobDataSchema =
+  variantGroupExportJobDataSchema.extend({
+    exportType: z.literal('competitor-variant-group'),
+    taskSubType: z.literal('competitor-variant-group'),
+    params: competitorCatalogExportParamsSchema,
+  });
+export type CompetitorAsinExportJobData = z.infer<
+  typeof competitorAsinExportJobDataSchema
+>;
+export type CompetitorVariantGroupExportJobData = z.infer<
+  typeof competitorVariantGroupExportJobDataSchema
+>;
+export const catalogExportJobDataSchema = z.union([
+  asinExportJobDataSchema,
+  variantGroupExportJobDataSchema,
+  competitorAsinExportJobDataSchema,
+  competitorVariantGroupExportJobDataSchema,
+]);
+export type CatalogExportJobData = z.infer<typeof catalogExportJobDataSchema>;
+export const CATALOG_EXPORT_TYPES = [
+  'asin',
+  'variant-group',
+  'competitor-asin',
+  'competitor-variant-group',
+] as const;
 export const asinExportArtifactSchema = z
   .object({
     taskId: z.string().uuid(),

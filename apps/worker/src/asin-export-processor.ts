@@ -1,6 +1,8 @@
 import {
   asinExportJobDataSchema,
+  competitorAsinExportJobDataSchema,
   type AsinExportJobData,
+  type CompetitorAsinExportJobData,
 } from '@asin-monitor/contracts';
 import {
   MAX_ASIN_EXPORT_GROUP_PAGE_SIZE,
@@ -9,7 +11,7 @@ import {
   isTerminalTaskStatus,
   type AsinExportChildrenCursor,
   type AsinExportCursor,
-  type AsinExportQueryRepositoryPort,
+  type CatalogExportQueryRepositoryPort,
   type RedisTaskRepository,
   type TaskMutation,
   type TaskState,
@@ -26,6 +28,10 @@ import {
   asinExportRows,
 } from './asin-export-rows';
 import { createBoundedExportWorkbook } from './bounded-export-workbook';
+import {
+  competitorAsinExportFormat,
+  competitorAsinExportRows,
+} from './competitor-export-rows';
 import { logger } from './logger';
 
 const GROUP_PAGE_SIZE = MAX_ASIN_EXPORT_GROUP_PAGE_SIZE;
@@ -34,7 +40,7 @@ const MAX_ROWS = 100_000;
 export const ASIN_EXPORT_TASK_TIMEOUT_MS = 30 * 60_000;
 const WRITER_CLOSE_TIMEOUT_MS = 5000;
 const cancelledResult = { cancelled: true, message: '导出任务已取消' };
-const identity = (data: AsinExportJobData) => ({
+const identity = (data: AsinExportJobData | CompetitorAsinExportJobData) => ({
   userId: data.userId,
   taskType: data.taskType,
   taskSubType: data.taskSubType,
@@ -47,6 +53,8 @@ export interface AsinExportProcessorOptions {
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
   now?(): Date;
+  competitor?: boolean;
+  authorize?(userId: string): Promise<void>;
 }
 class TaskStopped extends Error {
   constructor(readonly state: TaskState) {
@@ -56,15 +64,21 @@ class TaskStopped extends Error {
 class ExportCapacityError extends Error {}
 
 export function createAsinExportProcessor(
-  repository: AsinExportQueryRepositoryPort,
+  repository: CatalogExportQueryRepositoryPort,
   store: Pick<RedisTaskRepository, 'read' | 'mutate'>,
   artifacts: ExportArtifactStore,
   options: AsinExportProcessorOptions,
   log: Pick<typeof logger, 'info' | 'warn' | 'error'> = logger,
 ): Processor<unknown, unknown, string> {
   return async (job, token) => {
-    const parsed = asinExportJobDataSchema.safeParse(job.data);
-    if (!parsed.success || job.id !== parsed.data.taskId || job.name !== 'asin')
+    const parsed = options.competitor
+      ? competitorAsinExportJobDataSchema.safeParse(job.data)
+      : asinExportJobDataSchema.safeParse(job.data);
+    if (
+      !parsed.success ||
+      job.id !== parsed.data.taskId ||
+      job.name !== (options.competitor ? 'competitor-asin' : 'asin')
+    )
       throw new UnrecoverableError('导出任务数据无效');
     const data = parsed.data;
     const controller = new AbortController();
@@ -136,6 +150,7 @@ export function createAsinExportProcessor(
       controller.signal.throwIfAborted();
       if (options.isClosing()) throw new Error('EXPORT_WORKER_STOPPING');
       await options.assertJobLock(job, token);
+      await options.authorize?.(data.userId);
       const state = verify(await store.read(data.taskId));
       if (isTerminalTaskStatus(state.status)) throw new TaskStopped(state);
       if (state.cancelRequestedAt || state.status === 'cancelling')
@@ -154,8 +169,10 @@ export function createAsinExportProcessor(
     ) => {
       await check();
       const result = {
-        exportType: 'asin' as const,
-        filename: asinExportFilename(options.now?.() ?? new Date()),
+        exportType: data.exportType,
+        filename:
+          (options.competitor ? '竞品' : '') +
+          asinExportFilename(options.now?.() ?? new Date()),
         mimeType:
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         fileSizeBytes: artifact.bytes,
@@ -205,8 +222,14 @@ export function createAsinExportProcessor(
         controller.abort(error),
       );
       const workbook = boundedWorkbook.workbook;
-      const sheet = workbook.addWorksheet('ASIN数据');
-      const format = asinExportFormat(data.params.layout);
+      const sheet = workbook.addWorksheet(
+        options.competitor ? '竞品ASIN数据' : 'ASIN数据',
+      );
+      const format = options.competitor
+        ? competitorAsinExportFormat
+        : asinExportFormat(
+            'layout' in data.params ? data.params.layout : undefined,
+          );
       sheet.columns = format.widths.map((width) => ({ width }));
       boundedWorkbook.commitRow(sheet, format.header);
       await boundedWorkbook.drain(controller.signal);
@@ -225,7 +248,12 @@ export function createAsinExportProcessor(
         const appendRows = async (
           group: ReturnType<typeof mapAsinQueryGroups>[number],
         ) => {
-          for (const row of asinExportRows([group], data.params.layout)) {
+          for (const row of options.competitor
+            ? competitorAsinExportRows([group])
+            : asinExportRows(
+                [group],
+                'layout' in data.params ? data.params.layout : undefined,
+              )) {
             if (++rowCount > MAX_ROWS)
               throw new ExportCapacityError('EXPORT_LIMIT_EXCEEDED');
             if (
