@@ -453,7 +453,7 @@ describe('bounded backup streaming save', () => {
     expect(f.sink.write).not.toHaveBeenCalled();
     expect(f.sink.close).not.toHaveBeenCalled();
   });
-  it('reports HTTP 403 promptly while a native abort retains physical admission and runs once', async () => {
+  it('reports HTTP 403 promptly while a native abort runs once', async () => {
     const f = fixture(),
       cleanup = deferred<void>();
     f.fetcher.mockResolvedValueOnce(
@@ -488,6 +488,57 @@ describe('bounded backup streaming save', () => {
       cleanup.resolve();
       await result;
     }
+  });
+  it('retains all physical file-save slots until failed download aborts actually finish', async () => {
+    const f = fixture(),
+      cleanup = deferred<void>();
+    f.fetcher.mockImplementation(async () =>
+      jsonResponse({ success: false }, 403),
+    );
+    const sinks = Array.from({ length: 64 }, () => ({
+      write: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+      abort: vi.fn(() => cleanup.promise),
+    }));
+    const destination = (sink: DownloadSink) => ({
+      kind: 'file' as const,
+      filename: file.filename.replace('.dump', '.tar'),
+      handle: { createWritable: vi.fn(async () => sink) },
+    });
+    const run = (client: typeof f, target: ReturnType<typeof destination>) =>
+      downloadBackup(
+        client.http,
+        client.api,
+        file,
+        target,
+        new AbortController().signal,
+        () => true,
+        vi.fn(),
+      );
+    const failures = sinks.map((sink) =>
+      run(f, destination(sink)).catch((error: unknown) => error),
+    );
+    try {
+      expect(await Promise.all(failures)).toEqual(
+        sinks.map(() => expect.objectContaining({ status: 403 })),
+      );
+      const other = fixture(),
+        blocked = destination(other.sink);
+      await expect(run(other, blocked)).rejects.toMatchObject({
+        kind: 'CAPACITY',
+      });
+      expect(blocked.handle.createWritable).not.toHaveBeenCalled();
+      expect(other.fetcher).not.toHaveBeenCalled();
+      for (const sink of sinks) expect(sink.abort).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup.resolve();
+      await Promise.all(failures);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const recovered = fixture();
+    await expect(
+      run(recovered, destination(recovered.sink)),
+    ).resolves.toBeGreaterThan(0);
   });
   it('enforces the deadline against a non-cooperating fetch and ignores its late body', async () => {
     vi.useFakeTimers();
