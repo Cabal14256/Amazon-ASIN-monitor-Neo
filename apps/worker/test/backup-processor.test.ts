@@ -344,7 +344,7 @@ describe('backup command boundary', () => {
       '/tmp/test.dump',
       'restore_user',
     );
-    expect(args).toContain('--dbname=backup_ci');
+    expect(args).toContain("--dbname=dbname='backup_ci'");
     expect(args).toContain('--single-transaction');
     expect(args.join(' ')).not.toContain('private_password');
   });
@@ -579,7 +579,7 @@ describe('backup command boundary', () => {
       expect(environment.PGDATABASE).toBe(client.connectionParameters.database);
       expect(
         restoreCommandArgs(environment.PGDATABASE!, '/tmp/test.dump', 'backup'),
-      ).toContain(`--dbname=${expected}`);
+      ).toContain(`--dbname=dbname='${expected}'`);
     },
   );
 

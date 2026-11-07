@@ -309,6 +309,63 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
       20000,
     );
 
+    it('restores a literal conninfo-looking database name without touching the reinterpreted database', async () => {
+      const literalName = `dbname=${scratchName}`;
+      const url = new URL(scratchUrl);
+      url.pathname = `/${encodeURIComponent(literalName)}`;
+      let literalPool: ReturnType<typeof createPgPool> | undefined;
+      let created = false;
+      const sentinel = `literal_database_${scratchName.slice(-12)}`;
+      try {
+        await adminPool.query(
+          `CREATE DATABASE "${literalName}" TEMPLATE template0`,
+        );
+        created = true;
+        await adminPool.query(
+          `ALTER DATABASE "${literalName}" SET TimeZone TO 'Asia/Shanghai'`,
+        );
+        literalPool = createPgPool(url.toString(), {
+          max: 1,
+          connectionTimeoutMillis: 2000,
+        });
+        await literalPool.query(
+          `CREATE TABLE public.${sentinel}(value text NOT NULL)`,
+        );
+        await literalPool.query(
+          `INSERT INTO public.${sentinel} VALUES('literal-original')`,
+        );
+        await scratchPool.query(
+          `CREATE TABLE public.${sentinel}(value text NOT NULL)`,
+        );
+        await scratchPool.query(
+          `INSERT INTO public.${sentinel} VALUES('decoy-untouched')`,
+        );
+        const archived = await runJob(url.toString(), 'create', {
+          tables: [sentinel],
+        });
+        const filename = (archived.result as { filename?: string }).filename;
+        if (!filename)
+          throw new Error('Literal database archive not published');
+        await literalPool.query(
+          `UPDATE public.${sentinel} SET value='literal-mutated'`,
+        );
+        const restored = await runJob(url.toString(), 'restore', { filename });
+        expect(restored.state.status).toBe('completed');
+        expect(
+          (await literalPool.query(`SELECT value FROM public.${sentinel}`))
+            .rows,
+        ).toEqual([{ value: 'literal-original' }]);
+        expect(
+          (await scratchPool.query(`SELECT value FROM public.${sentinel}`))
+            .rows,
+        ).toEqual([{ value: 'decoy-untouched' }]);
+      } finally {
+        await literalPool?.end();
+        if (created)
+          await adminPool.query(`DROP DATABASE "${literalName}" WITH (FORCE)`);
+        await scratchPool.query(`DROP TABLE IF EXISTS public.${sentinel}`);
+      }
+    }, 30_000);
     it('backs up and restores only the literal mixed-case table using the real pg_dump parser', async () => {
       const mixed = `BackupMixed_${scratchName.slice(-12)}`;
       const folded = mixed.toLowerCase();

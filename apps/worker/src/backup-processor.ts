@@ -455,9 +455,17 @@ export function restoreCommandArgs(
     '--no-owner',
     '--no-acl',
     `--role=${backupDatabaseRole(role)}`,
-    `--dbname=${database}`,
+    `--dbname=${literalDatabaseConnection(database)}`,
     input,
   ];
+}
+
+/** libpq expands names containing '=' or a URI prefix. An escaped conninfo
+ * value keeps the decoded application database name literal. */
+function literalDatabaseConnection(database: string): string {
+  if (!database || database.includes('\0'))
+    throw new BackupCommandError('BACKUP_DATABASE_URL_INVALID');
+  return `dbname='${database.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
 }
 
 interface BackupCommandOptions {
@@ -1188,7 +1196,7 @@ async function restorePostgresqlIsolated(input: {
         '--no-owner',
         '--no-acl',
         `--role=${input.lock.effectiveRole}`,
-        `--dbname=${database}`,
+        `--dbname=${literalDatabaseConnection(database)}`,
         input.directoryFile,
       ],
       commandEnv,
@@ -1311,7 +1319,7 @@ async function restoreTimescaleIsolated(input: {
         '--no-owner',
         '--no-acl',
         `--role=${input.lock.effectiveRole}`,
-        `--dbname=${database}`,
+        `--dbname=${literalDatabaseConnection(database)}`,
         input.directoryFile,
       ],
       commandEnv,
@@ -1427,12 +1435,45 @@ function sameArtifactVersion(left: BigIntStats, right: BigIntStats): boolean {
 }
 
 export async function readBackupArtifactMetadataFile(path: string) {
-  const details = await lstat(path);
-  if (!details.isFile() || details.size > BACKUP_ARTIFACT_METADATA_MAX_BYTES)
+  const entry = await lstat(path, { bigint: true });
+  const maximum = BigInt(BACKUP_ARTIFACT_METADATA_MAX_BYTES);
+  if (!entry.isFile() || entry.size > maximum)
     throw new Error('BACKUP_METADATA_INVALID');
-  return backupArtifactMetadataSchema.parse(
-    JSON.parse(await readFile(path, 'utf8')),
+  const file = await open(
+    path,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      (fsConstants.O_NONBLOCK ?? 0),
   );
+  try {
+    const details = await file.stat({ bigint: true });
+    if (
+      !details.isFile() ||
+      details.size > maximum ||
+      !sameArtifactVersion(entry, details)
+    )
+      throw new Error('BACKUP_METADATA_INVALID');
+    const bytes = Buffer.alloc(Number(details.size) + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await file.read(
+        bytes,
+        offset,
+        Math.min(64 * 1024, bytes.length - offset),
+        offset,
+      );
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    const after = await file.stat({ bigint: true });
+    if (offset !== Number(details.size) || !sameArtifactVersion(details, after))
+      throw new Error('BACKUP_METADATA_INVALID');
+    return backupArtifactMetadataSchema.parse(
+      JSON.parse(bytes.subarray(0, offset).toString('utf8')),
+    );
+  } finally {
+    await file.close();
+  }
 }
 
 export function createBackupProcessor(

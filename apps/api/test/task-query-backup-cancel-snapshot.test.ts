@@ -343,6 +343,34 @@ describe('retained backup BullMQ snapshot to authenticated HTTP detail', () => {
       assertReadOnly();
     },
   );
+  it.each(
+    identities.flatMap((identity) =>
+      ['missing', 'malformed', 'other-file'].map((mode) => ({
+        ...identity,
+        mode,
+      })),
+    ),
+  )(
+    'rejects queue-only $operation/$target success without its matching receipt ($mode)',
+    async ({ mode, ...identity }) => {
+      const data = backupData(identity);
+      const receipt = successfulResult(data);
+      const result =
+        mode === 'missing'
+          ? null
+          : mode === 'malformed'
+          ? { operation: identity.operation }
+          : {
+              ...receipt,
+              filename: 'backup_20260927-020000-abcdef01-primary.dump',
+            };
+      retain(data, result);
+      const response = await get();
+      expect(response.statusCode).toBe(500);
+      expect(response.body).not.toContain('completed');
+      assertReadOnly();
+    },
+  );
   it.each([
     {
       ...identities[0],
@@ -358,14 +386,12 @@ describe('retained backup BullMQ snapshot to authenticated HTTP detail', () => {
     },
     { ...identities[3], result: { message: cancellation.message } },
   ])(
-    'does not interpret a non-true cancellation marker as $operation/$target cancellation',
+    'rejects an unproven completed $operation/$target result instead of treating a non-true marker as success',
     async ({ result, ...identity }) => {
       retain(backupData(identity), result);
       const response = await get();
-      expect(response.statusCode).toBe(200);
-      expect(taskInfoResultSchema.parse(response.json()).data?.status).toBe(
-        'completed',
-      );
+      expect(response.statusCode).toBe(500);
+      expect(response.body).not.toContain('completed');
       assertReadOnly();
     },
   );

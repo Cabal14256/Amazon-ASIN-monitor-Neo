@@ -9,6 +9,7 @@ import {
 import {
   asinExportJobDataSchema,
   backupJobDataSchema,
+  backupRestoreReceiptSchema,
   competitorMonitorJobSchema,
   primaryMonitorJobSchema,
   variantGroupExportJobDataSchema,
@@ -23,6 +24,7 @@ import {
   RedisTaskRepository,
   batchDeleteTaskDataSchema,
   isBackupUncommittedFailure,
+  parseBackupCreationReceipt,
   parseCompetitorMonitorCompletion,
   type BatchDeleteTaskData,
   type TaskRedisPort,
@@ -143,6 +145,18 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
     backupData = backupJobDataSchema.parse(job.data);
     if (backupData.taskId !== job.id || job.name !== backupData.operation)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
+    if (state === 'completed' && status !== 'cancelled') {
+      if (backupData.operation === 'create')
+        parseBackupCreationReceipt(backupData, result);
+      else {
+        const receipt = backupRestoreReceiptSchema.parse(result);
+        if (
+          receipt.target !== backupData.target ||
+          receipt.filename !== backupData.params.filename
+        )
+          throw new Error('BACKUP_RESTORE_RECEIPT_INVALID');
+      }
+    }
     if (state === 'failed')
       backupUncommittedFailure = isBackupUncommittedFailure(
         backupData,
