@@ -6,6 +6,35 @@ import {
   Registry,
   collectDefaultMetrics,
 } from 'prom-client';
+import type { DatabaseOperation } from '../database/observed-pg-client';
+
+interface DatabasePoolSnapshot {
+  readonly totalCount: number;
+  readonly idleCount: number;
+  readonly waitingCount: number;
+  readonly options: { max?: number };
+}
+type DatabasePools = Record<
+  'database' | 'competitor_database',
+  DatabasePoolSnapshot
+>;
+const DATABASE_POOL_METRICS: ReadonlyArray<
+  readonly [string, string, (pool: DatabasePoolSnapshot) => number]
+> = [
+  ['total_connections', '连接池已创建连接数', (pool) => pool.totalCount],
+  ['idle_connections', '连接池空闲连接数', (pool) => pool.idleCount],
+  [
+    'active_connections',
+    '连接池已借出连接数（包含空闲事务）',
+    (pool) => Math.max(0, pool.totalCount - pool.idleCount),
+  ],
+  [
+    'waiting_requests',
+    '连接池等待获取连接的请求数',
+    (pool) => pool.waitingCount,
+  ],
+  ['connection_limit', '连接池最大连接数', (pool) => pool.options.max ?? 10],
+];
 
 /**
  * 指标命名沿用旧系统 metricsService.js 的 amazon_asin_monitor_* 前缀，
@@ -28,6 +57,38 @@ export type AnalyticsCachePrefix = (typeof ANALYTICS_CACHE_PREFIXES)[number];
 @Injectable()
 export class MetricsService implements OnModuleDestroy {
   readonly registry = new Registry();
+  private databasePools?: DatabasePools;
+  private poolMetricsFailure?: () => void;
+  private poolMetricsWarned = false;
+  private readonly databasePoolGauges = DATABASE_POOL_METRICS.map(
+    ([suffix, help, read]) => {
+      const owner = this;
+      return new Gauge({
+        name: `${METRICS_PREFIX}db_pool_${suffix}`,
+        help,
+        labelNames: ['database'] as const,
+        registers: [this.registry],
+        collect() {
+          if (!owner.databasePools) return;
+          for (const name of ['database', 'competitor_database'] as const) {
+            try {
+              this.set({ database: name }, read(owner.databasePools[name]));
+            } catch {
+              this.remove({ database: name });
+              if (!owner.poolMetricsWarned) {
+                owner.poolMetricsWarned = true;
+                try {
+                  owner.poolMetricsFailure?.();
+                } catch {
+                  /* Keep scrape independent of diagnostics. */
+                }
+              }
+            }
+          }
+        },
+      });
+    },
+  );
 
   readonly httpRequestsTotal = new Counter({
     name: `${METRICS_PREFIX}http_requests_total`,
@@ -76,7 +137,7 @@ export class MetricsService implements OnModuleDestroy {
 
   readonly dbQueryDurationSeconds = new Histogram({
     name: `${METRICS_PREFIX}db_query_duration_seconds`,
-    help: '数据库查询耗时（秒，P2 阶段接入）',
+    help: '成功的标准 client query 调用耗时（秒，含客户端排队，不含连接获取）',
     labelNames: ['table', 'operation'] as const,
     buckets: [0.001, 0.01, 0.1, 0.5, 1, 2, 5],
     registers: [this.registry],
@@ -143,6 +204,32 @@ export class MetricsService implements OnModuleDestroy {
   async render(): Promise<string> {
     return this.registry.metrics();
   }
+  recordDatabaseQuery(
+    operation: DatabaseOperation,
+    status: 'success' | 'error',
+    seconds: number,
+  ): void {
+    this.dbQueriesTotal.inc({ table: 'unknown', operation, status });
+    if (status === 'success')
+      this.dbQueryDurationSeconds.observe(
+        { table: 'unknown', operation },
+        seconds,
+      );
+  }
+  attachDatabasePools(
+    pools: DatabasePools,
+    onFailure?: () => void,
+  ): () => void {
+    this.databasePools = pools;
+    this.poolMetricsFailure = onFailure;
+    this.poolMetricsWarned = false;
+    return () => {
+      if (this.databasePools !== pools) return;
+      this.databasePools = undefined;
+      this.poolMetricsFailure = undefined;
+      for (const gauge of this.databasePoolGauges) gauge.reset();
+    };
+  }
 
   recordHealthProbe(input: {
     dependency: 'competitor_database' | 'database' | 'redis';
@@ -181,6 +268,8 @@ export class MetricsService implements OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
+    this.databasePools = undefined;
+    this.poolMetricsFailure = undefined;
     this.registry.clear();
   }
 }
