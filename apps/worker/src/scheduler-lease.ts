@@ -41,6 +41,10 @@ export class SchedulerLease {
     private readonly cleanupSchedules?: () => Promise<void>,
   ) {}
 
+  isOwner(): boolean {
+    return !this.stopped && this.ownsLease;
+  }
+
   async assertCurrentOwner(): Promise<boolean> {
     if (this.stopped || this.stopping || !this.ownsLease) return false;
     try {
