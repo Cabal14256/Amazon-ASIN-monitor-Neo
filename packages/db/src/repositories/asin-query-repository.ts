@@ -91,6 +91,20 @@ export interface AsinExportQueryRepositoryPort {
     signal?: AbortSignal,
   ): Promise<T>;
 }
+/** Business-only interface shared by primary and competitor XLSX snapshots. */
+export type CatalogExportQueryUnit = Pick<
+  AsinExportQueryUnit,
+  'listExportGroups' | 'listExportChildrenPage'
+>;
+export interface CatalogExportQueryRepositoryPort {
+  read<T>(
+    operation: (
+      unit: CatalogExportQueryUnit,
+      ensureOpen: () => void,
+    ) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T>;
+}
 export class AsinQueryRepositoryError extends Error {
   constructor(
     readonly code: 'capacity' | 'input' | 'result' | 'too-many-children',

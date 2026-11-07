@@ -108,7 +108,12 @@ export class TaskCancellationService {
       if (
         next.status === 'cancelled' &&
         next.taskType === 'export' &&
-        ['asin', 'variant-group'].includes(next.taskSubType || '')
+        [
+          'asin',
+          'variant-group',
+          'competitor-asin',
+          'competitor-variant-group',
+        ].includes(next.taskSubType || '')
       ) {
         // A delayed retry may own an earlier published file even though no
         // Worker will run after atomic queue removal. Use only the verified

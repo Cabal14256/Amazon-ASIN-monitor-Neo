@@ -1,6 +1,9 @@
 import type { Env } from '@asin-monitor/config';
 import {
   asinExportTaskRequestSchema,
+  catalogExportJobDataSchema,
+  competitorAsinExportTaskRequestSchema,
+  competitorVariantGroupExportTaskRequestSchema,
   createExportTaskRequestSchema,
   variantGroupExportTaskRequestSchema,
 } from '@asin-monitor/contracts';
@@ -70,17 +73,24 @@ export class AsinExportTaskService implements OnModuleDestroy {
     if (!request.success) fail(400, '导出参数无效');
     if (
       request.data.exportType !== 'asin' &&
-      request.data.exportType !== 'variant-group'
+      request.data.exportType !== 'variant-group' &&
+      request.data.exportType !== 'competitor-asin' &&
+      request.data.exportType !== 'competitor-variant-group'
     )
       fail(501, '此导出类型尚未在 Neo 实现');
     const exportType = request.data.exportType;
     const parsed =
-      exportType === 'variant-group'
+      exportType === 'competitor-asin'
+        ? competitorAsinExportTaskRequestSchema.safeParse(raw)
+        : exportType === 'competitor-variant-group'
+        ? competitorVariantGroupExportTaskRequestSchema.safeParse(raw)
+        : exportType === 'variant-group'
         ? variantGroupExportTaskRequestSchema.safeParse(raw)
         : asinExportTaskRequestSchema.safeParse(raw);
     if (!parsed.success) fail(400, '导出筛选参数无效');
-    const taskTitle =
-      exportType === 'variant-group' ? '变体组导出' : 'ASIN导出';
+    const taskTitle = `${exportType.startsWith('competitor-') ? '竞品' : ''}${
+      exportType.endsWith('variant-group') ? '变体组导出' : 'ASIN导出'
+    }`;
     this.active++;
     const taskId = randomUUID();
     let submissionStarted = false;
@@ -131,7 +141,16 @@ export class AsinExportTaskService implements OnModuleDestroy {
         createdAt: task.createdAt,
         taskType: 'export' as const,
       };
-      if (exportType === 'variant-group')
+      if (exportType.startsWith('competitor-'))
+        await port.enqueue(
+          catalogExportJobDataSchema.parse({
+            ...jobIdentity,
+            taskSubType: exportType,
+            exportType,
+            params: parsed.data.params,
+          }),
+        );
+      else if (exportType === 'variant-group')
         await port.enqueue({
           ...jobIdentity,
           taskSubType: 'variant-group',

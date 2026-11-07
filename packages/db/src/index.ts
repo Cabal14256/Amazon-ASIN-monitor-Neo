@@ -45,6 +45,7 @@ export * from './repositories/catalog-operation-execution';
 export * from './repositories/catalog-operation-repository';
 export * from './repositories/competitor-batch-delete-repository';
 export * from './repositories/competitor-check-repository';
+export * from './repositories/competitor-export-repository';
 export * from './repositories/competitor-history-query-repository';
 export * from './repositories/competitor-import-repository';
 export * from './repositories/competitor-monitor-repository';

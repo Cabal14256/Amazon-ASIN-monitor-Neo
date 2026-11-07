@@ -90,7 +90,12 @@ export class TaskDownloadService implements OnModuleDestroy {
           : {};
       if (
         task.taskType === 'export' &&
-        ['asin', 'variant-group'].includes(task.taskSubType || '')
+        [
+          'asin',
+          'variant-group',
+          'competitor-asin',
+          'competitor-variant-group',
+        ].includes(task.taskSubType || '')
       ) {
         const artifact = asinExportArtifactSchema.safeParse(result.artifact);
         if (
@@ -98,12 +103,16 @@ export class TaskDownloadService implements OnModuleDestroy {
           artifact.data.taskId !== task.taskId ||
           typeof result.filename !== 'string' ||
           !(
-            task.taskSubType === 'variant-group'
+            task.taskSubType === 'competitor-variant-group'
+              ? /^竞品变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/
+              : task.taskSubType === 'competitor-asin'
+              ? /^竞品ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/
+              : task.taskSubType === 'variant-group'
               ? /^变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/
               : /^ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/
           ).test(result.filename) ||
-          (task.taskSubType === 'variant-group' &&
-            (result.exportType !== 'variant-group' ||
+          (task.taskSubType !== 'asin' &&
+            (result.exportType !== task.taskSubType ||
               result.mimeType !==
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
               result.fileSizeBytes !== artifact.data.bytes ||

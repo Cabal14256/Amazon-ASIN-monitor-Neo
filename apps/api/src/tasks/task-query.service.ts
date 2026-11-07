@@ -1,5 +1,8 @@
 import type { Env } from '@asin-monitor/config';
-import { backupRestoreReceiptSchema } from '@asin-monitor/contracts';
+import {
+  backupRestoreReceiptSchema,
+  CATALOG_EXPORT_TYPES,
+} from '@asin-monitor/contracts';
 import { isTerminalTaskStatus, type TaskState } from '@asin-monitor/db';
 import {
   variantCheckResultOperation,
@@ -38,7 +41,7 @@ const cancellationSensitiveTask = (task: { taskType: string }) =>
 const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
   cancellationSensitiveTask(task) ||
   (task.taskType === 'export' &&
-    ['asin', 'variant-group'].includes(task.taskSubType || ''));
+    CATALOG_EXPORT_TYPES.some((kind) => kind === task.taskSubType));
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
   (checkTask(task) && task.status === 'failed') ||

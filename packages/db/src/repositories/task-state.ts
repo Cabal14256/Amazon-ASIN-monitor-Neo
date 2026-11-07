@@ -180,7 +180,12 @@ export function transitionTask(
   } else if (
     change.kind === 'completed' &&
     task.taskType === 'export' &&
-    ['asin', 'variant-group'].includes(task.taskSubType || '') &&
+    [
+      'asin',
+      'variant-group',
+      'competitor-asin',
+      'competitor-variant-group',
+    ].includes(task.taskSubType || '') &&
     (task.cancelRequestedAt || task.status === 'cancelling')
   ) {
     // Completion must not win if cancellation reached Redis after the
@@ -252,7 +257,12 @@ export function transitionTask(
             'competitor-monitor',
           ].includes(task.taskType) ||
           (task.taskType === 'export' &&
-            ['asin', 'variant-group'].includes(task.taskSubType || ''))) &&
+            [
+              'asin',
+              'variant-group',
+              'competitor-asin',
+              'competitor-variant-group',
+            ].includes(task.taskSubType || ''))) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {
         next.status = 'cancelled';

@@ -7,18 +7,16 @@ import {
   type QueueName,
 } from '@asin-monitor/config';
 import {
-  asinExportJobDataSchema,
   backupJobDataSchema,
   backupRestoreReceiptSchema,
+  catalogExportJobDataSchema,
   competitorMonitorJobSchema,
   primaryMonitorJobSchema,
-  variantGroupExportJobDataSchema,
-  type AsinExportJobData,
   type BackupJobData,
+  type CatalogExportJobData,
   type CompetitorMonitorJob,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
-  type VariantGroupExportJobData,
 } from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
@@ -91,7 +89,7 @@ export interface BackupProducerPort {
 }
 export interface ExportProducerPort {
   store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
-  enqueue(data: AsinExportJobData | VariantGroupExportJobData): Promise<void>;
+  enqueue(data: CatalogExportJobData): Promise<void>;
   recordRejected?(
     identity: ExportRejectionIdentity,
     deadline?: number,
@@ -128,7 +126,13 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       'competitor-monitor',
       'backup',
     ].includes(type) ||
-      (type === 'export' && ['asin', 'variant-group'].includes(job.name))) &&
+      (type === 'export' &&
+        [
+          'asin',
+          'variant-group',
+          'competitor-asin',
+          'competitor-variant-group',
+        ].includes(job.name))) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
@@ -169,12 +173,21 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);
   }
-  if (type === 'export' && ['asin', 'variant-group'].includes(job.name)) {
-    const data =
-      job.name === 'asin'
-        ? asinExportJobDataSchema.parse(job.data)
-        : variantGroupExportJobDataSchema.parse(job.data);
-    if (data.taskId !== job.id || data.taskType !== type)
+  if (
+    type === 'export' &&
+    [
+      'asin',
+      'variant-group',
+      'competitor-asin',
+      'competitor-variant-group',
+    ].includes(job.name)
+  ) {
+    const data = catalogExportJobDataSchema.parse(job.data);
+    if (
+      data.taskId !== job.id ||
+      data.taskType !== type ||
+      data.exportType !== job.name
+    )
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
   }
   if (type === 'monitor') {
@@ -439,7 +452,12 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       reconcileRejectedExport: async (task) => {
         if (
           task.taskType !== 'export' ||
-          !['asin', 'variant-group'].includes(task.taskSubType || '') ||
+          ![
+            'asin',
+            'variant-group',
+            'competitor-asin',
+            'competitor-variant-group',
+          ].includes(task.taskSubType || '') ||
           !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
             task.taskId,
           )
@@ -667,10 +685,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
           true,
         ),
       enqueue: async (input) => {
-        const parsed =
-          input.exportType === 'variant-group'
-            ? variantGroupExportJobDataSchema.safeParse(input)
-            : asinExportJobDataSchema.safeParse(input);
+        const parsed = catalogExportJobDataSchema.safeParse(input);
         if (!parsed.success) throw new ExportEnqueueRejected('invalid');
         let queue: Queue;
         try {

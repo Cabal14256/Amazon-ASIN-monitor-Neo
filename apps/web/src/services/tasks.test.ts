@@ -149,6 +149,59 @@ describe('task API boundary', () => {
       });
     expect(f.fetcher).not.toHaveBeenCalled();
   });
+  it.each(['competitor-asin', 'competitor-variant-group'] as const)(
+    'downloads a validated %s XLSX and rejects receipt substitution',
+    async (kind) => {
+      const f = setup('/api/');
+      const filename = `${
+        kind === 'competitor-asin' ? '竞品ASIN' : '竞品变体组'
+      }数据_2026-10-07.xlsx`;
+      const original = variantGroupExportTask();
+      const task = {
+        ...original,
+        taskSubType: kind,
+        filename,
+        result: {
+          ...(original.result as Record<string, unknown>),
+          exportType: kind,
+          filename,
+        },
+      };
+      f.fetcher.mockResolvedValueOnce(workbook());
+      expect(await f.tasks.downloadVariantGroupExport(task)).toMatchObject({
+        filename,
+      });
+      expect(f.fetcher.mock.calls[0][0]).toBe(
+        `https://app.test/api/v1/tasks/${id}/download`,
+      );
+      for (const invalid of [
+        { ...task, taskSubType: 'variant-group' },
+        { ...task, filename: '../unsafe.xlsx' },
+        {
+          ...task,
+          result: {
+            ...task.result,
+            exportType: kind === 'competitor-asin' ? 'asin' : 'variant-group',
+          },
+        },
+        {
+          ...task,
+          result: {
+            ...task.result,
+            artifact: {
+              ...((original.result as Record<string, unknown>)
+                .artifact as object),
+              taskId: '10000000-0000-4000-8000-000000000230',
+            },
+          },
+        },
+      ])
+        await expect(
+          f.tasks.downloadVariantGroupExport(invalid),
+        ).rejects.toMatchObject({ kind: 'INVALID_INPUT' });
+      expect(f.fetcher).toHaveBeenCalledOnce();
+    },
+  );
   it.each([
     new Response('{}', { headers: { 'content-type': 'application/json' } }),
     new Response(new Uint8Array([80, 75]), {

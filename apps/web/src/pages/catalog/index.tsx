@@ -96,6 +96,7 @@ import type {
   CatalogGroup,
   CatalogQuery,
 } from './catalog-types';
+import { CompetitorExportControls } from './competitor-export';
 
 const PAGE_SIZES = [1, 10, 20, 50, 100] as const;
 const CHILD_PAGE_SIZE = 50;
@@ -2682,6 +2683,12 @@ export function CatalogPage({
         <CatalogRefreshContext.Provider value={refreshImportedCatalog}>
           {extra}
         </CatalogRefreshContext.Provider>
+        {config.id === 'competitor' && (
+          <CompetitorExportControls
+            query={query}
+            disabled={writing || groups.isPending || !!groups.error}
+          />
+        )}
         {importBlocked && (
           <div className="space-y-2">
             <p role="status">
