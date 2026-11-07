@@ -217,6 +217,63 @@ describe('dedicated competitor bounded batch executor', () => {
       false,
     );
   });
+  it('serializes duplicate positions while unrelated groups keep the free concurrency slot', async () => {
+    const f = setup(),
+      first = deferred<CompetitorGroupCheckData>(),
+      other = deferred<CompetitorGroupCheckData>();
+    let duplicates = 0;
+    f.pipeline.checkGroup.mockImplementation(async (id) => {
+      if (id === 'g1' && ++duplicates === 1) return first.promise;
+      if (id === 'g2') return other.promise;
+      return result(id);
+    });
+    const running = f.executor.execute(
+      { ...job, params: { ...job.params, groupIds: ['g1', 'g1', 'g2'] } },
+      f.context,
+    );
+    await flush();
+    expect(f.pipeline.checkGroup.mock.calls.map(([id]) => id)).toEqual([
+      'g1',
+      'g2',
+    ]);
+    other.resolve(result('g2'));
+    await flush();
+    expect(f.pipeline.checkGroup).toHaveBeenCalledTimes(2);
+    first.resolve(result('g1'));
+    const reference = await running;
+    expect(f.pipeline.checkGroup.mock.calls.map(([id]) => id)).toEqual([
+      'g1',
+      'g2',
+      'g1',
+    ]);
+    expect(
+      f.pipeline.checkGroup.mock.calls.map(
+        ([, scope]) => scope.operation?.step,
+      ),
+    ).toEqual(['group-0', 'group-2', 'group-1']);
+    expect(f.receipts.get(reference.operationKey)?.result).toMatchObject({
+      successCount: 3,
+      results: [{ groupId: 'g1' }, { groupId: 'g1' }, { groupId: 'g2' }],
+    });
+  });
+  it('never starts waiting duplicates after cancellation or an uncertain predecessor commit', async () => {
+    const f = setup(),
+      gate = deferred<CompetitorGroupCheckData>();
+    f.pipeline.checkGroup.mockImplementation(() => gate.promise);
+    const running = f.executor.execute(
+      { ...job, params: { ...job.params, groupIds: ['g1', 'g1'] } },
+      f.context,
+    );
+    const rejected = expect(running).rejects.toBeInstanceOf(
+      VariantCheckCommitUncertainError,
+    );
+    await flush();
+    expect(f.pipeline.checkGroup).toHaveBeenCalledTimes(1);
+    gate.reject(new VariantCheckCommitUncertainError());
+    await rejected;
+    expect(f.pipeline.checkGroup).toHaveBeenCalledTimes(1);
+    expect(f.receipts.size).toBe(0);
+  });
   it('recovers a root COMMIT acknowledgement loss without duplicate group/history writes', async () => {
     const f = setup(),
       transaction = f.repository.transaction;

@@ -325,13 +325,27 @@ export class CompetitorCheckService implements OnModuleDestroy {
         useAsyncCheck(body, query, true) ||
         params.groupIds.length > this.env.BATCH_CHECK_SYNC_MAX_GROUPS
       ) {
+        // Validate the complete immutable request before retaining a catalog
+        // reservation or creating/binding durable task metadata.
+        const createdAt = new Date().toISOString();
+        const prepared = parseVariantCheckJob({
+          taskId: randomUUID(),
+          userId: principal.userId,
+          taskType: 'batch-check',
+          taskSubType: 'competitor-variant-group',
+          params,
+          createdAt,
+          expiresAt: new Date(
+            Date.parse(createdAt) + this.env.TASK_META_TTL_SECONDS * 1000,
+          ).toISOString(),
+        });
         const deadline = performance.now() + 3000;
         const port = this.tasks.openCheck(() => {
           controller.signal.throwIfAborted();
           if (finished || performance.now() >= deadline)
             throw new Error('COMPETITOR_CHECK_SUBMISSION_DEADLINE');
         });
-        submission = randomUUID();
+        submission = prepared.taskId;
         catalog.retain();
         const task = await port.store.create(
           {

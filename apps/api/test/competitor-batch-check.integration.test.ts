@@ -386,6 +386,53 @@ describe.skipIf(
       expect(await count('variant_check_receipts', false)).toBe(0);
       expect(checker.check).toHaveBeenCalledOnce();
     });
+    it('checks duplicate nonempty groups in order with one history pair per position', async () => {
+      await f.pools.competitorPool.query(
+        "INSERT INTO competitor_asins(id,asin,variant_group_id,asin_type,country,brand) VALUES('duplicate-a1','B000000001','g1','MAIN_LINK','US','Fixture')",
+      );
+      const response = await post({
+        groupIds: ['g1', 'g1', ' padded ', 'g1'],
+        useAsync: false,
+        forceRefresh: true,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(
+        response
+          .json()
+          .data.results.map((row: { success: boolean }) => row.success),
+      ).toEqual([true, true, true, true]);
+      expect(checker.check).toHaveBeenCalledTimes(3);
+      expect(await count('competitor_monitor_history')).toBe(6);
+      expect(await count('competitor_variant_check_receipts')).toBe(0);
+      expect(await count('variant_check_receipts', false)).toBe(0);
+      expect(
+        await new PgCatalogOperationRepository(f.pools.primaryPool).read(
+          userId,
+          'competitor',
+        ),
+      ).toBeNull();
+    });
+    it('queues and cancels the maximum-width Unicode batch without stranding its catalog reservation', async () => {
+      const groupIds = Array<string>(1000).fill('😺'.repeat(50));
+      const submitted = await post({ groupIds });
+      expect(submitted.statusCode).toBe(200);
+      const id = submitted.json().data.taskId as string;
+      expect((await queue.getJob(id))?.data.params.groupIds).toEqual(groupIds);
+      const cancelled = await f.http.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${id}/cancel`,
+        headers,
+        payload: {},
+      });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json().data.status).toBe('cancelled');
+      expect(
+        await new PgCatalogOperationRepository(f.pools.primaryPool).read(
+          userId,
+          'competitor',
+        ),
+      ).toBeNull();
+    });
     it('keeps a pending real BullMQ task fenced after a lost client response and removes it through authenticated cancellation', async () => {
       const submitted = await post({ groupIds: ['g1'] });
       expect(submitted.statusCode).toBe(200);

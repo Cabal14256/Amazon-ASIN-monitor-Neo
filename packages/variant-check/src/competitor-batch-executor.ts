@@ -254,58 +254,76 @@ export class CompetitorBatchCheckExecutor {
       results[index] = value;
       recovered.add(index);
     }
-    let next = 0,
-      completed = 0;
+    const pending = groupIds.map((_, index) => index);
+    const running = new Map<string, Promise<void>>();
+    let completed = 0;
     let failed: unknown;
     let progress = Promise.resolve();
-    const workers = Array.from(
-      { length: Math.min(concurrency, groupIds.length) },
-      async () => {
+    const runItem = async (index: number) => {
+      await this.guard(context);
+      if (!recovered.has(index)) {
         try {
-          while (true) {
-            await this.guard(context);
-            const index = next++;
-            if (index >= groupIds.length) return;
-            if (!recovered.has(index)) {
-              try {
-                const value = await this.pipeline.checkGroup(groupIds[index], {
-                  ...context,
-                  operation: operations[index],
-                  onProgress: undefined,
-                  validateResult: (value) =>
-                    reserve(index, {
-                      ...value,
-                      groupId: groupIds[index],
-                      success: true,
-                    }),
-                });
-                results[index] = {
-                  ...value,
-                  groupId: groupIds[index],
-                  success: true,
-                };
-              } catch (error) {
-                context.signal?.throwIfAborted();
-                if (!recoverable(error)) throw error;
-                const value = failure(groupIds[index], error);
-                reserve(index, value);
-                results[index] = value;
-              }
-            }
-            const done = ++completed;
-            progress = progress.then(async () => {
-              await this.guard(context);
-              await context.onProgress?.(done, groupIds.length);
-            });
-            await progress;
-          }
+          const value = await this.pipeline.checkGroup(groupIds[index], {
+            ...context,
+            operation: operations[index],
+            onProgress: undefined,
+            validateResult: (value) =>
+              reserve(index, {
+                ...value,
+                groupId: groupIds[index],
+                success: true,
+              }),
+          });
+          results[index] = {
+            ...value,
+            groupId: groupIds[index],
+            success: true,
+          };
         } catch (error) {
-          failed ??= error;
-          stop.abort(error);
+          context.signal?.throwIfAborted();
+          if (!recoverable(error)) throw error;
+          const value = failure(groupIds[index], error);
+          reserve(index, value);
+          results[index] = value;
         }
-      },
-    );
-    await Promise.all(workers);
+      }
+      const done = ++completed;
+      progress = progress.then(async () => {
+        await this.guard(context);
+        await context.onProgress?.(done, groupIds.length);
+      });
+      await progress;
+    };
+    try {
+      while (pending.length || running.size) {
+        await this.guard(context);
+        while (running.size < concurrency && !failed) {
+          // A duplicate must observe its predecessor's committed snapshot.
+          // Skip busy IDs so unrelated groups can still use every free slot.
+          const offset = pending.findIndex(
+            (index) => !running.has(groupIds[index]),
+          );
+          if (offset === -1) break;
+          const [index] = pending.splice(offset, 1);
+          const id = groupIds[index];
+          const work = runItem(index)
+            .catch((error: unknown) => {
+              failed ??= error;
+              stop.abort(error);
+            })
+            .finally(() => running.delete(id));
+          running.set(id, work);
+        }
+        if (running.size) await Promise.race(running.values());
+        if (failed) break;
+      }
+    } catch (error) {
+      failed ??= error;
+      stop.abort(error);
+    } finally {
+      // Cancellation cannot release physical admission while group I/O remains.
+      await Promise.all(running.values());
+    }
     if (failed) throw failed;
     await this.guard(context);
     return { total: groupIds.length, results };

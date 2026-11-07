@@ -117,7 +117,9 @@ function canonicalRequest(value: unknown): string {
     throw new VariantCheckError('invalid-input');
   };
   const json = JSON.stringify(visit(value, 0));
-  if (Buffer.byteLength(json) > 128 * 1024)
+  // 1000 literal catalog IDs can each contain 50 four-byte Unicode scalars.
+  // Keep the digest bounded without rejecting a contract-valid batch.
+  if (Buffer.byteLength(json) > 256 * 1024)
     throw new VariantCheckError('invalid-input');
   return json;
 }

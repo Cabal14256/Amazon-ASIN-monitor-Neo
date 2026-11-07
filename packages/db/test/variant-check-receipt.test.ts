@@ -80,6 +80,26 @@ describe('Variant check operation identity and complete receipt payload', () => 
       parseVariantCheckOperation({ ...first, userId: 'different-owner' }),
     ).toThrow(VariantCheckError);
   });
+  it('hashes the maximum Unicode batch reproducibly and detects changed duplicate positions', () => {
+    const batch = {
+      ...identity,
+      taskType: 'batch-check' as const,
+      taskSubType: 'competitor-variant-group' as const,
+      resultKind: 'competitor-batch' as const,
+    };
+    const params = {
+      groupIds: Array<string>(1000).fill('😺'.repeat(50)),
+      forceRefresh: true,
+    };
+    const operation = createVariantCheckOperation(batch, params);
+    expect(() =>
+      assertVariantCheckOperationRequest(operation, params),
+    ).not.toThrow();
+    params.groupIds[999] = '😸'.repeat(50);
+    expect(() => assertVariantCheckOperationRequest(operation, params)).toThrow(
+      VariantCheckError,
+    );
+  });
   it('keeps batch group steps separate from one another and the final batch result', () => {
     const batch = {
       ...identity,
@@ -129,7 +149,7 @@ describe('Variant check operation identity and complete receipt payload', () => 
     Infinity,
     new Date(),
     { value: undefined },
-    { data: 'x'.repeat(128 * 1024) },
+    { data: 'x'.repeat(256 * 1024) },
   ])(
     'rejects request values that cannot form a bounded reproducible identity',
     (value) => {

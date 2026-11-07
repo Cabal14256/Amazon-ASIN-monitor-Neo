@@ -103,6 +103,18 @@ describe('competitor batch check HTTP and owned result boundary', () => {
     );
     expect(f.producer.store.create).not.toHaveBeenCalled();
   });
+  it('admits all 1000 maximum-width Unicode IDs without leaving an unqueued bound task', async () => {
+    const groupIds = Array<string>(1000).fill('😺'.repeat(50));
+    const response = await post({ groupIds });
+    expect(response.statusCode).toBe(200);
+    const taskId = response.json().data.taskId as string;
+    expect(f.enqueued.get(taskId)?.params).toMatchObject({ groupIds });
+    expect(f.producer.store.create).toHaveBeenCalledTimes(1);
+    expect(f.producer.enqueue).toHaveBeenCalledTimes(1);
+    expect(
+      variantCheckJobOperation(f.enqueued.get(taskId)!).requestHash,
+    ).toMatch(/^[a-f0-9]{64}$/);
+  });
   it('forces more than twenty groups async despite an explicit sync flag', async () => {
     const response = await post({
       groupIds: Array(21).fill('cg1'),

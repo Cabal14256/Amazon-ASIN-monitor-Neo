@@ -277,6 +277,8 @@ describe.skipIf(
     }
   });
   async function start(selected = 'variant-check,batch-check') {
+    exited = false;
+    output = '';
     child = spawn(process.execPath, [resolve(__dirname, '../dist/main.js')], {
       cwd: resolve(__dirname, '..'),
       stdio: ['ignore', 'pipe', 'pipe'],
