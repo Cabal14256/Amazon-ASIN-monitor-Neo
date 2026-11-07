@@ -71,6 +71,12 @@ export const asinExportParamsSchema = z
   })
   .strict();
 export type AsinExportParams = z.infer<typeof asinExportParamsSchema>;
+export const variantGroupExportParamsSchema = asinExportParamsSchema
+  .omit({ layout: true })
+  .default({});
+export type VariantGroupExportParams = z.infer<
+  typeof variantGroupExportParamsSchema
+>;
 export const asinExportTaskRequestSchema = z
   .object({
     exportType: z.literal('asin'),
@@ -89,6 +95,26 @@ export const asinExportJobDataSchema = z
   })
   .strict();
 export type AsinExportJobData = z.infer<typeof asinExportJobDataSchema>;
+export const variantGroupExportTaskRequestSchema = z
+  .object({
+    exportType: z.literal('variant-group'),
+    params: variantGroupExportParamsSchema,
+  })
+  .strict();
+export const variantGroupExportJobDataSchema = z
+  .object({
+    taskId: z.string().uuid(),
+    taskType: z.literal('export'),
+    taskSubType: z.literal('variant-group'),
+    exportType: z.literal('variant-group'),
+    userId: z.string().min(1).max(200),
+    createdAt: z.string().datetime(),
+    params: variantGroupExportParamsSchema,
+  })
+  .strict();
+export type VariantGroupExportJobData = z.infer<
+  typeof variantGroupExportJobDataSchema
+>;
 export const asinExportArtifactSchema = z
   .object({
     taskId: z.string().uuid(),

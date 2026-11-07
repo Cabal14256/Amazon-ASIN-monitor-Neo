@@ -21,6 +21,7 @@ import { logger } from './logger';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
 import { taskNotificationWarning } from './task-notification-warning';
+import { createVariantGroupExportProcessor } from './variant-group-export-processor';
 
 export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
   if (env.AUTH_DATA_AUTHORITY !== 'postgresql')
@@ -87,9 +88,11 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
         ensureStarting();
         await queue.waitUntilReady();
         ensureStarting();
-        worker = new Worker(
-          getPhysicalQueueName('export'),
-          createAsinExportProcessor(repository, store, artifacts, {
+        const processor = createAsinExportProcessor(
+          repository,
+          store,
+          artifacts,
+          {
             shutdownSignal: shutdown.signal,
             isClosing: () => closing,
             assertJobLock: async (job, token) => {
@@ -105,7 +108,36 @@ export async function startAsinExportRuntime(env: Env, onFatal: () => void) {
               if (!current) throw new Error('EXPORT_JOB_MISSING');
               await current.updateProgress(value);
             },
-          }),
+          },
+        );
+        const variantGroupProcessor = createVariantGroupExportProcessor(
+          repository,
+          store,
+          artifacts,
+          {
+            shutdownSignal: shutdown.signal,
+            isClosing: () => closing,
+            assertJobLock: async (job, token) => {
+              if (
+                !token ||
+                !job.id ||
+                (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
+              )
+                throw new Error('EXPORT_JOB_LOCK_LOST');
+            },
+            updateProgress: async (job, value) => {
+              const current = await queue.getJob(job.id!);
+              if (!current) throw new Error('EXPORT_JOB_MISSING');
+              await current.updateProgress(value);
+            },
+          },
+        );
+        worker = new Worker(
+          getPhysicalQueueName('export'),
+          (job, token) =>
+            job.name === 'variant-group'
+              ? variantGroupProcessor(job, token)
+              : processor(job, token),
           {
             ...getWorkerOptions('export', env, connection),
             concurrency: Math.min(2, env.EXPORT_QUEUE_WORKER_CONCURRENCY),

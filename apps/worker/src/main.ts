@@ -4,6 +4,8 @@ import {
   assertBackupTaskRetention,
   loadEnv,
   loadEnvironmentFiles,
+  resolveScheduledMonitorSelection,
+  SCHEDULED_MONITOR_PHYSICAL_QUEUE,
   type Env,
 } from '@asin-monitor/config';
 import { Queue } from 'bullmq';
@@ -76,6 +78,13 @@ async function startConfiguredWorker(
       });
     }
   }
+  const scheduledMonitor = resolveScheduledMonitorSelection(
+    env.WORKER_ENABLED_QUEUES,
+  );
+  const scheduledMonitorEnabled =
+    scheduledMonitor.enabled && env.AUTH_DATA_AUTHORITY === 'postgresql';
+  if (scheduledMonitor.enabled && !scheduledMonitorEnabled)
+    logger.info('定时监控未启用，当前认证权威源为 Legacy');
   const enableMaintenance =
     selectedMaintenance && env.AUTH_DATA_AUTHORITY === 'postgresql';
   const enableIntervals =
@@ -86,12 +95,21 @@ async function startConfiguredWorker(
     logger.info('认证维护未启用，当前认证权威源为 Legacy');
 
   if (unknownQueues.length > 0) {
-    logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
-      unknownQueues,
-    });
+    const publicUnknownQueues = unknownQueues.filter(
+      (value) => value.trim().toLowerCase() !== 'scheduled-monitor',
+    );
+    if (publicUnknownQueues.length > 0)
+      logger.warn('WORKER_ENABLED_QUEUES 包含未知队列名，已忽略', {
+        unknownQueues: publicUnknownQueues,
+      });
   }
 
-  if (enabled.length === 0 && !enableMaintenance && !enableIntervals) {
+  if (
+    enabled.length === 0 &&
+    !enableMaintenance &&
+    !enableIntervals &&
+    !scheduledMonitorEnabled
+  ) {
     try {
       const stopped = waitForShutdownSignal();
       logger.info('Worker 未启用任何队列，跳过 Redis 连接与看门狗');
@@ -136,13 +154,15 @@ async function startConfiguredWorker(
       name === 'competitor-monitor',
   );
   const variantChecks =
-    checkQueues.length && env.AUTH_DATA_AUTHORITY === 'postgresql'
+    (checkQueues.length || scheduledMonitorEnabled) &&
+    env.AUTH_DATA_AUTHORITY === 'postgresql'
       ? await startVariantCheckRuntime(
           env,
           checkQueues,
           () => process.exit(1),
           process.env,
           metrics?.observer,
+          scheduledMonitorEnabled,
         )
       : undefined;
   const backup =
@@ -241,6 +261,7 @@ async function startConfiguredWorker(
       ...(maintenance ? [AUTH_MAINTENANCE_QUEUE] : []),
       ...(intervals ? [MONITOR_INTERVAL_QUEUE] : []),
       ...(backup ? [getPhysicalQueueName('backup')] : []),
+      ...(scheduledMonitorEnabled ? [SCHEDULED_MONITOR_PHYSICAL_QUEUE] : []),
     ],
     queueCount:
       queues.length +
@@ -252,7 +273,8 @@ async function startConfiguredWorker(
       (variantChecks?.queues.length ?? 0) +
       Number(!!backup),
     schedulerEnabled:
-      !!(maintenance || intervals || backup) && env.SCHEDULER_ENABLED,
+      !!(maintenance || intervals || backup || scheduledMonitorEnabled) &&
+      env.SCHEDULER_ENABLED,
   });
 }
 

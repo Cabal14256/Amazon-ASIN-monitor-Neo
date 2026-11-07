@@ -73,11 +73,19 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
     expect(await other.listUser('foreign')).toEqual([]);
     expect(await redis.get(legacy)).toBe('unchanged');
   });
-  it('atomically admits only two ASIN exports per owner across repository instances', async () => {
+  it('atomically admits only two exports per owner across repository instances', async () => {
     const owner = `export-owner-${randomUUID()}`;
     keys.add(userKey(owner));
     keys.add(`${prefix}:neo:task:export:${encodeURIComponent(owner)}`);
-    const inputs = Array.from({ length: 3 }, () => ({
+    const first = {
+      taskId: randomUUID(),
+      userId: owner,
+      taskType: 'export',
+      taskSubType: 'variant-group',
+    };
+    keys.add(metaKey(first.taskId));
+    await repository.createLimitedExport(first, 2);
+    const inputs = Array.from({ length: 2 }, () => ({
       taskId: randomUUID(),
       userId: owner,
       taskType: 'export',
@@ -91,21 +99,14 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
     );
     expect(
       results.filter((result) => result.status === 'fulfilled'),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(
       results.filter((result) => result.status === 'rejected'),
     ).toHaveLength(1);
     expect(
       results.find((result) => result.status === 'rejected'),
     ).toMatchObject({ reason: { code: 'TASK_EXPORT_LIMIT' } });
-    const admitted = results.find((result) => result.status === 'fulfilled');
-    if (!admitted || admitted.status !== 'fulfilled')
-      throw new Error('No admitted export fixture');
-    await repository.mutate(
-      admitted.value.taskId,
-      { kind: 'completed' },
-      admitted.value,
-    );
+    await repository.mutate(first.taskId, { kind: 'completed' });
     const fourth = {
       taskId: randomUUID(),
       userId: owner,

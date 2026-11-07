@@ -11,11 +11,13 @@ import {
   backupJobDataSchema,
   competitorMonitorJobSchema,
   primaryMonitorJobSchema,
+  variantGroupExportJobDataSchema,
   type AsinExportJobData,
   type BackupJobData,
   type CompetitorMonitorJob,
   type PrimaryMonitorJob,
   type VariantCheckJobData,
+  type VariantGroupExportJobData,
 } from '@asin-monitor/contracts';
 import {
   RedisTaskRepository,
@@ -87,7 +89,7 @@ export interface BackupProducerPort {
 }
 export interface ExportProducerPort {
   store: Pick<RedisTaskRepository, 'createLimitedExport' | 'mutate'>;
-  enqueue(data: AsinExportJobData): Promise<void>;
+  enqueue(data: AsinExportJobData | VariantGroupExportJobData): Promise<void>;
   recordRejected?(
     identity: ExportRejectionIdentity,
     deadline?: number,
@@ -124,7 +126,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       'competitor-monitor',
       'backup',
     ].includes(type) ||
-      (type === 'export' && job.name === 'asin')) &&
+      (type === 'export' && ['asin', 'variant-group'].includes(job.name))) &&
     resultObject.cancelled === true
       ? 'cancelled'
       : state === 'completed' || state === 'failed'
@@ -153,8 +155,11 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
     checkOperation = variantCheckJobOperation(data);
   }
-  if (type === 'export' && job.name === 'asin') {
-    const data = asinExportJobDataSchema.parse(job.data);
+  if (type === 'export' && ['asin', 'variant-group'].includes(job.name)) {
+    const data =
+      job.name === 'asin'
+        ? asinExportJobDataSchema.parse(job.data)
+        : variantGroupExportJobDataSchema.parse(job.data);
     if (data.taskId !== job.id || data.taskType !== type)
       throw new Error('TASK_QUEUE_IDENTITY_MISMATCH');
   }
@@ -420,7 +425,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
       reconcileRejectedExport: async (task) => {
         if (
           task.taskType !== 'export' ||
-          task.taskSubType !== 'asin' ||
+          !['asin', 'variant-group'].includes(task.taskSubType || '') ||
           !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
             task.taskId,
           )
@@ -451,7 +456,13 @@ export class TaskQueryRuntime implements OnModuleDestroy {
           return null;
         const next = await this.createStore(ensureOpen).mutate(
           task.taskId,
-          { kind: 'failed', message: 'ASIN 导出未入队，请重试' },
+          {
+            kind: 'failed',
+            message:
+              task.taskSubType === 'variant-group'
+                ? '变体组导出未入队，请重试'
+                : 'ASIN 导出未入队，请重试',
+          },
           proof,
         );
         if (next && ['failed', 'cancelled', 'completed'].includes(next.status))
@@ -642,7 +653,10 @@ export class TaskQueryRuntime implements OnModuleDestroy {
           true,
         ),
       enqueue: async (input) => {
-        const parsed = asinExportJobDataSchema.safeParse(input);
+        const parsed =
+          input.exportType === 'variant-group'
+            ? variantGroupExportJobDataSchema.safeParse(input)
+            : asinExportJobDataSchema.safeParse(input);
         if (!parsed.success) throw new ExportEnqueueRejected('invalid');
         let queue: Queue;
         try {
@@ -678,7 +692,9 @@ export class TaskQueryRuntime implements OnModuleDestroy {
         }
         // An error from add may follow a committed Redis write. Keep its task
         // ID for reconciliation instead of claiming the request was rejected.
-        await queue.add('asin', parsed.data, { jobId: parsed.data.taskId });
+        await queue.add(parsed.data.exportType, parsed.data, {
+          jobId: parsed.data.taskId,
+        });
         ensureOpen();
       },
     };

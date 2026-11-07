@@ -13,7 +13,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthContext } from '../../auth/context';
 import type { IdentityStore } from '../../auth/identity';
 import { ApiError } from '../../lib/http';
-import type { createTransportRuntime } from '../../services/runtime';
+import { sessionFixture } from '../../lib/transport-fixtures';
+import type {
+  createTransportRuntime,
+  SessionEvent,
+} from '../../services/runtime';
 import { ASIN_CATALOG } from '../asin/config';
 import {
   catalogCheckGateKey,
@@ -29,6 +33,7 @@ const taskSnapshot = vi.hoisted(() => ({
   error: null as Error | null,
 }));
 vi.mock('../../hooks/tasks', () => ({
+  useCreateExportTask: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTaskQuery: (_runtime: unknown, _id: string, enabled: boolean) => ({
     data: enabled ? taskSnapshot.data : undefined,
     isError: enabled && Boolean(taskSnapshot.error),
@@ -108,11 +113,17 @@ function fixture() {
     status: 'pending' as const,
   }));
   const getTask = vi.fn(async () => ({ taskId, status: 'completed' }));
+  const sessionListeners = new Set<(event: SessionEvent) => void>();
   const runtime = {
     http: { request: vi.fn() },
     queryClient,
     tasks: { get: getTask },
     clearUserWork: vi.fn(),
+    session: sessionFixture().store,
+    subscribeSession: (listener: (event: SessionEvent) => void) => {
+      sessionListeners.add(listener);
+      return () => sessionListeners.delete(listener);
+    },
   } as unknown as ReturnType<typeof createTransportRuntime>;
   const config = {
     ...ASIN_CATALOG,

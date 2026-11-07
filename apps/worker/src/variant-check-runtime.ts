@@ -1,17 +1,23 @@
 import {
   getNeoQueuePrefix,
   getPhysicalQueueName,
+  SCHEDULED_MONITOR_PHYSICAL_QUEUE,
   type Env,
 } from '@asin-monitor/config';
 import {
   createPgPool,
+  competitorMonitorEnabled as isCompetitorMonitorEnabled,
+  PgCatalogOperationRepository,
   PgCompetitorCheckRepository,
   PgCompetitorMonitorRepository,
+  PgCompetitorScheduledMonitorRunRepository,
   PgPrimaryMonitorRepository,
+  PgPrimaryScheduledMonitorRunRepository,
   PgSpApiConfigurationRepository,
   PgVariantCheckRepository,
   RedisMonitorEventRepository,
   RedisTaskRepository,
+  withCatalogOperationExemptExecution,
 } from '@asin-monitor/db';
 import {
   createFeishuNotifications,
@@ -31,6 +37,7 @@ import {
 } from '@asin-monitor/variant-check';
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
+import { createCatalogFencedProcessor } from './catalog-operation-processor';
 import { createCompetitorMonitorProcessor } from './competitor-monitor-processor';
 import { logger } from './logger';
 import type { MonitorMetrics } from './metrics';
@@ -39,6 +46,12 @@ import { MonitorGroupAdmission } from './monitor-group-admission';
 import { createPrimaryMonitorProcessor } from './primary-monitor-processor';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
 import { parseRedisUrl } from './redis-options';
+import { deliverScheduledMonitorNotifications } from './scheduled-monitor-notifications';
+import { createScheduledMonitorProcessor } from './scheduled-monitor-processor';
+import {
+  startScheduledMonitorScheduler,
+  type ScheduledMonitorSchedulerRuntime,
+} from './scheduled-monitor-scheduler-runtime';
 import { taskNotificationWarning } from './task-notification-warning';
 import { createVariantCheckProcessor } from './variant-check-processor';
 
@@ -47,6 +60,13 @@ type CheckQueue =
   | 'batch-check'
   | 'monitor'
   | 'competitor-monitor';
+
+function databaseSchema(url: string): string | undefined {
+  const options = new URL(url).searchParams.get('options');
+  const match = options?.match(/(?:^|\s)-c\s+search_path=([^\s]+)/);
+  const schema = match?.[1]?.replace(/^"|"$/g, '');
+  return schema && /^[A-Za-z_][A-Za-z0-9_]*$/.test(schema) ? schema : undefined;
+}
 /** Actual BullMQ consumers. All catalog/quota/task commands use a fail-fast
  * non-replaying connection; BullMQ alone owns its blocking/retry connections. */
 export async function startVariantCheckRuntime(
@@ -55,10 +75,11 @@ export async function startVariantCheckRuntime(
   onFatal: () => void,
   environment: Readonly<Record<string, unknown>> = process.env,
   metrics?: MonitorMetrics,
+  scheduledMonitorEnabled = false,
 ) {
   if (
     env.AUTH_DATA_AUTHORITY !== 'postgresql' ||
-    !selected.length ||
+    (!selected.length && !scheduledMonitorEnabled) ||
     selected.some(
       (name) =>
         ![
@@ -95,6 +116,7 @@ export async function startVariantCheckRuntime(
     statement_timeout: 1500,
   });
   const competitorChecks =
+    scheduledMonitorEnabled ||
     selected.includes('variant-check') ||
     selected.includes('competitor-monitor');
   const competitorPool =
@@ -135,7 +157,15 @@ export async function startVariantCheckRuntime(
   let monitorGroupAdmission: MonitorGroupAdmission | undefined;
   let monitorHeartbeat: MonitorConsumerHeartbeat | undefined;
   let competitorMonitorHeartbeat: MonitorConsumerHeartbeat | undefined;
+  let scheduledMonitorScheduler: ScheduledMonitorSchedulerRuntime | undefined;
+  let scheduledBusinessQueue: Queue | undefined;
   let competitorMonitorRepository: PgCompetitorMonitorRepository | undefined;
+  let scheduledPrimaryRepository:
+    | PgPrimaryScheduledMonitorRunRepository
+    | undefined;
+  let scheduledCompetitorRepository:
+    | PgCompetitorScheduledMonitorRunRepository
+    | undefined;
   let transport: NodeHttpTransport | undefined,
     htmlTransport: NodeHttpTransport | undefined;
   let closing = false,
@@ -153,6 +183,8 @@ export async function startVariantCheckRuntime(
     void monitorHeartbeat?.stop();
     void competitorMonitorHeartbeat?.stop();
     competitorMonitorRepository?.close();
+    scheduledPrimaryRepository?.close();
+    scheduledCompetitorRepository?.close();
     runtime?.close();
     notifications?.close();
     competitorRuntime?.close();
@@ -167,7 +199,8 @@ export async function startVariantCheckRuntime(
       ? new PgPrimaryMonitorRepository(pool)
       : undefined;
     if (
-      (selected.includes('monitor') ||
+      (scheduledMonitorEnabled ||
+        selected.includes('monitor') ||
         selected.includes('competitor-monitor')) &&
       competitorPool
     )
@@ -182,6 +215,16 @@ export async function startVariantCheckRuntime(
         pool,
         competitorPool,
       );
+    if (scheduledMonitorEnabled && competitorPool) {
+      scheduledPrimaryRepository = new PgPrimaryScheduledMonitorRunRepository(
+        pool,
+        { schema: databaseSchema(env.DATABASE_URL) },
+      );
+      scheduledCompetitorRepository =
+        new PgCompetitorScheduledMonitorRunRepository(competitorPool, {
+          schema: databaseSchema(env.COMPETITOR_DATABASE_URL),
+        });
+    }
     const configRepository = new PgSpApiConfigurationRepository(pool);
     source = new DatabaseConfigSource(environment, async (signal) =>
       Object.fromEntries(
@@ -221,7 +264,11 @@ export async function startVariantCheckRuntime(
         },
       },
     });
-    if (selected.includes('monitor') || selected.includes('competitor-monitor'))
+    if (
+      scheduledMonitorEnabled ||
+      selected.includes('monitor') ||
+      selected.includes('competitor-monitor')
+    )
       monitorGroupAdmission = new MonitorGroupAdmission(
         env,
         (signal) => {
@@ -272,6 +319,10 @@ export async function startVariantCheckRuntime(
       if (monitorRepository) await monitorRepository.assertReady();
       if (competitorMonitorRepository)
         await competitorMonitorRepository.assertReady();
+      if (scheduledPrimaryRepository)
+        await scheduledPrimaryRepository.assertReady(shutdown.signal);
+      if (scheduledCompetitorRepository)
+        await scheduledCompetitorRepository.assertReady(shutdown.signal);
       if (competitorRepository)
         await competitorRepository.transaction((unit) =>
           unit.purgeExpiredReceipts(),
@@ -358,14 +409,118 @@ export async function startVariantCheckRuntime(
                   updateProgress,
                 },
               );
-        const worker = new Worker(getPhysicalQueueName(name), processor, {
-          ...getWorkerOptions(name, env, connection),
-          autorun: false,
-        });
+        const worker = new Worker(
+          getPhysicalQueueName(name),
+          createCatalogFencedProcessor(
+            name,
+            new PgCatalogOperationRepository(pool),
+            store,
+            processor,
+          ),
+          {
+            ...getWorkerOptions(name, env, connection),
+            autorun: false,
+          },
+        );
         workers.push(worker);
         worker.on('error', () =>
           logger.warn('检查消费者连接异常', {
             reason: 'variant_check_worker_error',
+          }),
+        );
+        await worker.waitUntilReady();
+        ensureOpen();
+      }
+      if (scheduledMonitorEnabled) {
+        const queue = new Queue(SCHEDULED_MONITOR_PHYSICAL_QUEUE, {
+          connection: control as unknown as ConnectionOptions,
+          prefix: getNeoQueuePrefix(env),
+          defaultJobOptions: {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: { age: 604800 },
+            removeOnFail: { age: 604800 },
+          },
+        });
+        scheduledBusinessQueue = queue;
+        queues.push(queue);
+        queue.on('error', () =>
+          logger.warn('定时监控队列连接异常', {
+            reason: 'scheduled_monitor_queue_error',
+          }),
+        );
+        await queue.waitUntilReady();
+        ensureOpen();
+        const assertJobLock = async (job: { id?: string }, token?: string) => {
+          if (
+            !token ||
+            !job.id ||
+            (await control.get(`${queue.toKey(job.id)}:lock`)) !== token
+          )
+            throw new Error('SCHEDULED_MONITOR_JOB_LOCK_LOST');
+        };
+        const processor = createScheduledMonitorProcessor({
+          primary: scheduledPrimaryRepository!,
+          competitor: scheduledCompetitorRepository!,
+          primaryPipeline: business.pipeline,
+          competitorPipeline: competitorRuntime!.pipeline,
+          groupAdmission: monitorGroupAdmission,
+          shutdownSignal: shutdown.signal,
+          assertJobLock,
+          competitorMonitorEnabled: async (unit) => {
+            let configuredValue: string | null | undefined;
+            if (unit?.competitorMonitorConfiguration) {
+              configuredValue = await unit.competitorMonitorConfiguration();
+            } else {
+              const rows = await configRepository.readConfiguration();
+              const matches = rows.filter(
+                (row) =>
+                  row.configKey.trim().toUpperCase() ===
+                  'COMPETITOR_MONITOR_ENABLED',
+              );
+              if (matches.length > 1)
+                throw new Error('COMPETITOR_MONITOR_CONFIG_DUPLICATE');
+              configuredValue = matches[0]?.configValue;
+            }
+            return isCompetitorMonitorEnabled(
+              configuredValue,
+              env.COMPETITOR_MONITOR_ENABLED,
+            );
+          },
+          enqueueFollowUp: async (child) => {
+            await queue.add('scheduled-monitor', child, { jobId: child.jobId });
+          },
+          deliverNotifications: (run, signal, checkpoint) =>
+            deliverScheduledMonitorNotifications(
+              run,
+              signal,
+              checkpoint ?? (async () => undefined),
+              {
+                ledgerFor: (domain) =>
+                  domain === 'primary'
+                    ? scheduledPrimaryRepository!
+                    : scheduledCompetitorRepository!,
+                notifications: notifications!,
+              },
+            ),
+        });
+        const worker = new Worker(
+          SCHEDULED_MONITOR_PHYSICAL_QUEUE,
+          (job, token) =>
+            withCatalogOperationExemptExecution('scheduled-system', () =>
+              processor(job, token),
+            ),
+          {
+            connection,
+            prefix: getNeoQueuePrefix(env),
+            concurrency: 1,
+            autorun: false,
+          },
+        );
+        workers.push(worker);
+        worker.on('error', () =>
+          logger.warn('定时监控消费者连接异常', {
+            reason: 'scheduled_monitor_worker_error',
           }),
         );
         await worker.waitUntilReady();
@@ -404,6 +559,21 @@ export async function startVariantCheckRuntime(
         `${getNeoQueuePrefix(env)}:competitor-monitor:consumer:ready`,
       );
       await competitorMonitorHeartbeat.start();
+      ensureOpen();
+    }
+    if (scheduledMonitorEnabled) {
+      if (!scheduledBusinessQueue)
+        throw new Error('SCHEDULED_MONITOR_BUSINESS_QUEUE_MISSING');
+      scheduledMonitorScheduler = await startScheduledMonitorScheduler({
+        env,
+        connection,
+        control,
+        scheduledQueue: scheduledBusinessQueue,
+        configRepository,
+        competitorEnabled: { value: env.COMPETITOR_MONITOR_ENABLED },
+        onFatal,
+      });
+      queues.push(scheduledMonitorScheduler.queue as Queue);
       ensureOpen();
     }
     const cleanup = async () => {
@@ -452,12 +622,15 @@ export async function startVariantCheckRuntime(
         stopBusiness();
         closed ??= (async () => {
           try {
+            await scheduledMonitorScheduler?.close();
             await monitorHeartbeat?.stop();
             await competitorMonitorHeartbeat?.stop();
             await Promise.all(workers.map((worker) => worker.close()));
           } finally {
             await Promise.allSettled([
-              ...queues.map((queue) => queue.close()),
+              ...queues
+                .filter((queue) => queue !== scheduledMonitorScheduler?.queue)
+                .map((queue) => queue.close()),
               pool.end(),
               ...(competitorPool ? [competitorPool.end()] : []),
             ]);
@@ -469,12 +642,15 @@ export async function startVariantCheckRuntime(
     };
   } catch {
     stopBusiness();
+    await scheduledMonitorScheduler?.close();
     await monitorHeartbeat?.stop();
     await competitorMonitorHeartbeat?.stop();
     control.disconnect(false);
     await Promise.allSettled([
       ...workers.map((worker) => worker.close(true)),
-      ...queues.map((queue) => queue.close()),
+      ...queues
+        .filter((queue) => queue !== scheduledMonitorScheduler?.queue)
+        .map((queue) => queue.close()),
       pool.end(),
       ...(competitorPool ? [competitorPool.end()] : []),
     ]);

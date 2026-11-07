@@ -19,6 +19,7 @@ import { mapAsinQueryGroups } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import type { WriteStream } from 'node:fs';
 import { finished } from 'node:stream/promises';
+import { abortableExport } from './abortable-export';
 import {
   asinExportFilename,
   asinExportFormat,
@@ -53,32 +54,6 @@ class TaskStopped extends Error {
   }
 }
 class ExportCapacityError extends Error {}
-
-function abortable<T>(signal: AbortSignal, operation: () => Promise<T>) {
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => {
-      signal.removeEventListener('abort', abort);
-      reject(signal.reason);
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) return abort();
-    void Promise.resolve()
-      .then(() => {
-        signal.throwIfAborted();
-        return operation();
-      })
-      .then(
-        (value) => {
-          signal.removeEventListener('abort', abort);
-          resolve(value);
-        },
-        (error: unknown) => {
-          signal.removeEventListener('abort', abort);
-          reject(error);
-        },
-      );
-  });
-}
 
 export function createAsinExportProcessor(
   repository: AsinExportQueryRepositoryPort,
@@ -377,7 +352,7 @@ export function createAsinExportProcessor(
       // Never commit the writer or publish a file from a timed-out/aborted
       // snapshot callback that may finish after its connection was destroyed.
       await check();
-      await abortable(controller.signal, async () => {
+      await abortableExport(controller.signal, async () => {
         await workbook.commit();
         await finished(output.stream);
       });

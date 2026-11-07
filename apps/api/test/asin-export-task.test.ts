@@ -115,6 +115,42 @@ describe('ASIN export producer', () => {
     );
   });
 
+  it('accepts the bounded variant-group export subtype without broadening other types', async () => {
+    const result = await service().create(principal, {
+      exportType: 'variant-group',
+      params: { keyword: 'Main', country: 'US', variantStatus: 'BROKEN' },
+    });
+    expect(result).toMatchObject({
+      exportType: 'variant-group',
+      status: 'pending',
+    });
+    expect(createLimitedExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: result.taskId,
+        taskSubType: 'variant-group',
+        title: '变体组导出',
+      }),
+      2,
+      100,
+      expect.any(Function),
+    );
+    expect(enqueue).toHaveBeenCalledWith({
+      taskId: result.taskId,
+      userId: principal.userId,
+      createdAt,
+      taskType: 'export',
+      taskSubType: 'variant-group',
+      exportType: 'variant-group',
+      params: { keyword: 'Main', country: 'US', variantStatus: 'BROKEN' },
+    });
+    await expect(
+      service().create(principal, {
+        exportType: 'variant-group',
+        params: { layout: 'detailed' },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
   it('stops when the live grant is revoked, authority is Legacy, or two exports are active', async () => {
     vi.mocked(authorizeAdministration).mockRejectedValueOnce(
       new HttpException('forbidden', 403),

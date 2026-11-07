@@ -250,6 +250,29 @@ describe('production worker bootstrap isolates backup retention admission', () =
     expect(dependencies.startVariantChecks).not.toHaveBeenCalled();
     expect(process.on).not.toHaveBeenCalled();
   });
+  it.each(['86400', '604800'])(
+    'keeps scheduled monitoring selected alongside backup with task TTL %s',
+    async (ttl) => {
+      vi.stubEnv('TASK_META_TTL_SECONDS', ttl);
+      vi.stubEnv('WORKER_ENABLED_QUEUES', 'backup,scheduled-monitor');
+      await expect(bootstrap()).resolves.toBeUndefined();
+      expect(dependencies.startVariantChecks).toHaveBeenCalledWith(
+        expect.anything(),
+        [],
+        expect.any(Function),
+        expect.anything(),
+        undefined,
+        true,
+      );
+      expect(dependencies.startBackup).toHaveBeenCalledTimes(
+        ttl === '604800' ? 1 : 0,
+      );
+      expect(dependencies.waitForShutdownSignal).not.toHaveBeenCalled();
+      expect(dependencies.createQueue).not.toHaveBeenCalled();
+      const resources = dependencies.shutdownWorker.mock.calls[0]?.[0];
+      expect(resources.extraClosers).toHaveLength(ttl === '604800' ? 2 : 1);
+    },
+  );
 
   it('keeps monitor running when backup and monitor share one-day TTL', async () => {
     vi.stubEnv('WORKER_ENABLED_QUEUES', 'backup,monitor');
