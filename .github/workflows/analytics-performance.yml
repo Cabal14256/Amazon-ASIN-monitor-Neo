@@ -1,0 +1,101 @@
+name: Analytics Performance
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: analytics-performance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analytics-performance:
+    name: analytics-performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # Separate services from Integration: no other test writes, refreshes,
+    # compresses, drops, or clears the databases measured by this gate.
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+
+
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: analytics_http_control
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent" --health-interval 10s --health-timeout 5s --health-retries 12
+
+
+      timescaledb:
+        image: timescale/timescaledb:2.29.2-pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: analytics_http_control
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d analytics_http_control" --health-interval 5s --health-timeout 3s --health-retries 20
+
+
+    env:
+      NODE_OPTIONS: --max-old-space-size=1536
+      LOG_LEVEL: WARN
+      RUN_NEO_ANALYTICS_PERFORMANCE: 'true'
+      ANALYTICS_PERFORMANCE_ROWS: '720000'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install frozen workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify fixture isolation and existing benchmark gate
+        run: |
+          pnpm run test:analytics-performance
+          pnpm run test:analytics-benchmark
+
+      - name: Build the real Neo API and dependencies serially
+        run: pnpm --workspace-concurrency=1 --filter @asin-monitor/api... build
+
+      - name: Measure real Legacy and Neo HTTP analytics against identical data
+        env:
+          ANALYTICS_TIMESCALE_CONTAINER_ID: ${{ job.services.timescaledb.id }}
+        run: node scripts/run-isolated-analytics-performance.js
+
+      - name: Upload performance samples, P95 summary and sanitized manifest
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: analytics-http-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/analytics-http-performance/
+          if-no-files-found: warn
+          retention-days: 14
