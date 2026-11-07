@@ -5,6 +5,7 @@ import {
   competitorAsinExportTaskRequestSchema,
   competitorVariantGroupExportTaskRequestSchema,
   createExportTaskRequestSchema,
+  parentAsinExportTaskRequestSchema,
   variantGroupExportTaskRequestSchema,
 } from '@asin-monitor/contracts';
 import {
@@ -75,12 +76,15 @@ export class AsinExportTaskService implements OnModuleDestroy {
       request.data.exportType !== 'asin' &&
       request.data.exportType !== 'variant-group' &&
       request.data.exportType !== 'competitor-asin' &&
-      request.data.exportType !== 'competitor-variant-group'
+      request.data.exportType !== 'competitor-variant-group' &&
+      request.data.exportType !== 'parent-asin-query'
     )
       fail(501, '此导出类型尚未在 Neo 实现');
     const exportType = request.data.exportType;
     const parsed =
-      exportType === 'competitor-asin'
+      exportType === 'parent-asin-query'
+        ? parentAsinExportTaskRequestSchema.safeParse(raw)
+        : exportType === 'competitor-asin'
         ? competitorAsinExportTaskRequestSchema.safeParse(raw)
         : exportType === 'competitor-variant-group'
         ? competitorVariantGroupExportTaskRequestSchema.safeParse(raw)
@@ -88,9 +92,12 @@ export class AsinExportTaskService implements OnModuleDestroy {
         ? variantGroupExportTaskRequestSchema.safeParse(raw)
         : asinExportTaskRequestSchema.safeParse(raw);
     if (!parsed.success) fail(400, '导出筛选参数无效');
-    const taskTitle = `${exportType.startsWith('competitor-') ? '竞品' : ''}${
-      exportType.endsWith('variant-group') ? '变体组导出' : 'ASIN导出'
-    }`;
+    const taskTitle =
+      exportType === 'parent-asin-query'
+        ? '父变体查询结果导出'
+        : `${exportType.startsWith('competitor-') ? '竞品' : ''}${
+            exportType.endsWith('variant-group') ? '变体组导出' : 'ASIN导出'
+          }`;
     this.active++;
     const taskId = randomUUID();
     let submissionStarted = false;
@@ -141,29 +148,14 @@ export class AsinExportTaskService implements OnModuleDestroy {
         createdAt: task.createdAt,
         taskType: 'export' as const,
       };
-      if (exportType.startsWith('competitor-'))
-        await port.enqueue(
-          catalogExportJobDataSchema.parse({
-            ...jobIdentity,
-            taskSubType: exportType,
-            exportType,
-            params: parsed.data.params,
-          }),
-        );
-      else if (exportType === 'variant-group')
-        await port.enqueue({
+      await port.enqueue(
+        catalogExportJobDataSchema.parse({
           ...jobIdentity,
-          taskSubType: 'variant-group',
-          exportType: 'variant-group',
+          taskSubType: exportType,
+          exportType,
           params: parsed.data.params,
-        });
-      else
-        await port.enqueue({
-          ...jobIdentity,
-          taskSubType: 'asin',
-          exportType: 'asin',
-          params: parsed.data.params,
-        });
+        }),
+      );
       this.logger.info('导出任务已创建', 'AsinExportTaskService', {
         exportType,
       });

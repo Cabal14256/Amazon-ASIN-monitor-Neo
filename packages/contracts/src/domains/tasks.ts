@@ -149,11 +149,54 @@ export type CompetitorAsinExportJobData = z.infer<
 export type CompetitorVariantGroupExportJobData = z.infer<
   typeof competitorVariantGroupExportJobDataSchema
 >;
+export const parentAsinExportParamsSchema = z
+  .object({
+    asins: z
+      .array(z.string().regex(/^[A-Z][A-Z0-9]{9}$/))
+      .min(1)
+      .max(1000),
+    country: z.enum(['US', 'UK', 'DE', 'FR', 'IT', 'ES']),
+  })
+  .strict();
+/** Legacy export accepts comma/newline text, filters invalid tokens and keeps
+ * normalized duplicates in their original order. The queued form is canonical. */
+export const parentAsinExportTaskRequestSchema = z
+  .object({
+    exportType: z.literal('parent-asin-query'),
+    params: z
+      .object({
+        asins: z
+          .string()
+          .max(20_000)
+          .transform((value) =>
+            value
+              .split(/[,\n]/)
+              .map((asin) => asin.trim().toUpperCase())
+              .filter((asin) => /^[A-Z][A-Z0-9]{9}$/.test(asin)),
+          ),
+        country: z
+          .string()
+          .max(10)
+          .transform((value) => value.trim().toUpperCase()),
+      })
+      .strict()
+      .pipe(parentAsinExportParamsSchema),
+  })
+  .strict();
+export const parentAsinExportJobDataSchema = asinExportJobDataSchema.extend({
+  exportType: z.literal('parent-asin-query'),
+  taskSubType: z.literal('parent-asin-query'),
+  params: parentAsinExportParamsSchema,
+});
+export type ParentAsinExportJobData = z.infer<
+  typeof parentAsinExportJobDataSchema
+>;
 export const catalogExportJobDataSchema = z.union([
   asinExportJobDataSchema,
   variantGroupExportJobDataSchema,
   competitorAsinExportJobDataSchema,
   competitorVariantGroupExportJobDataSchema,
+  parentAsinExportJobDataSchema,
 ]);
 export type CatalogExportJobData = z.infer<typeof catalogExportJobDataSchema>;
 export const CATALOG_EXPORT_TYPES = [
@@ -161,6 +204,7 @@ export const CATALOG_EXPORT_TYPES = [
   'variant-group',
   'competitor-asin',
   'competitor-variant-group',
+  'parent-asin-query',
 ] as const;
 export const asinExportArtifactSchema = z
   .object({

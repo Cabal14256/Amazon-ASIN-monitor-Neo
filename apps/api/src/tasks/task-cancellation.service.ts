@@ -113,6 +113,7 @@ export class TaskCancellationService {
           'variant-group',
           'competitor-asin',
           'competitor-variant-group',
+          'parent-asin-query',
         ].includes(next.taskSubType || '')
       ) {
         // A delayed retry may own an earlier published file even though no
