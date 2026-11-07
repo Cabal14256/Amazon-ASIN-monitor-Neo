@@ -361,4 +361,27 @@ describe('dual PostgreSQL metrics through actual Nest modules and native Pool', 
     expect(record).toHaveBeenCalledOnce();
     expect(record).toHaveBeenCalledWith('OTHER', 'error', expect.any(Number));
   });
+  it('keeps scrapes and queries usable when a pool snapshot fails and detaches owned references', async () => {
+    const failed = vi.fn();
+    const broken = {
+      get totalCount(): number {
+        throw new Error('private snapshot error');
+      },
+      idleCount: 0,
+      waitingCount: 0,
+      options: { max: 10 },
+    };
+    const detach = metrics.attachDatabasePools(
+      { database: broken, competitor_database: pools.competitorPool },
+      failed,
+    );
+    expect(await scrape()).not.toContain('private snapshot error');
+    expect(await scrape()).toContain(
+      'db_pool_connection_limit{database="competitor_database"} 10',
+    );
+    expect(failed).toHaveBeenCalledOnce();
+    expect(await pools.primaryPool.query('SELECT still-works')).toBe(result);
+    detach();
+    expect(await scrape()).not.toContain('db_pool_connection_limit{database=');
+  });
 });
