@@ -166,6 +166,8 @@ function ExportScope({
         },
         controller.signal,
       );
+      if (result.exportType !== operation)
+        throw new ApiError('INVALID_RESPONSE', '导出任务类型响应不匹配');
       // Always preserve a known ACK for the original scope, even after leaving.
       sessionStorage.setItem(
         name,

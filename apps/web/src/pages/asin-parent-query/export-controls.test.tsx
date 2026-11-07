@@ -232,4 +232,27 @@ describe('full parent query page and real TaskApi/HttpClient export boundaries',
     await screen.findByText('本地存储不可用，导出结果需在任务中心核实');
     expect(f.post).not.toHaveBeenCalled();
   });
+  it('retains unknown protection when a response acknowledges a different export subtype', async () => {
+    const f = fixture();
+    f.input();
+    f.post.mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        data: { taskId, exportType: 'competitor-asin', status: 'pending' },
+      }),
+    );
+    f.submit();
+    await screen.findByText('导出任务类型响应不匹配');
+    expect(f.announce).not.toHaveBeenCalled();
+    expect(screen.queryByText(`导出任务已提交：${taskId}`)).toBeNull();
+    expect(
+      screen
+        .getByRole('button', { name: '已核实，恢复导出' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      sessionStorage.getItem('neo:parent-asin-export:["owner","session"]'),
+    ).not.toContain(taskId);
+    expect(f.post).toHaveBeenCalledTimes(1);
+  });
 });
