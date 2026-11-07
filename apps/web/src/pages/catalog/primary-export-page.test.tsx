@@ -78,6 +78,8 @@ function fixture({
   const runtime = {
     http: { request: vi.fn() },
     queryClient,
+    session: { revision: 0 },
+    subscribeSession: () => () => undefined,
     tasks: { createExport: vi.fn() },
     clearUserWork: vi.fn(),
   } as unknown as ReturnType<typeof createTransportRuntime>;
