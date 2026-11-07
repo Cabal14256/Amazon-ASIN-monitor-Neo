@@ -453,6 +453,42 @@ describe('bounded backup streaming save', () => {
     expect(f.sink.write).not.toHaveBeenCalled();
     expect(f.sink.close).not.toHaveBeenCalled();
   });
+  it('reports HTTP 403 promptly while a native abort retains physical admission and runs once', async () => {
+    const f = fixture(),
+      cleanup = deferred<void>();
+    f.fetcher.mockResolvedValueOnce(
+      jsonResponse({ success: false, errorMessage: 'permission revoked' }, 403),
+    );
+    vi.mocked(f.sink.abort).mockReturnValueOnce(cleanup.promise);
+    let error: unknown;
+    const result = downloadBackup(
+      f.http,
+      f.api,
+      file,
+      {
+        kind: 'file',
+        filename: file.filename.replace('.dump', '.tar'),
+        handle: { createWritable: async () => f.sink },
+      },
+      new AbortController().signal,
+      () => true,
+      vi.fn(),
+    ).catch((failure: unknown) => {
+      error = failure;
+    });
+    try {
+      await vi.waitFor(
+        () => expect(error).toMatchObject({ kind: 'HTTP', status: 403 }),
+        { timeout: 250 },
+      );
+      expect(f.sink.abort).toHaveBeenCalledTimes(1);
+      expect(f.sink.close).not.toHaveBeenCalled();
+      await result;
+    } finally {
+      cleanup.resolve();
+      await result;
+    }
+  });
   it('enforces the deadline against a non-cooperating fetch and ignores its late body', async () => {
     vi.useFakeTimers();
     const f = fixture(),

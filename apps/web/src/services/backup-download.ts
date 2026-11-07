@@ -179,7 +179,9 @@ export async function downloadBackup(
       check();
       return bytes;
     } catch (error) {
-      await guarded.abort(error);
+      // Native abort can outlive the HTTP failure. saveToFile owns its physical
+      // reservation; propagate now so permission refresh and UI recovery run.
+      void guarded.abort(error);
       throw error;
     }
   };
