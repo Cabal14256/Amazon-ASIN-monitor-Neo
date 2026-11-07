@@ -363,7 +363,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
           (await store.read(id))?.status === 'failed' ? true : null,
         );
         expect(await artifacts.read(id)).toBeNull();
-        expect((await get(id, '/download')).statusCode).toBe(403);
+        // The Worker rejected this task before publishing. Preserve the shared
+        // download contract: a failed task is 409 before completed-artifact
+        // authorization. Revoked access to an existing artifact is 403 above.
+        const download = await get(id, '/download');
+        expect(download.statusCode).toBe(409);
+        expect(download.json()).toMatchObject({
+          success: false,
+          errorCode: 409,
+        });
       } finally {
         await worker?.close();
         worker = undefined;
