@@ -11,6 +11,7 @@ import type {
 } from '@asin-monitor/db';
 import { transitionTask, VariantCheckError } from '@asin-monitor/db';
 import type { CompetitorCheckContext } from '@asin-monitor/variant-check';
+import { CompetitorBatchCheckExecutor } from '@asin-monitor/variant-check';
 import jwt from 'jsonwebtoken';
 import { vi } from 'vitest';
 import { COMPETITOR_CHECK_REPOSITORY } from '../../src/competitor/competitor-check-storage.module';
@@ -149,18 +150,21 @@ export async function competitorCheckApp(overrides: NodeJS.ProcessEnv = {}) {
   };
   const producer = {
     store: {
-      create: vi.fn<CheckProducerPort['store']['create']>(async (input) => {
-        const now = new Date().toISOString();
-        const task = taskFixture({
-          ...input,
-          taskId: input.taskId,
-          taskSubType: input.taskSubType ?? null,
-          createdAt: now,
-          updatedAt: now,
-        });
-        tasks.set(task.taskId, task);
-        return task;
-      }),
+      create: vi.fn<CheckProducerPort['store']['create']>(
+        async (input, onPrepared) => {
+          const now = new Date().toISOString();
+          const task = taskFixture({
+            ...input,
+            taskId: input.taskId,
+            taskSubType: input.taskSubType ?? null,
+            createdAt: now,
+            updatedAt: now,
+          });
+          await onPrepared?.(task);
+          tasks.set(task.taskId, task);
+          return task;
+        },
+      ),
     },
     enqueue: vi.fn(async (data: VariantCheckJobData) => {
       enqueued.set(data.taskId, data);
@@ -193,6 +197,7 @@ export async function competitorCheckApp(overrides: NodeJS.ProcessEnv = {}) {
     open: vi.fn(() => port),
     openCancellation: vi.fn((_ensureOpen: () => void) => cancellationPort),
   };
+  const batch = new CompetitorBatchCheckExecutor(repository, pipeline as never);
   const app = await sessionApp(
     auth.repository,
     overrides,
@@ -203,7 +208,7 @@ export async function competitorCheckApp(overrides: NodeJS.ProcessEnv = {}) {
         .overrideProvider(ApplicationSpApiRuntime)
         .useValue({})
         .overrideProvider(ApplicationCompetitorCheckRuntime)
-        .useValue({ pipeline })
+        .useValue({ pipeline, batch, onModuleDestroy: () => batch.close() })
         .overrideProvider(TaskQueryRuntime)
         .useValue(taskRuntime),
     [CompetitorCheckModule],
@@ -222,6 +227,7 @@ export async function competitorCheckApp(overrides: NodeJS.ProcessEnv = {}) {
     unit,
     repository,
     pipeline,
+    batch,
     producer,
     taskRuntime,
     tasks,

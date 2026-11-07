@@ -118,6 +118,7 @@ export async function startVariantCheckRuntime(
   const competitorChecks =
     scheduledMonitorEnabled ||
     selected.includes('variant-check') ||
+    selected.includes('batch-check') ||
     selected.includes('competitor-monitor');
   const competitorPool =
     competitorChecks || selected.includes('monitor')
@@ -170,6 +171,7 @@ export async function startVariantCheckRuntime(
     htmlTransport: NodeHttpTransport | undefined;
   let closing = false,
     cleanupRunning = false;
+  let startupStage = 'construct';
   let startupTimer: ReturnType<typeof setTimeout> | undefined,
     cleanupTimer: ReturnType<typeof setInterval> | undefined;
   const ensureOpen = () => {
@@ -299,6 +301,7 @@ export async function startVariantCheckRuntime(
         repository: competitorRepository,
         logger,
         prefix: getNeoQueuePrefix(env),
+        batchConcurrency: env.BATCH_CHECK_GROUP_CONCURRENCY,
       });
     const business = runtime;
     const store = new RedisTaskRepository(
@@ -308,27 +311,43 @@ export async function startVariantCheckRuntime(
       taskNotificationWarning(),
     );
     const initialize = async () => {
+      startupStage = 'redis-connect';
       await control.connect();
       ensureOpen();
+      startupStage = 'sp-api-initialize';
       await spApi!.initialize();
       ensureOpen();
+      startupStage = 'monitor-group-admission';
       await monitorGroupAdmission?.start();
       ensureOpen();
       // Require the primary completion-table upgrade before registering consumers.
+      startupStage = 'primary-receipts-ready';
       await repository.transaction((unit) => unit.purgeExpiredReceipts());
-      if (monitorRepository) await monitorRepository.assertReady();
-      if (competitorMonitorRepository)
+      if (monitorRepository) {
+        startupStage = 'primary-monitor-ready';
+        await monitorRepository.assertReady();
+      }
+      if (competitorMonitorRepository) {
+        startupStage = 'competitor-monitor-ready';
         await competitorMonitorRepository.assertReady();
-      if (scheduledPrimaryRepository)
+      }
+      if (scheduledPrimaryRepository) {
+        startupStage = 'scheduled-primary-ready';
         await scheduledPrimaryRepository.assertReady(shutdown.signal);
-      if (scheduledCompetitorRepository)
+      }
+      if (scheduledCompetitorRepository) {
+        startupStage = 'scheduled-competitor-ready';
         await scheduledCompetitorRepository.assertReady(shutdown.signal);
-      if (competitorRepository)
+      }
+      if (competitorRepository) {
+        startupStage = 'competitor-receipts-ready';
         await competitorRepository.transaction((unit) =>
           unit.purgeExpiredReceipts(),
         );
+      }
       ensureOpen();
       for (const name of new Set(selected)) {
+        startupStage = `queue-${name}-ready`;
         const queue = new Queue(
           getPhysicalQueueName(name),
           getQueueOptions(name, env, control as unknown as ConnectionOptions),
@@ -396,7 +415,8 @@ export async function startVariantCheckRuntime(
                   execute: (raw, context) => {
                     const data = parseVariantCheckJob(raw);
                     return data.taskSubType === 'competitor-asin-check' ||
-                      data.taskSubType === 'competitor-variant-group-check'
+                      data.taskSubType === 'competitor-variant-group-check' ||
+                      data.taskSubType === 'competitor-variant-group'
                       ? competitorRuntime!.executor.execute(data, context)
                       : business.executor.execute(data, context);
                   },
@@ -430,8 +450,10 @@ export async function startVariantCheckRuntime(
         );
         await worker.waitUntilReady();
         ensureOpen();
+        startupStage = `worker-${name}-ready`;
       }
       if (scheduledMonitorEnabled) {
+        startupStage = 'scheduled-business-queue-ready';
         const queue = new Queue(SCHEDULED_MONITOR_PHYSICAL_QUEUE, {
           connection: control as unknown as ConnectionOptions,
           prefix: getNeoQueuePrefix(env),
@@ -640,7 +662,34 @@ export async function startVariantCheckRuntime(
         return closed;
       },
     };
-  } catch {
+  } catch (error) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    const message = error instanceof Error ? error.message : '';
+    const dependencyClass = /does not exist|undefined table|relation/i.test(
+      message,
+    )
+      ? 'missing_relation'
+      : /timeout|cancelled|canceled/i.test(message)
+      ? 'database_timeout'
+      : /connection|closed|ECONN/i.test(message)
+      ? 'database_connection'
+      : 'dependency_error';
+    try {
+      logger.error('检查 Worker 初始化失败', {
+        reason: 'variant_check_initialization_failed',
+        stage: startupStage,
+        error: error instanceof Error ? error.name : 'unknown_error',
+        dependencyClass,
+        ...(typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code)
+          ? { dependencyCode: code }
+          : {}),
+      });
+    } catch {
+      // Startup diagnostics cannot prevent owned resources from closing.
+    }
     stopBusiness();
     await scheduledMonitorScheduler?.close();
     await monitorHeartbeat?.stop();
@@ -654,7 +703,7 @@ export async function startVariantCheckRuntime(
       pool.end(),
       ...(competitorPool ? [competitorPool.end()] : []),
     ]);
-    throw new Error('Variant check initialization failed');
+    throw new Error(`Variant check initialization failed at ${startupStage}`);
   } finally {
     if (startupTimer) clearTimeout(startupTimer);
   }

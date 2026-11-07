@@ -78,4 +78,18 @@ export class CompetitorCheckController {
       ),
     };
   }
+
+  @Post('variant-groups/batch-check')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async batch(
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    return {
+      success: true,
+      errorCode: 0,
+      data: await this.service.executeBatch(request, reply),
+    };
+  }
 }

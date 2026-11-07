@@ -38,7 +38,7 @@ export const competitorVariantCheckReceipts = pgTable(
     ),
     check(
       'ck_competitor_variant_check_receipts_kind',
-      sql`${table.resultKind} IN ('competitor-asin','competitor-group')`,
+      sql`${table.resultKind} IN ('competitor-asin','competitor-group','competitor-batch')`,
     ),
   ],
 );
