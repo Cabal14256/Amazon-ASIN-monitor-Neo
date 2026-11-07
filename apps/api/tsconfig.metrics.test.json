@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "noEmit": true },
+  "include": [
+    "src/**/*.ts",
+    "test/database-metrics.test.ts",
+    "test/helpers/database-metrics-native.ts"
+  ]
+}
