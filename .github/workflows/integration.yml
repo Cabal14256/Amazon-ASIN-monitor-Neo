@@ -471,7 +471,7 @@ jobs:
         run: |
           pnpm --filter @asin-monitor/api exec tsc -p tsconfig.export.test.json --pretty false
           pnpm --filter @asin-monitor/worker exec tsc -p tsconfig.export.test.json --pretty false
-          pnpm --filter @asin-monitor/api exec vitest run test/asin-export.integration.test.ts test/competitor-export.integration.test.ts test/parent-asin-export.integration.test.ts --no-file-parallelism
+          pnpm --filter @asin-monitor/api exec vitest run test/asin-export.integration.test.ts test/competitor-export.integration.test.ts test/parent-asin-export.integration.test.ts test/monitor-history-export.integration.test.ts --no-file-parallelism
 
       - name: Verify ASIN export group status and keyset queries against PostgreSQL
         run: pnpm --filter @asin-monitor/db exec vitest run test/asin-export-query.integration.test.ts

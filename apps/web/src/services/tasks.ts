@@ -97,7 +97,8 @@ export function exportDownloadFilename(task: TaskInfo): string | null {
   if (
     task.taskSubType === 'competitor-asin' ||
     task.taskSubType === 'competitor-variant-group' ||
-    task.taskSubType === 'parent-asin-query'
+    task.taskSubType === 'parent-asin-query' ||
+    task.taskSubType === 'monitor-history'
   ) {
     if (
       task.status !== 'completed' ||
@@ -118,7 +119,9 @@ export function exportDownloadFilename(task: TaskInfo): string | null {
       result.exportType === task.taskSubType &&
       result.mimeType === XLSX_MIME &&
       typeof result.filename === 'string' &&
-      (task.taskSubType === 'parent-asin-query'
+      (task.taskSubType === 'monitor-history'
+        ? /^监控历史_\d{4}-\d{2}-\d{2}\.xlsx$/
+        : task.taskSubType === 'parent-asin-query'
         ? /^ASIN父变体查询结果_\d{4}-\d{2}-\d{2}\.xlsx$/
         : task.taskSubType === 'competitor-asin'
         ? /^竞品ASIN数据_\d{4}-\d{2}-\d{2}\.xlsx$/

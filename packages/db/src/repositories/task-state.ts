@@ -186,6 +186,7 @@ export function transitionTask(
       'competitor-asin',
       'competitor-variant-group',
       'parent-asin-query',
+      'monitor-history',
     ].includes(task.taskSubType || '') &&
     (task.cancelRequestedAt || task.status === 'cancelling')
   ) {
@@ -264,6 +265,7 @@ export function transitionTask(
               'competitor-asin',
               'competitor-variant-group',
               'parent-asin-query',
+              'monitor-history',
             ].includes(task.taskSubType || ''))) &&
         (task.cancelRequestedAt || task.status === 'cancelling')
       ) {

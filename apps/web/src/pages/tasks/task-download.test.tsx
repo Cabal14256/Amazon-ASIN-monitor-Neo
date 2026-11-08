@@ -173,6 +173,63 @@ afterEach(() => {
 });
 
 describe('task center ASIN export fallback download', () => {
+  it('offers monitor-history downloads to a monitor reader without an ASIN grant and blocks ASIN-only readers', async () => {
+    const original = exported(),
+      filename = '监控历史_2026-10-07.xlsx';
+    const history = {
+      ...original,
+      taskSubType: 'monitor-history',
+      filename,
+      result: {
+        ...(original.result as object),
+        exportType: 'monitor-history',
+        filename,
+      },
+    };
+    const f = fixture({
+      task: history,
+      identity: { ...user(), permissions: ['monitor:read'] },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '下载结果' }));
+    await waitFor(() => expect(f.filenames).toEqual([filename]));
+    expect(f.files()).toHaveLength(1);
+    f.change({ ...user(), permissions: ['asin:read'] });
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: '下载结果' })).toBeNull(),
+    );
+  });
+  it('aborts a late monitor-history download on monitor permission revocation even if ASIN permission remains', async () => {
+    const pending = deferred<Response>(),
+      original = exported(),
+      filename = '监控历史_2026-10-07.xlsx';
+    const history = {
+      ...original,
+      taskSubType: 'monitor-history',
+      filename,
+      result: {
+        ...(original.result as object),
+        exportType: 'monitor-history',
+        filename,
+      },
+    };
+    const f = fixture({
+      task: history,
+      identity: { ...user(), permissions: ['asin:read', 'monitor:read'] },
+      download: async () => pending.promise,
+    });
+    fireEvent.click(await screen.findByRole('button', { name: '下载结果' }));
+    await waitFor(() => expect(f.files()).toHaveLength(1));
+    f.change(user());
+    await act(async () =>
+      pending.resolve(
+        new Response(new Uint8Array([80, 75, 3, 4]), {
+          headers: { 'content-type': mime },
+        }),
+      ),
+    );
+    expect(f.filenames).toEqual([]);
+    expect(f.objectURL).not.toHaveBeenCalled();
+  });
   it('uses the same direct file stream from the actual mounted task detail download action', async () => {
     const sink = {
       write: vi.fn(async () => undefined),

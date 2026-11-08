@@ -32,6 +32,7 @@ vi.mock('@asin-monitor/db', () => ({
   PgAsinExportQueryRepository: class {},
   PgAsinQueryRepository: class {},
   PgCompetitorExportRepository: class {},
+  PgMonitorHistoryExportRepository: class {},
   RedisTaskRepository: class {
     async read(taskId: string) {
       return fixture.tasks.get(taskId) ?? null;
@@ -340,7 +341,7 @@ describe('ASIN export startup deadline', () => {
       expect(fixture.queueClosed).toBe(1);
       expect(fixture.workerClosed).toBe(stalled === 'worker' ? 1 : 0);
       expect(fixture.redisDisconnected).toBe(1);
-      expect(fixture.poolEnded).toBe(2);
+      expect(fixture.poolEnded).toBe(3);
     },
   );
 });
