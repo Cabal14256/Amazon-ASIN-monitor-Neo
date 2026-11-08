@@ -602,7 +602,7 @@ describe('Redis task registry behavior', () => {
     });
   });
 
-  it.each(['variant-group', 'parent-asin-query'] as const)(
+  it.each(['variant-group', 'parent-asin-query', 'monitor-history'] as const)(
     'captures and indexes the actual %s export identity',
     async (taskSubType) => {
       const { repository, redis } = fixture();

@@ -164,11 +164,23 @@ describe('owned task cancellation HTTP', () => {
   });
   it('does not apply ASIN artifact cleanup to another export family', async () => {
     const { storage, id } = await priorPublishedArtifact();
-    task!.taskSubType = 'monitor-history';
+    task!.taskSubType = 'analytics-monthly-breakdown';
     expect((await cancel(headers, id)).json().data.status).toBe('cancelled');
     expect(await storage.read(id)).not.toBeNull();
     expect(artifacts.discardFinal).not.toHaveBeenCalled();
   });
+  it.each(['removed', 'absent'] as const)(
+    'cleans a published history artifact after %s cancellation without deleting its neighbour',
+    async (state) => {
+      const { storage, neighbour, id } = await priorPublishedArtifact();
+      task!.taskSubType = 'monitor-history';
+      outcome = state;
+      expect((await cancel(headers, id)).json().data.status).toBe('cancelled');
+      expect(await storage.read(id)).toBeNull();
+      expect(await storage.read(neighbour)).not.toBeNull();
+      expect(artifacts.discardFinal).toHaveBeenCalledExactlyOnceWith(id);
+    },
+  );
   it.each(['completed', 'failed', 'foreign', 'replaced', 'subtype'] as const)(
     'preserves the prior artifact when %s wins the cancellation boundary',
     async (state) => {

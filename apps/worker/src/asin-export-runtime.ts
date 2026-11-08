@@ -10,6 +10,7 @@ import {
   PgAsinExportQueryRepository,
   PgAsinQueryRepository,
   PgCompetitorExportRepository,
+  PgMonitorHistoryExportRepository,
   RedisTaskRepository,
 } from '@asin-monitor/db';
 import { ExportArtifactStore } from '@asin-monitor/export';
@@ -20,6 +21,7 @@ import {
   createAsinExportProcessor,
 } from './asin-export-processor';
 import { logger } from './logger';
+import { createMonitorHistoryExportProcessor } from './monitor-history-export-processor';
 import { createParentAsinExportProcessor } from './parent-asin-export-processor';
 import { createParentAsinExportQuery } from './parent-asin-export-query';
 import { getQueueOptions, getWorkerOptions } from './queue-policy';
@@ -67,6 +69,20 @@ export async function startAsinExportRuntime(
   );
   const repository = new PgAsinExportQueryRepository(pool);
   const authorization = new PgAsinQueryRepository(pool);
+  const historyPool = createPgPool(env.DATABASE_URL, {
+    max: 2,
+    connectionTimeoutMillis: Math.min(
+      env.DATABASE_POOL_CONNECTION_TIMEOUT_MS,
+      2000,
+    ),
+    statement_timeout: ASIN_EXPORT_QUERY_TIMEOUT_MS,
+  });
+  historyPool.on('error', () =>
+    logger.error('监控历史导出数据库连接异常', {
+      reason: 'history_export_database_error',
+    }),
+  );
+  const historyRepository = new PgMonitorHistoryExportRepository(historyPool);
   const competitorPool = createPgPool(env.COMPETITOR_DATABASE_URL, {
     max: 2,
     connectionTimeoutMillis: Math.min(
@@ -161,8 +177,9 @@ export async function startAsinExportRuntime(
             },
           },
         );
-        const liveExportOptions = {
-          authorize: async (userId: string) =>
+        const authorize =
+          (permission: 'asin:read' | 'monitor:read') =>
+          async (userId: string) =>
             authorization.read(async (unit) => {
               const user = await unit.lockOperator(userId);
               if (
@@ -173,11 +190,13 @@ export async function startAsinExportRuntime(
                 (user.passwordExpiresAt &&
                   user.passwordExpiresAt <= new Date()) ||
                 !(await unit.operatorPermissionCodes(userId)).includes(
-                  'asin:read',
+                  permission,
                 )
               )
                 throw new Error('EXPORT_AUTHORITY_REVOKED');
-            }),
+            });
+        const liveExportOptions = {
+          authorize: authorize('asin:read'),
           shutdownSignal: shutdown.signal,
           isClosing: () => closing,
           assertJobLock: async (job: { id?: string }, token?: string) => {
@@ -212,10 +231,18 @@ export async function startAsinExportRuntime(
           artifacts,
           liveExportOptions,
         );
+        const historyProcessor = createMonitorHistoryExportProcessor(
+          historyRepository,
+          store,
+          artifacts,
+          { ...liveExportOptions, authorize: authorize('monitor:read') },
+        );
         worker = new Worker(
           getPhysicalQueueName('export'),
           (job, token) =>
-            job.name === 'parent-asin-query'
+            job.name === 'monitor-history'
+              ? historyProcessor(job, token)
+              : job.name === 'parent-asin-query'
               ? parentAsinProcessor(job, token)
               : job.name === 'competitor-asin'
               ? competitorAsinProcessor(job, token)
@@ -358,6 +385,7 @@ export async function startAsinExportRuntime(
             queue.close(),
             pool.end(),
             competitorPool.end(),
+            historyPool.end(),
           ]);
           control.disconnect(false);
         })();
@@ -375,6 +403,7 @@ export async function startAsinExportRuntime(
       queue.close(),
       pool.end(),
       competitorPool.end(),
+      historyPool.end(),
     ]);
     throw new Error('ASIN export runtime initialization failed');
   } finally {

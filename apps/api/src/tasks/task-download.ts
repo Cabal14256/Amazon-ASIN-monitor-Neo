@@ -96,6 +96,7 @@ export class TaskDownloadService implements OnModuleDestroy {
           'competitor-asin',
           'competitor-variant-group',
           'parent-asin-query',
+          'monitor-history',
         ].includes(task.taskSubType || '')
       ) {
         const artifact = asinExportArtifactSchema.safeParse(result.artifact);
@@ -104,7 +105,9 @@ export class TaskDownloadService implements OnModuleDestroy {
           artifact.data.taskId !== task.taskId ||
           typeof result.filename !== 'string' ||
           !(
-            task.taskSubType === 'parent-asin-query'
+            task.taskSubType === 'monitor-history'
+              ? /^监控历史_\d{4}-\d{2}-\d{2}\.xlsx$/
+              : task.taskSubType === 'parent-asin-query'
               ? /^ASIN父变体查询结果_\d{4}-\d{2}-\d{2}\.xlsx$/
               : task.taskSubType === 'competitor-variant-group'
               ? /^竞品变体组数据_\d{4}-\d{2}-\d{2}\.xlsx$/
@@ -124,7 +127,13 @@ export class TaskDownloadService implements OnModuleDestroy {
           fail(404, '任务结果文件不存在或已过期');
         // Task ownership alone does not retain a revoked read grant.
         await this.exportAuthorization.read(async (unit) => {
-          await authorizeAdministration(unit, request.auth!, 'asin:read');
+          await authorizeAdministration(
+            unit,
+            request.auth!,
+            task.taskSubType === 'monitor-history'
+              ? 'monitor:read'
+              : 'asin:read',
+          );
         });
         controller.signal.throwIfAborted();
         // The supported 256 MiB XLSX needs time for hashing and slower clients.
@@ -145,7 +154,9 @@ export class TaskDownloadService implements OnModuleDestroy {
         reply.header(
           'Content-Disposition',
           `attachment; filename="${
-            task.taskSubType === 'variant-group'
+            task.taskSubType === 'monitor-history'
+              ? 'monitor-history-export'
+              : task.taskSubType === 'variant-group'
               ? 'variant-group-export'
               : 'asin-export'
           }-${task.taskId}.xlsx"; filename*=UTF-8''${encodeURIComponent(

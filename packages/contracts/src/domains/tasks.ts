@@ -191,12 +191,59 @@ export const parentAsinExportJobDataSchema = asinExportJobDataSchema.extend({
 export type ParentAsinExportJobData = z.infer<
   typeof parentAsinExportJobDataSchema
 >;
+const historyExportWallTime = z
+  .string()
+  .max(30)
+  .refine((value) => {
+    if (value === '') return true;
+    const match =
+      /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?)?$/.exec(
+        value,
+      );
+    if (!match || Number(value.slice(0, 4)) < 1000) return false;
+    const iso = `${match[1]}T${match[2] ?? '00:00:00'}.${(
+      match[3] ?? ''
+    ).padEnd(3, '0')}Z`;
+    const parsed = new Date(iso);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString() === iso;
+  }, '请使用有效的上海日期时间');
+/** First history export slice: records by country and Shanghai wall time.
+ * Full history filters/status changes are tracked separately in #233. */
+export const monitorHistoryExportParamsSchema = z
+  .object({
+    country: z
+      .string()
+      .max(10)
+      .regex(/^[^\x00-\x1f\x7f]*$/u)
+      .optional(),
+    startTime: historyExportWallTime.optional(),
+    endTime: historyExportWallTime.optional(),
+  })
+  .strict()
+  .default({});
+export const monitorHistoryExportTaskRequestSchema = z
+  .object({
+    exportType: z.literal('monitor-history'),
+    params: monitorHistoryExportParamsSchema,
+  })
+  .strict();
+export const monitorHistoryExportJobDataSchema = asinExportJobDataSchema.extend(
+  {
+    exportType: z.literal('monitor-history'),
+    taskSubType: z.literal('monitor-history'),
+    params: monitorHistoryExportParamsSchema,
+  },
+);
+export type MonitorHistoryExportJobData = z.infer<
+  typeof monitorHistoryExportJobDataSchema
+>;
 export const catalogExportJobDataSchema = z.union([
   asinExportJobDataSchema,
   variantGroupExportJobDataSchema,
   competitorAsinExportJobDataSchema,
   competitorVariantGroupExportJobDataSchema,
   parentAsinExportJobDataSchema,
+  monitorHistoryExportJobDataSchema,
 ]);
 export type CatalogExportJobData = z.infer<typeof catalogExportJobDataSchema>;
 export const CATALOG_EXPORT_TYPES = [
@@ -205,6 +252,7 @@ export const CATALOG_EXPORT_TYPES = [
   'competitor-asin',
   'competitor-variant-group',
   'parent-asin-query',
+  'monitor-history',
 ] as const;
 export const asinExportArtifactSchema = z
   .object({

@@ -38,6 +38,7 @@ interface WorkbookInternals {
 export function createBoundedExportWorkbook(
   output: Writable,
   onFailure: (error: Error) => void,
+  options: { useStyles?: boolean } = {},
 ) {
   const zipOptions = {
     highWaterMark: WORKSHEET_HIGH_WATER_MARK,
@@ -46,7 +47,7 @@ export function createBoundedExportWorkbook(
   const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
     stream: output,
     useSharedStrings: false,
-    useStyles: false,
+    useStyles: options.useStyles ?? false,
     zip: zipOptions,
   });
   const internals = workbook as unknown as WorkbookInternals;
@@ -80,9 +81,14 @@ export function createBoundedExportWorkbook(
     workbook,
     commitRow(
       sheet: ExcelJS.Worksheet,
-      values: readonly (string | number | Date)[],
+      values: readonly (string | number | boolean | Date)[],
+      headerStyle?: { font: Partial<ExcelJS.Font>; fill: ExcelJS.Fill },
     ) {
       const row = sheet.addRow([...values]);
+      if (headerStyle) {
+        row.font = headerStyle.font;
+        row.fill = headerStyle.fill;
+      }
       values.forEach((value, index) => {
         if (value !== '') return;
         // Inline empty <v> cells reload as null in ExcelJS. Keep exactly one

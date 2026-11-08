@@ -10,6 +10,9 @@
     "src/**/*.ts",
     "test/parent-asin-export-legacy.test.ts",
     "test/parent-asin-export-recovery.test.ts",
-    "test/helpers/parent-asin-export-fixture.ts"
+    "test/helpers/parent-asin-export-fixture.ts",
+    "test/monitor-history-export-legacy.test.ts",
+    "test/monitor-history-export-recovery.test.ts",
+    "test/helpers/monitor-history-export-fixture.ts"
   ]
 }

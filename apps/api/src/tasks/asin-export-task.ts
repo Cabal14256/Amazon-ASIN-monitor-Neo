@@ -5,6 +5,7 @@ import {
   competitorAsinExportTaskRequestSchema,
   competitorVariantGroupExportTaskRequestSchema,
   createExportTaskRequestSchema,
+  monitorHistoryExportTaskRequestSchema,
   parentAsinExportTaskRequestSchema,
   variantGroupExportTaskRequestSchema,
 } from '@asin-monitor/contracts';
@@ -31,8 +32,6 @@ import { randomUUID } from 'node:crypto';
 import { authorizeAdministration } from '../auth/administration-authorization';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { AuthenticationGuard } from '../auth/authentication.guard';
-import { PermissionsGuard } from '../auth/permissions.guard';
-import { RequirePermissions } from '../auth/require-permissions.decorator';
 import { ExportSubmissionRejectedException } from '../common/export-submission-rejected.exception';
 import { ENV } from '../config/config.module';
 import { ApplicationDatabasePools } from '../database/database.service';
@@ -77,12 +76,15 @@ export class AsinExportTaskService implements OnModuleDestroy {
       request.data.exportType !== 'variant-group' &&
       request.data.exportType !== 'competitor-asin' &&
       request.data.exportType !== 'competitor-variant-group' &&
-      request.data.exportType !== 'parent-asin-query'
+      request.data.exportType !== 'parent-asin-query' &&
+      request.data.exportType !== 'monitor-history'
     )
       fail(501, '此导出类型尚未在 Neo 实现');
     const exportType = request.data.exportType;
     const parsed =
-      exportType === 'parent-asin-query'
+      exportType === 'monitor-history'
+        ? monitorHistoryExportTaskRequestSchema.safeParse(raw)
+        : exportType === 'parent-asin-query'
         ? parentAsinExportTaskRequestSchema.safeParse(raw)
         : exportType === 'competitor-asin'
         ? competitorAsinExportTaskRequestSchema.safeParse(raw)
@@ -93,7 +95,9 @@ export class AsinExportTaskService implements OnModuleDestroy {
         : asinExportTaskRequestSchema.safeParse(raw);
     if (!parsed.success) fail(400, '导出筛选参数无效');
     const taskTitle =
-      exportType === 'parent-asin-query'
+      exportType === 'monitor-history'
+        ? '监控历史导出'
+        : exportType === 'parent-asin-query'
         ? '父变体查询结果导出'
         : `${exportType.startsWith('competitor-') ? '竞品' : ''}${
             exportType.endsWith('variant-group') ? '变体组导出' : 'ASIN导出'
@@ -108,7 +112,11 @@ export class AsinExportTaskService implements OnModuleDestroy {
     let submissionDeadline = performance.now() + 3000;
     try {
       await this.authorization.read(async (unit) => {
-        await authorizeAdministration(unit, principal, 'asin:read');
+        await authorizeAdministration(
+          unit,
+          principal,
+          exportType === 'monitor-history' ? 'monitor:read' : 'asin:read',
+        );
       });
       const deadline = performance.now() + 3000;
       submissionDeadline = deadline;
@@ -209,7 +217,9 @@ export class AsinExportTaskService implements OnModuleDestroy {
               {
                 kind: 'failed',
                 message:
-                  exportType === 'variant-group'
+                  exportType === 'monitor-history'
+                    ? '监控历史导出未入队，请重试'
+                    : exportType === 'variant-group'
                     ? '变体组导出未入队，请重试'
                     : 'ASIN 导出未入队，请重试',
               },
@@ -252,8 +262,7 @@ export class AsinExportTaskService implements OnModuleDestroy {
 }
 
 @Controller('tasks')
-@UseGuards(AuthenticationGuard, PermissionsGuard)
-@RequirePermissions('asin:read')
+@UseGuards(AuthenticationGuard)
 export class AsinExportTaskController {
   constructor(
     @Inject(AsinExportTaskService)
