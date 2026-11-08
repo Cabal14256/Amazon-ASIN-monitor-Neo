@@ -532,13 +532,15 @@ describe.skipIf(process.env.RUN_INTEGRATION_TESTS !== 'true')(
     }, 45_000);
 
     it('produces, tracks and streams a filtered Legacy-compatible workbook; denies other owners and revoked grants', async () => {
-      const unsupported = await f.app.inject({
+      const monitorPermissionRequired = await f.app.inject({
         method: 'POST',
         url: '/api/v1/tasks/export',
         headers: ownerHeaders,
         payload: { exportType: 'monitor-history' },
       });
-      expect(unsupported.statusCode).toBe(501);
+      // This owner has asin:read only. monitor-history is now supported, with
+      // its independent monitor:read grant verified by its integration suite.
+      expect(monitorPermissionRequired.statusCode).toBe(403);
       const created = await f.app.inject({
         method: 'POST',
         url: '/api/v1/tasks/export',

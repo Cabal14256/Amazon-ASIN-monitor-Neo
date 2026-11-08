@@ -57,9 +57,9 @@ async function legacy(
       exports: {} as Record<string, (...args: unknown[]) => Promise<unknown>>,
     };
   const list = sourceRows.map(({ record }) => {
-    // Actual mysql2 JSON decoding precedes the original exporter.
-    const decoded =
-      record.checkResult === null ? null : JSON.parse(record.checkResult);
+    // Legacy init.sql declares check_result as TEXT, so mysql2 preserves its
+    // text. Parsing at this fixture boundary would conceal a double-decode bug.
+    const decoded = record.checkResult;
     return {
       ...record,
       check_time: record.checkTime,
@@ -152,7 +152,7 @@ async function legacy(
   return records(output);
 }
 describe('monitor history XLSX versus both unchanged Legacy exporters', () => {
-  it('matches actual MySQL JSON decoding for scalar and nested-string payloads', async () => {
+  it('preserves Legacy TEXT decoding for JSON scalars and nested-string payloads', async () => {
     const f = await historyExportFixture();
     try {
       const source = f.rows[0]!;
@@ -178,22 +178,12 @@ describe('monitor history XLSX versus both unchanged Legacy exporters', () => {
       const actual = await records(
         path.join(f.directory, `export-${f.taskId}.xlsx`),
       );
-      expect(actual.rows.slice(1).map((row) => row[12])).toEqual([
-        '',
-        '',
-        '',
-        '',
-        'literal text',
-        JSON.stringify(
-          {
-            source: 'MANUAL_ACTION',
-            action: 'MARK_BROKEN',
-            reason: 'Nested reason',
-          },
-          null,
-          2,
-        ),
-      ]);
+      expect(actual.rows.slice(1).map((row) => row[12])).toEqual(
+        values.map((value) => JSON.stringify(value, null, 2)),
+      );
+      // A JSON string containing object text remains a string after the one
+      // Legacy parse; it cannot supply artificial manual-action metadata.
+      expect(actual.rows.at(-1)?.slice(8, 12)).toEqual(['', '', '', '']);
       for (const direct of [false, true])
         expect(actual).toEqual(await legacy(f.directory, f.rows, direct));
     } finally {

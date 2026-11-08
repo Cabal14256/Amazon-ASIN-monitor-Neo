@@ -37,16 +37,9 @@ export function monitorHistoryExportRow(
   history: MonitorHistoryExportRecord,
 ): (string | number | boolean)[] {
   const raw = history.checkResult;
-  // mysql2 decodes JSON columns before the unchanged Legacy exporter sees
-  // them. PostgreSQL returns JSONB::text here; reproduce that one driver decode.
-  let value: unknown = raw;
-  if (raw) {
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      /* Historical text remains literal. */
-    }
-  }
+  // Legacy check_result is TEXT. Both the original formatter and manual
+  // metadata extractor parse once; JSONB::text must follow that same boundary.
+  const value = raw;
   let payload: Record<string, unknown> | null = null,
     details = '';
   if (value) {
