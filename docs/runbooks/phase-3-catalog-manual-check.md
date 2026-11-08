@@ -2,7 +2,7 @@
 
 本任务增补主营所选变体组批量检查、竞品单组和单 ASIN 检查。主营已上线的单项入口保留；两类目录沿用 Legacy 和 Neo API 的 `asin:read` 权限，不增加写权限要求。
 
-当前 PR #216 保持 Draft，存在未解决的跨版本 P1：[旧 bundle 可通过原 reconcileCreate 清除 active check](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/pull/216#discussion_r4237204983)。代码合并与部署依赖 [Issue #224](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/issues/224) / [PR #229](https://github.com/Cabal14256/Amazon-ASIN-monitor-Neo/pull/229) 的持久后端保护正式进入 `main`，随后同步主线并验证旧恢复后的实际写请求被拒绝。仅 #229 分支已有验收或本轮 Web 检查通过，均不能解除此阻塞；生产切换仍暂停。
+2026-11-08 已普通合并包含 #229 持久后端保护和 #211 批量删除的正式 `main`，再同步 #174。PR #216 继续 Draft，原跨版本 P1 仍须由本次最新 head 的真实 Integration 和 Review 核验后才解除。新版检查与删除共用选择、身份隔离和 Web Lock；历史旧 bundle 仍能清除本地 inspection，正式保护来自 API 的 owner/domain 持久槽与物理事务 pin，不能把前端恢复当作任务停止证明。没有执行生产部署或切流。
 
 ## 接口范围与迁移边界
 
@@ -14,7 +14,7 @@
 
 新入口明确传 `useAsync: true` 和当前确认的 `forceRefresh`。竞品 Neo 服务默认保持 Legacy 同步行为，因此该参数必须显式提供。异步 ACK 的 `taskType` 是子类型；前端校验任务 ID、pending / unknown 状态和相应子类型，批量 ACK 若携带总数，必须匹配目标数量。
 
-Legacy 竞品批量检查菜单和契约登记已有，但 Neo 没有对应 controller / worker bulk 实现。本任务不展示竞品批量检查按钮、不伪造请求，也不修改 API、数据库或生产切换门禁。父 ASIN 批量查询、定时检查、导出、批量删除分别由独立任务负责。
+竞品批量检查后端已由 #251 正式进入 main，但其批量页面入口不在 #214 的原单项范围，本任务不增加竞品批量按钮。父 ASIN 批量查询、定时检查、导出和批量删除由独立任务负责；本任务不修改 API 产品逻辑、数据库结构或生产切换门禁。
 
 ## 操作与恢复
 
@@ -29,6 +29,14 @@ Legacy 竞品批量检查菜单和契约登记已有，但 Neo 没有对应 cont
 - 任务读取 403 通过真实身份重验证处理。同一身份连续两次拒绝后暂停自动跟踪，保留原目标和任务编号，提供人工重试；重试只恢复原任务查询，不发第二次检查 POST。身份最终确认变化时清除旧运行时回执，独立持久化预约保留给原账号核实。
 
 ## 本轮验证记录
+
+2026-11-08 接续：
+
+- 保留主线批量删除、组内批量创建、两域导入保护、竞品/主营导出。只读检查用户仍可选择主营组；有删除权限时检查和删除使用同一组选择，清空、筛选和已受理检查均消除旧确认，已受理后删除不能继续提交。C1 控制符与孤立代理字符沿用当前 Neo 目录 ID 策略拒绝，普通空格、Unicode 和原始 ID 保留。
+- `CatalogCheckRecovery` 在同一共享 Web Lock 内同时读取独立导入保护；尚未合并进共享外壳的旧导入回执也能阻止检查，不覆盖原任务。保留 import/batch-delete/check 三种外壳、跨标签已知删除回执及 GET-only 重读路径。
+- 新增 `catalog-old-recovery-source.json`，冻结原 main `197925d` 四个闭包和完整源 SHA-256；仅用 TypeScript 编译去类型，运行原 parser、setSafety、runWithCatalogLock、reconcileCreate 与 beginWrite。两个纯函数控制仍明确显示原恢复一次 GET 后清保护、保留独立回执并允许本地 beginWrite，不将历史失败改写成前端成功。
+- `literal-check-targets.integration.test.ts` 新增主营/竞品两域真实门禁：真实 HTTP 建立 pending 检查及 PG/Redis 身份，旧恢复执行实际目录 GET；旧页面随后发出的 CRUD 与第二检查必须 409，目录内容未变化；再启动编译 Worker，只执行原检查一次。真实服务证据必须以 latest head Integration 为准，本机 opt-in skip 不算通过。
+- Web 挂载/真实 HttpClient 的组合专项 164 项及旧恢复闭包控制 2 项已通过；根基线、最新 CI、原生门禁和最新 Review 结果写入 PR 的验证节。该记录不代替 #270 的完整真实服务浏览器/下载或生产观察门禁。
 
 2026-10-07，`NODE_OPTIONS=--max-old-space-size=1536`，测试使用真实 HttpClient、Zod 响应解析、TaskApi / Query 更新及挂载目录组件，仅替换外壳、路由链接和网络响应。
 
