@@ -4,6 +4,7 @@
   "include": [
     "src/**/*.ts",
     "test/competitor-export.integration.test.ts",
-    "test/parent-asin-export.integration.test.ts"
+    "test/parent-asin-export.integration.test.ts",
+    "test/monitor-history-export.integration.test.ts"
   ]
 }

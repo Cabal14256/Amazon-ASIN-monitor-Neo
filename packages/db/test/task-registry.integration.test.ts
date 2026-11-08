@@ -73,7 +73,7 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
     expect(await other.listUser('foreign')).toEqual([]);
     expect(await redis.get(legacy)).toBe('unchanged');
   });
-  it.each(['variant-group', 'parent-asin-query'] as const)(
+  it.each(['variant-group', 'parent-asin-query', 'monitor-history'] as const)(
     'atomically admits only two exports per owner with a %s seed across repository instances',
     async (taskSubType) => {
       const owner = `export-owner-${randomUUID()}`;
@@ -123,77 +123,85 @@ describe.skipIf(!enabled)('Neo task registry / real Redis', () => {
       );
     },
   );
-  it('atomically caps all five export kinds across owners and API replicas, retaining the parent seed', async () => {
-    const globalPrefix = `${prefix}-global`;
-    const globalConfig = { ...config, BULL_PREFIX: globalPrefix };
-    const first = new RedisTaskRepository(redis, globalConfig);
-    const second = new RedisTaskRepository(peer, globalConfig);
-    const indexKey = `${globalPrefix}:neo:task:export-global:asin`;
-    keys.add(indexKey);
-    const kinds = [
-      'parent-asin-query',
-      'asin',
-      'variant-group',
-      'competitor-asin',
-      'competitor-variant-group',
-      'asin',
-    ];
-    const inputs = kinds.map((taskSubType, index) => ({
-      taskId: randomUUID(),
-      userId: `global-owner-${index}`,
-      taskType: 'export',
-      taskSubType,
-    }));
-    for (const input of inputs) {
-      keys.add(`${globalPrefix}:neo:task:meta:${input.taskId}`);
-      keys.add(`${globalPrefix}:neo:task:user:${input.userId}`);
-      keys.add(`${globalPrefix}:neo:task:export:${input.userId}`);
-    }
-    const seed = await first.createLimitedExport(inputs[0]!, 2, 3);
-    const results = [
-      { status: 'fulfilled' as const, value: seed },
-      ...(await Promise.allSettled(
-        inputs
-          .slice(1)
-          .map((input, index) =>
-            (index % 2 ? second : first).createLimitedExport(input, 2, 3),
-          ),
-      )),
-    ];
-    const admitted = results.filter((result) => result.status === 'fulfilled');
-    expect(admitted).toHaveLength(3);
-    const rejected = results.filter((result) => result.status === 'rejected');
-    expect(rejected).toHaveLength(3);
-    for (const result of rejected)
-      expect(result).toMatchObject({
-        reason: { code: 'TASK_EXPORT_GLOBAL_LIMIT' },
+  it.each(['parent-asin-query', 'monitor-history'] as const)(
+    'atomically caps all six export kinds across owners and API replicas, retaining the %s seed',
+    async (seedKind) => {
+      const globalPrefix = `${prefix}-global-${seedKind}`;
+      const globalConfig = { ...config, BULL_PREFIX: globalPrefix };
+      const first = new RedisTaskRepository(redis, globalConfig);
+      const second = new RedisTaskRepository(peer, globalConfig);
+      const indexKey = `${globalPrefix}:neo:task:export-global:asin`;
+      keys.add(indexKey);
+      const kinds = [
+        seedKind,
+        ...[
+          'asin',
+          'variant-group',
+          'competitor-asin',
+          'competitor-variant-group',
+          'parent-asin-query',
+          'monitor-history',
+        ].filter((kind) => kind !== seedKind),
+      ];
+      const inputs = kinds.map((taskSubType, index) => ({
+        taskId: randomUUID(),
+        userId: `global-owner-${index}`,
+        taskType: 'export',
+        taskSubType,
+      }));
+      for (const input of inputs) {
+        keys.add(`${globalPrefix}:neo:task:meta:${input.taskId}`);
+        keys.add(`${globalPrefix}:neo:task:user:${input.userId}`);
+        keys.add(`${globalPrefix}:neo:task:export:${input.userId}`);
+      }
+      const seed = await first.createLimitedExport(inputs[0]!, 2, 3);
+      const results = [
+        { status: 'fulfilled' as const, value: seed },
+        ...(await Promise.allSettled(
+          inputs
+            .slice(1)
+            .map((input, index) =>
+              (index % 2 ? second : first).createLimitedExport(input, 2, 3),
+            ),
+        )),
+      ];
+      const admitted = results.filter(
+        (result) => result.status === 'fulfilled',
+      );
+      expect(admitted).toHaveLength(3);
+      const rejected = results.filter((result) => result.status === 'rejected');
+      expect(rejected).toHaveLength(3);
+      for (const result of rejected)
+        expect(result).toMatchObject({
+          reason: { code: 'TASK_EXPORT_GLOBAL_LIMIT' },
+        });
+      expect(await redis.zcard(indexKey)).toBe(3);
+      const released = admitted[0];
+      if (!released || released.status !== 'fulfilled')
+        throw new Error('No admitted export fixture');
+      await first.mutate(
+        released.value.taskId,
+        { kind: 'failed', message: '并发准入测试释放任务容量' },
+        released.value,
+      );
+      expect(await redis.zcard(indexKey)).toBe(2);
+      const replacement = {
+        taskId: randomUUID(),
+        userId: 'global-replacement',
+        taskType: 'export',
+        taskSubType: 'asin',
+      };
+      keys.add(`${globalPrefix}:neo:task:meta:${replacement.taskId}`);
+      keys.add(`${globalPrefix}:neo:task:user:${replacement.userId}`);
+      keys.add(`${globalPrefix}:neo:task:export:${replacement.userId}`);
+      await expect(
+        second.createLimitedExport(replacement, 2, 3),
+      ).resolves.toMatchObject({
+        taskId: replacement.taskId,
       });
-    expect(await redis.zcard(indexKey)).toBe(3);
-    const released = admitted[0];
-    if (!released || released.status !== 'fulfilled')
-      throw new Error('No admitted export fixture');
-    await first.mutate(
-      released.value.taskId,
-      { kind: 'failed', message: '并发准入测试释放任务容量' },
-      released.value,
-    );
-    expect(await redis.zcard(indexKey)).toBe(2);
-    const replacement = {
-      taskId: randomUUID(),
-      userId: 'global-replacement',
-      taskType: 'export',
-      taskSubType: 'asin',
-    };
-    keys.add(`${globalPrefix}:neo:task:meta:${replacement.taskId}`);
-    keys.add(`${globalPrefix}:neo:task:user:${replacement.userId}`);
-    keys.add(`${globalPrefix}:neo:task:export:${replacement.userId}`);
-    await expect(
-      second.createLimitedExport(replacement, 2, 3),
-    ).resolves.toMatchObject({
-      taskId: replacement.taskId,
-    });
-    expect(await redis.zcard(indexKey)).toBe(3);
-  });
+      expect(await redis.zcard(indexKey)).toBe(3);
+    },
+  );
   it('does not lose cancellation across two concurrent writers and never regresses terminal results', async () => {
     for (let round = 0; round < 20; round++) {
       const id = `race-${round}`;

@@ -133,6 +133,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
           'competitor-asin',
           'competitor-variant-group',
           'parent-asin-query',
+          'monitor-history',
         ].includes(job.name))) &&
     resultObject.cancelled === true
       ? 'cancelled'
@@ -182,6 +183,7 @@ function snapshot(job: Job, state: string, type: string): QueueTaskSnapshot {
       'competitor-asin',
       'competitor-variant-group',
       'parent-asin-query',
+      'monitor-history',
     ].includes(job.name)
   ) {
     const data = catalogExportJobDataSchema.parse(job.data);
@@ -460,6 +462,7 @@ export class TaskQueryRuntime implements OnModuleDestroy {
             'competitor-asin',
             'competitor-variant-group',
             'parent-asin-query',
+            'monitor-history',
           ].includes(task.taskSubType || '') ||
           !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
             task.taskId,

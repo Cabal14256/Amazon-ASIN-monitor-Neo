@@ -73,7 +73,7 @@ describe('ASIN export producer', () => {
   it('rejects unimplemented types and malformed ASIN filters without creating a task', async () => {
     const subject = service();
     await expect(
-      subject.create(principal, { exportType: 'monitor-history' }),
+      subject.create(principal, { exportType: 'analytics-monthly-breakdown' }),
     ).rejects.toMatchObject({ status: 501 });
     await expect(
       subject.create(principal, {
@@ -111,6 +111,35 @@ describe('ASIN export producer', () => {
         taskType: 'export',
         taskSubType: 'asin',
         params: { country: 'US', variantStatus: 'BROKEN' },
+      }),
+    );
+  });
+  it('uses the live monitor grant for history exports without requiring an ASIN grant', async () => {
+    const result = await service().create(principal, {
+      exportType: 'monitor-history',
+      params: { country: 'EU', startTime: '2026-09-01', endTime: '2026-10-01' },
+    });
+    expect(authorizeAdministration).toHaveBeenCalledWith(
+      {},
+      principal,
+      'monitor:read',
+    );
+    expect(createLimitedExport).toHaveBeenCalledWith(
+      expect.objectContaining({ taskSubType: 'monitor-history' }),
+      2,
+      100,
+      expect.any(Function),
+    );
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: result.taskId,
+        taskSubType: 'monitor-history',
+        exportType: 'monitor-history',
+        params: {
+          country: 'EU',
+          startTime: '2026-09-01',
+          endTime: '2026-10-01',
+        },
       }),
     );
   });

@@ -143,10 +143,17 @@ export function canOpenTaskDetail(
   return !protectedCheckResult || canReadASIN;
 }
 
-export function hasTaskDownload(task: TaskInfo, canReadASIN = true): boolean {
+export function hasTaskDownload(
+  task: TaskInfo,
+  canReadASIN = true,
+  canReadMonitor = false,
+): boolean {
   if (task.status !== 'completed' || !task.downloadUrl) return false;
   if (task.taskType === 'export')
-    return canReadASIN && exportDownloadFilename(task) !== null;
+    return (
+      (task.taskSubType === 'monitor-history' ? canReadMonitor : canReadASIN) &&
+      exportDownloadFilename(task) !== null
+    );
   if (completedCheckTask(task) && !canReadASIN) return false;
   if (task.taskType === 'import') {
     const result = taskResult(task);

@@ -97,9 +97,11 @@ function DownloadAction({
 function TaskDetails({
   task,
   canReadASIN,
+  canReadMonitor,
 }: {
   task: TaskInfo;
   canReadASIN: boolean;
+  canReadMonitor: boolean;
 }) {
   const result = taskResult(task);
   const warnings = taskWarnings(task);
@@ -220,7 +222,7 @@ function TaskDetails({
         warnings.length === 0 &&
         counts.length === 0 && (
           <p className="text-xs text-muted-foreground">
-            {hasTaskDownload(task, canReadASIN)
+            {hasTaskDownload(task, canReadASIN, canReadMonitor)
               ? '当前结果没有可展示的结构化摘要；可通过下载入口获取完整结果。'
               : '当前结果没有可展示的结构化摘要。'}
           </p>
@@ -239,12 +241,17 @@ export default function TaskCenterPage() {
     identity.status === 'authenticated' &&
     access.canReadASIN &&
     !access.mustChangePassword;
+  const canReadMonitor =
+    identity.status === 'authenticated' &&
+    access.canReadMonitor &&
+    !access.mustChangePassword;
   const scope = JSON.stringify([
     identity.status,
     identity.status === 'authenticated' ? identity.identity.user.id : null,
     identity.status === 'authenticated' ? identity.identity.sessionId : null,
     runtime.session.revision,
     canReadASIN,
+    canReadMonitor,
     access.mustChangePassword,
   ]);
   const downloadScope = useRef(scope);
@@ -340,7 +347,7 @@ export default function TaskCenterPage() {
       identity.status !== 'authenticated' ||
       access.mustChangePassword ||
       downloadRequest.current ||
-      !hasTaskDownload(task, canReadASIN)
+      !hasTaskDownload(task, canReadASIN, canReadMonitor)
     )
       return;
     const controller = new AbortController();
@@ -364,7 +371,7 @@ export default function TaskCenterPage() {
         state.identity.user.id === owner &&
         state.identity.sessionId === sessionId &&
         !policy.mustChangePassword &&
-        hasTaskDownload(task, policy.canReadASIN)
+        hasTaskDownload(task, policy.canReadASIN, policy.canReadMonitor)
       );
     };
     try {
@@ -635,7 +642,11 @@ export default function TaskCenterPage() {
                                   检查结果需 ASIN 读取权限
                                 </span>
                               )}
-                              {hasTaskDownload(task, canReadASIN) && (
+                              {hasTaskDownload(
+                                task,
+                                canReadASIN,
+                                canReadMonitor,
+                              ) && (
                                 <DownloadAction
                                   task={task}
                                   pending={downloadId === task.taskId}
@@ -741,8 +752,16 @@ export default function TaskCenterPage() {
                       详情刷新失败，当前展示上一次成功读取的内容。
                     </p>
                   )}
-                  <TaskDetails task={detail.data} canReadASIN={canReadASIN} />
-                  {hasTaskDownload(detail.data, canReadASIN) && (
+                  <TaskDetails
+                    task={detail.data}
+                    canReadASIN={canReadASIN}
+                    canReadMonitor={canReadMonitor}
+                  />
+                  {hasTaskDownload(
+                    detail.data,
+                    canReadASIN,
+                    canReadMonitor,
+                  ) && (
                     <div className="mt-5">
                       <DownloadAction
                         task={detail.data}

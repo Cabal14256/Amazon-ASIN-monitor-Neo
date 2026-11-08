@@ -73,6 +73,7 @@ describe('own task query HTTP and bounded reconciliation', () => {
     'competitor-asin',
     'competitor-variant-group',
     'parent-asin-query',
+    'monitor-history',
   ] as const)('%s immutable queue reconciliation', (taskSubType) => {
     it.each(['createdAt', 'taskSubType'] as const)(
       'rejects a changed %s before registry mutation',

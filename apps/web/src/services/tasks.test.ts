@@ -153,12 +153,15 @@ describe('task API boundary', () => {
     'competitor-asin',
     'competitor-variant-group',
     'parent-asin-query',
+    'monitor-history',
   ] as const)(
     'downloads a validated %s XLSX and rejects receipt substitution',
     async (kind) => {
       const f = setup('/api/');
       const filename =
-        kind === 'parent-asin-query'
+        kind === 'monitor-history'
+          ? '监控历史_2026-10-07.xlsx'
+          : kind === 'parent-asin-query'
           ? 'ASIN父变体查询结果_2026-10-07.xlsx'
           : `${
               kind === 'competitor-asin' ? '竞品ASIN' : '竞品变体组'

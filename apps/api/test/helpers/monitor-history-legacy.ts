@@ -123,6 +123,11 @@ export async function legacyMonitorHistoryFixture() {
     return {
       query,
       close,
+      model: model as {
+        findAll(
+          params: Record<string, unknown>,
+        ): Promise<{ list: Record<string, unknown>[]; total: number | null }>;
+      },
       list: (raw: Record<string, string>) =>
         invoke(controller.getMonitorHistory, { query: raw }),
       detail: (id: number) =>

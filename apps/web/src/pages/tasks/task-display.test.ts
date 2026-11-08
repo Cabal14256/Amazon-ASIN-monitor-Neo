@@ -44,6 +44,39 @@ const report = {
 };
 
 describe('task center display boundaries', () => {
+  it('requires the monitor grant specifically for a validated history workbook', () => {
+    const filename = '监控历史_2026-10-07.xlsx';
+    const result = {
+      exportType: 'monitor-history',
+      filename,
+      mimeType:
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      fileSizeBytes: 4,
+      artifact: {
+        taskId: importId,
+        key: `export-${importId}.xlsx`,
+        bytes: 4,
+        sha256: 'c'.repeat(64),
+      },
+    };
+    const history = task({
+      taskId: importId,
+      taskType: 'export',
+      taskSubType: 'monitor-history',
+      status: 'completed',
+      filename,
+      downloadUrl: `/api/v1/tasks/${importId}/download`,
+      result,
+    });
+    expect(hasTaskDownload(history, false, true)).toBe(true);
+    expect(hasTaskDownload(history, true, false)).toBe(false);
+    expect(
+      hasTaskDownload({ ...history, filename: '../unsafe.xlsx' }, false, true),
+    ).toBe(false);
+    expect(
+      hasTaskDownload({ ...history, taskSubType: 'asin' }, false, true),
+    ).toBe(false);
+  });
   it('offers only a completed task-owned variant-group XLSX artifact', () => {
     const result = {
       exportType: 'variant-group',
