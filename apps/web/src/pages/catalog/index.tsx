@@ -20,6 +20,7 @@ import {
   useState,
   type FormEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
@@ -124,6 +125,10 @@ type AcceptedCheckMemory = {
   gate?: CatalogCheckGate;
   authorizationFailures?: number;
 };
+interface RetainedBatchReceipt {
+  receipt: AsinBatchReceipt;
+  owner: string;
+}
 function sameCheckReservation(left: CatalogCheckGate, right: CatalogCheckGate) {
   return (
     left.requestId === right.requestId &&
@@ -971,8 +976,46 @@ export function CatalogPage({
   config: CatalogConfig;
   extra?: ReactNode;
 }) {
-  const { runtime } = useAuth();
+  const { runtime, identity } = useAuth();
   const auth = useIdentity();
+  // Keep completed receipt retirement above the permission-scoped body. A
+  // permission-only unmount must not lose cleanup when that session later ends.
+  const batchResultRef = useRef<RetainedBatchReceipt | null>(null);
+  useEffect(() => {
+    const retire = () => {
+      const previous = batchResultRef.current;
+      if (!previous) return;
+      // Transfer once to the existing retirement lifecycle. Repeated identity
+      // notifications must not queue cleanup for this receipt a second time.
+      batchResultRef.current = null;
+      retireBatchReceiptAfterIdentityChange(
+        identity,
+        runtime,
+        previous.receipt,
+        previous.owner,
+        () => undefined,
+      );
+    };
+    const unsubscribe = identity.subscribe(() => {
+      const current = identity.getSnapshot();
+      const previous = batchResultRef.current;
+      if (
+        previous &&
+        (current.status === 'anonymous' ||
+          (current.status === 'authenticated' &&
+            JSON.stringify([
+              config.id,
+              current.identity.user.id,
+              current.identity.sessionId ?? null,
+            ]) !== previous.owner))
+      )
+        retire();
+    });
+    return () => {
+      unsubscribe();
+      retire();
+    };
+  }, [config.id, identity, runtime]);
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
@@ -992,15 +1035,24 @@ export function CatalogPage({
     runtime.session?.revision,
     auth.status === 'authenticated' ? auth.identity.permissions : [],
   ]);
-  return <CatalogPageBody key={scope} config={config} extra={extra} />;
+  return (
+    <CatalogPageBody
+      key={scope}
+      config={config}
+      extra={extra}
+      batchResultRef={batchResultRef}
+    />
+  );
 }
 
 function CatalogPageBody({
   config,
   extra,
+  batchResultRef,
 }: {
   config: CatalogConfig;
   extra?: ReactNode;
+  batchResultRef: RefObject<RetainedBatchReceipt | null>;
 }) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
@@ -1247,7 +1299,6 @@ function CatalogPageBody({
     persisted: boolean;
     recoveredFromOwner?: string;
   } | null>(null);
-  const batchResultRef = useRef(batchResult);
   // A permission-only transition hides the result, but its original receipt
   // still needs cleanup if this session is subsequently logged out/replaced.
   if (batchResult) batchResultRef.current = batchResult;
@@ -1269,15 +1320,6 @@ function CatalogPageBody({
       );
     },
     [identity, runtime],
-  );
-  useEffect(
-    () => () => {
-      // RouteGate may unmount for pending/error before identity is definitive.
-      // The retirement subscription survives that screen without losing rows.
-      const previous = batchResultRef.current;
-      if (previous) retireBatchReceipt(previous.receipt, previous.owner);
-    },
-    [config.id, identity, retireBatchReceipt],
   );
   const [batchReceiptWarning, setBatchReceiptWarning] = useState<string | null>(
     null,
