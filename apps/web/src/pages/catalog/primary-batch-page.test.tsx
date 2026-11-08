@@ -866,11 +866,16 @@ describe('actual primary batch-create catalog integration', () => {
         'session-2',
         mustChangePassword,
       );
-      const restore = screen.getByRole('button', {
+      const restore = screen.queryByRole('button', {
         name: '恢复原会话已知回执（不提交）',
       });
-      expect(restore).toHaveProperty('disabled', true);
-      fireEvent.click(restore);
+      if (mustChangePassword) {
+        expect(restore).toBeNull();
+        expect(screen.getByRole('alert').textContent).toContain('请先修改密码');
+      } else {
+        expect(restore).toHaveProperty('disabled', true);
+        fireEvent.click(restore!);
+      }
       expect(screen.queryByRole('region', { name: '批量添加结果' })).toBeNull();
       expect(window.localStorage.getItem(guardKey)).not.toBeNull();
       expect(f.posts()).toHaveLength(1);

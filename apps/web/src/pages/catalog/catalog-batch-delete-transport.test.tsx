@@ -749,11 +749,16 @@ describe('mounted primary and competitor bulk-delete real HTTP transport', () =>
       act(() =>
         f.setIdentity(permissions, 'operator', 'session-2', mustChangePassword),
       );
-      const button = screen.getByRole('button', {
+      const button = screen.queryByRole('button', {
         name: '恢复原会话删除回执（不提交）',
       });
-      expect(button).toHaveProperty('disabled', true);
-      fireEvent.click(button);
+      if (mustChangePassword) {
+        expect(button).toBeNull();
+        expect(screen.getByRole('alert').textContent).toContain('请先修改密码');
+      } else {
+        expect(button).toHaveProperty('disabled', true);
+        fireEvent.click(button!);
+      }
       expect(screen.queryByText(/实际删除变体组 1 个/)).toBeNull();
       expect(mutations(f)).toHaveLength(1);
       expect(

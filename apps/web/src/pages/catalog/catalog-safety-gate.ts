@@ -17,7 +17,14 @@ export interface CatalogBatchDeleteGate {
   ownerScope?: string;
 }
 
+import {
+  validCatalogCheckGate,
+  type CatalogCheckGate,
+} from './catalog-check-types';
+
 export type CatalogSafetyGate =
+  | { phase: 'check-invalid'; operationId: string }
+  | { phase: 'check'; operationId: string; check: CatalogCheckGate }
   | CatalogBatchDeleteGate
   | {
       phase: 'import';
@@ -119,6 +126,7 @@ export function readCatalogSafetyGate(
   if (!raw) return null;
   let value: unknown;
   try {
+    if (raw.length > 128 * 1024) throw new Error('invalid');
     value = JSON.parse(raw);
   } catch {
     return { phase: 'inspection', operationId: 'invalid-record' };
@@ -233,6 +241,21 @@ export function readCatalogSafetyGate(
       typeof gate.operationId === 'string'
         ? { operationId: gate.operationId }
         : {};
+    if (
+      gate.phase === 'check' ||
+      (gate.phase === 'inspection' && Object.hasOwn(gate, 'check'))
+    ) {
+      if (
+        !validCatalogCheckGate(gate.check) ||
+        gate.operationId !== gate.check.requestId
+      )
+        throw new Error('invalid');
+      return {
+        phase: 'check',
+        operationId: gate.check.requestId,
+        check: gate.check,
+      };
+    }
     if (gate.phase === 'inspection')
       return { phase: 'inspection', ...operationId };
     if (
@@ -287,6 +310,19 @@ export function readCatalogSafetyGate(
       ...(batchCreateOwner ? { batchCreateOwner } : {}),
     };
   } catch {
+    // Never discard a malformed async-operation record and permit a duplicate.
+    try {
+      const raw = storage.getItem(key);
+      if (raw?.includes('"check"'))
+        return { phase: 'check-invalid', operationId: 'invalid-check-record' };
+      if (raw?.includes('"inspection"'))
+        return {
+          phase: 'inspection',
+          operationId: 'invalid-inspection-record',
+        };
+    } catch {
+      return { phase: 'check-invalid', operationId: 'unreadable-check-record' };
+    }
     try {
       storage.removeItem(key);
     } catch {
@@ -323,6 +359,10 @@ export function writeCatalogSafetyGate(
                 operationId: gate.operationId,
               },
             }
+          : gate.phase === 'check'
+          ? { ...gate, phase: 'inspection' }
+          : gate.phase === 'check-invalid'
+          ? { ...gate, phase: 'inspection', check: null }
           : gate;
       storage.setItem(catalogSafetyKey(owner, source), JSON.stringify(stored));
     } else storage.removeItem(catalogSafetyKey(owner, source));

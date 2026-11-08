@@ -692,5 +692,13 @@ export function useCatalogBatchDelete(options: {
       )}
     </div>
   ) : null;
-  return { selection, panel, busy };
+  return {
+    selection,
+    panel,
+    busy,
+    clearSelection: () => {
+      setConfirmation(null);
+      setSelection({ scope, ids: [] });
+    },
+  };
 }

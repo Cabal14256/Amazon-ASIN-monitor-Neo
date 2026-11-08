@@ -34,6 +34,7 @@ import {
 } from '../src/sp-api-runtime/sp-api-runtime.module';
 import { TaskQueryRuntime } from '../src/tasks/task-query.runtime';
 import { VariantCheckModule } from '../src/variant-check/variant-check.module';
+import { runOldCatalogRecovery } from './helpers/catalog-old-recovery';
 import { competitorWriteApp } from './helpers/competitor-write-app';
 import { legacyLiteralCheckFixture } from './helpers/literal-check-legacy';
 
@@ -442,6 +443,100 @@ suite(
         25_000,
       );
     });
+    it.each(['primary', 'competitor'] as const)(
+      '%s rejects old-tab CRUD and a second check after the original old recovery clears an active reservation',
+      async (domain) => {
+        const groupId = `mixed-version-${domain}`;
+        const seeded = await seed(domain, groupId, 'mixed-child');
+        const path = domain === 'primary' ? '' : '/competitor';
+        const checkPath =
+          domain === 'primary'
+            ? '/variant-groups/batch-check'
+            : `${path}/variant-groups/${groupId}/check`;
+        const checkBody = {
+          ...(domain === 'primary' ? { groupIds: [groupId] } : {}),
+          useAsync: true,
+          forceRefresh: true,
+        };
+        const accepted = await post(checkPath, checkBody);
+        expect(accepted.statusCode, accepted.body.slice(0, 500)).toBe(200);
+        const taskId = accepted.json().data.taskId as string;
+        expect((await store.read(taskId))?.status).toBe('pending');
+        const old = await runOldCatalogRecovery(
+          userId,
+          domain === 'primary' ? 'asin' : 'competitor',
+          {
+            phase: 'inspection',
+            operationId: 'old-visible-check',
+            check: {
+              requestId: 'old-visible-check',
+              submittedAt: Date.now(),
+              taskId,
+              target:
+                domain === 'primary'
+                  ? {
+                      kind: 'batch',
+                      id: 'batch',
+                      label: 'Fixture',
+                      groupIds: [groupId],
+                    }
+                  : { kind: 'group', id: groupId, label: 'Fixture' },
+            },
+          },
+          async () => {
+            const read = await f.http.inject({
+              method: 'GET',
+              url: `/api/v1${path}/variant-groups`,
+              headers,
+            });
+            expect(read.statusCode).toBe(200);
+          },
+        );
+        // Keep the historical frontend failure visible: it really removes the
+        // shared key and permits its old local beginWrite while receipt stays.
+        expect(old.afterRecovery).toBeNull();
+        expect(JSON.parse(old.receipt!)).toMatchObject({ taskId });
+        expect(old.admitted).toMatchObject({ phase: 'refresh' });
+        const payload = {
+          name: 'Must remain blocked',
+          country: 'US',
+          brand: 'Fixture',
+          ...(domain === 'primary' ? { site: 'amazon.com' } : {}),
+        };
+        const edit = await f.http.inject({
+          method: 'PUT',
+          url: `/api/v1${path}/variant-groups/${groupId}`,
+          headers,
+          payload,
+        });
+        expect(edit.statusCode, edit.body.slice(0, 500)).toBe(409);
+        expect((await post(checkPath, checkBody)).statusCode).toBe(409);
+        expect(transport.request).not.toHaveBeenCalled();
+        expect(
+          (
+            await seeded.pool.query(
+              `SELECT name FROM ${seeded.g} WHERE id=$1`,
+              [groupId],
+            )
+          ).rows[0].name,
+        ).toBe('Fixture');
+        await start();
+        await finish(taskId, 'completed');
+        expect(
+          (
+            await seeded.pool.query(
+              `SELECT name,is_broken FROM ${seeded.g} WHERE id=$1`,
+              [groupId],
+            )
+          ).rows[0],
+        ).toMatchObject({ name: 'Fixture', is_broken: false });
+        const requests = transport.request.mock.calls.filter(([input]) =>
+          input.url.pathname.endsWith(`/${seeded.asin}`),
+        );
+        expect(requests).toHaveLength(1);
+      },
+      30_000,
+    );
     it('keeps literal batch targets, duplicate ordinals and original receipt identity through the compiled Worker', async () => {
       // Frozen Legacy checks iterate their original array; deletion's first-ID
       // deduplication policy must not change an accepted check job's ordinals.

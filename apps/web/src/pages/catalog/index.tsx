@@ -20,6 +20,7 @@ import {
   useState,
   type FormEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { createAccess } from '../../auth/access';
 import { useAuth, useIdentity } from '../../auth/context';
@@ -40,8 +41,9 @@ import {
   ModuleLabel,
 } from '../../components/ui/surfaces';
 import { useCreateExportTask, useTaskQuery } from '../../hooks/tasks';
+import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
-import { isBulkDeleteId } from '../../services/catalog-batch-delete';
+import { isCheckGroupId } from '../../services/catalog-check';
 import { isTerminalTask } from '../../services/tasks';
 import { AsinBatchCreatePanel } from '../asin/asin-batch-create-panel';
 import { AsinBatchCreateResult } from '../asin/asin-batch-create-result';
@@ -53,10 +55,7 @@ import {
 } from '../asin/asin-batch-receipt';
 import { importGateKey } from '../asin/asin-import-gate';
 import { CatalogActionPanel } from './catalog-actions';
-import {
-  useCatalogBatchDelete,
-  type CatalogSelection,
-} from './catalog-batch-delete';
+import { useCatalogBatchDelete } from './catalog-batch-delete';
 import { retireBatchReceiptAfterIdentityChange } from './catalog-batch-receipt-retirement';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
@@ -90,6 +89,10 @@ import {
   writeCatalogSafetyGate,
   type CatalogSafetyGate,
 } from './catalog-safety-gate';
+import {
+  CatalogSelectionInput,
+  type CatalogSelection,
+} from './catalog-selection';
 import type {
   CatalogAction,
   CatalogConfig,
@@ -117,31 +120,23 @@ type CheckState = {
   uncertain?: boolean;
   message?: string;
 };
-const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
-function CatalogSelectionInput({
-  group,
-  selection,
-}: {
-  group: CatalogGroup;
-  selection?: CatalogSelection;
-}) {
-  if (!selection) return null;
-  const eligible = isBulkDeleteId(group.id);
+type AcceptedCheckMemory = {
+  scope: symbol;
+  gate?: CatalogCheckGate;
+  authorizationFailures?: number;
+};
+interface RetainedBatchReceipt {
+  receipt: AsinBatchReceipt;
+  owner: string;
+}
+function sameCheckReservation(left: CatalogCheckGate, right: CatalogCheckGate) {
   return (
-    <label className="mb-2 flex items-center gap-2 text-xs">
-      <input
-        type="checkbox"
-        aria-label={`选择变体组 ${group.name || '未命名'}，ID ${JSON.stringify(
-          group.id,
-        )}`}
-        checked={selection.ids.includes(group.id)}
-        disabled={selection.disabled || !eligible}
-        onChange={() => selection.toggle(group.id)}
-      />
-      {eligible ? '选择' : '原始 ID 格式不兼容，无法选择'}
-    </label>
+    left.requestId === right.requestId &&
+    left.submittedAt === right.submittedAt &&
+    JSON.stringify(left.target) === JSON.stringify(right.target)
   );
 }
+const INITIAL_QUERY: CatalogQuery = { current: 1, pageSize: 10 };
 function Notice({
   title,
   error,
@@ -184,7 +179,9 @@ function GroupCard({
     <li className="rounded-control border border-border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <CatalogSelectionInput group={group} selection={selection} />
+          {selection && (
+            <CatalogSelectionInput group={group} selection={selection} />
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="break-words font-semibold">
               {group.name || '未命名变体组'}
@@ -783,7 +780,12 @@ export function GroupRows({
         header: '变体组',
         cell: ({ row }) => (
           <div className="min-w-0">
-            <CatalogSelectionInput group={row.original} selection={selection} />
+            {selection && (
+              <CatalogSelectionInput
+                group={row.original}
+                selection={selection}
+              />
+            )}
             <p className="break-words font-semibold">
               {row.original.name || '未命名变体组'}
             </p>
@@ -854,7 +856,7 @@ export function GroupRows({
         ),
       },
     ],
-    [actionsDisabled, config, selectedId, toggleGroup, selection],
+    [actionsDisabled, config, selectedId, selection, toggleGroup],
   );
   const table = useTable({
     features: TABLE_FEATURES,
@@ -974,6 +976,84 @@ export function CatalogPage({
   config: CatalogConfig;
   extra?: ReactNode;
 }) {
+  const { runtime, identity } = useAuth();
+  const auth = useIdentity();
+  // Keep completed receipt retirement above the permission-scoped body. A
+  // permission-only unmount must not lose cleanup when that session later ends.
+  const batchResultRef = useRef<RetainedBatchReceipt | null>(null);
+  useEffect(() => {
+    const retire = () => {
+      const previous = batchResultRef.current;
+      if (!previous) return;
+      // Transfer once to the existing retirement lifecycle. Repeated identity
+      // notifications must not queue cleanup for this receipt a second time.
+      batchResultRef.current = null;
+      retireBatchReceiptAfterIdentityChange(
+        identity,
+        runtime,
+        previous.receipt,
+        previous.owner,
+        () => undefined,
+      );
+    };
+    const unsubscribe = identity.subscribe(() => {
+      const current = identity.getSnapshot();
+      const previous = batchResultRef.current;
+      if (
+        previous &&
+        (current.status === 'anonymous' ||
+          (current.status === 'authenticated' &&
+            JSON.stringify([
+              config.id,
+              current.identity.user.id,
+              current.identity.sessionId ?? null,
+            ]) !== previous.owner))
+      )
+        retire();
+    });
+    return () => {
+      unsubscribe();
+      retire();
+    };
+  }, [config.id, identity, runtime]);
+  const access = createAccess(
+    auth.status === 'authenticated' ? auth.identity : undefined,
+  );
+  if (!access.canReadASIN || access.mustChangePassword)
+    return (
+      <AppShell title={config.title}>
+        <p role="alert">
+          {access.mustChangePassword
+            ? '请先修改密码，再访问目录检查。'
+            : '当前身份无权读取 ASIN 目录。'}
+        </p>
+      </AppShell>
+    );
+  const scope = JSON.stringify([
+    auth.status === 'authenticated' ? auth.identity.user.id : '',
+    auth.status === 'authenticated' ? auth.identity.sessionId : '',
+    runtime.session?.revision,
+    auth.status === 'authenticated' ? auth.identity.permissions : [],
+  ]);
+  return (
+    <CatalogPageBody
+      key={scope}
+      config={config}
+      extra={extra}
+      batchResultRef={batchResultRef}
+    />
+  );
+}
+
+function CatalogPageBody({
+  config,
+  extra,
+  batchResultRef,
+}: {
+  config: CatalogConfig;
+  extra?: ReactNode;
+  batchResultRef: RefObject<RetainedBatchReceipt | null>;
+}) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
   const exportTask = useCreateExportTask(runtime);
@@ -1087,9 +1167,12 @@ export function CatalogPage({
         '已有导入请求待核实，导入保护解除前不能写入目录。',
       );
     }
-    if (existing) {
+    if (existing || recovery?.read()) {
       runtime.queryClient.setQueryData(safetyKey, existing);
-      throw new ApiError('INVALID_INPUT', '已有写入结果待核实，请先重读目录。');
+      throw new ApiError(
+        'INVALID_INPUT',
+        '已有目录操作或检查结果待核实，请先恢复原操作。',
+      );
     }
     const gate: CatalogSafetyGate = {
       phase: 'refresh',
@@ -1119,11 +1202,19 @@ export function CatalogPage({
   const access = createAccess(
     auth.status === 'authenticated' ? auth.identity : undefined,
   );
+  const [checkState, setCheckState] = useState<CheckState | null>(null);
+  const checkBusyRef = useRef(false);
+  const checkBusy =
+    checkState?.phase === 'submitting' ||
+    checkState?.phase === 'task' ||
+    checkState?.phase === 'unknown' ||
+    checkState?.phase === 'refreshing';
   const canWrite = Boolean(
     config.writes &&
       safetyHydrated &&
       access.canWriteASIN &&
       !safety &&
+      !checkBusy &&
       !importBlocked &&
       !storageUnavailable,
   );
@@ -1134,11 +1225,53 @@ export function CatalogPage({
         ? access.canWriteASIN
         : access.canDeleteASIN) &&
       !safety &&
+      !checkBusy &&
       !importBlocked &&
       !storageUnavailable,
   );
   const canCheck = Boolean(config.checks && access.canReadASIN);
   const userId = auth.status === 'authenticated' ? auth.identity.user.id : '';
+  const sessionId =
+    auth.status === 'authenticated' ? auth.identity.sessionId : undefined;
+  const sessionRevision = runtime.session?.revision;
+  const acceptedCheckKey = useMemo(
+    () =>
+      [
+        'catalog-check-accepted',
+        config.id,
+        userId,
+        sessionId,
+        sessionRevision,
+      ] as const,
+    [config.id, userId, sessionId, sessionRevision],
+  );
+  // A valid ACK may outlive the mounted route when both storage areas reject
+  // its update. A removed submission scope must never be recreated by late ACKs.
+  useEffect(() => {
+    runtime.queryClient.setQueryDefaults(['catalog-check-accepted'], {
+      gcTime: Infinity,
+    });
+  }, [runtime.queryClient]);
+  useQuery<AcceptedCheckMemory | null>({
+    queryKey: acceptedCheckKey,
+    queryFn: () => null,
+    enabled: false,
+    gcTime: Infinity,
+  });
+  const currentCheckScope = useCallback(() => {
+    const current = identity.getSnapshot();
+    const grant = createAccess(
+      current.status === 'authenticated' ? current.identity : undefined,
+    );
+    return (
+      current.status === 'authenticated' &&
+      current.identity.user.id === userId &&
+      current.identity.sessionId === sessionId &&
+      runtime.session?.revision === sessionRevision &&
+      grant.canReadASIN &&
+      !grant.mustChangePassword
+    );
+  }, [identity, runtime.session, sessionId, sessionRevision, userId]);
   const [action, setAction] = useState<CatalogAction | null>(null);
   const [actionSerial, setActionSerial] = useState(0);
   const [writing, setWriting] = useState(false);
@@ -1166,7 +1299,6 @@ export function CatalogPage({
     persisted: boolean;
     recoveredFromOwner?: string;
   } | null>(null);
-  const batchResultRef = useRef(batchResult);
   // A permission-only transition hides the result, but its original receipt
   // still needs cleanup if this session is subsequently logged out/replaced.
   if (batchResult) batchResultRef.current = batchResult;
@@ -1188,15 +1320,6 @@ export function CatalogPage({
       );
     },
     [identity, runtime],
-  );
-  useEffect(
-    () => () => {
-      // RouteGate may unmount for pending/error before identity is definitive.
-      // The retirement subscription survives that screen without losing rows.
-      const previous = batchResultRef.current;
-      if (previous) retireBatchReceipt(previous.receipt, previous.owner);
-    },
-    [config.id, identity, retireBatchReceipt],
   );
   const [batchReceiptWarning, setBatchReceiptWarning] = useState<string | null>(
     null,
@@ -1283,41 +1406,118 @@ export function CatalogPage({
     [config.id, runtime.queryClient],
   );
   const [forceRefresh, setForceRefresh] = useState(true);
-  const [checkState, setCheckState] = useState<CheckState | null>(null);
-  const checkBusyRef = useRef(false);
+  const selectionScope = JSON.stringify(query);
+  const catalogReadRevision = useRef(0);
+  useLayoutEffect(() => {
+    // Include a monotonic revision so changing away and back cannot authorize
+    // an earlier response to unlock the current catalog.
+    ++catalogReadRevision.current;
+  }, [selectionScope, selectedId]);
+  const [selectedGroups, setSelectedGroups] = useState<{
+    scope: string;
+    ids: string[];
+  }>({ scope: selectionScope, ids: [] });
+  const selectedGroupIds =
+    selectedGroups.scope === selectionScope ? selectedGroups.ids : [];
+  const [confirmation, setConfirmation] = useState<{
+    scope: string;
+    target: CheckTarget;
+    forceRefresh: boolean;
+  } | null>(null);
+  const pendingConfirmation =
+    confirmation?.scope === selectionScope ? confirmation : null;
+  useLayoutEffect(() => {
+    // Invalidate the stored targets, not only their visibility. Returning to a
+    // previous query must never revive an old selection or confirmation.
+    setSelectedGroups({ scope: selectionScope, ids: [] });
+    setConfirmation(null);
+  }, [selectionScope]);
+  const selection: CatalogSelection = {
+    ids: selectedGroupIds,
+    disabled:
+      !safetyHydrated ||
+      importBlocked ||
+      checkBusy ||
+      writing ||
+      Boolean(safety) ||
+      storageUnavailable,
+    toggle: (id) => {
+      if (
+        !safetyHydrated ||
+        importBlocked ||
+        checkBusyRef.current ||
+        writingRef.current ||
+        safety ||
+        !isCheckGroupId(id)
+      )
+        return;
+      setConfirmation(null);
+      setSelectedGroups((previous) => {
+        const ids = previous.scope === selectionScope ? previous.ids : [];
+        return {
+          scope: selectionScope,
+          ids: ids.includes(id)
+            ? ids.filter((value) => value !== id)
+            : [...ids, id],
+        };
+      });
+    },
+  };
   const mounted = useRef(true);
   const checkOwner = useRef(userId);
   checkOwner.current = userId;
   const checkRequest = useRef<AbortController | null>(null);
+  const peerCheckRequest = useRef<AbortController | null>(null);
+  const invalidatePeerCheck = useCallback(() => {
+    ++crossTabSafetyRevision.current;
+    peerCheckRequest.current?.abort();
+  }, []);
+  const [peerCheckRefresh, setPeerCheckRefresh] = useState<
+    'reading' | 'failed' | null
+  >(null);
   const recovery = useMemo(() => {
     try {
       return config.checks && userId
-        ? browserCheckRecovery(config.id, userId)
+        ? browserCheckRecovery(config.id, userId, (next) =>
+            runtime.queryClient.setQueryData(safetyKey, next),
+          )
         : null;
     } catch {
       return null;
     }
-  }, [config.checks, config.id, userId]);
+  }, [config.checks, config.id, userId, runtime.queryClient, safetyKey]);
   const handledTasks = useRef(new Set<string>());
   const handlingTasks = useRef(new Set<string>());
-  const checkBusy =
-    checkState?.phase === 'submitting' ||
-    checkState?.phase === 'task' ||
-    checkState?.phase === 'unknown' ||
-    checkState?.phase === 'refreshing';
   const restoreCheck = useCallback(() => {
     if (!recovery || !canCheck) return;
     try {
-      const gate = recovery.read();
+      const durable = recovery.read();
+      const memory =
+        runtime.queryClient.getQueryData<AcceptedCheckMemory>(acceptedCheckKey);
+      const accepted = memory?.gate;
+      const matches =
+        durable &&
+        accepted &&
+        sameCheckReservation(durable, accepted) &&
+        (!durable.taskId || durable.taskId === accepted.taskId);
+      const gate =
+        matches && !durable.taskId
+          ? { ...durable, taskId: accepted.taskId }
+          : durable;
+      if (accepted && !matches)
+        runtime.queryClient.setQueryData(acceptedCheckKey, null);
       if (gate) {
+        const paused = matches && (memory?.authorizationFailures ?? 0) >= 2;
         checkBusyRef.current = true;
         setCheckState({
           target: gate.target,
           gate,
-          phase: gate.taskId ? 'task' : 'unknown',
+          phase: gate.taskId && !paused ? 'task' : 'unknown',
           taskId: gate.taskId,
           uncertain: true,
-          message: '上次提交结果待核实，请先查看任务中心；核实前不会重复提交。',
+          message: paused
+            ? '任务状态连续无权读取，自动重试已暂停；请到任务中心核实，或重试核实原任务。任务编号和防重记录继续保留。'
+            : '上次提交结果待核实，请先查看任务中心；核实前不会重复提交。',
         });
       } else if (!checkRequest.current) {
         checkBusyRef.current = false;
@@ -1328,7 +1528,7 @@ export function CatalogPage({
         '无法读取浏览器中的检查记录，请恢复本地存储后重试；尚未发送新请求。',
       );
     }
-  }, [canCheck, recovery]);
+  }, [canCheck, recovery, acceptedCheckKey, runtime.queryClient]);
   const restoreCurrentCheck = useRef(restoreCheck);
   restoreCurrentCheck.current = restoreCheck;
   useEffect(() => {
@@ -1336,12 +1536,17 @@ export function CatalogPage({
     return () => {
       mounted.current = false;
       checkRequest.current?.abort();
+      peerCheckRequest.current?.abort();
     };
   }, []);
   useEffect(() => {
     restoreCheck();
     const sync = (event: StorageEvent) => {
-      if (event.key === catalogCheckGateKey(config.id, userId)) restoreCheck();
+      if (
+        event.key === catalogCheckGateKey(config.id, userId) ||
+        event.key === catalogSafetyKey(userId, config.id)
+      )
+        restoreCheck();
     };
     window.addEventListener('storage', sync);
     return () => window.removeEventListener('storage', sync);
@@ -1361,6 +1566,81 @@ export function CatalogPage({
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
+  const rereadReleasedCheck = useCallback(
+    async (stored: Storage, revision: number) => {
+      peerCheckRequest.current?.abort();
+      const controller = new AbortController();
+      peerCheckRequest.current = controller;
+      const current = () =>
+        mounted.current &&
+        currentCheckScope() &&
+        !controller.signal.aborted &&
+        revision === crossTabSafetyRevision.current;
+      const guard = () => {
+        if (!current()) throw new ApiError('CANCELLED', '身份或页面已变化');
+      };
+      setPeerCheckRefresh('reading');
+      try {
+        guard();
+        await clearCatalogCache();
+        guard();
+        const firstPage = await config.list(
+          runtime.http,
+          query,
+          controller.signal,
+        );
+        guard();
+        const lastPage = Math.max(
+          1,
+          Math.ceil(firstPage.total / firstPage.pageSize),
+        );
+        const correctedQuery =
+          firstPage.current > lastPage
+            ? { ...query, current: lastPage }
+            : query;
+        const fresh =
+          correctedQuery === query
+            ? firstPage
+            : await config.list(
+                runtime.http,
+                correctedQuery,
+                controller.signal,
+              );
+        guard();
+        const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+        if (latest || recovery?.read()) {
+          if (latest) runtime.queryClient.setQueryData(safetyKey, latest);
+          restoreCheck();
+          setPeerCheckRefresh(null);
+          return;
+        }
+        runtime.queryClient.setQueryData(
+          [config.id, 'groups', correctedQuery],
+          fresh,
+        );
+        if (correctedQuery !== query) setQuery(correctedQuery);
+        runtime.queryClient.setQueryData(safetyKey, null);
+        setPeerCheckRefresh(null);
+      } catch {
+        if (current()) setPeerCheckRefresh('failed');
+        // The cached check still blocks operations until a successful GET.
+      } finally {
+        if (peerCheckRequest.current === controller)
+          peerCheckRequest.current = null;
+      }
+    },
+    [
+      clearCatalogCache,
+      config,
+      currentCheckScope,
+      ownerId,
+      query,
+      recovery,
+      restoreCheck,
+      runtime,
+      safetyKey,
+    ],
+  );
   useLayoutEffect(() => {
     if (!ownerId || !config.writes) return;
     let active = true;
@@ -1387,6 +1667,8 @@ export function CatalogPage({
       if (importing) runtime.queryClient.setQueryData(importSafetyKey, true);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {
+        peerCheckRequest.current?.abort();
+        setPeerCheckRefresh(null);
         const known =
           runtime.queryClient.getQueryData<CatalogSafetyGate>(safetyKey);
         const receiptScope = JSON.stringify([
@@ -1413,6 +1695,11 @@ export function CatalogPage({
         runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
       if (!currentSafety && !currentImportBlocked) {
         runtime.queryClient.setQueryData(safetyKey, null);
+        setPeerCheckRefresh(null);
+        return;
+      }
+      if (currentSafety?.phase === 'check') {
+        void rereadReleasedCheck(stored, revision);
         return;
       }
       if (importing) return;
@@ -1484,6 +1771,7 @@ export function CatalogPage({
     window.addEventListener(CATALOG_GATE_CHANGED, changed);
     return () => {
       active = false;
+      invalidatePeerCheck();
       window.removeEventListener('storage', syncSafety);
       window.removeEventListener(CATALOG_GATE_CHANGED, changed);
     };
@@ -1498,6 +1786,8 @@ export function CatalogPage({
     peerRefreshRetry,
     peerSessionId,
     identity,
+    rereadReleasedCheck,
+    invalidatePeerCheck,
   ]);
   useEffect(() => {
     if (!action) return;
@@ -1605,11 +1895,28 @@ export function CatalogPage({
       safetyHydrated &&
       !storageUnavailable &&
       !importBlocked &&
+      !checkBusy &&
       !writing &&
       !accessDenied,
     onQuery: setQuery,
     onDenied: () => reportAccessDenied(),
   });
+  const sharedSelection: CatalogSelection | undefined = batchDelete.selection
+    ? {
+        ...batchDelete.selection,
+        toggle: (id) => {
+          setConfirmation(null);
+          batchDelete.selection?.toggle(id);
+        },
+      }
+    : canCheck && config.checks?.batch
+    ? selection
+    : undefined;
+  const sharedGroupIds = sharedSelection?.ids ?? [];
+  const sharedSelectionRevision = JSON.stringify(sharedGroupIds);
+  useLayoutEffect(() => {
+    setConfirmation(null);
+  }, [sharedSelectionRevision]);
 
   const recheckAccess = useCallback(async () => {
     if (recheckActive.current) return;
@@ -1646,14 +1953,52 @@ export function CatalogPage({
     if (recheckActive.current) return;
     const outstanding =
       runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
+    const accepted =
+      runtime.queryClient.getQueryData<AcceptedCheckMemory>(acceptedCheckKey);
+    let durable: CatalogCheckGate | null = null;
+    try {
+      durable = recovery?.read() ?? null;
+    } catch {
+      /* Storage failure must not prevent identity revalidation. */
+    }
+    const matching =
+      durable &&
+      accepted?.gate &&
+      sameCheckReservation(durable, accepted.gate) &&
+      (!durable.taskId || durable.taskId === accepted.gate.taskId);
+    const gate =
+      matching && durable && accepted?.gate
+        ? { ...durable, taskId: durable.taskId ?? accepted.gate.taskId }
+        : durable;
     runtime.clearUserWork();
     if (outstanding) runtime.queryClient.setQueryData(safetyKey, outstanding);
+    // A 403 suspends access until revalidation; it does not prove a new owner.
+    // IdentityStore clears this receipt if revalidation confirms another scope.
+    if (gate?.taskId && currentCheckScope())
+      runtime.queryClient.setQueryData<AcceptedCheckMemory>(acceptedCheckKey, {
+        scope: accepted?.scope ?? Symbol('catalog-check-revalidation'),
+        gate,
+        authorizationFailures:
+          (matching ? accepted.authorizationFailures ?? 0 : 0) + 1,
+      });
     void recheckAccess();
-  }, [recheckAccess, runtime, safetyKey]);
+  }, [
+    recheckAccess,
+    runtime,
+    safetyKey,
+    acceptedCheckKey,
+    currentCheckScope,
+    recovery,
+  ]);
 
   const refreshCheckedCatalog = useCallback(async () => {
+    const revision = catalogReadRevision.current;
     const guard = () => {
-      if (!mounted.current || checkOwner.current !== userId)
+      if (
+        !mounted.current ||
+        !currentCheckScope() ||
+        revision !== catalogReadRevision.current
+      )
         throw new ApiError('CANCELLED', '身份或页面已变化');
     };
     guard();
@@ -1675,7 +2020,7 @@ export function CatalogPage({
         detail,
       );
     }
-  }, [config, query, runtime, selectedId, userId]);
+  }, [config, query, runtime, selectedId, currentCheckScope]);
 
   useEffect(() => {
     if (
@@ -1709,8 +2054,13 @@ export function CatalogPage({
         : current,
     );
     const gate = checkState.gate;
+    const revision = catalogReadRevision.current;
+    const current = () =>
+      mounted.current &&
+      currentCheckScope() &&
+      revision === catalogReadRevision.current;
     void (async () => {
-      let message =
+      const message =
         task.status === 'completed'
           ? summarizeCheckResult(task.result)
           : task.error || task.message || '检查任务未完成。';
@@ -1721,11 +2071,26 @@ export function CatalogPage({
           reportAccessDenied();
           return;
         }
-        message += '，目录刷新失败，请手动刷新。';
+        if (mounted.current && currentCheckScope())
+          setCheckState((current) =>
+            current?.taskId === task.taskId
+              ? {
+                  ...current,
+                  phase: 'unknown',
+                  message:
+                    message + '；目录重读未完成，防重记录保留，请核实后重试。',
+                }
+              : current,
+          );
+        return;
       }
-      const cleared = !gate || Boolean(await recovery?.clear(gate));
+      if (!mounted.current || !currentCheckScope()) return;
+      const cleared = !gate || Boolean(await recovery?.clear(gate, current));
       if (!mounted.current || checkOwner.current !== userId) return;
-      if (cleared) handledTasks.current.add(task.taskId);
+      if (cleared) {
+        handledTasks.current.add(task.taskId);
+        runtime.queryClient.setQueryData(acceptedCheckKey, null);
+      }
       checkBusyRef.current = !cleared;
       setCheckState((current) =>
         current?.taskId === task.taskId
@@ -1763,36 +2128,80 @@ export function CatalogPage({
     reportAccessDenied,
     recovery,
     userId,
+    currentCheckScope,
+    runtime.queryClient,
+    acceptedCheckKey,
   ]);
 
-  async function runCheck(target: CheckTarget) {
-    if (!config.checks || !canCheck || checkBusyRef.current || checkBusy)
+  async function runCheck(
+    target: CheckTarget,
+    requestedForceRefresh = forceRefresh,
+  ) {
+    if (
+      !config.checks ||
+      !canCheck ||
+      !currentCheckScope() ||
+      writingRef.current ||
+      checkBusyRef.current ||
+      checkBusy
+    )
       return;
     checkBusyRef.current = true;
     setNotice(null);
     setCheckState({ target, phase: 'submitting' });
-    const current = () => mounted.current && checkOwner.current === userId;
+    const current = () => mounted.current && currentCheckScope();
     const controller = new AbortController();
     checkRequest.current = controller;
     let staleSubmission = false;
     try {
       if (!recovery) throw new Error('CHECK_GATE_UNAVAILABLE');
+      const scope = Symbol('catalog-check-submission');
+      runtime.queryClient.setQueryData<AcceptedCheckMemory>(acceptedCheckKey, {
+        scope,
+      });
       const result = await recovery.submit(
         target,
         () =>
-          config.checks![target.kind](
-            runtime.http,
-            target.id,
-            { forceRefresh },
-            controller.signal,
-          ),
+          target.kind === 'batch'
+            ? config.checks!.batch!(
+                runtime.http,
+                target.groupIds,
+                { forceRefresh: requestedForceRefresh },
+                controller.signal,
+              )
+            : config.checks![target.kind](
+                runtime.http,
+                target.id,
+                { forceRefresh: requestedForceRefresh },
+                controller.signal,
+              ),
         current,
+        (gate, persisted) => {
+          if (persisted) return;
+          const memory =
+            runtime.queryClient.getQueryData<AcceptedCheckMemory>(
+              acceptedCheckKey,
+            );
+          const verified = identity.getSnapshot();
+          if (
+            memory?.scope !== scope ||
+            runtime.session?.revision !== sessionRevision ||
+            verified.status === 'anonymous' ||
+            (verified.status === 'authenticated' &&
+              (verified.identity.user.id !== userId ||
+                verified.identity.sessionId !== sessionId))
+          )
+            return;
+          runtime.queryClient.setQueryData(acceptedCheckKey, { scope, gate });
+        },
       );
       if (!current() || result.kind === 'stale') {
         staleSubmission = true;
         return;
       }
       if (result.kind === 'task' || result.kind === 'blocked') {
+        setSelectedGroups({ scope: selectionScope, ids: [] });
+        batchDelete.clearSelection();
         const gate = result.gate;
         setCheckState({
           target: gate.target,
@@ -1886,15 +2295,60 @@ export function CatalogPage({
 
   async function reconcileCheck() {
     const gate = checkState?.gate;
-    if (!gate || !recovery || checkRequest.current) return;
+    if (!gate || !recovery || checkRequest.current || !currentCheckScope())
+      return;
+    const revision = catalogReadRevision.current;
+    const current = () =>
+      mounted.current &&
+      currentCheckScope() &&
+      revision === catalogReadRevision.current;
+    const matchingReceipt = () => {
+      try {
+        const durable = recovery.read();
+        if (!durable || !sameCheckReservation(durable, gate)) return false;
+        const accepted =
+          runtime.queryClient.getQueryData<AcceptedCheckMemory>(
+            acceptedCheckKey,
+          )?.gate;
+        const taskId =
+          durable.taskId ??
+          (accepted && sameCheckReservation(durable, accepted)
+            ? accepted.taskId
+            : undefined);
+        return taskId === gate.taskId;
+      } catch {
+        return false;
+      }
+    };
     try {
       const outcome = await recovery.reconcile(
         gate,
         (id) => runtime.tasks.get(id),
-        refreshCheckedCatalog,
+        async () => {
+          if (!current()) throw new ApiError('CANCELLED', '目录或身份已变化');
+          await refreshCheckedCatalog();
+        },
+        current,
       );
-      if (!mounted.current || checkOwner.current !== userId) return;
+      if (!mounted.current || !currentCheckScope()) return;
       if (outcome === 'active') {
+        if (!matchingReceipt()) {
+          restoreCurrentCheck.current();
+          return;
+        }
+        const memory =
+          runtime.queryClient.getQueryData<AcceptedCheckMemory>(
+            acceptedCheckKey,
+          );
+        if (
+          memory?.gate &&
+          sameCheckReservation(memory.gate, gate) &&
+          memory.gate.taskId === gate.taskId
+        )
+          runtime.queryClient.setQueryData(acceptedCheckKey, {
+            ...memory,
+            authorizationFailures: 0,
+          });
         setCheckState({
           target: gate.target,
           gate,
@@ -1910,10 +2364,15 @@ export function CatalogPage({
         return;
       }
       checkBusyRef.current = false;
+      runtime.queryClient.setQueryData(acceptedCheckKey, null);
       setCheckState(null);
       setNotice('已核实原任务，可以重新提交检查。');
     } catch (error) {
-      if (!mounted.current || checkOwner.current !== userId) return;
+      if (!mounted.current || !currentCheckScope()) return;
+      if (!matchingReceipt()) {
+        restoreCurrentCheck.current();
+        return;
+      }
       if (catalogAccessDenied(error)) reportAccessDenied();
       else
         setNotice(
@@ -2129,6 +2588,36 @@ export function CatalogPage({
       if (catalogAccessDenied(cause)) {
         reportAccessDenied();
       }
+    }
+  }
+
+  async function retryReleasedCheck() {
+    if (
+      peerCheckRefresh === 'reading' ||
+      safety?.phase !== 'check' ||
+      !mounted.current ||
+      !currentCheckScope()
+    )
+      return;
+    try {
+      await runWithCatalogLock(async () => {
+        if (!mounted.current || !currentCheckScope()) return;
+        const stored = catalogSafetyStorage();
+        if (!stored) {
+          setStorageUnavailable(true);
+          return;
+        }
+        const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+        if (latest || recovery?.read()) {
+          if (latest) runtime.queryClient.setQueryData(safetyKey, latest);
+          restoreCheck();
+          setPeerCheckRefresh(null);
+          return;
+        }
+        await rereadReleasedCheck(stored, ++crossTabSafetyRevision.current);
+      });
+    } catch {
+      if (mounted.current && currentCheckScope()) setPeerCheckRefresh('failed');
     }
   }
 
@@ -2666,6 +3155,32 @@ export function CatalogPage({
         </section>
 
         {storageWarning}
+        {safety?.phase === 'check' && !checkState && peerCheckRefresh && (
+          <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
+            <p role="alert">
+              {peerCheckRefresh === 'reading'
+                ? '其他标签已核实原检查，正在重新读取本页目录；目录操作仍暂停。'
+                : '其他标签已核实原检查，但本页目录重读失败；目录操作仍暂停。请重新读取目录后继续。'}
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              disabled={storageUnavailable}
+              pending={peerCheckRefresh === 'reading'}
+              onClick={() => void retryReleasedCheck()}
+            >
+              重新读取检查后的目录
+            </Button>
+          </div>
+        )}
+        {safety?.phase === 'check-invalid' && (
+          <p
+            role="alert"
+            className="rounded-control bg-status-warning-soft p-4 text-sm"
+          >
+            检查恢复记录损坏，目录操作已暂停。请人工核实原任务和目录后修复恢复记录。
+          </p>
+        )}
         {safety?.phase === 'inspection' && (
           <div className="space-y-3 rounded-control bg-status-warning-soft p-4 text-sm text-status-warning">
             <p role="alert">
@@ -2709,6 +3224,49 @@ export function CatalogPage({
               重读目录并核实导入保护（不提交）
             </Button>
           </div>
+        )}
+        {pendingConfirmation && !checkBusy && (
+          <section
+            aria-label="确认检查"
+            className="space-y-3 rounded-control border border-border bg-muted/55 p-4 text-sm"
+          >
+            <h2 className="font-semibold">确认提交检查</h2>
+            <p>
+              {pendingConfirmation.target.label}；
+              {pendingConfirmation.forceRefresh
+                ? '强制刷新最新数据'
+                : '允许使用缓存'}
+              。提交后可到任务中心查看进度。
+            </p>
+            <ul className="neo-mono max-h-40 overflow-auto break-all text-xs">
+              {(pendingConfirmation.target.kind === 'batch'
+                ? pendingConfirmation.target.groupIds
+                : [pendingConfirmation.target.id]
+              ).map((id) => (
+                <li key={id}>{JSON.stringify(id)}</li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
+              <Button
+                size="small"
+                disabled={writing || Boolean(safety) || storageUnavailable}
+                onClick={() => {
+                  const snapshot = pendingConfirmation;
+                  setConfirmation(null);
+                  void runCheck(snapshot.target, snapshot.forceRefresh);
+                }}
+              >
+                确认提交检查
+              </Button>
+              <Button
+                size="small"
+                variant="ghost"
+                onClick={() => setConfirmation(null)}
+              >
+                取消
+              </Button>
+            </div>
+          </section>
         )}
 
         {notice && (
@@ -2757,10 +3315,8 @@ export function CatalogPage({
                 )}
                 {checkState.gate && (
                   <p className="text-xs text-muted-foreground">
-                    提交时间：
-                    {new Date(checkState.gate.submittedAt).toLocaleString(
-                      'zh-CN',
-                    )}
+                    提交时间（北京时间）：
+                    {formatBeijing(checkState.gate.submittedAt)}
                   </p>
                 )}
               </div>
@@ -3039,13 +3595,59 @@ export function CatalogPage({
                     <input
                       type="checkbox"
                       checked={forceRefresh}
-                      disabled={checkBusy}
+                      disabled={checkBusy || writing || Boolean(safety)}
                       onChange={(event) =>
                         setForceRefresh(event.target.checked)
                       }
                     />
                     强制刷新
                   </label>
+                )}
+                {canCheck && config.checks?.batch && (
+                  <>
+                    <span className="text-xs text-muted-foreground">
+                      已选 {sharedGroupIds.length} 组
+                    </span>
+                    <Button
+                      size="small"
+                      disabled={
+                        !sharedSelection ||
+                        sharedSelection.disabled ||
+                        sharedGroupIds.length === 0
+                      }
+                      onClick={() =>
+                        setConfirmation({
+                          scope: selectionScope,
+                          forceRefresh,
+                          target: {
+                            kind: 'batch',
+                            id: 'batch',
+                            label: `所选 ${sharedGroupIds.length} 个主营变体组`,
+                            groupIds: [...sharedGroupIds],
+                          },
+                        })
+                      }
+                    >
+                      检查所选组
+                    </Button>
+                    {!batchDelete.selection && (
+                      <Button
+                        size="small"
+                        variant="ghost"
+                        disabled={
+                          !sharedSelection ||
+                          sharedSelection.disabled ||
+                          sharedGroupIds.length === 0
+                        }
+                        onClick={() => {
+                          setSelectedGroups({ scope: selectionScope, ids: [] });
+                          setConfirmation(null);
+                        }}
+                      >
+                        清空选择
+                      </Button>
+                    )}
+                  </>
                 )}
                 {canWrite && (
                   <Button
@@ -3139,7 +3741,7 @@ export function CatalogPage({
                   <GroupRows
                     groups={data.list}
                     config={config}
-                    selection={batchDelete.selection}
+                    selection={sharedSelection}
                     selectedId={selectedId}
                     onSelect={(id) => {
                       if (writingRef.current) return;
@@ -3149,10 +3751,18 @@ export function CatalogPage({
                     canWrite={canWrite}
                     canDelete={canDelete}
                     canCheck={canCheck}
-                    checkBusy={checkBusy}
+                    checkBusy={checkBusy || writing || Boolean(safety)}
                     actionsDisabled={writing}
                     onAction={openAction}
-                    onCheck={(target) => void runCheck(target)}
+                    onCheck={(target) =>
+                      config.id === 'competitor'
+                        ? setConfirmation({
+                            scope: selectionScope,
+                            target,
+                            forceRefresh,
+                          })
+                        : void runCheck(target)
+                    }
                     onDenied={reportAccessDenied}
                   />
                 )}

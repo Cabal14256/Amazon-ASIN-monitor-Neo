@@ -172,7 +172,8 @@ describe('primary catalog variant-group export', () => {
     'hides export when read access or password policy blocks it',
     async ({ permissions, mustChangePassword }) => {
       fixture({ permissions, mustChangePassword });
-      await screen.findAllByText('Primary group');
+      await screen.findByRole('alert');
+      expect(screen.queryByText('Primary group')).toBeNull();
       expect(screen.queryByRole('button', { name: '导出变体组' })).toBeNull();
       expect(exportHook.mutateAsync).not.toHaveBeenCalled();
     },
