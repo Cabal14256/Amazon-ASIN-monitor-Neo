@@ -468,7 +468,20 @@ suite(
           {
             phase: 'inspection',
             operationId: 'old-visible-check',
-            check: { taskId },
+            check: {
+              requestId: 'old-visible-check',
+              submittedAt: Date.now(),
+              taskId,
+              target:
+                domain === 'primary'
+                  ? {
+                      kind: 'batch',
+                      id: 'batch',
+                      label: 'Fixture',
+                      groupIds: [groupId],
+                    }
+                  : { kind: 'group', id: groupId, label: 'Fixture' },
+            },
           },
           async () => {
             const read = await f.http.inject({
@@ -482,7 +495,7 @@ suite(
         // Keep the historical frontend failure visible: it really removes the
         // shared key and permits its old local beginWrite while receipt stays.
         expect(old.afterRecovery).toBeNull();
-        expect(old.receipt).toBe('processing');
+        expect(JSON.parse(old.receipt!)).toMatchObject({ taskId });
         expect(old.admitted).toMatchObject({ phase: 'refresh' });
         const payload = {
           name: 'Must remain blocked',

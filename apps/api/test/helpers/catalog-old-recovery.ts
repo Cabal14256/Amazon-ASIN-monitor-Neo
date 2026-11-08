@@ -39,7 +39,11 @@ export async function runOldCatalogRecovery(
   const key = module.exports.catalogSafetyKey!(ownerId, domain) as string;
   values.set(key, JSON.stringify(shared));
   // The receipt stays independent even when an old tab drops envelope fields.
-  values.set('independent-receipt', 'processing');
+  const receiptKey = `neo:catalog-check:${encodeURIComponent(
+    domain,
+  )}:${encodeURIComponent(ownerId)}`;
+  const check = (shared as { check: unknown }).check;
+  values.set(receiptKey, JSON.stringify(check));
   const storage = {
     getItem: (name: string) => values.get(name) ?? null,
     setItem: (name: string, value: string) => values.set(name, value),
@@ -90,7 +94,7 @@ export async function runOldCatalogRecovery(
   old.beginWrite({ type: 'create-group' });
   return {
     afterRecovery,
-    receipt: storage.getItem('independent-receipt'),
+    receipt: storage.getItem(receiptKey),
     admitted: parser(storage, ownerId, domain),
   };
 }

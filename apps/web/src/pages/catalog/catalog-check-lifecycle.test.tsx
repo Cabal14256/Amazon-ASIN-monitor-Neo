@@ -203,10 +203,11 @@ async function fixture(domain: Domain = 'asin', failAcceptedReceipt = false) {
       );
     }
     if (
-      domain === 'competitor'
-        ? url.pathname === '/api/v1/competitor/catalog/variant-groups/detail' &&
-          url.searchParams.get('groupId') === group.id
-        : url.pathname.endsWith(encodeURIComponent(group.id))
+      url.pathname ===
+        `/api/v1${
+          domain === 'competitor' ? '/competitor' : ''
+        }/catalog/variant-groups/detail` &&
+      url.searchParams.get('groupId') === group.id
     )
       return envelope(group);
     catalogReads.push(url);

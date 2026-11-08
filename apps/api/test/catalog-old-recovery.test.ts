@@ -12,13 +12,18 @@ describe('frozen pre-deploy catalog recovery evidence', () => {
         {
           phase: 'inspection',
           operationId: 'check-214',
-          check: { taskId: 'task-214' },
+          check: {
+            requestId: 'check-214',
+            submittedAt: 1000,
+            target: { kind: 'group', id: 'g1', label: 'Fixture' },
+            taskId: 'task-214',
+          },
         },
         read,
       );
       expect(read).toHaveBeenCalledTimes(1);
       expect(actual.afterRecovery).toBeNull();
-      expect(actual.receipt).toBe('processing');
+      expect(JSON.parse(actual.receipt!)).toMatchObject({ taskId: 'task-214' });
       expect(actual.admitted).toMatchObject({
         phase: 'refresh',
         createUncertain: true,

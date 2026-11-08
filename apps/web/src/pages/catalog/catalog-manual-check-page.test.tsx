@@ -122,10 +122,11 @@ function fixture(
         }),
       );
     if (
-      domain === 'competitor'
-        ? path === '/api/v1/competitor/catalog/variant-groups/detail' &&
-          new URL(String(input)).searchParams.get('groupId') === group.id
-        : path.endsWith(encodeURIComponent(group.id))
+      path ===
+        `/api/v1${
+          domain === 'competitor' ? '/competitor' : ''
+        }/catalog/variant-groups/detail` &&
+      new URL(String(input)).searchParams.get('groupId') === group.id
     )
       return envelope(group);
     if (listFails)
