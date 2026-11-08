@@ -1,9 +1,15 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CatalogOperationModule } from '../catalog/catalog-operation.module';
 import { CompetitorCheckStorageModule } from '../competitor/competitor-check-storage.module';
 import { ImportStorageModule } from '../import/import-storage.module';
 import { VariantCheckStorageModule } from '../variant-check/variant-check-storage.module';
 import { WebSocketModule } from '../websocket/websocket.module';
+import {
+  AsinExportTaskController,
+  AsinExportTaskService,
+} from './asin-export-task';
+import { ExportStorageModule } from './export-storage.module';
 import { TaskCancellationController } from './task-cancellation.controller';
 import { TaskCancellationService } from './task-cancellation.service';
 import { TaskDownloadController, TaskDownloadService } from './task-download';
@@ -15,15 +21,18 @@ import { VariantCheckTaskResults } from './variant-check-task-results';
 @Module({
   imports: [
     AuthModule,
+    CatalogOperationModule,
     WebSocketModule,
     ImportStorageModule,
     VariantCheckStorageModule,
+    ExportStorageModule,
     CompetitorCheckStorageModule,
   ],
   controllers: [
     TaskQueryController,
     TaskCancellationController,
     TaskDownloadController,
+    AsinExportTaskController,
   ],
   providers: [
     TaskQueryRuntime,
@@ -31,6 +40,7 @@ import { VariantCheckTaskResults } from './variant-check-task-results';
     VariantCheckTaskResults,
     TaskCancellationService,
     TaskDownloadService,
+    AsinExportTaskService,
   ],
   exports: [TaskQueryRuntime],
 })

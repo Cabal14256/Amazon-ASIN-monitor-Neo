@@ -1,4 +1,8 @@
 import type { Env } from '@asin-monitor/config';
+import {
+  backupRestoreReceiptSchema,
+  CATALOG_EXPORT_TYPES,
+} from '@asin-monitor/contracts';
 import { isTerminalTaskStatus, type TaskState } from '@asin-monitor/db';
 import {
   variantCheckResultOperation,
@@ -8,6 +12,7 @@ import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { AuthPrincipal } from '../auth/auth.types';
 import { ENV } from '../config/config.module';
 import { AppLogger } from '../logger/app-logger.service';
+import { backupCreationResult } from './backup-creation-result';
 import {
   parseTaskId,
   parseTaskQuery,
@@ -26,11 +31,21 @@ function fail(status: number, message: string): never {
 }
 const checkTask = (task: { taskType: string }) =>
   ['variant-check', 'batch-check'].includes(task.taskType);
+const backupRestoreTask = (task: {
+  taskType: string;
+  taskSubType?: string | null;
+}) => task.taskType === 'backup' && task.taskSubType === 'restore';
+const backupTask = (task: { taskType: string }) => task.taskType === 'backup';
 const cancellationSensitiveTask = (task: { taskType: string }) =>
   checkTask(task) || ['monitor', 'competitor-monitor'].includes(task.taskType);
+const boundTask = (task: { taskType: string; taskSubType: string | null }) =>
+  cancellationSensitiveTask(task) ||
+  (task.taskType === 'export' &&
+    CATALOG_EXPORT_TYPES.some((kind) => kind === task.taskSubType));
 const needsReconciliation = (task: TaskState) =>
   !isTerminalTaskStatus(task.status) ||
-  (checkTask(task) && task.status === 'failed');
+  (checkTask(task) && task.status === 'failed') ||
+  (backupTask(task) && ['failed', 'cancelled'].includes(task.status));
 @Injectable()
 export class TaskQueryService {
   private active = 0;
@@ -60,7 +75,7 @@ export class TaskQueryService {
         throw new Error('TASK_QUERY_DEADLINE');
     };
     try {
-      return await action(this.runtime.open(ensureOpen), ensureOpen);
+      return await action(this.runtime.open(ensureOpen, deadline), ensureOpen);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       if (error instanceof TaskQueryInputError) fail(400, '任务查询参数无效');
@@ -84,6 +99,16 @@ export class TaskQueryService {
     const userId = principal.userId;
     this.owner(task, userId);
     if (!needsReconciliation(task)) return task;
+    // Queue absence alone is never proof. Only the producer's immutable,
+    // shared-volume receipt can terminalize a definitive pre-add rejection.
+    if (port.reconcileRejectedExport) {
+      const rejected = await port.reconcileRejectedExport(task);
+      if (rejected) {
+        this.owner(rejected, userId);
+        if (isTerminalTaskStatus(rejected.status)) return rejected;
+      }
+    }
+    ensureOpen();
     const queued = await port.findJob(task.taskId, task.taskType);
     // Cleanup, retention limits, or a lost completion acknowledgement can erase
     // the job after a business commit. Without its immutable request digest,
@@ -92,7 +117,7 @@ export class TaskQueryService {
     this.owner(queued, userId);
     if (queued.taskType !== task.taskType)
       throw new Error('TASK_QUEUE_TYPE_MISMATCH');
-    if (cancellationSensitiveTask(task)) {
+    if (boundTask(task) || backupTask(task)) {
       if (
         queued.createdAt !== task.createdAt ||
         queued.taskSubType !== task.taskSubType
@@ -104,10 +129,65 @@ export class TaskQueryService {
       userId: task.userId,
       taskType: task.taskType,
       createdAt: task.createdAt,
-      ...(cancellationSensitiveTask(task)
+      ...(boundTask(task) || backupTask(task)
         ? { taskSubType: task.taskSubType }
         : {}),
     };
+    if (
+      task.taskType === 'backup' &&
+      task.taskSubType === 'create' &&
+      queued.status === 'completed'
+    ) {
+      const receipt = backupCreationResult(task, queued);
+      if (receipt) {
+        ensureOpen();
+        current = await port.store.mutate(
+          task.taskId,
+          {
+            kind: 'backup-create-committed',
+            result: receipt,
+            message: '备份完成（已从队列恢复）',
+          },
+          identity,
+        );
+        ensureOpen();
+        if (!current) fail(404, '任务不存在');
+        this.owner(current, userId);
+        return current;
+      }
+      if (isTerminalTaskStatus(task.status)) return task;
+    }
+    if (backupRestoreTask(task) && queued.status === 'completed') {
+      const receipt = backupRestoreReceiptSchema.safeParse(queued.result);
+      if (receipt.success) {
+        // The in-place transaction committed or the isolated database was
+        // verified and retained before registry/cancellation acknowledgements.
+        // Its immutable queue incarnation is checked above.
+        current = await port.store.mutate(
+          task.taskId,
+          {
+            kind: 'restore-committed',
+            result: { ...receipt.data, verification: 'unconfirmed' },
+          },
+          identity,
+        );
+        if (receipt.data.verification === 'confirmed')
+          current = await port.store.mutate(
+            task.taskId,
+            {
+              kind: 'restore-confirmed',
+              result: { ...receipt.data, verification: 'confirmed' },
+            },
+            identity,
+          );
+        if (!current) fail(404, '任务不存在');
+        this.owner(current, userId);
+        return current;
+      }
+      // BullMQ completes the processor's cancellation marker too. Only a
+      // validated commit receipt may override confirmed restore cancellation.
+      if (isTerminalTaskStatus(task.status)) return task;
+    }
     if (
       cancellationSensitiveTask(task) &&
       (queued.status === 'cancelled' ||
@@ -156,7 +236,7 @@ export class TaskQueryService {
         return current;
       }
     }
-    if (queued.status === 'completed' && !checkTask(task))
+    if (queued.status === 'completed' && !checkTask(task) && !backupTask(task))
       current = await port.store.mutate(
         task.taskId,
         {
@@ -182,8 +262,15 @@ export class TaskQueryService {
       current = await port.store.mutate(
         task.taskId,
         {
-          kind: 'failed',
-          message: '任务执行失败',
+          // A cancellation may win the atomic mutation after this task read.
+          kind:
+            backupTask(task) && queued.backupUncommittedFailure === true
+              ? 'backup-uncommitted-failed'
+              : 'failed',
+          message:
+            backupTask(task) && queued.backupUncommittedFailure !== true
+              ? '备份任务失败，副作用或清理未确认，请核对数据库状态和残留产物'
+              : '任务执行失败',
         },
         identity,
       );

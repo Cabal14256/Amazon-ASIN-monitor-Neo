@@ -20,7 +20,10 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The full dual-database suite plus scheduler restart verification can exceed
+    # 15 minutes including service boot and teardown. Test assertions and the
+    # separate sub-600s promotion target remain unchanged.
+    timeout-minutes: 20
 
     services:
       redis:
@@ -144,6 +147,13 @@ jobs:
       - name: Run PostgreSQL schema and MySQL-to-PostgreSQL migration tests
         run: pnpm --filter @asin-monitor/db test:integration
 
+      - name: Apply durable catalog fence upgrade twice after final snapshot migration
+        run: |
+          docker cp packages/db/migrations/0017_catalog_operation_fence.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0017_catalog_operation_fence.sql"
+          docker cp packages/db/docker/apply-catalog-operation-fence.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-catalog-operation-fence.sh"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.sql
+
       - name: Apply authentication maintenance storage upgrade twice after final snapshot migration
         run: |
           docker cp packages/db/migrations/0003_auth_maintenance.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0003_auth_maintenance.sql"
@@ -195,10 +205,13 @@ jobs:
       - name: Run Neo task registry concurrency and expiry tests
         run: pnpm --filter @asin-monitor/db exec vitest run test/task-registry.integration.test.ts
 
+      - name: Verify durable catalog identity and physical commit fencing
+        run: pnpm --filter @asin-monitor/db exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
+
       - name: Verify scheduled ledgers on both PostgreSQL databases and batch policy against real MySQL
         env:
           RUN_NEO_SCHEDULED_MONITOR_INTEGRATION: '1'
-        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts --no-file-parallelism
+        run: pnpm --filter @asin-monitor/db exec vitest run test/scheduled-monitor-schema.integration.test.ts test/scheduled-monitor-mysql.integration.test.ts test/scheduled-monitor-run.integration.test.ts --no-file-parallelism
 
       - name: Run authentication cleanup and audit archive PostgreSQL transactions
         run: pnpm --filter @asin-monitor/db exec vitest run test/auth-maintenance.integration.test.ts
@@ -284,6 +297,18 @@ jobs:
       - name: Compare competitor query HTTP with Legacy MySQL and verify actual dual-database authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-query.integration.test.ts
 
+      - name: Verify literal catalog detail through actual HTTP, both PostgreSQL databases and Redis
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-literal-detail.integration.test.ts --maxWorkers=1
+
+      - name: Upload synthetic literal catalog index plans
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: catalog-literal-index-${{ github.run_id }}
+          path: artifacts/refactor-audit/catalog-literal-index-242-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upgrade competitor write policy twice
         run: |
           docker cp packages/db/docker/apply-competitor-write-policy.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-write-policy.sh"
@@ -299,6 +324,13 @@ jobs:
           docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-check-receipts.sh /tmp/0014_competitor_check_receipts.sql
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_competitor_monitor_ci --command "SELECT 1 FROM public.competitor_variant_check_receipts LIMIT 1"
           test "$(docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -A -t -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --command "SELECT to_regclass('public.competitor_variant_check_receipts') IS NULL")" = t
+
+      - name: Upgrade competitor batch-check root receipts twice
+        run: |
+          docker cp packages/db/docker/apply-competitor-batch-check-receipts.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-competitor-batch-check-receipts.sh"
+          docker cp packages/db/migrations/0018_competitor_batch_check_receipts.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0018_competitor_batch_check_receipts.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-batch-check-receipts.sh /tmp/0018_competitor_batch_check_receipts.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-competitor-batch-check-receipts.sh /tmp/0018_competitor_batch_check_receipts.sql
 
       - name: Upgrade competitor manual monitor storage twice before competitor schema consumers
         run: |
@@ -333,6 +365,9 @@ jobs:
       - name: Compare all fourteen analytics HTTP responses with Legacy MySQL and verify Redis/current authorization
         run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-analytics.integration.test.ts
 
+      - name: Verify abnormal duration raw identifier query through HTTP and PostgreSQL
+        run: pnpm --filter @asin-monitor/api exec vitest run test/monitor-abnormal-wire.integration.test.ts --maxWorkers=1
+
       - name: Verify monitor continuous aggregate freshness after late writes and historical corrections
         run: pnpm --filter @asin-monitor/db exec vitest run test/monitor-aggregate-coverage.integration.test.ts
 
@@ -346,7 +381,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: monitor-sql-decimal-${{ github.run_id }}
-          path: artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+          path: |
+            artifacts/refactor-audit/monitor-analytics-109-decimal-evidence.json
+            artifacts/refactor-audit/monitor-analytics-226-identity-failure.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -371,6 +408,12 @@ jobs:
       - name: Run Neo BullMQ queue policy integration tests
         run: pnpm --filter @asin-monitor/worker exec vitest run test/queue-policy.integration.test.ts
 
+      - name: Typecheck backup failure, file-handle and cancellation fixtures
+        run: |
+          pnpm --filter @asin-monitor/db exec tsc -p tsconfig.backup.test.json --pretty false
+          pnpm --filter @asin-monitor/api exec tsc -p tsconfig.backup.test.json --pretty false
+          pnpm --filter @asin-monitor/worker exec tsc -p tsconfig.backup.test.json --pretty false
+
       - name: Run owned task queries and BullMQ terminal reconciliation
         run: pnpm --filter @asin-monitor/api exec vitest run test/task-query.integration.test.ts
 
@@ -382,6 +425,16 @@ jobs:
           pnpm --filter @asin-monitor/worker build
           pnpm --filter @asin-monitor/worker exec vitest run test/auth-maintenance.integration.test.ts test/auth-maintenance-entry.integration.test.ts --no-file-parallelism
 
+      - name: Install PostgreSQL client for real backup and restore checks
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client
+
+      - name: Verify Neo backup commands against isolated PostgreSQL and TimescaleDB
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-pipeline.integration.test.ts test/backup-scheduler.integration.test.ts --no-file-parallelism
+      - name: Verify immutable restore snapshots against shared archive replacement and inode writes
+        run: pnpm --filter @asin-monitor/worker exec vitest run test/backup-archive-snapshot.integration.test.ts --maxWorkers=1
+      - name: Verify migrated Legacy backup configuration row selection
+        run: pnpm --filter @asin-monitor/db exec vitest run test/backup-configuration.integration.test.ts
+
       - name: Run status interval scheduling, shutdown recovery and compiled Worker lifecycle
         run: pnpm --filter @asin-monitor/worker exec vitest run test/monitor-interval.integration.test.ts
 
@@ -391,8 +444,16 @@ jobs:
       - name: Verify literal competitor deletion, real Legacy safety difference and compiled Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-delete.integration.test.ts
 
+      - name: Verify catalog server fencing survives discarded browser receipts
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-operation.integration.test.ts --no-file-parallelism
+      - name: Verify catalog preparation binding failures with PostgreSQL and a Redis driver seam
+        run: pnpm --filter @asin-monitor/api exec vitest run test/catalog-submission-binding.integration.test.ts --maxWorkers=1 --no-file-parallelism
+
       - name: Run compiled variant and batch check consumers with PostgreSQL completion storage
         run: pnpm --filter @asin-monitor/worker exec vitest run test/variant-check-entry.integration.test.ts
+
+      - name: Verify competitor batch HTTP, receipt isolation and migration rollback on real disposable services
+        run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-batch-check.integration.test.ts --pool=forks --maxWorkers=1
 
       - name: Run compiled primary monitor consumer with owned tasks and PostgreSQL history
         run: pnpm --filter @asin-monitor/worker exec vitest run test/primary-monitor-entry.integration.test.ts
@@ -401,10 +462,21 @@ jobs:
         run: pnpm --filter @asin-monitor/worker exec vitest run test/competitor-monitor-entry.integration.test.ts --maxWorkers=1
 
       - name: Run variant check HTTP, full results, retry recovery and two API gateways
-        run: pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts
+        run: |
+          pnpm --filter @asin-monitor/api exec tsc -p tsconfig.catalog-check.test.json --pretty false
+          pnpm --filter @asin-monitor/api exec vitest run test/variant-check.integration.test.ts test/literal-check-targets.integration.test.ts --no-file-parallelism
 
       - name: Compare Legacy MySQL and Neo PostgreSQL import Workers using the same files
         run: pnpm --filter @asin-monitor/api exec vitest run test/asin-import.integration.test.ts
+
+      - name: Run catalog and parent-query XLSX exports through isolated PostgreSQL, Redis and compiled Worker
+        run: |
+          pnpm --filter @asin-monitor/api exec tsc -p tsconfig.export.test.json --pretty false
+          pnpm --filter @asin-monitor/worker exec tsc -p tsconfig.export.test.json --pretty false
+          pnpm --filter @asin-monitor/api exec vitest run test/asin-export.integration.test.ts test/competitor-export.integration.test.ts test/parent-asin-export.integration.test.ts --no-file-parallelism
+
+      - name: Verify ASIN export group status and keyset queries against PostgreSQL
+        run: pnpm --filter @asin-monitor/db exec vitest run test/asin-export-query.integration.test.ts
 
       - name: Compare competitor imports with Legacy MySQL and verify shared compiled import Worker dispatch
         run: pnpm --filter @asin-monitor/api exec vitest run test/competitor-import.integration.test.ts
@@ -429,7 +501,7 @@ jobs:
       - name: Run Neo audit query PostgreSQL and HTTP integration tests
         run: pnpm --filter @asin-monitor/api exec vitest run test/audit-query.integration.test.ts
 
-      - name: Smoke test scheduled ledger deployment upgrades and rollbacks twice in each logical database
+      - name: Execute compiled scheduled monitor Worker on BullMQ, Redis and both PostgreSQL databases
         run: |
           docker cp packages/db/docker/apply-scheduled-monitor.sh "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/apply-scheduled-monitor.sh"
           for domain in primary competitor; do
@@ -438,6 +510,11 @@ jobs:
             for attempt in 1 2; do
               docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-scheduled-monitor.sh "$domain" "/tmp/0016_scheduled_monitor_${domain}.sql"
             done
+          done
+          pnpm --filter @asin-monitor/worker... build
+          RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION=1 pnpm --filter @asin-monitor/worker exec vitest run test/competitor-monitor-entry.integration.test.ts --maxWorkers=1 -t "private scheduled US run"
+          RUN_NEO_SCHEDULED_MONITOR_SCHEDULER_INTEGRATION=1 pnpm --filter @asin-monitor/worker exec vitest run test/scheduled-monitor-scheduler.integration.test.ts --pool=forks --maxWorkers=1
+          for domain in primary competitor; do
             for attempt in 1 2; do
               docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-scheduled-monitor.sh "$domain" "/tmp/0016_scheduled_monitor_${domain}.rollback.sql"
             done
@@ -448,6 +525,12 @@ jobs:
           docker cp packages/db/migrations/0012_primary_monitor.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0012_primary_monitor.rollback.sql"
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
           docker exec "$INTEGRATION_TIMESCALE_CONTAINER_ID" psql -X -v ON_ERROR_STOP=1 --username postgres --dbname amazon_asin_monitor_ci --file /tmp/0012_primary_monitor.rollback.sql
+
+      - name: Smoke test durable catalog fence rollback twice after consumers stop
+        run: |
+          docker cp packages/db/migrations/0017_catalog_operation_fence.rollback.sql "$INTEGRATION_TIMESCALE_CONTAINER_ID:/tmp/0017_catalog_operation_fence.rollback.sql"
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.rollback.sql
+          docker exec --env POSTGRES_DB=amazon_asin_monitor_ci --env COMPETITOR_DATABASE=amazon_competitor_monitor_ci "$INTEGRATION_TIMESCALE_CONTAINER_ID" sh /tmp/apply-catalog-operation-fence.sh /tmp/0017_catalog_operation_fence.rollback.sql
 
       - name: Smoke test competitor monitor storage rollback twice and reapply
         run: |
@@ -511,7 +594,7 @@ jobs:
             echo "## Integration CI"
             echo "- Result: ${{ job.status }}"
             echo "- Test-step duration after services became ready: ${duration_seconds}s"
-            echo "- Infrastructure timeout: 15m; this only bounds the job and does not change test assertions or the promotion target"
+            echo "- Infrastructure timeout: 20m; this only bounds the job and does not change test assertions or the promotion target"
             echo "- Promotion threshold: 10 consecutive successful runs whose total Actions startedAt-to-updatedAt duration is under 600s"
             echo "- The test-step duration above excludes service setup and teardown; use the Actions run timestamps for total duration"
           } >> "$GITHUB_STEP_SUMMARY"

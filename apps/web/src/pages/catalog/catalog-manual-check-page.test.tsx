@@ -121,7 +121,13 @@ function fixture(
           status: taskStatus,
         }),
       );
-    if (path.endsWith(encodeURIComponent(group.id))) return envelope(group);
+    if (
+      domain === 'competitor'
+        ? path === '/api/v1/competitor/catalog/variant-groups/detail' &&
+          new URL(String(input)).searchParams.get('groupId') === group.id
+        : path.endsWith(encodeURIComponent(group.id))
+    )
+      return envelope(group);
     if (listFails)
       return jsonResponse({ success: false, errorMessage: 'read failed' }, 500);
     if (listResponse) return listResponse();
@@ -233,6 +239,42 @@ function peerClearsCheck(domain: 'asin' | 'competitor' = 'asin') {
   );
 }
 describe('mounted existing Neo manual check endpoints with actual transport', () => {
+  it('uses the deletion selection for checks and clears it once the check is accepted', async () => {
+    const f = fixture('asin', ['asin:read', 'asin:delete']);
+    await selectGroup();
+    fireEvent.click(screen.getByRole('button', { name: '检查所选组' }));
+    fireEvent.click(
+      within(screen.getByRole('region', { name: '确认检查' })).getByRole(
+        'button',
+        { name: '确认提交检查' },
+      ),
+    );
+    await screen.findByText('job-1');
+    expect(f.checkCalls()).toHaveLength(1);
+    expect(JSON.parse(String(f.checkCalls()[0][1]?.body)).groupIds).toEqual([
+      group.id,
+    ]);
+    expect(screen.getByRole('button', { name: '检查所选组' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    expect(
+      screen.queryByRole('button', { name: '批量删除所选组' }),
+    ).toHaveProperty('disabled', true);
+  });
+  it('clears a stale check confirmation when the shared delete selection is cleared', async () => {
+    const f = fixture('asin', ['asin:read', 'asin:delete']);
+    await selectGroup();
+    fireEvent.click(screen.getByRole('button', { name: '检查所选组' }));
+    expect(screen.getByRole('region', { name: '确认检查' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '清空选择' }));
+    expect(screen.queryByRole('region', { name: '确认检查' })).toBeNull();
+    expect(screen.getByRole('button', { name: '检查所选组' })).toHaveProperty(
+      'disabled',
+      true,
+    );
+    expect(f.checkCalls()).toHaveLength(0);
+  });
   it('shares desktop/mobile selection, confirms the raw targets and submits one normalized async primary batch', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-07T00:00:00Z'));
     const f = fixture();

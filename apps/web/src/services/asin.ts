@@ -8,6 +8,7 @@ import {
   deleteVariantGroupResultSchema,
   feishuNotifyRequestSchema,
   groupManualBrokenRequestSchema,
+  isNeoBatchDeleteId,
   moveAsinRequestSchema,
   updateAsinRequestSchema,
   variantCheckTaskDataSchema,
@@ -15,6 +16,7 @@ import {
   variantGroupListResultSchema,
   variantGroupResultSchema,
   variantGroupUpsertRequestSchema,
+  type BatchDeleteVariantGroupsRequest,
   type CheckVariantGroupRequest,
   type CreateAsinRequest,
   type MoveAsinRequest,
@@ -28,7 +30,16 @@ import {
   type VariantView,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
+import { submitCatalogBatchDelete } from './catalog-batch-delete';
 import { isValidTaskId } from './tasks';
+
+export function batchDeleteVariantGroups(
+  http: Pick<HttpClient, 'request'>,
+  input: BatchDeleteVariantGroupsRequest,
+  signal?: AbortSignal,
+) {
+  return submitCatalogBatchDelete(http, 'asin', input, signal);
+}
 
 const ASIN_RESPONSE_LIMIT = 32 * 1024 * 1024;
 const CHECK_RESPONSE_LIMIT = 40 * 1024 * 1024;
@@ -79,6 +90,7 @@ function checkBody(input: CheckVariantGroupRequest): CheckVariantGroupRequest {
 
 function segment(id: string): string {
   if (
+    !id.length ||
     !id.trim() ||
     id === '.' ||
     id === '..' ||
@@ -136,10 +148,16 @@ export async function getVariantGroup(
   id: string,
   signal?: AbortSignal,
 ): Promise<VariantGroup> {
-  // Segment encoding prevents a record identifier from changing the route.
+  if (!isNeoBatchDeleteId(id))
+    throw new ApiError('INVALID_INPUT', 'ASIN 或变体组 ID 无效');
   const response = await http.request(
-    `${GROUPS}/${segment(id)}`,
-    { signal, timeoutMs: 120_000, maxResponseBytes: ASIN_RESPONSE_LIMIT },
+    '/api/v1/catalog/variant-groups/detail',
+    {
+      query: { groupId: id },
+      signal,
+      timeoutMs: 120_000,
+      maxResponseBytes: ASIN_RESPONSE_LIMIT,
+    },
     variantGroupResultSchema,
   );
   if (!response.success || !response.data)

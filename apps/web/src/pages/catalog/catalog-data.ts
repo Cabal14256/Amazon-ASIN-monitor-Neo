@@ -187,6 +187,7 @@ export function catalogActionSourceCurrent(
   if (
     action.type === 'edit-group' ||
     action.type === 'delete-group' ||
+    action.type === 'batch-create-asins' ||
     action.type === 'create-asin'
   )
     return (

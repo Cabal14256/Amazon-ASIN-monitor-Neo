@@ -13,6 +13,7 @@ import {
   type CompetitorMonitorGroup,
   type CompetitorMonitorNotificationCandidate,
   type PgCompetitorMonitorRepository,
+  type RedisMonitorEventRepository,
   type RedisTaskRepository,
   type TaskState,
 } from '@asin-monitor/db';
@@ -27,11 +28,14 @@ import {
 import type {
   CompetitorCheckPipeline,
   CompetitorGroupCheckData,
+  VariantGroupAdmission,
 } from '@asin-monitor/variant-check';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { logger } from './logger';
+import { observeMonitorMetrics, type MonitorMetrics } from './metrics';
+import { MonitorRunEvents } from './monitor-live-events';
 
 export function competitorMonitorGroupOperation(
   job: CompetitorMonitorJob,
@@ -60,7 +64,9 @@ export function competitorMonitorGroupOperation(
   );
 }
 interface Options {
+  monitorEvents?: Pick<RedisMonitorEventRepository, 'publish'>;
   pipeline: Pick<CompetitorCheckPipeline, 'checkGroup'>;
+  groupAdmission?: VariantGroupAdmission;
   repository: Pick<
     PgCompetitorMonitorRepository,
     | 'groups'
@@ -74,6 +80,7 @@ interface Options {
   notifications: Pick<FeishuNotifications, 'withCompetitorCountryDelivery'>;
   defaultEnabled: boolean;
   shutdownSignal: AbortSignal;
+  metrics?: MonitorMetrics;
   assertJobLock(job: Job, token: string | undefined): Promise<void>;
   updateProgress(job: Job, progress: number): Promise<void>;
 }
@@ -208,6 +215,8 @@ export function createCompetitorMonitorProcessor(
     )
       throw new UnrecoverableError('竞品监控任务数据无效');
     const data = parsed.data;
+    const attemptStarted = process.hrtime.bigint();
+    const events = new MonitorRunEvents(data, options.monitorEvents);
     const identity = {
       userId: data.userId,
       taskType: data.taskType,
@@ -300,11 +309,22 @@ export function createCompetitorMonitorProcessor(
       const countryResults = Object.fromEntries(
         data.countries.map((country) => [country, empty(data)]),
       ) as Record<string, Summary>;
+      await events.started(await check());
       let complete = 0;
       for (const country of data.countries) {
-        for (const group of groups.filter((item) => item.country === country)) {
+        const countryGroups = groups.filter((item) => item.country === country);
+        let current = 0;
+        for (const group of countryGroups) {
           await check();
+          await events.progress(
+            await check(),
+            country,
+            ++current,
+            countryGroups.length,
+          );
+          const groupStarted = process.hrtime.bigint();
           const result = await options.pipeline.checkGroup(group.groupId, {
+            groupAdmission: options.groupAdmission,
             forceRefresh: false,
             snapshotDigest: group.snapshotDigest,
             operation: competitorMonitorGroupOperation(data, group),
@@ -322,8 +342,16 @@ export function createCompetitorMonitorProcessor(
               await check();
             },
           });
+          observeMonitorMetrics(options.metrics, (metrics) =>
+            metrics.recordGroup({
+              region: country,
+              isBroken: Boolean(result.isBroken),
+              durationSec: Number(process.hrtime.bigint() - groupStarted) / 1e9,
+            }),
+          );
           committed = true;
           addGroup(countryResults[country], result, group);
+          events.addGroup(country, result);
           complete++;
           try {
             validateCountryNotification(
@@ -474,6 +502,7 @@ export function createCompetitorMonitorProcessor(
         throw cancelled;
       if (finished.status !== 'completed')
         throw new Error('COMPETITOR_MONITOR_ACK_UNCONFIRMED');
+      await events.complete(finished);
       logger.info('竞品监控任务完成', { totalChecked, totalBroken });
       return finalResult;
     } catch (error) {
@@ -534,6 +563,12 @@ export function createCompetitorMonitorProcessor(
         throw new UnrecoverableError('竞品通知摘要超出容量，请核实已提交结果');
       throw new Error('竞品监控任务未完成');
     } finally {
+      observeMonitorMetrics(options.metrics, (metrics) =>
+        metrics.recordRun({
+          type: 'competitor_monitor_task',
+          durationSec: Number(process.hrtime.bigint() - attemptStarted) / 1e9,
+        }),
+      );
       stopped = true;
       if (heartbeat) clearTimeout(heartbeat);
       await checking;

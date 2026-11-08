@@ -2,6 +2,7 @@ import http, { type ClientRequest } from 'node:http';
 import https from 'node:https';
 import { abortError, SpApiError } from './errors';
 import type { HttpInput, HttpResponse, Transport } from './types';
+import { trackWorkSettlement } from './work-settlement';
 
 /** Bounded actual I/O; no redirects, hidden retries, credential/payload error dumps. */
 export class NodeHttpTransport implements Transport {
@@ -57,6 +58,11 @@ export class NodeHttpTransport implements Transport {
         return fail('CAPACITY');
       let settled = false;
       let req: ClientRequest | undefined;
+      let resolveClosed!: () => void;
+      const physicallyClosed = new Promise<void>((resolve) => {
+        resolveClosed = resolve;
+      });
+      trackWorkSettlement(input.signal, physicallyClosed);
       const finish = (error?: SpApiError, response?: HttpResponse) => {
         if (settled) return;
         settled = true;
@@ -107,7 +113,10 @@ export class NodeHttpTransport implements Transport {
         );
         this.requests.set(req, stop);
         const activeRequest = req;
-        req.on('close', () => this.requests.delete(activeRequest));
+        req.on('close', () => {
+          this.requests.delete(activeRequest);
+          resolveClosed();
+        });
         req.on('error', (error) =>
           finish(
             error instanceof SpApiError ? error : new SpApiError('HTTP_ERROR'),
@@ -117,6 +126,7 @@ export class NodeHttpTransport implements Transport {
         if (input.signal.aborted) abort();
         else req.end(input.body);
       } catch {
+        if (!req) resolveClosed();
         stop(new SpApiError('HTTP_ERROR'));
       }
     });

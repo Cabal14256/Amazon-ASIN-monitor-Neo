@@ -2156,6 +2156,7 @@ class MonitorHistory {
       country = '',
       site = '',
       brand = '',
+      asinSpelling = 'legacy',
     } = params;
     const config = MonitorHistory.getDurationSourceConfig(sourceGranularity);
     const isPeakCase = MonitorHistory.getPeakHourCase(
@@ -2201,13 +2202,23 @@ class MonitorHistory {
       'mh.asin_code',
     )}`;
 
+    // Summary representatives use UTF-8 bytes, independently of the original
+    // CI/PAD SPACE identity below. Convert the binary minimum back to text so
+    // mysql2 and the raw JS Map retain the actual spelling rather than a Buffer.
+    const asinKeyExpr =
+      "COALESCE(NULLIF(mh.asin_code, ''), CONCAT('ID#', mh.asin_id))";
+    const asinRepresentative =
+      asinSpelling === 'binary-min'
+        ? `CONVERT(MIN(CAST(${asinKeyExpr} AS BINARY)) USING utf8mb4)`
+        : asinKeyExpr;
+
     const sql = `
       SELECT
         DATE_FORMAT(${config.rawSlotExpr}, '${config.rawSlotFormat}') as slot_period,
         mh.country,
         COALESCE(mh.site_snapshot, '') as site,
         COALESCE(mh.brand_snapshot, '') as brand,
-        COALESCE(NULLIF(mh.asin_code, ''), CONCAT('ID#', mh.asin_id)) as asin_key,
+        ${asinRepresentative} as asin_key,
         COUNT(*) as total_checks,
         SUM(CASE WHEN mh.is_broken = 1 THEN 1 ELSE 0 END) as broken_count,
         MAX(${isPeakCase}) as has_peak
@@ -4072,6 +4083,7 @@ class MonitorHistory {
         startTime,
         endTime,
         sourceGranularity,
+        asinSpelling: 'binary-min',
       });
       source = 'raw';
       const [metrics = {}] = MonitorHistory.buildDurationRowsByGroup(
@@ -4284,6 +4296,7 @@ class MonitorHistory {
         startTime,
         endTime,
         sourceGranularity,
+        asinSpelling: 'binary-min',
       });
       source = 'raw';
     }

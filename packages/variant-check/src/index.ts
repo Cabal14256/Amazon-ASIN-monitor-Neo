@@ -1,3 +1,4 @@
+export * from './competitor-batch-executor';
 export * from './competitor-pipeline';
 export * from './competitor-runtime';
 export * from './executor';

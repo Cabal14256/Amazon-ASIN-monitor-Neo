@@ -6,6 +6,7 @@ import {
   type CheckTarget,
 } from './catalog-check-types';
 import {
+  catalogImportBlocksWrite,
   catalogSafetyKey,
   readCatalogSafetyGate,
   writeCatalogSafetyGate,
@@ -41,7 +42,7 @@ export class CatalogCheckRecovery {
     private readonly uuid: () => string = () => crypto.randomUUID(),
     private readonly shared?: {
       owner: string;
-      catalog: string;
+      catalog: 'asin' | 'competitor';
       publish?: (
         gate: import('./catalog-safety-gate').CatalogSafetyGate | null,
       ) => void;
@@ -212,7 +213,15 @@ export class CatalogCheckRecovery {
       if (!current()) return { kind: 'stale' as const };
       const existing = this.read();
       if (existing) return { kind: 'blocked' as const, gate: existing };
-      if (this.sharedGate())
+      if (
+        this.sharedGate() ||
+        (this.shared &&
+          catalogImportBlocksWrite(
+            this.local,
+            this.shared.owner,
+            this.shared.catalog,
+          ))
+      )
         throw new ApiError(
           'INVALID_INPUT',
           '目录已有操作结果待核实，请先恢复原操作。',
@@ -270,7 +279,7 @@ export function definiteCheckRejection(error: unknown): boolean {
 }
 
 export function browserCheckRecovery(
-  catalog: string,
+  catalog: 'asin' | 'competitor',
   owner: string,
   publish?: (
     gate: import('./catalog-safety-gate').CatalogSafetyGate | null,

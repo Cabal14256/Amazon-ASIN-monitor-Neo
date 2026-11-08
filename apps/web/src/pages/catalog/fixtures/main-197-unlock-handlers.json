@@ -1,0 +1,37 @@
+{
+  "revision": "197925d8a0c6059612d05d4fc7a298b37bb88b03",
+  "sources": {
+    "catalog": {
+      "path": "apps/web/src/pages/catalog/index.tsx",
+      "blob": "bf0a64933f3a591d46afa6de0744f746c03df8da",
+      "declarations": {
+        "setSafety": {
+          "text": "const setSafety = (\n    next: CatalogSafetyGate | null,\n    expected?: CatalogSafetyGate,\n  ): boolean => {\n    const stored = catalogSafetyStorage();\n    if (!stored) {\n      setStorageUnavailable(true);\n      runtime.queryClient.setQueryData(\n        safetyKey,\n        expected ?? next ?? safety ?? null,\n      );\n      return false;\n    }\n    const current = stored\n      ? readCatalogSafetyGate(stored, ownerId, config.id)\n      : null;\n    if (expected && JSON.stringify(current) !== JSON.stringify(expected)) {\n      runtime.queryClient.setQueryData(\n        safetyKey,\n        current ?? { phase: 'inspection' },\n      );\n      return false;\n    }\n    const saved =\n      stored && writeCatalogSafetyGate(stored, ownerId, config.id, next);\n    if (!saved) setStorageUnavailable(true);\n    runtime.queryClient.setQueryData(\n      safetyKey,\n      saved ? next : current ?? expected ?? next,\n    );\n    return Boolean(saved);\n  };",
+          "sha256": "68e6825fb1d7b7a92c4a3098c08cedcfe66414b7b1b82de7f48935af22c53a17"
+        },
+        "beginWrite": {
+          "text": "const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {\n    const stored = catalogSafetyStorage();\n    if (!stored) {\n      setStorageUnavailable(true);\n      throw new ApiError(\n        'INVALID_INPUT',\n        '浏览器本地存储不可用，无法安全提交。',\n      );\n    }\n    const existing = readCatalogSafetyGate(stored, ownerId, config.id);\n    if (existing) {\n      runtime.queryClient.setQueryData(safetyKey, existing);\n      throw new ApiError('INVALID_INPUT', '已有写入结果待核实，请先重读目录。');\n    }\n    const gate: CatalogSafetyGate = {\n      phase: 'refresh',\n      message: null,\n      detailId:\n        candidate.type === 'delete-group' || candidate.type === 'create-group'\n          ? null\n          : candidate.group.id,\n      createUncertain:\n        candidate.type === 'create-group' || candidate.type === 'create-asin',\n      operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,\n    };\n    if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {\n      setStorageUnavailable(true);\n      throw new ApiError(\n        'INVALID_INPUT',\n        '无法保存写入状态，请检查浏览器本地存储权限。',\n      );\n    }\n    return gate;\n  };",
+          "sha256": "60ab47d9b5e04dd54bbbedbb4f1073eded9e28a271bdef41034a7920aed1a8fd"
+        },
+        "reconcileCreate": {
+          "text": "async function reconcileCreate() {\n    if (safety?.phase !== 'inspection') return;\n    let reconciled = false;\n    try {\n      await runWithCatalogLock(async () => {\n        const stored = catalogSafetyStorage();\n        const current = stored\n          ? readCatalogSafetyGate(stored, ownerId, config.id)\n          : null;\n        if (!stored) {\n          setStorageUnavailable(true);\n          return;\n        }\n        if (!current) {\n          await readAfterWrite(null);\n          const latest = readCatalogSafetyGate(stored, ownerId, config.id);\n          runtime.queryClient.setQueryData(safetyKey, latest);\n          reconciled = !latest;\n          return;\n        }\n        if (JSON.stringify(current) !== JSON.stringify(safety)) {\n          runtime.queryClient.setQueryData(safetyKey, current);\n          return;\n        }\n        await readAfterWrite(null);\n        reconciled = setSafety(null, safety);\n      });\n      if (!reconciled) return;\n      setNotice('目录已重新读取，请仅在确认原新建记录后继续写入。');\n    } catch (cause) {\n      if (catalogAccessDenied(cause)) reportAccessDenied();\n      else setNotice('目录重读失败，写入仍暂停，请稍后重试。');\n    }\n  }",
+          "sha256": "7cba2705141a85e543967b5aee9a680324e76fce1732d8a71b421cb67db66a49"
+        }
+      }
+    },
+    "import": {
+      "path": "apps/web/src/pages/asin/asin-import-panel.tsx",
+      "blob": "238bda99c8b4ebe50bbe7df6d6dd9711eb7e342d",
+      "declarations": {
+        "canReconcile": {
+          "text": "const canReconcile = Boolean(\n    gate &&\n      !activeTask &&\n      !(terminalTask && gate.phase !== 'settled') &&\n      (gate.phase === 'settled' ||\n        (gate.phase === 'uncertain' &&\n          (!gate.taskId ||\n            matchingTask ||\n            task.isError ||\n            !access.canReadASIN)) ||\n        (gate.phase === 'accepted' && (task.isError || !access.canReadASIN))),\n  );",
+          "sha256": "1975ae15b6edf21f8a0d7c31d5a47428b58ab4dead6d4506fd3e38e812a16a23"
+        },
+        "unlockAfterReconciliation": {
+          "text": "async function unlockAfterReconciliation() {\n    if (!canReconcile) return;\n    const stored = storage();\n    const locks = navigator.locks;\n    if (!stored || !locks || !gate) {\n      setNotice('无法清除导入锁，请检查浏览器本地存储权限。');\n      return;\n    }\n    const expected = gate;\n    let result: 'changed' | 'cleared' | 'unavailable' | 'active';\n    try {\n      const key = importGateKey(domain, userId);\n      const previousRaw = stored.getItem(key);\n      result = await locks.request(key, () => {\n        if (\n          latestTask.current?.taskId === expected.taskId &&\n          isActiveTask(latestTask.current.status)\n        )\n          return 'active' as const;\n        if (\n          latestTask.current?.taskId === expected.taskId &&\n          isTerminalTask(latestTask.current.status) &&\n          expected.phase !== 'settled'\n        )\n          return 'changed' as const;\n        const current = readImportGate(stored, domain, userId);\n        const session = storage('session');\n        const sessionGate = session\n          ? readImportGate(session, domain, userId)\n          : null;\n        const matchesUnsavedGate =\n          expected.phase === 'uncertain' &&\n          expected.taskId &&\n          ((current?.phase === 'uncertain' &&\n            current.taskId === null &&\n            current.savedAt === expected.savedAt) ||\n            (!current &&\n              JSON.stringify(sessionGate) === JSON.stringify(expected)));\n        if (\n          stored.getItem(key) !== previousRaw ||\n          (JSON.stringify(current) !== JSON.stringify(expected) &&\n            !matchesUnsavedGate)\n        )\n          return 'changed' as const;\n        return writeImportGate(stored, domain, userId, null)\n          ? ('cleared' as const)\n          : ('unavailable' as const);\n      });\n    } catch {\n      result = 'unavailable';\n    }\n    if (owner.current !== userId || !mounted.current) return;\n    if (result === 'active') {\n      setNotice('原导入任务仍在运行，结束前不能解锁或重新导入。');\n      return;\n    }\n    if (result !== 'cleared') {\n      setGate(restoredGate(stored, domain, userId));\n      setNotice(\n        result === 'changed'\n          ? '原任务状态已变化，请重新核实后再解锁。'\n          : '无法清除导入锁，请检查浏览器本地存储权限。',\n      );\n      return;\n    }\n    const session = storage('session');\n    if (session && !writeImportGate(session, domain, userId, null)) {\n      setNotice('无法清除导入锁，请检查浏览器会话存储权限。');\n      return;\n    }\n    setGate(null);\n    setLastTaskId(null);\n    setFile(null);\n    if (fileInput.current) fileInput.current.value = '';\n    setNotice('请确认原任务不会继续写入后再重新导入。');\n  }",
+          "sha256": "d2c3ff6505746a6201b68f1cb2d958a352706fc01ac7290453a589697f047592"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": "../..", "noEmit": true },
+  "include": [
+    "src/**/*.ts",
+    "test/catalog-old-recovery.test.ts",
+    "test/literal-check-targets.integration.test.ts"
+  ]
+}

@@ -1,3 +1,4 @@
+import type { BatchCreateAsinsData } from '@asin-monitor/contracts';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { tableFeatures, useTable, type ColumnDef } from '@tanstack/react-table';
@@ -5,6 +6,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   RefreshCw,
   Search,
 } from 'lucide-react';
@@ -37,12 +39,23 @@ import {
   CardHeader,
   ModuleLabel,
 } from '../../components/ui/surfaces';
-import { useTaskQuery } from '../../hooks/tasks';
+import { useCreateExportTask, useTaskQuery } from '../../hooks/tasks';
 import { formatBeijing } from '../../lib/beijingTime';
 import { ApiError } from '../../lib/http';
 import { isCheckGroupId } from '../../services/catalog-check';
 import { isTerminalTask } from '../../services/tasks';
+import { AsinBatchCreatePanel } from '../asin/asin-batch-create-panel';
+import { AsinBatchCreateResult } from '../asin/asin-batch-create-result';
+import {
+  readAsinBatchReceipt,
+  removeAsinBatchReceipt,
+  saveAsinBatchReceipt,
+  type AsinBatchReceipt,
+} from '../asin/asin-batch-receipt';
+import { importGateKey } from '../asin/asin-import-gate';
 import { CatalogActionPanel } from './catalog-actions';
+import { useCatalogBatchDelete } from './catalog-batch-delete';
+import { retireBatchReceiptAfterIdentityChange } from './catalog-batch-receipt-retirement';
 import { summarizeCheckResult } from './catalog-check-feedback';
 import {
   browserCheckRecovery,
@@ -63,7 +76,12 @@ import {
   statusOf,
   statusSource,
 } from './catalog-data';
+import { CATALOG_GATE_CHANGED } from './catalog-gate-events';
+import { runWithCatalogOperationLock } from './catalog-operation-lock';
+import { CatalogRefreshContext } from './catalog-refresh-context';
 import {
+  canRecoverKnownBatchDeleteReceipt,
+  catalogImportBlocksWrite,
   catalogSafetyKey,
   catalogSafetyStorage,
   readCatalogSafetyGate,
@@ -80,8 +98,10 @@ import type {
   CatalogGroup,
   CatalogQuery,
 } from './catalog-types';
+import { CompetitorExportControls } from './competitor-export';
+import { PrimaryAsinExportControls } from './primary-export';
 
-const PAGE_SIZES = [10, 20, 50, 100] as const;
+const PAGE_SIZES = [1, 10, 20, 50, 100] as const;
 const CHILD_PAGE_SIZE = 50;
 const TABLE_FEATURES = tableFeatures({});
 type StatusFilter = 'ALL' | 'BROKEN' | 'NORMAL';
@@ -304,6 +324,8 @@ function GroupDetail({
             group: fresh,
             child,
           });
+      } else if (type === 'batch-create-asins') {
+        onAction({ type, group: fresh });
       } else {
         onAction({
           type: type as
@@ -443,6 +465,18 @@ function GroupDetail({
                     </Button>
                     {config.id === 'asin' && (
                       <>
+                        {config.writes?.batchCreateAsins && (
+                          <Button
+                            variant="secondary"
+                            size="small"
+                            disabled={preparingAction || actionsDisabled}
+                            onClick={() =>
+                              void prepareAction('batch-create-asins')
+                            }
+                          >
+                            批量添加 ASIN
+                          </Button>
+                        )}
                         <Button
                           variant="secondary"
                           size="small"
@@ -970,7 +1004,10 @@ function CatalogPageBody({
 }) {
   const { runtime, identity, announce } = useAuth();
   const auth = useIdentity();
+  const exportTask = useCreateExportTask(runtime);
   const ownerId = auth.status === 'authenticated' ? auth.identity.user.id : '';
+  const peerSessionId =
+    auth.status === 'authenticated' ? auth.identity.sessionId : undefined;
   const safetyKey = useMemo(
     () => ['catalog-write-safety', ownerId, config.id] as const,
     [config.id, ownerId],
@@ -979,6 +1016,21 @@ function CatalogPageBody({
     typeof safetyKey | null
   >(null);
   const safetyHydrated = !config.writes || hydratedSafetyKey === safetyKey;
+  const importSafetyKey = useMemo(
+    () => ['catalog-import-safety', ownerId, config.id] as const,
+    [ownerId, config.id],
+  );
+  const importBlocked = useQuery({
+    queryKey: importSafetyKey,
+    queryFn: () => false,
+    enabled: false,
+    initialData: () => {
+      if (!ownerId || !config.writes) return false;
+      const stored = catalogSafetyStorage();
+      return !stored || catalogImportBlocksWrite(stored, ownerId, config.id);
+    },
+    gcTime: Infinity,
+  }).data;
   const [storageUnavailable, setStorageUnavailable] = useState(() =>
     Boolean(ownerId && config.writes && !catalogSafetyStorage()),
   );
@@ -986,6 +1038,7 @@ function CatalogPageBody({
     string | null
   >(null);
   const [recoveringStorage, setRecoveringStorage] = useState(false);
+  const [peerRefreshRetry, setPeerRefreshRetry] = useState(0);
   const safety = useQuery<CatalogSafetyGate | null>({
     queryKey: safetyKey,
     queryFn: () => null,
@@ -999,7 +1052,7 @@ function CatalogPageBody({
   }).data;
   const setSafety = (
     next: CatalogSafetyGate | null,
-    expected?: CatalogSafetyGate,
+    expected?: CatalogSafetyGate | null,
   ): boolean => {
     const stored = catalogSafetyStorage();
     if (!stored) {
@@ -1013,7 +1066,10 @@ function CatalogPageBody({
     const current = stored
       ? readCatalogSafetyGate(stored, ownerId, config.id)
       : null;
-    if (expected && JSON.stringify(current) !== JSON.stringify(expected)) {
+    if (
+      expected !== undefined &&
+      JSON.stringify(current) !== JSON.stringify(expected)
+    ) {
       runtime.queryClient.setQueryData(
         safetyKey,
         current ?? { phase: 'inspection' },
@@ -1035,7 +1091,12 @@ function CatalogPageBody({
         'INVALID_INPUT',
         '浏览器不支持安全的跨标签写入锁，请使用支持 Web Locks 的浏览器。',
       );
-    await navigator.locks.request(catalogSafetyKey(ownerId, config.id), work);
+    await runWithCatalogOperationLock(
+      navigator.locks,
+      ownerId,
+      config.id,
+      work,
+    );
   };
   const beginWrite = (candidate: CatalogAction): CatalogSafetyGate => {
     const stored = catalogSafetyStorage();
@@ -1047,6 +1108,13 @@ function CatalogPageBody({
       );
     }
     const existing = readCatalogSafetyGate(stored, ownerId, config.id);
+    if (catalogImportBlocksWrite(stored, ownerId, config.id)) {
+      runtime.queryClient.setQueryData(importSafetyKey, true);
+      throw new ApiError(
+        'INVALID_INPUT',
+        '已有导入请求待核实，导入保护解除前不能写入目录。',
+      );
+    }
     if (existing || recovery?.read()) {
       runtime.queryClient.setQueryData(safetyKey, existing);
       throw new ApiError(
@@ -1062,8 +1130,13 @@ function CatalogPageBody({
           ? null
           : candidate.group.id,
       createUncertain:
-        candidate.type === 'create-group' || candidate.type === 'create-asin',
+        candidate.type === 'create-group' ||
+        candidate.type === 'create-asin' ||
+        candidate.type === 'batch-create-asins',
       operationId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      ...(candidate.type === 'batch-create-asins'
+        ? { batchCreate: true, batchCreateOwner: batchOwner }
+        : {}),
     };
     if (!writeCatalogSafetyGate(stored, ownerId, config.id, gate)) {
       setStorageUnavailable(true);
@@ -1090,6 +1163,7 @@ function CatalogPageBody({
       access.canWriteASIN &&
       !safety &&
       !checkBusy &&
+      !importBlocked &&
       !storageUnavailable,
   );
   const canDelete = Boolean(
@@ -1100,6 +1174,7 @@ function CatalogPageBody({
         : access.canDeleteASIN) &&
       !safety &&
       !checkBusy &&
+      !importBlocked &&
       !storageUnavailable,
   );
   const canCheck = Boolean(config.checks && access.canReadASIN);
@@ -1151,6 +1226,67 @@ function CatalogPageBody({
   const writingRef = useRef(false);
   const actionRef = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const batchOwner = JSON.stringify([
+    config.id,
+    ownerId,
+    auth.status === 'authenticated' ? auth.identity.sessionId ?? null : null,
+  ]);
+  const batchPending = useRef<{
+    serial: number;
+    owner: string;
+    userId: string;
+    source: 'asin' | 'competitor';
+    queryClient: typeof runtime.queryClient;
+  } | null>(null);
+  const [batchResult, setBatchResult] = useState<{
+    serial: number;
+    owner: string;
+    groupName: string;
+    result: BatchCreateAsinsData;
+    receipt: AsinBatchReceipt;
+    persisted: boolean;
+    recoveredFromOwner?: string;
+  } | null>(null);
+  const batchResultRef = useRef(batchResult);
+  // A permission-only transition hides the result, but its original receipt
+  // still needs cleanup if this session is subsequently logged out/replaced.
+  if (batchResult) batchResultRef.current = batchResult;
+  const knownBatchReceipts = useRef(
+    new Map<string, { receipt: AsinBatchReceipt; persisted: boolean }>(),
+  );
+  const retireBatchReceipt = useCallback(
+    (receipt: AsinBatchReceipt, displayedOwner: string) => {
+      retireBatchReceiptAfterIdentityChange(
+        identity,
+        runtime,
+        receipt,
+        displayedOwner,
+        () => {
+          const memory = knownBatchReceipts.current.get(receipt.operationId);
+          if (memory?.receipt.owner === receipt.owner)
+            knownBatchReceipts.current.delete(receipt.operationId);
+        },
+      );
+    },
+    [identity, runtime],
+  );
+  useEffect(
+    () => () => {
+      // RouteGate may unmount for pending/error before identity is definitive.
+      // The retirement subscription survives that screen without losing rows.
+      const previous = batchResultRef.current;
+      if (previous) retireBatchReceipt(previous.receipt, previous.owner);
+    },
+    [config.id, identity, retireBatchReceipt],
+  );
+  const [batchReceiptWarning, setBatchReceiptWarning] = useState<string | null>(
+    null,
+  );
+  const [batchRecoveryNotice, setBatchRecoveryNotice] = useState<string | null>(
+    null,
+  );
+  const [recoveringBatchReceipt, setRecoveringBatchReceipt] = useState(false);
+  const batchReceiptRecoveryEpoch = useRef(0);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessRetryError, setAccessRetryError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -1159,15 +1295,74 @@ function CatalogPageBody({
   const [country, setCountry] = useState('');
   const [status, setStatus] = useState<StatusFilter>('ALL');
   const [query, setQuery] = useState<CatalogQuery>(INITIAL_QUERY);
+  const importReadEpoch = useRef(0);
+  const importSessionRevision = runtime.session.revision;
+  useLayoutEffect(() => {
+    importReadEpoch.current++;
+  }, [query, ownerId, peerSessionId, importSessionRevision]);
+  const refreshImportedCatalog = useMemo(
+    () => async () => {
+      const epoch = importReadEpoch.current;
+      const check = () => {
+        const state = identity.getSnapshot();
+        const policy = createAccess(
+          state.status === 'authenticated' ? state.identity : undefined,
+        );
+        if (
+          importReadEpoch.current !== epoch ||
+          runtime.session.revision !== importSessionRevision ||
+          state.status !== 'authenticated' ||
+          state.identity.user.id !== ownerId ||
+          state.identity.sessionId !== peerSessionId ||
+          !policy.canReadASIN ||
+          policy.mustChangePassword
+        )
+          throw new ApiError(
+            'CANCELLED',
+            '目录查询或会话已改变，请重读当前目录后再解除导入保护',
+          );
+      };
+      check();
+      await runtime.queryClient.cancelQueries({ queryKey: [config.id] });
+      check();
+      const first = await config.list(runtime.http, query);
+      check();
+      const last = Math.max(1, Math.ceil(first.total / first.pageSize));
+      const corrected =
+        first.current > last ? { ...query, current: last } : query;
+      const fresh =
+        corrected === query
+          ? first
+          : await config.list(runtime.http, corrected);
+      check();
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+      runtime.queryClient.setQueryData([config.id, 'groups', corrected], fresh);
+      if (corrected !== query) setQuery(corrected);
+    },
+    [
+      config,
+      identity,
+      importSessionRevision,
+      ownerId,
+      peerSessionId,
+      query,
+      runtime,
+    ],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const crossTabSafetyRevision = useRef(0);
-  const clearCatalogCache = useCallback(async () => {
-    await runtime.queryClient
-      .cancelQueries({ queryKey: [config.id] })
-      .catch(() => undefined);
-    runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
-    runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
-  }, [config.id, runtime.queryClient]);
+  const clearCatalogCache = useCallback(
+    async (guard?: () => void) => {
+      guard?.();
+      await runtime.queryClient
+        .cancelQueries({ queryKey: [config.id] })
+        .catch(() => undefined);
+      guard?.();
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'groups'] });
+      runtime.queryClient.removeQueries({ queryKey: [config.id, 'group'] });
+    },
+    [config.id, runtime.queryClient],
+  );
   const [forceRefresh, setForceRefresh] = useState(true);
   const selectionScope = JSON.stringify(query);
   const catalogReadRevision = useRef(0);
@@ -1197,9 +1392,17 @@ function CatalogPageBody({
   }, [selectionScope]);
   const selection: CatalogSelection = {
     ids: selectedGroupIds,
-    disabled: checkBusy || writing || Boolean(safety) || storageUnavailable,
+    disabled:
+      !safetyHydrated ||
+      importBlocked ||
+      checkBusy ||
+      writing ||
+      Boolean(safety) ||
+      storageUnavailable,
     toggle: (id) => {
       if (
+        !safetyHydrated ||
+        importBlocked ||
         checkBusyRef.current ||
         writingRef.current ||
         safety ||
@@ -1402,7 +1605,13 @@ function CatalogPageBody({
     const syncSafety = (event?: StorageEvent) => {
       // The writable-storage probe broadcasts its own set/remove events to
       // other tabs. Ignore unrelated keys before any probe can broadcast again.
-      if (event && event.key !== catalogSafetyKey(ownerId, config.id)) return;
+      if (
+        event &&
+        event.key !== null &&
+        event.key !== catalogSafetyKey(ownerId, config.id) &&
+        event.key !== importGateKey(config.id, ownerId)
+      )
+        return;
       const stored = catalogSafetyStorage();
       if (!stored) {
         setStorageUnavailable(true);
@@ -1410,11 +1619,28 @@ function CatalogPageBody({
       }
       if (event && event.storageArea !== stored) return;
       const incoming = readCatalogSafetyGate(stored, ownerId, config.id);
+      const importing = catalogImportBlocksWrite(stored, ownerId, config.id);
+      const currentImportBlocked =
+        runtime.queryClient.getQueryData<boolean>(importSafetyKey);
+      if (importing) runtime.queryClient.setQueryData(importSafetyKey, true);
       const revision = ++crossTabSafetyRevision.current;
       if (incoming) {
         peerCheckRequest.current?.abort();
         setPeerCheckRefresh(null);
-        runtime.queryClient.setQueryData(safetyKey, incoming);
+        const known =
+          runtime.queryClient.getQueryData<CatalogSafetyGate>(safetyKey);
+        const receiptScope = JSON.stringify([
+          config.id,
+          ownerId,
+          peerSessionId ?? null,
+        ]);
+        runtime.queryClient.setQueryData(
+          safetyKey,
+          canRecoverKnownBatchDeleteReceipt(incoming, known) &&
+            known.ownerScope === receiptScope
+            ? known
+            : incoming,
+        );
         if (incoming.phase === 'refresh') {
           setAction(null);
           setSelectedId(null);
@@ -1425,19 +1651,22 @@ function CatalogPageBody({
       }
       const currentSafety =
         runtime.queryClient.getQueryData<CatalogSafetyGate | null>(safetyKey);
-      if (
-        currentSafety?.phase !== 'refresh' &&
-        currentSafety?.phase !== 'inspection' &&
-        currentSafety?.phase !== 'check'
-      ) {
+      if (!currentSafety && !currentImportBlocked) {
         runtime.queryClient.setQueryData(safetyKey, null);
         setPeerCheckRefresh(null);
         return;
       }
-      if (currentSafety.phase === 'check') {
+      if (currentSafety?.phase === 'check') {
         void rereadReleasedCheck(stored, revision);
         return;
       }
+      if (importing) return;
+      if (
+        currentSafety?.phase === 'refresh' &&
+        currentSafety.batchCreate &&
+        currentSafety.createUncertain
+      )
+        return;
       void (async () => {
         try {
           await clearCatalogCache();
@@ -1457,7 +1686,17 @@ function CatalogPageBody({
           if (
             !active ||
             revision !== crossTabSafetyRevision.current ||
-            readCatalogSafetyGate(stored, ownerId, config.id)
+            readCatalogSafetyGate(stored, ownerId, config.id) ||
+            catalogImportBlocksWrite(stored, ownerId, config.id)
+          )
+            return;
+          const currentIdentity = identity.getSnapshot();
+          if (
+            currentIdentity.status !== 'authenticated' ||
+            currentIdentity.identity.user.id !== ownerId ||
+            currentIdentity.identity.sessionId !== peerSessionId ||
+            !createAccess(currentIdentity.identity).canReadASIN ||
+            createAccess(currentIdentity.identity).mustChangePassword
           )
             return;
           runtime.queryClient.setQueryData(
@@ -1466,28 +1705,46 @@ function CatalogPageBody({
           );
           if (correctedQuery !== query) setQuery(correctedQuery);
           runtime.queryClient.setQueryData(safetyKey, null);
+          runtime.queryClient.setQueryData(importSafetyKey, false);
         } catch {
           // Keep the safety gate until this tab can reread the catalog.
+          if (active && revision === crossTabSafetyRevision.current)
+            setNotice(
+              '目录重读失败，操作保护仍保留；可再次重读，不能重新提交旧操作。',
+            );
         }
       })();
     };
     // The disabled query may cache null while the page misses storage events.
     syncSafety();
     setHydratedSafetyKey(safetyKey);
+    const changed = (event: Event) => {
+      if (
+        (event as CustomEvent<string>).detail ===
+        importGateKey(config.id, ownerId)
+      )
+        syncSafety();
+    };
     window.addEventListener('storage', syncSafety);
+    window.addEventListener(CATALOG_GATE_CHANGED, changed);
     return () => {
       active = false;
       invalidatePeerCheck();
       window.removeEventListener('storage', syncSafety);
+      window.removeEventListener(CATALOG_GATE_CHANGED, changed);
     };
   }, [
     clearCatalogCache,
     config,
     ownerId,
     query,
-    rereadReleasedCheck,
     runtime,
     safetyKey,
+    importSafetyKey,
+    peerRefreshRetry,
+    peerSessionId,
+    identity,
+    rereadReleasedCheck,
     invalidatePeerCheck,
   ]);
   useEffect(() => {
@@ -1495,10 +1752,129 @@ function CatalogPageBody({
     actionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     actionRef.current?.focus();
   }, [action]);
+  useEffect(() => {
+    batchReceiptRecoveryEpoch.current++;
+    const previous = batchResultRef.current;
+    if (
+      previous &&
+      previous.owner !== batchOwner &&
+      navigator.locks &&
+      (auth.status === 'authenticated' || auth.status === 'anonymous')
+    ) {
+      batchResultRef.current = null;
+      retireBatchReceipt(previous.receipt, previous.owner);
+    }
+    setBatchReceiptWarning(null);
+    setBatchRecoveryNotice(null);
+    setRecoveringBatchReceipt(false);
+    setBatchResult((current) =>
+      current?.owner === batchOwner &&
+      access.canWriteASIN &&
+      !access.mustChangePassword
+        ? current
+        : null,
+    );
+    const pending = batchPending.current;
+    if (pending && (pending.owner !== batchOwner || !access.canWriteASIN)) {
+      const stored = catalogSafetyStorage();
+      const gate = stored
+        ? readCatalogSafetyGate(stored, pending.userId, pending.source)
+        : null;
+      if (gate)
+        pending.queryClient.setQueryData(
+          ['catalog-write-safety', pending.userId, pending.source],
+          gate,
+        );
+      batchPending.current = null;
+      writingRef.current = false;
+      setWriting(false);
+      setAction((current) =>
+        current?.type === 'batch-create-asins' ? null : current,
+      );
+    }
+  }, [
+    batchOwner,
+    access.canWriteASIN,
+    access.mustChangePassword,
+    auth.status,
+    retireBatchReceipt,
+  ]);
+  useLayoutEffect(() => {
+    if (
+      config.id !== 'asin' ||
+      !ownerId ||
+      !access.canWriteASIN ||
+      access.mustChangePassword
+    )
+      return;
+    const recovered = readAsinBatchReceipt(
+      ownerId,
+      batchOwner,
+      safety?.operationId,
+    );
+    if (!recovered) return;
+    if (
+      safety?.phase === 'refresh' &&
+      safety.batchCreate &&
+      recovered.receipt.groupId !== safety.detailId
+    )
+      return;
+    setBatchResult((current) =>
+      current?.receipt.operationId === recovered.receipt.operationId &&
+      current.owner === batchOwner
+        ? current
+        : {
+            serial: 0,
+            owner: batchOwner,
+            groupName: recovered.receipt.groupName,
+            result: recovered.receipt.result,
+            ...recovered,
+          },
+    );
+  }, [
+    config.id,
+    ownerId,
+    batchOwner,
+    access.canWriteASIN,
+    access.mustChangePassword,
+    safety,
+  ]);
   const data = groups.data;
   const current = data?.current ?? query.current ?? 1;
   const pageSize = data?.pageSize ?? query.pageSize ?? 10;
   const pages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+  const batchDelete = useCatalogBatchDelete({
+    config,
+    query,
+    groups: data?.list ?? [],
+    safety,
+    safetyHydrated,
+    enabled:
+      safetyHydrated &&
+      !storageUnavailable &&
+      !importBlocked &&
+      !checkBusy &&
+      !writing &&
+      !accessDenied,
+    onQuery: setQuery,
+    onDenied: () => reportAccessDenied(),
+  });
+  const sharedSelection: CatalogSelection | undefined = batchDelete.selection
+    ? {
+        ...batchDelete.selection,
+        toggle: (id) => {
+          setConfirmation(null);
+          batchDelete.selection?.toggle(id);
+        },
+      }
+    : canCheck && config.checks?.batch
+    ? selection
+    : undefined;
+  const sharedGroupIds = sharedSelection?.ids ?? [];
+  const sharedSelectionRevision = JSON.stringify(sharedGroupIds);
+  useLayoutEffect(() => {
+    setConfirmation(null);
+  }, [sharedSelectionRevision]);
 
   const recheckAccess = useCallback(async () => {
     if (recheckActive.current) return;
@@ -1783,6 +2159,7 @@ function CatalogPageBody({
       }
       if (result.kind === 'task' || result.kind === 'blocked') {
         setSelectedGroups({ scope: selectionScope, ids: [] });
+        batchDelete.clearSelection();
         const gate = result.gate;
         setCheckState({
           target: gate.target,
@@ -1966,6 +2343,12 @@ function CatalogPageBody({
     if (writingRef.current || runtime.queryClient.getQueryData(safetyKey))
       return;
     setActionSerial((previous) => previous + 1);
+    if (next.type === 'batch-create-asins') {
+      if (batchResult) removeAsinBatchReceipt(ownerId, batchResult.receipt);
+      batchResultRef.current = null;
+      knownBatchReceipts.current.clear();
+      setBatchResult(null);
+    }
     setAction(next);
   }
 
@@ -1987,6 +2370,29 @@ function CatalogPageBody({
       pageSize: query.pageSize,
     });
   }
+  async function createVariantGroupExport() {
+    if (
+      config.id !== 'asin' ||
+      !access.canReadASIN ||
+      access.mustChangePassword
+    )
+      return;
+    try {
+      const result = await exportTask.mutateAsync({
+        exportType: 'variant-group',
+        params: {
+          keyword: query.keyword,
+          country: query.country,
+          variantStatus: query.variantStatus,
+        },
+      });
+      const message = `变体组导出任务已提交：${result.taskId}`;
+      setNotice(message);
+      announce(message);
+    } catch (error) {
+      setNotice(catalogError(error));
+    }
+  }
   function changePage(next: number) {
     if (writingRef.current) return;
     setAction(null);
@@ -1997,7 +2403,9 @@ function CatalogPageBody({
   async function reportUncertainWrite(
     uncertainAction: CatalogAction,
     claim: CatalogSafetyGate,
+    guard?: () => void,
   ) {
+    guard?.();
     setSelectedId(null);
     setAction(null);
     setNotice(null);
@@ -2012,12 +2420,21 @@ function CatalogPageBody({
             : uncertainAction.group.id,
         createUncertain:
           uncertainAction.type === 'create-group' ||
-          uncertainAction.type === 'create-asin',
+          uncertainAction.type === 'create-asin' ||
+          uncertainAction.type === 'batch-create-asins',
         operationId: claim.operationId,
+        ...(uncertainAction.type === 'batch-create-asins'
+          ? {
+              batchCreate: true,
+              ...(claim.phase === 'refresh' && claim.batchCreateOwner
+                ? { batchCreateOwner: claim.batchCreateOwner }
+                : {}),
+            }
+          : {}),
       },
       claim,
     );
-    await clearCatalogCache();
+    await clearCatalogCache(guard);
   }
 
   useEffect(() => {
@@ -2025,7 +2442,12 @@ function CatalogPageBody({
       reportAccessDenied();
   }, [groups.error, groups.isError, reportAccessDenied]);
 
-  async function readAfterWrite(detailId: string | null) {
+  async function readAfterWrite(
+    detailId: string | null,
+    guard?: () => void,
+    recoveryQuery = query,
+  ) {
+    guard?.();
     const detailRequest = detailId
       ? config.detail(runtime.http, detailId).then(
           (value) => ({ ok: true as const, value }),
@@ -2033,19 +2455,23 @@ function CatalogPageBody({
         )
       : Promise.resolve(null);
     const [firstPage, detailResult] = await Promise.all([
-      config.list(runtime.http, query),
+      config.list(runtime.http, recoveryQuery),
       detailRequest,
     ]);
+    guard?.();
     const lastPage = Math.max(
       1,
       Math.ceil(firstPage.total / firstPage.pageSize),
     );
     const correctedQuery =
-      firstPage.current > lastPage ? { ...query, current: lastPage } : query;
+      firstPage.current > lastPage
+        ? { ...recoveryQuery, current: lastPage }
+        : recoveryQuery;
     const fresh =
-      correctedQuery === query
+      correctedQuery === recoveryQuery
         ? firstPage
         : await config.list(runtime.http, correctedQuery);
+    guard?.();
     const stillListed = Boolean(
       detailId && fresh.list.some((item) => item.id === detailId),
     );
@@ -2076,9 +2502,16 @@ function CatalogPageBody({
     message: string,
     savedAction: CatalogAction,
     claim: CatalogSafetyGate,
+    guard?: () => void,
   ) {
+    guard?.();
     if (savedAction.type === 'delete-group') setSelectedId(null);
-    const detailId = savedAction.type === 'delete-group' ? null : selectedId;
+    const detailId =
+      savedAction.type === 'delete-group'
+        ? null
+        : savedAction.type === 'batch-create-asins'
+        ? savedAction.group.id
+        : selectedId;
     setNotice(null);
     const refreshedGate: CatalogSafetyGate = {
       phase: 'refresh',
@@ -2086,17 +2519,30 @@ function CatalogPageBody({
       detailId,
       createUncertain: false,
       operationId: claim.operationId,
+      ...(savedAction.type === 'batch-create-asins'
+        ? {
+            batchCreate: true,
+            ...(claim.phase === 'refresh' && claim.batchCreateOwner
+              ? { batchCreateOwner: claim.batchCreateOwner }
+              : {}),
+          }
+        : {}),
     };
     if (!setSafety(refreshedGate, claim)) return;
+    const known = knownBatchReceipts.current.get(claim.operationId ?? '');
+    if (savedAction.type === 'batch-create-asins' && !known?.persisted) return;
     try {
-      await clearCatalogCache();
-      await readAfterWrite(detailId);
-      setSafety(null, refreshedGate);
+      await clearCatalogCache(guard);
+      await readAfterWrite(detailId, guard);
+      guard?.();
+      if (setSafety(null, refreshedGate))
+        knownBatchReceipts.current.delete(claim.operationId ?? '');
       if (message) {
         setNotice(message);
         announce(message);
       }
     } catch (cause) {
+      guard?.();
       if (catalogAccessDenied(cause)) {
         reportAccessDenied();
       }
@@ -2133,12 +2579,220 @@ function CatalogPageBody({
     }
   }
 
-  async function retryAfterWrite() {
+  function guardBatch(serial: number, owner: string) {
+    const latest = identity.getSnapshot();
+    const latestOwner =
+      latest.status === 'authenticated'
+        ? JSON.stringify([
+            config.id,
+            latest.identity.user.id,
+            latest.identity.sessionId ?? null,
+          ])
+        : '';
+    if (
+      !mounted.current ||
+      batchPending.current?.serial !== serial ||
+      batchPending.current.owner !== owner ||
+      latestOwner !== owner ||
+      latest.status !== 'authenticated' ||
+      !createAccess(latest.identity).canWriteASIN
+    )
+      throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+  }
+
+  function batchWritingChange(serial: number, owner: string, pending: boolean) {
+    if (!mounted.current) return;
+    if (pending) {
+      batchPending.current = {
+        serial,
+        owner,
+        userId: ownerId,
+        source: config.id,
+        queryClient: runtime.queryClient,
+      };
+      writingChange(true);
+    } else if (
+      batchPending.current?.serial === serial &&
+      batchPending.current.owner === owner
+    ) {
+      batchPending.current = null;
+      writingChange(false);
+    }
+  }
+
+  async function restorePreviousBatchReceipt() {
+    if (
+      config.id !== 'asin' ||
+      safety?.phase !== 'refresh' ||
+      !safety.batchCreate ||
+      !safety.batchCreateOwner ||
+      safety.batchCreateOwner === batchOwner ||
+      !safety.operationId ||
+      !safety.detailId ||
+      !access.canWriteASIN ||
+      access.mustChangePassword ||
+      storageUnavailable ||
+      recoveringBatchReceipt
+    )
+      return;
+    const originalOwner = safety.batchCreateOwner;
+    const recoveryRevision = runtime.session.revision;
+    const recoveryEpoch = batchReceiptRecoveryEpoch.current;
+    const guard = () => {
+      const current = identity.getSnapshot();
+      const permissions = createAccess(
+        current.status === 'authenticated' ? current.identity : undefined,
+      );
+      if (
+        !mounted.current ||
+        batchReceiptRecoveryEpoch.current !== recoveryEpoch ||
+        runtime.session.revision !== recoveryRevision ||
+        current.status !== 'authenticated' ||
+        JSON.stringify([
+          config.id,
+          current.identity.user.id,
+          current.identity.sessionId ?? null,
+        ]) !== batchOwner ||
+        !permissions.canWriteASIN ||
+        permissions.mustChangePassword
+      )
+        throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+    };
+    setRecoveringBatchReceipt(true);
+    try {
+      await runWithCatalogLock(async () => {
+        guard();
+        const stored = catalogSafetyStorage();
+        const current = stored
+          ? readCatalogSafetyGate(stored, ownerId, config.id)
+          : null;
+        if (!stored || JSON.stringify(current) !== JSON.stringify(safety))
+          throw new ApiError('INVALID_INPUT', '原操作保护已变化，请重新核实。');
+        // Read only the exact original session/operation bound by this user's gate.
+        const original: unknown = JSON.parse(originalOwner);
+        if (
+          !Array.isArray(original) ||
+          original[0] !== 'asin' ||
+          original[1] !== ownerId
+        )
+          throw new ApiError('INVALID_INPUT', '原会话归属不匹配。');
+        const recovered = readAsinBatchReceipt(
+          ownerId,
+          originalOwner,
+          safety.operationId,
+        );
+        guard();
+        if (!recovered || recovered.receipt.groupId !== safety.detailId)
+          throw new ApiError(
+            'INVALID_INPUT',
+            '原会话回执缺失、损坏或与原组不匹配。',
+          );
+        setBatchResult({
+          serial: 0,
+          owner: batchOwner,
+          groupName: recovered.receipt.groupName,
+          result: recovered.receipt.result,
+          recoveredFromOwner: originalOwner,
+          ...recovered,
+        });
+        setBatchReceiptWarning(null);
+        setBatchRecoveryNotice(
+          '已显式恢复同一用户原会话的已知回执。原操作写入保护仍保留，请重读目录核实；未重新提交。',
+        );
+      });
+    } catch (cause) {
+      try {
+        guard();
+      } catch {
+        return;
+      }
+      setBatchReceiptWarning(
+        `${catalogError(cause)} 写入保护仍保留；请核实原操作，勿重发成功项。`,
+      );
+    } finally {
+      try {
+        guard();
+        setRecoveringBatchReceipt(false);
+      } catch {
+        // A queued old-session recovery must not mutate the new session's UI.
+      }
+    }
+  }
+
+  async function retryAfterWrite(narrow = false) {
     if (safety?.phase !== 'refresh') return;
+    const guardedBatchResult =
+      batchResult?.receipt.operationId === safety.operationId
+        ? batchResult
+        : null;
     const { message, detailId, createUncertain } = safety;
+    const targetQuery = narrow ? { ...query, current: 1, pageSize: 1 } : query;
+    const recoveryRevision = runtime.session.revision;
+    const guardRecovery = () => {
+      const currentIdentity = identity.getSnapshot();
+      if (
+        !mounted.current ||
+        runtime.session.revision !== recoveryRevision ||
+        currentIdentity.status !== 'authenticated' ||
+        JSON.stringify([
+          config.id,
+          currentIdentity.identity.user.id,
+          currentIdentity.identity.sessionId ?? null,
+        ]) !== batchOwner ||
+        !createAccess(currentIdentity.identity).canReadASIN ||
+        (guardedBatchResult?.recoveredFromOwner &&
+          (!createAccess(currentIdentity.identity).canWriteASIN ||
+            createAccess(currentIdentity.identity).mustChangePassword))
+      )
+        throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+    };
     let refreshed = false;
     try {
       await runWithCatalogLock(async () => {
+        guardRecovery?.();
+        const memory = knownBatchReceipts.current.get(safety.operationId ?? '');
+        const receipt =
+          guardedBatchResult?.receipt ??
+          (memory?.receipt.owner === batchOwner ? memory.receipt : null) ??
+          readAsinBatchReceipt(ownerId, batchOwner, safety.operationId)
+            ?.receipt;
+        if (
+          receipt &&
+          safety.batchCreate &&
+          (receipt.operationId !== safety.operationId ||
+            (receipt.owner !== batchOwner &&
+              !(
+                guardedBatchResult?.recoveredFromOwner === receipt.owner &&
+                safety.batchCreateOwner === receipt.owner
+              )) ||
+            receipt.groupId !== detailId)
+        ) {
+          setBatchReceiptWarning('已知回执与原操作不匹配，写入保护仍保留。');
+          return;
+        }
+        if (safety.batchCreate && !safety.createUncertain && !receipt) {
+          setBatchReceiptWarning(
+            '已知逐行回执不可读取，写入保护仍保留。请恢复浏览器存储或核实原操作；勿重发成功项。',
+          );
+          return;
+        }
+        if (
+          receipt &&
+          (receipt.owner === batchOwner ||
+            guardedBatchResult?.recoveredFromOwner === receipt.owner) &&
+          receipt.operationId === safety.operationId &&
+          !saveAsinBatchReceipt(ownerId, receipt)
+        ) {
+          setBatchResult((current) =>
+            current ? { ...current, persisted: false } : current,
+          );
+          return;
+        }
+        setBatchReceiptWarning(null);
+        if (receipt)
+          setBatchResult((current) =>
+            current ? { ...current, persisted: true } : current,
+          );
         const stored = catalogSafetyStorage();
         const current = stored
           ? readCatalogSafetyGate(stored, ownerId, config.id)
@@ -2148,17 +2802,26 @@ function CatalogPageBody({
           return;
         }
         if (!current) {
-          await readAfterWrite(detailId);
+          await readAfterWrite(detailId, guardRecovery, targetQuery);
+          guardRecovery?.();
           const latest = readCatalogSafetyGate(stored, ownerId, config.id);
-          runtime.queryClient.setQueryData(safetyKey, latest);
-          refreshed = !latest;
+          if (!latest && createUncertain) {
+            refreshed = setSafety(
+              { phase: 'inspection', operationId: safety.operationId },
+              null,
+            );
+          } else {
+            runtime.queryClient.setQueryData(safetyKey, latest);
+            refreshed = !latest;
+          }
           return;
         }
         if (JSON.stringify(current) !== JSON.stringify(safety)) {
           runtime.queryClient.setQueryData(safetyKey, current);
           return;
         }
-        await readAfterWrite(detailId);
+        await readAfterWrite(detailId, guardRecovery, targetQuery);
+        guardRecovery?.();
         refreshed = setSafety(
           createUncertain
             ? { phase: 'inspection', operationId: safety.operationId }
@@ -2167,20 +2830,52 @@ function CatalogPageBody({
         );
       });
       if (!refreshed) return;
-      if (message) {
-        setNotice(message);
-        announce(message);
+      guardRecovery?.();
+      knownBatchReceipts.current.delete(safety.operationId ?? '');
+      if (message || narrow) {
+        const report = `${message ?? ''}${
+          narrow
+            ? ' 已将目录改为每页 1 组，并按新范围成功重读。原大页读取未完成。'
+            : ''
+        }`;
+        setNotice(report);
+        announce(report);
       }
     } catch (cause) {
+      if (guardRecovery) {
+        try {
+          guardRecovery();
+        } catch {
+          return;
+        }
+      }
       if (catalogAccessDenied(cause)) reportAccessDenied();
     }
   }
 
   async function reconcileCreate() {
     if (safety?.phase !== 'inspection') return;
+    const recoveryRevision = runtime.session.revision;
+    const guard = () => {
+      const currentIdentity = identity.getSnapshot();
+      if (
+        !mounted.current ||
+        runtime.session.revision !== recoveryRevision ||
+        currentIdentity.status !== 'authenticated' ||
+        JSON.stringify([
+          config.id,
+          currentIdentity.identity.user.id,
+          currentIdentity.identity.sessionId ?? null,
+        ]) !== batchOwner ||
+        !createAccess(currentIdentity.identity).canReadASIN
+      )
+        throw new ApiError('CANCELLED', '身份、权限或页面已变化');
+    };
     let reconciled = false;
     try {
+      guard();
       await runWithCatalogLock(async () => {
+        guard();
         const stored = catalogSafetyStorage();
         const current = stored
           ? readCatalogSafetyGate(stored, ownerId, config.id)
@@ -2190,22 +2885,32 @@ function CatalogPageBody({
           return;
         }
         if (!current) {
-          await readAfterWrite(null);
+          await readAfterWrite(null, guard);
+          guard();
           const latest = readCatalogSafetyGate(stored, ownerId, config.id);
+          guard();
           runtime.queryClient.setQueryData(safetyKey, latest);
           reconciled = !latest;
           return;
         }
         if (JSON.stringify(current) !== JSON.stringify(safety)) {
+          guard();
           runtime.queryClient.setQueryData(safetyKey, current);
           return;
         }
-        await readAfterWrite(null);
+        await readAfterWrite(null, guard);
+        guard();
         reconciled = setSafety(null, safety);
       });
+      guard();
       if (!reconciled) return;
       setNotice('目录已重新读取，请仅在确认原新建记录后继续写入。');
     } catch (cause) {
+      try {
+        guard();
+      } catch {
+        return;
+      }
       if (catalogAccessDenied(cause)) reportAccessDenied();
       else setNotice('目录重读失败，写入仍暂停，请稍后重试。');
     }
@@ -2237,6 +2942,10 @@ function CatalogPageBody({
             readCatalogSafetyGate(stored, ownerId, config.id),
           );
         }
+        runtime.queryClient.setQueryData(
+          importSafetyKey,
+          catalogImportBlocksWrite(stored, ownerId, config.id),
+        );
         setStorageUnavailable(false);
       });
     } catch (cause) {
@@ -2266,6 +2975,39 @@ function CatalogPageBody({
       </Button>
     </div>
   );
+  const batchReceiptPanel = batchResult &&
+    batchResult.owner === batchOwner &&
+    access.canWriteASIN &&
+    !access.mustChangePassword &&
+    (!safety || safety.operationId === batchResult.receipt.operationId) && (
+      <div className="space-y-3">
+        {batchRecoveryNotice && <p role="status">{batchRecoveryNotice}</p>}
+        {(!batchResult.persisted || batchReceiptWarning) && (
+          <p role="alert">
+            {batchReceiptWarning ||
+              '逐行回执尚未保存到本地，写入保护继续保留。请保留页面并修复存储，勿重新提交成功项。'}
+          </p>
+        )}
+        <AsinBatchCreateResult
+          key={batchResult.receipt.operationId}
+          result={batchResult.result}
+          groupName={batchResult.groupName}
+          operationId={batchResult.receipt.operationId}
+          protected={Boolean(safety)}
+          dismiss={() => {
+            if (safety) return;
+            if (removeAsinBatchReceipt(ownerId, batchResult.receipt)) {
+              batchResultRef.current = null;
+              knownBatchReceipts.current.delete(
+                batchResult.receipt.operationId,
+              );
+              setBatchResult(null);
+            } else
+              setBatchReceiptWarning('无法清理已保存回执，请恢复存储后重试。');
+          }}
+        />
+      </div>
+    );
 
   if (accessDenied)
     return (
@@ -2303,7 +3045,39 @@ function CatalogPageBody({
           >
             重新读取目录
           </Button>
+          {safety.batchCreate && (
+            <Button
+              variant="secondary"
+              disabled={storageUnavailable}
+              onClick={() => void retryAfterWrite(true)}
+            >
+              改为每页 1 组重读（不重发）
+            </Button>
+          )}
+          {safety.batchCreate &&
+            safety.batchCreateOwner &&
+            safety.batchCreateOwner !== batchOwner && (
+              <div className="space-y-2">
+                <p>
+                  原操作属于你之前的登录会话。写入保护仍保留；可显式读取原会话绑定的已知回执后核实目录，勿重新提交。
+                </p>
+                <Button
+                  variant="secondary"
+                  disabled={
+                    storageUnavailable ||
+                    !access.canWriteASIN ||
+                    access.mustChangePassword
+                  }
+                  pending={recoveringBatchReceipt}
+                  onClick={() => void restorePreviousBatchReceipt()}
+                >
+                  恢复原会话已知回执（不提交）
+                </Button>
+              </div>
+            )}
+          {batchReceiptWarning && <p role="status">{batchReceiptWarning}</p>}
         </div>
+        {batchReceiptPanel}
       </AppShell>
     );
 
@@ -2380,7 +3154,35 @@ function CatalogPageBody({
             </Button>
           </div>
         )}
-        {extra}
+        <CatalogRefreshContext.Provider value={refreshImportedCatalog}>
+          {extra}
+        </CatalogRefreshContext.Provider>
+        {config.id === 'competitor' && (
+          <CompetitorExportControls
+            query={query}
+            disabled={writing || groups.isPending || !!groups.error}
+          />
+        )}
+        {config.id === 'asin' && (
+          <PrimaryAsinExportControls
+            query={query}
+            disabled={writing || groups.isPending || !!groups.error}
+          />
+        )}
+        {importBlocked && (
+          <div className="space-y-2">
+            <p role="status">
+              导入请求待核实，目录写入与批量删除已暂停；请先核实导入任务。
+            </p>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => setPeerRefreshRetry((value) => value + 1)}
+            >
+              重读目录并核实导入保护（不提交）
+            </Button>
+          </div>
+        )}
         {pendingConfirmation && !checkBusy && (
           <section
             aria-label="确认检查"
@@ -2556,26 +3358,104 @@ function CatalogPageBody({
           config.writes &&
           catalogActionAllowed(action, canWrite, canDelete) && (
             <div ref={actionRef} tabIndex={-1}>
-              <CatalogActionPanel
-                key={actionSerial}
-                action={action}
-                config={config}
-                http={runtime.http}
-                close={() =>
-                  setAction((current) => (current === action ? null : current))
-                }
-                saved={afterWrite}
-                denied={reportAccessDenied}
-                uncertain={reportUncertainWrite}
-                writingChange={writingChange}
-                runExclusive={runWithCatalogLock}
-                beginWrite={beginWrite}
-                releaseWrite={(claim) => {
-                  setSafety(null, claim);
-                }}
-              />
+              {action.type === 'batch-create-asins' && config.id === 'asin' ? (
+                <AsinBatchCreatePanel
+                  key={actionSerial}
+                  action={action}
+                  config={config}
+                  http={runtime.http}
+                  close={() =>
+                    setAction((current) =>
+                      current === action ? null : current,
+                    )
+                  }
+                  completed={async (result, completedAction, claim) => {
+                    const guard = () => guardBatch(actionSerial, batchOwner);
+                    guard();
+                    setBatchResult({
+                      serial: actionSerial,
+                      owner: batchOwner,
+                      groupName: completedAction.group.name,
+                      result,
+                      ...knownBatchReceipts.current.get(
+                        claim.operationId ?? '',
+                      )!,
+                    });
+                    setAction((current) =>
+                      current === action ? null : current,
+                    );
+                    await afterWrite(
+                      `批量添加已核实：成功 ${result.successCount} 个，失败 ${result.failedCount} 个。`,
+                      completedAction,
+                      claim,
+                      guard,
+                    );
+                  }}
+                  rememberReceipt={(result, completedAction, claim, input) => {
+                    if (!claim.operationId) return;
+                    const receipt: AsinBatchReceipt = {
+                      operationId: claim.operationId,
+                      owner: batchOwner,
+                      groupId: completedAction.group.id,
+                      groupName: completedAction.group.name,
+                      submittedAt: Number(claim.operationId.split('-')[0]),
+                      items: input.items.map((item) => ({ ...item })),
+                      result,
+                    };
+                    const known = {
+                      receipt,
+                      persisted: saveAsinBatchReceipt(ownerId, receipt),
+                    };
+                    // Persist late receipts to their original owner, but only
+                    // the current operation needs an in-memory recovery copy.
+                    if (
+                      batchPending.current?.serial === actionSerial &&
+                      batchPending.current.owner === batchOwner
+                    ) {
+                      knownBatchReceipts.current.clear();
+                      knownBatchReceipts.current.set(claim.operationId, known);
+                    }
+                  }}
+                  denied={reportAccessDenied}
+                  uncertain={(uncertainAction, claim) =>
+                    reportUncertainWrite(uncertainAction, claim, () =>
+                      guardBatch(actionSerial, batchOwner),
+                    ).catch(() => undefined)
+                  }
+                  writingChange={(pending) =>
+                    batchWritingChange(actionSerial, batchOwner, pending)
+                  }
+                  runExclusive={runWithCatalogLock}
+                  beginWrite={beginWrite}
+                  releaseWrite={(claim) => {
+                    setSafety(null, claim);
+                  }}
+                />
+              ) : (
+                <CatalogActionPanel
+                  key={actionSerial}
+                  action={action}
+                  config={config}
+                  http={runtime.http}
+                  close={() =>
+                    setAction((current) =>
+                      current === action ? null : current,
+                    )
+                  }
+                  saved={afterWrite}
+                  denied={reportAccessDenied}
+                  uncertain={reportUncertainWrite}
+                  writingChange={writingChange}
+                  runExclusive={runWithCatalogLock}
+                  beginWrite={beginWrite}
+                  releaseWrite={(claim) => {
+                    setSafety(null, claim);
+                  }}
+                />
+              )}
             </div>
           )}
+        {batchReceiptPanel}
 
         <Card>
           <CardHeader
@@ -2684,12 +3564,14 @@ function CatalogPageBody({
                 {canCheck && config.checks?.batch && (
                   <>
                     <span className="text-xs text-muted-foreground">
-                      已选 {selectedGroupIds.length} 组
+                      已选 {sharedGroupIds.length} 组
                     </span>
                     <Button
                       size="small"
                       disabled={
-                        selection.disabled || selectedGroupIds.length === 0
+                        !sharedSelection ||
+                        sharedSelection.disabled ||
+                        sharedGroupIds.length === 0
                       }
                       onClick={() =>
                         setConfirmation({
@@ -2698,27 +3580,31 @@ function CatalogPageBody({
                           target: {
                             kind: 'batch',
                             id: 'batch',
-                            label: `所选 ${selectedGroupIds.length} 个主营变体组`,
-                            groupIds: [...selectedGroupIds],
+                            label: `所选 ${sharedGroupIds.length} 个主营变体组`,
+                            groupIds: [...sharedGroupIds],
                           },
                         })
                       }
                     >
                       检查所选组
                     </Button>
-                    <Button
-                      size="small"
-                      variant="ghost"
-                      disabled={
-                        selection.disabled || selectedGroupIds.length === 0
-                      }
-                      onClick={() => {
-                        setSelectedGroups({ scope: selectionScope, ids: [] });
-                        setConfirmation(null);
-                      }}
-                    >
-                      清空选择
-                    </Button>
+                    {!batchDelete.selection && (
+                      <Button
+                        size="small"
+                        variant="ghost"
+                        disabled={
+                          !sharedSelection ||
+                          sharedSelection.disabled ||
+                          sharedGroupIds.length === 0
+                        }
+                        onClick={() => {
+                          setSelectedGroups({ scope: selectionScope, ids: [] });
+                          setConfirmation(null);
+                        }}
+                      >
+                        清空选择
+                      </Button>
+                    )}
                   </>
                 )}
                 {canWrite && (
@@ -2730,6 +3616,20 @@ function CatalogPageBody({
                     新建变体组
                   </Button>
                 )}
+                {config.id === 'asin' &&
+                  access.canReadASIN &&
+                  !access.mustChangePassword && (
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      disabled={writing || exportTask.isPending}
+                      pending={exportTask.isPending}
+                      onClick={() => void createVariantGroupExport()}
+                    >
+                      <Download aria-hidden="true" />
+                      导出变体组
+                    </Button>
+                  )}
                 <label className="flex items-center gap-2 text-xs">
                   每页{' '}
                   <select
@@ -2760,6 +3660,7 @@ function CatalogPageBody({
             }
           />
           <CardContent className="space-y-5">
+            {batchDelete.panel}
             {groups.isPending && (
               <div
                 aria-label={`正在加载${config.label}目录`}
@@ -2798,6 +3699,7 @@ function CatalogPageBody({
                   <GroupRows
                     groups={data.list}
                     config={config}
+                    selection={sharedSelection}
                     selectedId={selectedId}
                     onSelect={(id) => {
                       if (writingRef.current) return;
@@ -2808,9 +3710,6 @@ function CatalogPageBody({
                     canDelete={canDelete}
                     canCheck={canCheck}
                     checkBusy={checkBusy || writing || Boolean(safety)}
-                    selection={
-                      canCheck && config.checks?.batch ? selection : undefined
-                    }
                     actionsDisabled={writing}
                     onAction={openAction}
                     onCheck={(target) =>

@@ -7,6 +7,7 @@ import {
   getCompetitorHistory,
   getCompetitorHistoryDetail,
 } from '../../services/competitor-history';
+import { getAbnormalDurationStatistics } from '../../services/monitor-abnormal';
 import {
   getMonitorHistory,
   getMonitorHistoryDetail,
@@ -47,6 +48,7 @@ export type HistorySource = {
   getList: typeof getMonitorHistory;
   getStatistics?: typeof getMonitorStatistics;
   getPeakHours?: typeof getPeakHoursStatistics;
+  getAbnormal?: typeof getAbnormalDurationStatistics;
   getDetail: (
     http: Parameters<typeof getMonitorHistoryDetail>[0],
     id: number,
@@ -78,6 +80,7 @@ export const HISTORY_SOURCES: Record<'primary' | 'competitor', HistorySource> =
       getIntervals: getMonitorStatusIntervals,
       getStatistics: getMonitorStatistics,
       getPeakHours: getPeakHoursStatistics,
+      getAbnormal: getAbnormalDurationStatistics,
     },
     competitor: {
       key: 'competitor-monitor-history',

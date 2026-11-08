@@ -2,6 +2,7 @@ import {
   batchCheckRequestSchema,
   batchCheckResultSchema,
   competitorCheckResultSchema,
+  isNeoBatchDeleteId,
   variantCheckTaskDataSchema,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
@@ -19,13 +20,7 @@ type Subtype =
 
 /** JSON identifiers retain migrated case, Unicode and ordinary spaces. */
 export function isCheckGroupId(id: string): boolean {
-  return (
-    Boolean(id) &&
-    [...id].length <= 50 &&
-    ![...id].some(
-      (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
-    )
-  );
+  return isNeoBatchDeleteId(id);
 }
 function receipt(
   value: unknown,

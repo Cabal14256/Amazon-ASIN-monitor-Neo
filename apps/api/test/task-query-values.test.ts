@@ -9,6 +9,7 @@ import {
   publicTaskResult,
   serializeTask,
 } from '../src/tasks/task-query-values';
+import { backupCreationFixture } from './helpers/backup-creation-fixtures';
 import { taskFixture } from './helpers/task-query-fixtures';
 
 function legacySerializer() {
@@ -56,6 +57,106 @@ function legacySerializer() {
     '\nmodule.exports.fixtureSerialize = sanitizeTaskForResponse;',
   ).fixtureSerialize;
 }
+
+describe('historical backup creation display', () => {
+  it('labels a verified old completed result as filename time without changing its stored proof or terminal state', () => {
+    const published = backupCreationFixture('owner-95');
+    const task = taskFixture({
+      ...published.data,
+      status: 'completed',
+      result: published.result,
+    });
+    const original = structuredClone(task);
+    const displayed = serializeTask(task);
+    expect(displayed).toMatchObject({
+      status: 'completed',
+      result: { createdAt: published.result.createdAt, timeSource: 'filename' },
+    });
+    expect(JSON.stringify(displayed)).not.toContain('backupCreationCommit');
+    expect(task).toEqual(original);
+  });
+  it.each([
+    'userId',
+    'taskId',
+    'taskCreatedAt',
+    'filename',
+    'createdAt',
+    'missing-proof',
+  ])(
+    'shows an unavailable execution-time source when an old %s cannot be verified',
+    (field) => {
+      const published = backupCreationFixture('owner-95');
+      const result: Record<string, unknown> = structuredClone(published.result);
+      if (field === 'missing-proof') delete result.backupCreationCommit;
+      else if (field === 'filename' || field === 'createdAt')
+        result[field] = 'unverified';
+      else
+        (result.backupCreationCommit as Record<string, unknown>)[field] =
+          'unverified';
+      const task = taskFixture({
+        ...published.data,
+        status: 'completed',
+        result,
+      });
+      const original = structuredClone(task);
+      expect(serializeTask(task)).toMatchObject({
+        status: 'completed',
+        result: { timeSource: 'unavailable' },
+      });
+      expect(task).toEqual(original);
+    },
+  );
+  it('keeps actual execution windows and unrelated restore output unchanged', () => {
+    const published = backupCreationFixture('owner-95');
+    const execution = {
+      timeSource: 'dump-start',
+      dumpStartedAt: '2026-09-03T01:00:00.123Z',
+      dumpCompletedAt: '2026-09-03T01:02:00.456Z',
+      publicationStartedAt: '2026-09-03T01:03:00.789Z',
+    };
+    const result = {
+      ...published.result,
+      createdAt: execution.dumpStartedAt,
+      timeSource: 'dump-start',
+      execution,
+    };
+    expect(
+      serializeTask(
+        taskFixture({ ...published.data, status: 'completed', result }),
+      ).result,
+    ).toMatchObject({ timeSource: 'dump-start', execution });
+    expect(
+      serializeTask(
+        taskFixture({
+          taskType: 'backup',
+          taskSubType: 'restore',
+          status: 'completed',
+          result: { createdAt: published.result.createdAt },
+        }),
+      ).result,
+    ).toEqual({ createdAt: published.result.createdAt });
+  });
+  it('refuses filename-time provenance when available immutable queue parameters do not match the original digest', () => {
+    const published = backupCreationFixture('owner-95');
+    const task = taskFixture({
+      ...published.data,
+      status: 'completed',
+      result: published.result,
+    });
+    const queued = {
+      ...task,
+      backupData: {
+        ...published.data,
+        params: { description: 'different request' },
+      },
+    };
+    const original = structuredClone(queued);
+    expect(serializeTask(queued).result).toMatchObject({
+      timeSource: 'unavailable',
+    });
+    expect(queued).toEqual(original);
+  });
+});
 describe('task query values and actual Legacy public model', () => {
   it('recursively removes competitor private completion evidence without changing stored results', () => {
     const result = {
@@ -158,6 +259,33 @@ describe('task query values and actual Legacy public model', () => {
     ).toMatchObject({
       filename: 'result.csv',
       downloadUrl: '/api/v1/tasks/A%2FB%3FC/download',
+    });
+  });
+  it('does not advertise the unsupported task download endpoint for backup results', () => {
+    const artifact = 'backup_20260927-020000-abcdef01-primary.dump';
+    const backup = taskFixture({
+      taskType: 'backup',
+      taskSubType: 'create',
+      status: 'completed',
+      result: { filename: artifact, operation: 'create' },
+    });
+    expect(serializeTask(backup)).toMatchObject({
+      filename: artifact,
+      downloadUrl: null,
+    });
+    expect(
+      serializeTask({
+        ...backup,
+        result: {
+          filename: artifact,
+          filepath: '/private/backup.dump',
+          downloadUrl: '/legacy/download',
+        },
+      }),
+    ).toMatchObject({
+      filename: artifact,
+      downloadUrl: null,
+      result: { filename: artifact, downloadUrl: null },
     });
   });
   it.each(['', 'x'.repeat(201), 'a\u0000b', undefined])(

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../lib/http';
+import { importGateKey } from '../asin/asin-import-gate';
 import {
   readCatalogSafetyGate as readMainGate,
   writeCatalogSafetyGate as writeMainGate,
@@ -55,6 +56,26 @@ function fixture(shared = false, catalog: 'asin' | 'competitor' = 'asin') {
 }
 
 describe('shared catalog check operation gate', () => {
+  it.each(['asin', 'competitor'] as const)(
+    'blocks %s checks behind an independent outstanding import receipt',
+    async (catalog) => {
+      const f = fixture(true, catalog);
+      const key = importGateKey(catalog, 'operator');
+      const raw = JSON.stringify({
+        phase: 'uncertain',
+        taskId: null,
+        savedAt: 1000,
+      });
+      f.local.setItem(key, raw);
+      const send = vi.fn();
+      await expect(f.store.submit(target, send)).rejects.toMatchObject({
+        kind: 'INVALID_INPUT',
+      });
+      expect(f.local.getItem(key)).toBe(raw);
+      expect(send).not.toHaveBeenCalled();
+      expect(f.local.getItem(f.store.key)).toBeNull();
+    },
+  );
   it.each(['asin', 'competitor'] as const)(
     'executes the old main parser against a new %s check envelope without dropping the guard or receipt',
     async (catalog) => {

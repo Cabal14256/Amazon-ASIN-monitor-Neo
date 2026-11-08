@@ -95,6 +95,11 @@ jobs:
           pnpm --filter @asin-monitor/import test
           pnpm --filter @asin-monitor/import typecheck
 
+      - name: Test and typecheck export artifact storage
+        run: |
+          pnpm --filter @asin-monitor/export test
+          pnpm --filter @asin-monitor/export typecheck
+
       - name: Test new worker
         run: pnpm --filter @asin-monitor/worker test
 

@@ -134,15 +134,15 @@ describe('mounted primary canonical record IDs with actual transport', () => {
     async (base) => {
       for (const type of ['create-asin', 'move-asin'] as const) {
         const fetcher = vi.fn<typeof fetch>(async (input, options) => {
-          const path = new URL(String(input)).pathname;
+          const url = new URL(String(input));
           return jsonResponse({
             success: true,
             data:
               options?.method && options.method !== 'GET'
                 ? child
-                : path.endsWith(encodeURIComponent(group.id))
+                : url.searchParams.get('groupId') === group.id
                 ? group
-                : path.endsWith(encodeURIComponent(target.id))
+                : url.searchParams.get('groupId') === target.id
                 ? target
                 : { list: [group, target], total: 2, current: 1, pageSize: 20 },
           });
@@ -212,9 +212,8 @@ describe('mounted primary canonical record IDs with actual transport', () => {
           fetcher.mock.calls.some(
             ([input]) =>
               new URL(String(input)).pathname ===
-              `${prefixFor(base)}/variant-groups/${encodeURIComponent(
-                group.id,
-              )}`,
+                `${prefixFor(base)}/catalog/variant-groups/detail` &&
+              new URL(String(input)).searchParams.get('groupId') === group.id,
           ),
         ).toBe(true);
         if (type === 'move-asin')
@@ -222,9 +221,9 @@ describe('mounted primary canonical record IDs with actual transport', () => {
             fetcher.mock.calls.some(
               ([input]) =>
                 new URL(String(input)).pathname ===
-                `${prefixFor(base)}/variant-groups/${encodeURIComponent(
+                  `${prefixFor(base)}/catalog/variant-groups/detail` &&
+                new URL(String(input)).searchParams.get('groupId') ===
                   target.id,
-                )}`,
             ),
           ).toBe(true);
         expect(
@@ -264,14 +263,11 @@ describe('mounted primary canonical record IDs with actual transport', () => {
       const detail = f.fetcher.mock.calls.find(
         ([input]) =>
           new URL(String(input)).pathname ===
-          `${prefixFor(base)}/variant-groups/${encodeURIComponent(id)}`,
+            `${prefixFor(base)}/catalog/variant-groups/detail` &&
+          new URL(String(input)).searchParams.get('groupId') === id,
       );
       expect(detail).toBeTruthy();
-      expect(
-        decodeURIComponent(
-          new URL(String(detail![0])).pathname.split('/').at(-1)!,
-        ),
-      ).toBe(id);
+      expect(new URL(String(detail![0])).searchParams.get('groupId')).toBe(id);
       expect(
         f.fetcher.mock.calls.every(
           ([, options]) => !options?.method || options.method === 'GET',

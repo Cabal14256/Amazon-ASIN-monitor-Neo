@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "noEmit": true },
+  "include": [
+    "src/**/*.ts",
+    "test/competitor-export.integration.test.ts",
+    "test/parent-asin-export.integration.test.ts"
+  ]
+}

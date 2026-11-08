@@ -62,6 +62,28 @@ function timedOut(error: unknown): boolean {
   return false;
 }
 
+function normalizeAbnormalQuery(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const source = raw as Record<string, unknown>;
+  const result = { ...source };
+  for (const key of ['asinIds', 'asinCodes'] as const) {
+    const alias = `${key}[]`;
+    const nested = Object.keys(source).filter(
+      (candidate) => candidate.startsWith(`${key}[`) && candidate !== alias,
+    );
+    if (nested.length > 0) throw new MonitorAnalyticsQueryError('input');
+    if (!(alias in source)) continue;
+    if (key in source) throw new MonitorAnalyticsQueryError('input');
+    const value = source[alias];
+    const values = Array.isArray(value) ? Array.from(value) : [value];
+    if (!values.every((item) => typeof item === 'string'))
+      throw new MonitorAnalyticsQueryError('input');
+    result[key] = values;
+    delete result[alias];
+  }
+  return result;
+}
+
 @Injectable()
 export class MonitorAnalyticsService {
   private readonly admission = new MonitorAnalyticsAdmission();
@@ -154,7 +176,12 @@ export class MonitorAnalyticsService {
             monitorAnalyticsPermissions(operation),
           );
           ensureOpen();
-          let query = parseMonitorAnalyticsQuery(operation, raw);
+          let query = parseMonitorAnalyticsQuery(
+            operation,
+            operation === 'abnormal-duration-statistics'
+              ? normalizeAbnormalQuery(raw)
+              : raw,
+          );
           if (operation === 'analytics-monthly-breakdown') {
             const range = resolveMonitorMonthlyRange(query);
             query = {
@@ -167,7 +194,10 @@ export class MonitorAnalyticsService {
             // cache an implicit "current month" under an unchanging key.
           }
           const bypass = this.bypass(operation, bypassHeader);
-          const cached = bypass ? null : await this.cache.get(query);
+          const lookup = bypass
+            ? { cached: null, lease: null }
+            : await this.cache.lookup(query);
+          const cached = lookup.cached;
           ensureOpen();
           if (cached)
             return encodeMonitorAnalyticsResult(
@@ -187,7 +217,8 @@ export class MonitorAnalyticsService {
             false,
             ensureOpen,
           );
-          if (!bypass) await this.cache.set(query, result, generatedAt);
+          if (!bypass)
+            await this.cache.set(query, result, generatedAt, lookup.lease);
           ensureOpen();
           return encoded;
         });

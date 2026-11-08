@@ -7,7 +7,9 @@ import { normalizeCountry } from '@asin-monitor/sp-api';
 
 export type CheckSubType = Exclude<
   VariantCheckJobData['taskSubType'],
-  'competitor-asin-check' | 'competitor-variant-group-check'
+  | 'competitor-asin-check'
+  | 'competitor-variant-group-check'
+  | 'competitor-variant-group'
 >;
 type RequestOf<T> = T extends VariantCheckJobData
   ? Pick<T, 'taskType' | 'taskSubType' | 'params'>
@@ -15,7 +17,12 @@ type RequestOf<T> = T extends VariantCheckJobData
 export type CheckRequest = RequestOf<
   Exclude<
     VariantCheckJobData,
-    { taskSubType: 'competitor-asin-check' | 'competitor-variant-group-check' }
+    {
+      taskSubType:
+        | 'competitor-asin-check'
+        | 'competitor-variant-group-check'
+        | 'competitor-variant-group';
+    }
   >
 >;
 export function checkRequestObject(value: unknown): Record<string, unknown> {

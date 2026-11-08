@@ -1,4 +1,5 @@
 import {
+  batchDeleteVariantGroups,
   checkAsin,
   checkVariantGroup,
   createAsin,
@@ -15,6 +16,7 @@ import {
   updateVariantGroupManual,
   updateVariantGroupNotify,
 } from '../../services/asin';
+import { batchCreateAsins } from '../../services/asin-batch-create';
 import { checkSelectedGroups } from '../../services/catalog-check';
 import type { CatalogConfig } from '../catalog/catalog-types';
 
@@ -24,18 +26,20 @@ export const ASIN_CATALOG: CatalogConfig = {
   label: 'ASIN',
   heading: '变体组与 ASIN',
   description:
-    '查找变体组和组内 ASIN，管理单项资料与归属。CSV/XLSX 导入已接入异步任务；批量操作与导出仍在迁移。',
+    '查找变体组和组内 ASIN，管理资料与归属，支持组内批量添加、多选检查与批量删除、CSV/XLSX 异步导入和当前筛选 ASIN / 变体组导出。',
   showSite: true,
   showSource: true,
   showManual: true,
   list: getVariantGroups,
   detail: getVariantGroup,
+  batchDelete: batchDeleteVariantGroups,
   checks: {
     group: checkVariantGroup,
     asin: checkAsin,
     batch: checkSelectedGroups,
   },
   writes: {
+    batchCreateAsins,
     createGroup: createVariantGroup,
     updateGroup: updateVariantGroup,
     deleteGroup: deleteVariantGroup,

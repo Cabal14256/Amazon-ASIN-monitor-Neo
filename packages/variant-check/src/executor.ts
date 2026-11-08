@@ -1,7 +1,8 @@
-import type {
-  VariantCheckJobData,
-  VariantCheckResultReference,
-  VariantGroupCheckData,
+import {
+  isNeoCatalogId,
+  type VariantCheckJobData,
+  type VariantCheckResultReference,
+  type VariantGroupCheckData,
 } from '@asin-monitor/contracts';
 import {
   decodeVariantCheckReceiptResult,
@@ -181,7 +182,8 @@ export class VariantCheckExecutor {
     const data = parseVariantCheckJob(raw);
     if (
       data.taskSubType === 'competitor-asin-check' ||
-      data.taskSubType === 'competitor-variant-group-check'
+      data.taskSubType === 'competitor-variant-group-check' ||
+      data.taskSubType === 'competitor-variant-group'
     )
       throw new VariantCheckError('invalid-input');
     const operation = variantCheckJobOperation(data);
@@ -242,13 +244,7 @@ export class VariantCheckExecutor {
       !Array.isArray(groupIds) ||
       !groupIds.length ||
       groupIds.length > 1000 ||
-      groupIds.some(
-        (id) =>
-          typeof id !== 'string' ||
-          !id ||
-          id.length > 100 ||
-          /[\x00-\x1f\x7f]/u.test(id),
-      )
+      groupIds.some((id) => !isNeoCatalogId(id))
     )
       throw new VariantCheckError('invalid-input');
     const inputs = [...groupIds];

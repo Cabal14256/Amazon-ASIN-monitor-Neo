@@ -202,7 +202,12 @@ async function fixture(domain: Domain = 'asin', failAcceptedReceipt = false) {
         }),
       );
     }
-    if (url.pathname.endsWith(encodeURIComponent(group.id)))
+    if (
+      domain === 'competitor'
+        ? url.pathname === '/api/v1/competitor/catalog/variant-groups/detail' &&
+          url.searchParams.get('groupId') === group.id
+        : url.pathname.endsWith(encodeURIComponent(group.id))
+    )
       return envelope(group);
     catalogReads.push(url);
     if (heldCatalog) {

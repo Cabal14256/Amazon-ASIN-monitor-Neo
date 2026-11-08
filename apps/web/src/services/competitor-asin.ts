@@ -11,6 +11,8 @@ import {
   competitorGuardedUpdateAsinRequestSchema,
   competitorMoveAsinRequestSchema,
   competitorUpdateGroupRequestSchema,
+  isNeoBatchDeleteId,
+  type BatchDeleteVariantGroupsRequest,
   type CompetitorAsinSource,
   type CompetitorCreateAsinRequest,
   type CompetitorGroupListData,
@@ -23,6 +25,15 @@ import {
   type CompetitorVariantGroup,
 } from '@asin-monitor/contracts';
 import { ApiError, type HttpClient } from '../lib/http';
+import { submitCatalogBatchDelete } from './catalog-batch-delete';
+
+export function batchDeleteCompetitorGroups(
+  http: Pick<HttpClient, 'request'>,
+  input: BatchDeleteVariantGroupsRequest,
+  signal?: AbortSignal,
+) {
+  return submitCatalogBatchDelete(http, 'competitor', input, signal);
+}
 
 const RESPONSE_LIMIT = 32 * 1024 * 1024;
 const GROUPS = '/api/v1/competitor/variant-groups';
@@ -83,9 +94,16 @@ export async function getCompetitorGroup(
   id: string,
   signal?: AbortSignal,
 ): Promise<CompetitorVariantGroup> {
+  if (!isNeoBatchDeleteId(id))
+    throw new ApiError('INVALID_INPUT', '竞品 ASIN 或变体组 ID 无效');
   const response = await http.request(
-    `${GROUPS}/${segment(id)}`,
-    { signal, timeoutMs: 30_000, maxResponseBytes: RESPONSE_LIMIT },
+    '/api/v1/competitor/catalog/variant-groups/detail',
+    {
+      query: { groupId: id },
+      signal,
+      timeoutMs: 30_000,
+      maxResponseBytes: RESPONSE_LIMIT,
+    },
     competitorGroupResultSchema,
   );
   if (!response.success || !response.data)

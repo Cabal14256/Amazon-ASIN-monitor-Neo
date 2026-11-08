@@ -141,6 +141,9 @@ describe('catalog asynchronous checks', () => {
       [],
       ['g', 'g'],
       ['\t'],
+      ['a\u0085b'],
+      ['\ud800'],
+      ['\udc00'],
       ['😀'.repeat(51)],
       Array.from({ length: 1001 }, (_, i) => String(i)),
     ])

@@ -3,6 +3,8 @@ import { Module } from '@nestjs/common';
 import { AsinModule } from './asin/asin.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
+import { BackupModule } from './backup/backup.module';
+import { CatalogOperationModule } from './catalog/catalog-operation.module';
 import { CompetitorCheckModule } from './competitor/competitor-check.module';
 import { CompetitorMonitorTriggerModule } from './competitor/competitor-monitor-trigger.module';
 import { CompetitorModule } from './competitor/competitor.module';
@@ -36,6 +38,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     DashboardModule,
     RedisModule,
     AuthModule,
+    CatalogOperationModule,
     RoleModule,
     SpApiConfigModule,
     FeishuConfigModule,
@@ -53,6 +56,7 @@ import { WebSocketModule } from './websocket/websocket.module';
     UserAdministrationModule,
     UserQueryModule,
     AuditModule,
+    BackupModule,
     WebSocketModule,
     MetricsModule,
     RateLimitModule,

@@ -1,4 +1,5 @@
 import {
+  persistedVariantCheckJobSchema,
   variantCheckJobSchema,
   variantCheckResultReferenceSchema,
   type VariantCheckJobData,
@@ -12,8 +13,11 @@ import {
 } from '@asin-monitor/db';
 import { normalizeCountry } from '@asin-monitor/sp-api';
 
-export function parseVariantCheckJob(raw: unknown): VariantCheckJobData {
-  const parsed = variantCheckJobSchema.safeParse(raw);
+function parseJob(
+  raw: unknown,
+  schema: typeof variantCheckJobSchema,
+): VariantCheckJobData {
+  const parsed = schema.safeParse(raw);
   if (!parsed.success) throw new VariantCheckError('invalid-input');
   const data = parsed.data;
   if (data.taskSubType === 'parent-asin-query')
@@ -21,12 +25,25 @@ export function parseVariantCheckJob(raw: unknown): VariantCheckJobData {
   variantCheckJobOperation(data);
   return data;
 }
+/** Use only when reading payloads already persisted in BullMQ. */
+export function parsePersistedVariantCheckJob(
+  raw: unknown,
+): VariantCheckJobData {
+  return parseJob(raw, persistedVariantCheckJobSchema);
+}
+export function parseVariantCheckJob(raw: unknown): VariantCheckJobData {
+  return parseJob(raw, variantCheckJobSchema);
+}
 export function variantCheckJobOperation(
   data: VariantCheckJobData,
   groupIndex?: number,
 ): VariantCheckOperation {
   const kind =
-    data.taskSubType === 'competitor-asin-check'
+    data.taskSubType === 'competitor-variant-group'
+      ? groupIndex === undefined
+        ? 'competitor-batch'
+        : 'competitor-group'
+      : data.taskSubType === 'competitor-asin-check'
       ? 'competitor-asin'
       : data.taskSubType === 'competitor-variant-group-check'
       ? 'competitor-group'
@@ -39,14 +56,17 @@ export function variantCheckJobOperation(
       : 'batch';
   if (
     groupIndex !== undefined &&
-    (data.taskSubType !== 'variant-group' ||
+    ((data.taskSubType !== 'variant-group' &&
+      data.taskSubType !== 'competitor-variant-group') ||
       !Number.isInteger(groupIndex) ||
       groupIndex < 0 ||
       groupIndex >= data.params.groupIds.length)
   )
     throw new VariantCheckError('invalid-input');
   const request =
-    data.taskSubType === 'variant-group' && groupIndex !== undefined
+    (data.taskSubType === 'variant-group' ||
+      data.taskSubType === 'competitor-variant-group') &&
+    groupIndex !== undefined
       ? {
           groupId: data.params.groupIds[groupIndex],
           forceRefresh: data.params.forceRefresh,

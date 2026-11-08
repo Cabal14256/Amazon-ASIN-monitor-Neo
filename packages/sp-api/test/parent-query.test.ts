@@ -8,6 +8,10 @@ import {
   CatalogParentQuery,
   MAX_PARENT_QUERY_ITEMS,
 } from '../src/parent-query';
+import {
+  createWorkSettlement,
+  trackWorkSettlement,
+} from '../src/work-settlement';
 import { legacyService } from './catalog-legacy-fixture';
 import { deferred } from './fixtures';
 
@@ -51,6 +55,36 @@ afterEach(() => {
 });
 
 describe('Two-pass parent ASIN query', () => {
+  it('keeps the caller settlement pending until aborted native work physically closes', async () => {
+    const f = setup(1),
+      controller = new AbortController();
+    const settlement = createWorkSettlement(controller.signal);
+    const physicallyClosed = deferred<void>();
+    f.checker.check.mockImplementation(async (_asin, _country, options) => {
+      trackWorkSettlement(options?.signal, physicallyClosed.promise);
+      return new Promise((_resolve, reject) => {
+        options!.signal!.addEventListener(
+          'abort',
+          () => reject(new Error('stopped')),
+          { once: true },
+        );
+      });
+    });
+    const work = f.query.query([first], 'US', { signal: controller.signal });
+    const rejected = expect(work).rejects.toMatchObject({ code: 'CANCELLED' });
+    await vi.waitFor(() => expect(f.checker.check).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await rejected;
+    let drained = false;
+    const draining = settlement.drain().then(() => {
+      drained = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(drained).toBe(false);
+    physicallyClosed.resolve();
+    await draining;
+    expect(drained).toBe(true);
+  });
   it.each(
     [
       [first, second],

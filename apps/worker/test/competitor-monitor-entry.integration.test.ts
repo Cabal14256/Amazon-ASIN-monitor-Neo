@@ -1,6 +1,20 @@
-import { getNeoQueuePrefix, getPhysicalQueueName } from '@asin-monitor/config';
-import type { CompetitorMonitorJob } from '@asin-monitor/contracts';
-import { createPgPool, RedisTaskRepository } from '@asin-monitor/db';
+import {
+  getNeoQueuePrefix,
+  getPhysicalQueueName,
+  SCHEDULED_MONITOR_PHYSICAL_QUEUE,
+} from '@asin-monitor/config';
+import type {
+  CompetitorMonitorJob,
+  PrimaryMonitorJob,
+  ScheduledMonitorJob,
+} from '@asin-monitor/contracts';
+import { buildScheduledMonitorJobId } from '@asin-monitor/contracts';
+import {
+  createPgPool,
+  PgCatalogOperationRepository,
+  RedisTaskRepository,
+  scheduledMonitorTaskId,
+} from '@asin-monitor/db';
 import {
   parseCatalogVariantResult,
   RedisCatalogCheckStore,
@@ -28,6 +42,13 @@ import {
   eventually,
   maintenanceFixture,
 } from './helpers/auth-maintenance-fixture';
+import { createCatalogFixtureTask } from './helpers/catalog-operation-fixture';
+import {
+  assertMetricsFixtureTargets,
+  availableMetricsPort,
+  metricValue,
+  scrapeWorker,
+} from './helpers/metrics-fixture';
 
 /** Real compiled entry, private primary/competitor schemas and BullMQ/Redis.
  * Fixed Catalog responses are prewarmed; US/DE deferred tests inject only the
@@ -37,12 +58,15 @@ describe.skipIf(
   process.env.RUN_INTEGRATION_TESTS !== 'true' || process.platform === 'win32',
 )('compiled competitor monitor with owned receipts and country claims', () => {
   let f: Awaited<ReturnType<typeof maintenanceFixture>>;
+  let primarySchema = '';
   let competitorPool: ReturnType<typeof createPgPool> | undefined;
   let competitorBootstrap: ReturnType<typeof createPgPool> | undefined;
   let competitorSchema = '',
     competitorDatabaseUrl = '',
     competitorInstalled = false;
   let queue: Queue, events: QueueEvents, store: RedisTaskRepository;
+  let primaryQueue: Queue, primaryEvents: QueueEvents;
+  let scheduledQueue: Queue, scheduledEvents: QueueEvents;
   let child: ChildProcess | undefined,
     exited = true,
     output = '';
@@ -83,13 +107,15 @@ describe.skipIf(
       'utf8',
     );
 
+  let metricsPort = 0;
   beforeEach(async () => {
+    assertMetricsFixtureTargets();
+    metricsPort = await availableMetricsPort();
     directory = mkdtempSync(join(tmpdir(), 'neo-competitor-monitor-entry-'));
     cards.length = 0;
     f = await maintenanceFixture();
-    const primarySchema = (
-      await f.pool.query('SELECT current_schema() AS name')
-    ).rows[0]?.name as string;
+    primarySchema = (await f.pool.query('SELECT current_schema() AS name'))
+      .rows[0]?.name as string;
     if (!/^auth_worker_67_[a-f0-9]{32}$/.test(primarySchema))
       throw new Error('Unexpected primary monitor fixture schema');
     for (const table of [
@@ -111,10 +137,17 @@ describe.skipIf(
       for (const name of [
         '0004_asin_timestamp_policy.sql',
         '0006_variant_check_receipts.sql',
+        '0012_primary_monitor.sql',
       ])
         await primaryConnection.query(
           migration(name).replaceAll('public', primarySchema),
         );
+      await primaryConnection.query(
+        migration('0016_scheduled_monitor_primary.sql').replaceAll(
+          'public',
+          primarySchema,
+        ),
+      );
       // 0004 can leave pg_catalog first on this session; restore the verified
       // private schema before releasing the same migrated connection.
       await primaryConnection.query(`SET search_path TO ${primarySchema}`);
@@ -218,6 +251,12 @@ describe.skipIf(
           migration(name).replaceAll('public', competitorSchema),
         );
       await competitorConnection.query(
+        migration('0016_scheduled_monitor_competitor.sql').replaceAll(
+          'public',
+          competitorSchema,
+        ),
+      );
+      await competitorConnection.query(
         `SET search_path TO ${competitorSchema}`,
       );
       if (
@@ -255,6 +294,9 @@ describe.skipIf(
         };
         const claim = await cache.claim(identity, signal);
         await cache.write(identity, claim, current, 600, signal);
+        const primaryIdentity = { ...identity, owner: 'primary' as const };
+        const primaryClaim = await cache.claim(primaryIdentity, signal);
+        await cache.write(primaryIdentity, primaryClaim, current, 600, signal);
       }
     } finally {
       cache.close();
@@ -275,6 +317,44 @@ describe.skipIf(
     queue.on('error', () => undefined);
     events.on('error', () => undefined);
     await Promise.all([queue.waitUntilReady(), events.waitUntilReady()]);
+    primaryQueue = new Queue(
+      getPhysicalQueueName('monitor'),
+      getQueueOptions(
+        'monitor',
+        f.env,
+        f.redis as unknown as ConnectionOptions,
+      ),
+    );
+    primaryEvents = new QueueEvents(getPhysicalQueueName('monitor'), {
+      connection: parseRedisUrl(f.env.REDIS_URL),
+      prefix: getNeoQueuePrefix(f.env),
+    });
+    primaryQueue.on('error', () => undefined);
+    primaryEvents.on('error', () => undefined);
+    await Promise.all([
+      primaryQueue.waitUntilReady(),
+      primaryEvents.waitUntilReady(),
+    ]);
+    scheduledQueue = new Queue(SCHEDULED_MONITOR_PHYSICAL_QUEUE, {
+      connection: parseRedisUrl(f.env.REDIS_URL),
+      prefix: getNeoQueuePrefix(f.env),
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: { age: 604800 },
+        removeOnFail: { age: 604800 },
+      },
+    });
+    scheduledEvents = new QueueEvents(SCHEDULED_MONITOR_PHYSICAL_QUEUE, {
+      connection: parseRedisUrl(f.env.REDIS_URL),
+      prefix: getNeoQueuePrefix(f.env),
+    });
+    scheduledQueue.on('error', () => undefined);
+    scheduledEvents.on('error', () => undefined);
+    await Promise.all([
+      scheduledQueue.waitUntilReady(),
+      scheduledEvents.waitUntilReady(),
+    ]);
   });
 
   async function stop() {
@@ -299,6 +379,20 @@ describe.skipIf(
           webhook!.close((error) => (error ? reject(error) : resolve())),
         );
       await events?.close();
+      await primaryEvents?.close();
+      await scheduledEvents?.close();
+      if (primaryQueue) {
+        if (primaryQueue.opts.prefix !== getNeoQueuePrefix(f.env))
+          throw new Error('Unexpected primary fixture queue namespace');
+        await primaryQueue.obliterate({ force: true });
+        await primaryQueue.close();
+      }
+      if (scheduledQueue) {
+        if (scheduledQueue.opts.prefix !== getNeoQueuePrefix(f.env))
+          throw new Error('Unexpected scheduled fixture queue namespace');
+        await scheduledQueue.obliterate({ force: true });
+        await scheduledQueue.close();
+      }
       if (queue) {
         if (queue.opts.prefix !== getNeoQueuePrefix(f.env))
           throw new Error('Unexpected competitor fixture queue namespace');
@@ -449,10 +543,19 @@ ${extra}
     );
     return path;
   }
-  async function start(extra = '') {
+  async function start(
+    extra = '',
+    dualMonitor = false,
+    scheduledMonitor = false,
+  ) {
     if (child) throw new Error('Fixture Worker already started');
     output = '';
     exited = false;
+    const workerDatabaseUrl = new URL(f.env.DATABASE_URL);
+    workerDatabaseUrl.searchParams.set(
+      'options',
+      `-c search_path=${primarySchema} -c timezone=UTC`,
+    );
     child = spawn(
       process.execPath,
       ['--require', preload(extra), resolve(__dirname, '../dist/main.js')],
@@ -463,15 +566,31 @@ ${extra}
           ...process.env,
           PROCESS_ROLE: 'worker',
           AUTH_DATA_AUTHORITY: 'postgresql',
-          DATABASE_URL: f.env.DATABASE_URL,
+          DATABASE_URL: workerDatabaseUrl.toString(),
+          PGOPTIONS: `-c search_path=${primarySchema} -c timezone=UTC`,
           COMPETITOR_DATABASE_URL: competitorDatabaseUrl,
           REDIS_URL: f.env.REDIS_URL,
           BULL_PREFIX: f.env.BULL_PREFIX,
           RATE_LIMITER_KEY_PREFIX: `${getNeoQueuePrefix(f.env)}:quota`,
-          WORKER_ENABLED_QUEUES: 'competitor-monitor',
+          WORKER_ENABLED_QUEUES: scheduledMonitor
+            ? 'scheduled-monitor'
+            : dualMonitor
+            ? 'monitor,competitor-monitor'
+            : 'competitor-monitor',
           COMPETITOR_MONITOR_ENABLED: 'true',
           SCHEDULER_ENABLED: 'false',
+          WORKER_METRICS_ENABLED: 'true',
+          WORKER_METRICS_HOST: '127.0.0.1',
+          WORKER_METRICS_PORT: String(metricsPort),
           LOG_LEVEL: 'INFO',
+          ...(dualMonitor
+            ? {
+                MONITOR_QUEUE_WORKER_CONCURRENCY: '2',
+                COMPETITOR_QUEUE_WORKER_CONCURRENCY: '2',
+                MONITOR_MAX_CONCURRENT_GROUP_CHECKS: '7',
+                AUTO_ADJUST_CONCURRENCY: 'false',
+              }
+            : {}),
           ...(certificate ? { NODE_EXTRA_CA_CERTS: certificate } : {}),
         },
       },
@@ -492,17 +611,26 @@ ${extra}
         throw new Error(
           `Competitor fixture Worker exited before ready: ${output}`,
         );
+      if (scheduledMonitor)
+        return new RegExp('registeredProcessors:\\s*1').test(output);
       return (
         (await f.redis.get(ready())) === '1' &&
-        /registeredProcessors:\s*1/.test(output)
+        (!dualMonitor ||
+          (await f.redis.get(
+            `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`,
+          )) === '1') &&
+        new RegExp(`registeredProcessors:\\s*${dualMonitor ? 2 : 1}`).test(
+          output,
+        )
       );
     }, 15_000);
-    expect(await f.redis.zcard(`${ready()}:owners`)).toBe(1);
+    if (!scheduledMonitor)
+      expect(await f.redis.zcard(`${ready()}:owners`)).toBe(1);
   }
   async function job(
     country: 'US' | 'DE' = 'US',
   ): Promise<CompetitorMonitorJob> {
-    const task = await store.create({
+    const task = await createCatalogFixtureTask(f.pool, store, {
       taskId: randomUUID(),
       userId: 'fixture-owner',
       taskType: 'competitor-monitor',
@@ -553,8 +681,311 @@ ${extra}
     );
   }
 
+  function scheduledJob(): ScheduledMonitorJob {
+    const plannedSlot = new Date(
+      Math.floor(Date.now() / 60_000) * 60_000,
+    ).toISOString();
+    const plan = {
+      domain: 'primary' as const,
+      country: 'US' as const,
+      plannedSlot,
+      intervalMinutes: 15 as const,
+      batchConfig: { batchIndex: 0, totalBatches: 1 },
+    };
+    const createdAt = new Date().toISOString();
+    return {
+      ...plan,
+      version: 1,
+      source: 'scheduled',
+      taskType: 'scheduled-monitor',
+      actor: { kind: 'system', purpose: 'scheduled-monitor' },
+      taskId: scheduledMonitorTaskId(plan),
+      jobId: buildScheduledMonitorJobId(plan),
+      requestedAt: createdAt,
+      createdAt,
+      expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+    };
+  }
+
+  it.skipIf(process.env.RUN_NEO_SCHEDULED_MONITOR_ENTRY_INTEGRATION !== '1')(
+    'executes a private scheduled US run and its stable competitor follow-up on compiled BullMQ Worker',
+    async () => {
+      await f.pool.query(
+        "INSERT INTO variant_groups(id,name,country,site,brand,is_broken,variant_status,manual_broken,is_competitor,feishu_notify_enabled) VALUES('p-scheduled','Scheduled primary','US','amazon.com','Fixture',false,'NORMAL',false,false,true)",
+      );
+      await f.pool.query(
+        "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id,is_broken,variant_status,manual_broken,feishu_notify_enabled) VALUES('p-scheduled-a','B000000001','Scheduled normal','US','amazon.com','Fixture','p-scheduled',false,'NORMAL',false,true)",
+      );
+      await start('', false, true);
+      const job = scheduledJob();
+      const queued = await scheduledQueue.add('scheduled-monitor', job, {
+        jobId: job.jobId,
+      });
+      const parentResult = await queued.waitUntilFinished(
+        scheduledEvents,
+        30_000,
+      );
+      const debugLedger = await f.pool.query(
+        'SELECT groups FROM primary_scheduled_monitor_runs WHERE task_id=$1',
+        [job.taskId],
+      );
+      const debugGroups = await f.pool.query(
+        'SELECT id FROM variant_groups ORDER BY id',
+      );
+      expect(
+        parentResult,
+        `${output}\nledger=${JSON.stringify(
+          debugLedger.rows,
+        )}\ncatalog=${JSON.stringify(debugGroups.rows)}`,
+      ).toMatchObject({ state: 'completed' });
+      const primary = (
+        await f.pool.query(
+          'SELECT state,follow_up_job FROM primary_scheduled_monitor_runs WHERE task_id=$1',
+          [job.taskId],
+        )
+      ).rows[0];
+      expect(primary?.state).toBe('completed');
+      expect(primary?.follow_up_job).toMatchObject({
+        domain: 'competitor',
+        country: 'US',
+        plannedSlot: job.plannedSlot,
+        batchConfig: job.batchConfig,
+      });
+      const followUp = primary.follow_up_job as ScheduledMonitorJob;
+      await eventually(
+        async () => Boolean(await scheduledQueue.getJob(followUp.jobId)),
+        10_000,
+      );
+      const followUpQueueJob = await scheduledQueue.getJob(followUp.jobId);
+      await expect(
+        followUpQueueJob!.waitUntilFinished(scheduledEvents, 30_000),
+      ).resolves.toMatchObject({ state: 'completed' });
+      const [primaryCounts, competitorCounts] = await Promise.all([
+        f.pool.query(
+          `SELECT (SELECT count(*)::int FROM primary_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
+                (SELECT count(*)::int FROM monitor_history WHERE monitor_task_id=$1::text) AS history`,
+          [job.taskId],
+        ),
+        competitorPool!.query(
+          `SELECT state,
+                (SELECT count(*)::int FROM competitor_scheduled_monitor_group_receipts WHERE task_id=$1) AS receipts,
+                (SELECT count(*)::int FROM competitor_monitor_history WHERE monitor_task_id=$1::text) AS history
+           FROM competitor_scheduled_monitor_runs WHERE task_id=$1`,
+          [followUp.taskId],
+        ),
+      ]);
+      expect(primaryCounts.rows[0]).toEqual({ receipts: 1, history: 2 });
+      expect(competitorCounts.rows[0]).toMatchObject({
+        state: 'completed',
+        receipts: 1,
+        history: 3,
+      });
+      expect(await store.listUser('fixture-owner')).toEqual([]);
+      expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);
+    },
+    30_000,
+  );
+
+  it('shares database group admission across both compiled consumers and applies a live increase without losing real receipts', async () => {
+    await f.pool.query(
+      "INSERT INTO variant_groups(id,name,country,site,brand) VALUES('p-one','Primary admission US','US','amazon.com','Fixture'),('p-two','Primary admission DE','DE','amazon.de','Fixture')",
+    );
+    await f.pool.query(
+      "INSERT INTO asins(id,asin,name,country,site,brand,variant_group_id) VALUES('p-normal','B000000001','Normal US','US','amazon.com','Fixture','p-one'),('p-de-normal','B000000001','Normal DE','DE','amazon.de','Fixture','p-two')",
+    );
+    const cache = new RedisCatalogCheckStore(f.redis, getNeoQueuePrefix(f.env));
+    try {
+      const signal = new AbortController().signal;
+      for (const country of ['US', 'DE'] as const) {
+        const identity = {
+          asin: catalog[0].asin,
+          country,
+          owner: 'primary' as const,
+        };
+        const claim = await cache.claim(identity, signal);
+        await cache.write(
+          identity,
+          claim,
+          parseCatalogVariantResult(catalog[0], catalog[0].asin),
+          600,
+          signal,
+        );
+      }
+    } finally {
+      cache.close();
+    }
+    await f.pool.query(
+      "INSERT INTO sp_api_config(config_key,config_value,description) VALUES('MONITOR_MAX_CONCURRENT_GROUP_CHECKS','1','Fixture group admission')",
+    );
+    const observations = artifact('group-admission.jsonl');
+    const releaseCompetitor = artifact('release-competitor.marker');
+    const releasePrimary = artifact('release-primary.marker');
+    const readObservations = () =>
+      existsSync(observations)
+        ? (readFileSync(observations, 'utf8')
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line)) as {
+            domain: string;
+            phase: string;
+            active: number;
+            peak: number;
+          }[])
+        : [];
+    // Delay the real cached check outside the short primary SQL transaction.
+    // Pipeline entry, authorization, SQL, commits and receipts stay unmodified.
+    await start(
+      `
+let fixtureGroupActive=0, fixtureGroupPeak=0;
+const check=spApi.CatalogVariantChecker.prototype.check;
+spApi.CatalogVariantChecker.prototype.check=async function(asin,country,options) {
+  const result=await check.call(this,asin,country,options);
+  if(asin!=='B000000001') return result;
+  const domain=options.owner==='competitor' ? 'competitor' : 'primary';
+  const releaseFile=domain==='competitor' ? ${JSON.stringify(
+    releaseCompetitor,
+  )} : ${JSON.stringify(releasePrimary)};
+  fixtureGroupActive++;
+  fixtureGroupPeak=Math.max(fixtureGroupPeak,fixtureGroupActive);
+  const observe=phase=>fs.appendFileSync(${JSON.stringify(
+    observations,
+  )},JSON.stringify({domain,phase,active:fixtureGroupActive,peak:fixtureGroupPeak})+'\\n');
+  observe('started');
+  try {
+    const deadline=Date.now()+12000;
+    while(!fs.existsSync(releaseFile)) {
+      if(Date.now()>deadline) throw new Error('Fixture group admission release missing');
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    return result;
+  } finally {
+    fixtureGroupActive--;
+    observe('settled');
+  }
+};`,
+      true,
+    );
+    const competitorData = await job();
+    const competitorJob = await enqueue(competitorData, 1);
+    await eventually(
+      async () =>
+        readObservations().some(
+          (row) => row.domain === 'competitor' && row.phase === 'started',
+        ),
+      8000,
+    );
+    const primaryTasks: PrimaryMonitorJob[] = [];
+    await f.pool.query(
+      "INSERT INTO users(id,username,password,status,force_password_change) VALUES('fixture-primary-peer','fixture-primary-peer','unused-fixture-hash','ACTIVE',false)",
+    );
+    await f.pool.query(
+      "INSERT INTO user_roles(user_id,role_id) VALUES('fixture-primary-peer','monitor-fixture')",
+    );
+    for (let index = 0; index < 2; index++) {
+      const task = await createCatalogFixtureTask(f.pool, store, {
+        taskId: randomUUID(),
+        userId: index === 0 ? 'fixture-owner' : 'fixture-primary-peer',
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        title: 'Fixture shared primary monitor',
+      });
+      primaryTasks.push({
+        taskId: task.taskId,
+        userId: task.userId,
+        taskType: 'monitor',
+        taskSubType: 'primary',
+        createdAt: task.createdAt,
+        expiresAt: new Date(
+          Date.parse(task.createdAt) + 3600_000,
+        ).toISOString(),
+        countries: [index === 0 ? 'US' : 'DE'],
+      });
+    }
+    const primaryJobs = await Promise.all(
+      primaryTasks.map((data) =>
+        primaryQueue.add('primary-monitor', data, {
+          jobId: data.taskId,
+          attempts: 1,
+        }),
+      ),
+    );
+    await eventually(async () => (await primaryQueue.getActiveCount()) === 2);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(readObservations()).toEqual([
+      { domain: 'competitor', phase: 'started', active: 1, peak: 1 },
+    ]);
+    const changedAt = performance.now();
+    await f.pool.query(
+      "UPDATE sp_api_config SET config_value='2' WHERE config_key='MONITOR_MAX_CONCURRENT_GROUP_CHECKS'",
+    );
+    await eventually(
+      async () =>
+        readObservations().some(
+          (row) => row.domain === 'primary' && row.phase === 'started',
+        ),
+      7500,
+    );
+    expect(performance.now() - changedAt).toBeLessThan(7500);
+    const increased = readObservations();
+    expect(increased.filter((row) => row.phase === 'started')).toEqual([
+      { domain: 'competitor', phase: 'started', active: 1, peak: 1 },
+      { domain: 'primary', phase: 'started', active: 2, peak: 2 },
+    ]);
+    writeFileSync(releasePrimary, 'release');
+    writeFileSync(releaseCompetitor, 'release');
+    expect(await finish(competitorJob)).toMatchObject({
+      success: true,
+      totalChecked: 1,
+      totalBroken: 1,
+    });
+    for (const queued of primaryJobs)
+      expect(
+        await queued.waitUntilFinished(primaryEvents, 20_000),
+      ).toMatchObject({
+        success: true,
+        totalChecked: 1,
+        totalBroken: 0,
+      });
+    expect(
+      readObservations().filter((row) => row.phase === 'started'),
+    ).toHaveLength(3);
+    expect(Math.max(...readObservations().map((row) => row.peak))).toBe(2);
+    expect(readObservations().at(-1)?.active).toBe(0);
+    expect(await counts(competitorData.taskId)).toEqual({
+      runs: 1,
+      receipts: 1,
+      history: 3,
+      claims: 0,
+    });
+    expect(
+      (
+        await f.pool.query(
+          'SELECT (SELECT count(*)::int FROM primary_monitor_runs) AS runs,(SELECT count(*)::int FROM variant_check_receipts) AS receipts,(SELECT count(*)::int FROM monitor_history) AS history',
+        )
+      ).rows,
+    ).toEqual([{ runs: 2, receipts: 2, history: 4 }]);
+    for (const task of [competitorData, ...primaryTasks]) {
+      expect((await store.read(task.taskId))?.status).toBe('completed');
+      expect(
+        await new PgCatalogOperationRepository(f.pool).read(
+          task.userId,
+          task.taskSubType === 'primary' ? 'asin' : 'competitor',
+        ),
+      ).toBeNull();
+    }
+    expect(existsSync(artifact('unexpected-transport.marker'))).toBe(false);
+    expect(cards).toHaveLength(0);
+    await stop();
+    const primaryReady = `${getNeoQueuePrefix(f.env)}:monitor:consumer:ready`;
+    expect(await f.redis.exists(primaryReady, `${primaryReady}:owners`)).toBe(
+      0,
+    );
+  }, 45_000);
+
   it('runs the real competitor consumer, commits one timestamped history/receipt and defaults notifications off', async () => {
     await start();
+    const before = await scrapeWorker(metricsPort);
     const data = await job();
     expect(await finish(await enqueue(data))).toMatchObject({
       success: true,
@@ -569,6 +1000,64 @@ ${extra}
       },
     });
     expect((await store.read(data.taskId))?.status).toBe('completed');
+    expect(
+      await new PgCatalogOperationRepository(f.pool).read(
+        data.userId,
+        'competitor',
+      ),
+    ).toBeNull();
+    const after = await scrapeWorker(metricsPort);
+    expect(
+      metricValue(after, 'variant_group_checks_total', {
+        region: 'US',
+        result: 'broken',
+      }) -
+        metricValue(before, 'variant_group_checks_total', {
+          region: 'US',
+          result: 'broken',
+        }),
+    ).toBe(1);
+    expect(
+      metricValue(after, 'variant_group_check_duration_seconds_count', {
+        region: 'US',
+      }),
+    ).toBe(1);
+    expect(
+      metricValue(after, 'variant_group_check_duration_seconds_sum', {
+        region: 'US',
+      }),
+    ).toBeGreaterThan(0);
+    expect(
+      metricValue(after, 'scheduler_runs_total', {
+        type: 'competitor_monitor_task',
+      }),
+    ).toBe(1);
+    const failed = await job();
+    failed.expiresAt = new Date(Date.parse(failed.createdAt) + 1).toISOString();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(finish(await enqueue(failed, 1))).rejects.toThrow();
+    const cancelled = await job();
+    await store.mutate(cancelled.taskId, { kind: 'cancel-request' });
+    expect(await finish(await enqueue(cancelled, 1))).toEqual({
+      cancelled: true,
+    });
+    const ended = await scrapeWorker(metricsPort);
+    expect(
+      metricValue(ended, 'scheduler_runs_total', {
+        type: 'competitor_monitor_task',
+      }),
+    ).toBe(3);
+    expect(
+      metricValue(ended, 'scheduler_run_duration_seconds_count', {
+        type: 'competitor_monitor_task',
+      }),
+    ).toBe(3);
+    expect(
+      metricValue(ended, 'variant_group_check_duration_seconds_count', {
+        region: 'US',
+      }),
+    ).toBe(1);
+
     expect(await counts(data.taskId)).toEqual({
       runs: 1,
       receipts: 1,
